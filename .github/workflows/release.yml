@@ -21,17 +21,21 @@ jobs:
 
       - name: Build packages
         run: |
+          uv venv .venv
+          source .venv/bin/activate
+          uv pip install hatchling
           for pkg in packages/core packages/adapters/filesystem packages/adapters/postgres packages/sdk-python packages/cli; do
             echo "Building $pkg..."
-            cd $pkg && uv pip install --system hatchling && python -m hatchling build && cd -
+            cd $pkg && python -m hatchling build && cd -
           done
 
       - name: Publish to PyPI
         env:
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
         run: |
+          source .venv/bin/activate
           for pkg in packages/core packages/adapters/filesystem packages/adapters/postgres packages/sdk-python packages/cli; do
-            uv publish --system $pkg/dist/*
+            uv publish $pkg/dist/*
           done
 
   publish-npm:

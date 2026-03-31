@@ -38,16 +38,24 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv pip install --system -e packages/core -e packages/adapters/filesystem -e packages/adapters/postgres -e packages/sdk-python -e packages/cli
-          uv pip install --system pytest pyyaml
+          uv venv .venv
+          source .venv/bin/activate
+          uv pip install -e packages/core -e packages/adapters/filesystem -e packages/adapters/postgres -e packages/sdk-python -e packages/cli
+          uv pip install pytest pyyaml
 
       - name: Run unit tests
-        run: uv run --system pytest tests/unit/ -v
+        run: |
+          source .venv/bin/activate
+          pytest tests/unit/ -v
 
       - name: Run integration tests (filesystem)
-        run: uv run --system pytest tests/integration/test_filesystem_adapter.py -v
+        run: |
+          source .venv/bin/activate
+          pytest tests/integration/test_filesystem_adapter.py -v
 
       - name: Run integration tests (postgres)
         env:
           AMFS_TEST_PG_DSN: postgresql://postgres:test@localhost:5432/amfs_test
-        run: uv run --system pytest tests/integration/test_postgres_adapter.py -v
+        run: |
+          source .venv/bin/activate
+          pytest tests/integration/test_postgres_adapter.py -v
