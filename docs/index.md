@@ -111,6 +111,8 @@ entry = mem.read("checkout-service", "risk-race-condition")
 AMFS is available in two editions. The open-source layer provides the full memory primitive — versioning, confidence, outcomes, adapters, and MCP. The Pro layer adds an intelligence layer with LLM-driven extraction, automated quality auditing, memory distillation, safety validation, and multi-strategy retrieval.
 
 [Compare editions](/amfs/editions/){: .btn .btn-outline .fs-5 .mb-4 .mb-md-0 }
+[AMFS vs Vector DBs](/amfs/vs-vector-databases/){: .btn .btn-outline .fs-5 .mb-4 .mb-md-0 }
+[AMFS vs Competitors](/amfs/vs-competitors/){: .btn .btn-outline .fs-5 .mb-4 .mb-md-0 }
 
 ---
 

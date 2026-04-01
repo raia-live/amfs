@@ -126,6 +126,8 @@ Visit **[raia-live.github.io/amfs](https://raia-live.github.io/amfs/)** for the 
 - [Getting Started](https://raia-live.github.io/amfs/getting-started/) — installation, quick start, configuration
 - [Core Concepts](https://raia-live.github.io/amfs/concepts/) — memory entries, CoW, confidence, provenance
 - [OSS vs Pro](https://raia-live.github.io/amfs/editions/) — feature comparison and when to use which
+- [AMFS vs Vector Databases](https://raia-live.github.io/amfs/vs-vector-databases/) — when to use which, and how they complement each other
+- [AMFS vs Competitors](https://raia-live.github.io/amfs/vs-competitors/) — comparison with Mem0, Cognee, Zep/Graphiti, LangMem
 - [Guides](https://raia-live.github.io/amfs/guides/) — Python SDK, TypeScript SDK, CLI, MCP setup
 - [Adapters](https://raia-live.github.io/amfs/adapters/) — filesystem, Postgres, custom adapters
 - [Integrations](https://raia-live.github.io/amfs/integrations/) — CrewAI, LangGraph, LangChain, AutoGen
