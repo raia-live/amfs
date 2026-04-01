@@ -9,6 +9,8 @@ from typing import Any
 from amfs_core.abc import AdapterABC
 from amfs_core.models import MemoryEntry, MemoryType, Provenance
 
+ExternalContext = dict[str, Any]
+
 
 class CausalTagger:
     """Stamps provenance metadata on every write.
@@ -50,16 +52,43 @@ class ReadTracker:
     def __init__(self) -> None:
         self._reads: dict[str, datetime] = {}
         self._versions: dict[str, int] = {}
+        self._contexts: list[ExternalContext] = []
 
     def record(self, entry: MemoryEntry) -> None:
         """Record that an entry was read during this session."""
         self._reads[entry.entry_key] = datetime.now(timezone.utc)
         self._versions[entry.entry_key] = entry.version
 
+    def record_context(
+        self,
+        label: str,
+        summary: str,
+        *,
+        source: str | None = None,
+    ) -> None:
+        """Record external context that influenced decisions in this session.
+
+        Unlike ``record()``, this doesn't correspond to an AMFS entry — it
+        captures external tool calls, API responses, and other inputs that
+        informed the agent's decisions.  These are included in the causal
+        chain returned by ``explain()`` so decision traces are complete.
+        """
+        self._contexts.append({
+            "label": label,
+            "summary": summary,
+            "source": source,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        })
+
     @property
     def causal_keys(self) -> list[str]:
         """All entry keys read in this session, ordered by read time."""
         return [k for k, _ in sorted(self._reads.items(), key=lambda x: x[1])]
+
+    @property
+    def external_contexts(self) -> list[ExternalContext]:
+        """All external contexts recorded in this session, in order."""
+        return list(self._contexts)
 
     @property
     def read_count(self) -> int:
@@ -73,6 +102,7 @@ class ReadTracker:
         """Reset the read log (e.g. between sub-tasks within a session)."""
         self._reads.clear()
         self._versions.clear()
+        self._contexts.clear()
 
     def contains(self, entry_key: str) -> bool:
         return entry_key in self._reads

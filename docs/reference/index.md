@@ -1,7 +1,7 @@
 ---
 title: Reference
 layout: default
-nav_order: 7
+nav_order: 8
 has_children: true
 description: "API reference, configuration options, and environment variables."
 permalink: /reference/

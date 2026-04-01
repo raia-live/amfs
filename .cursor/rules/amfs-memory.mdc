@@ -33,13 +33,25 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS is sh
   ```
   amfs_write("<repo>/<module>", "pattern-<name>", "<pattern description>", pattern_refs=["related-key"])
   ```
-- **When finding a bug or risk**: Record it so other agents are warned.
+- **When finding a bug or risk**: Record it so other agents are warned. Use `memory_type="belief"` for hypotheses.
   ```
-  amfs_write("<repo>/<module>", "risk-<name>", "<what could go wrong>", confidence=0.8)
+  amfs_write("<repo>/<module>", "risk-<name>", "<what could go wrong>", confidence=0.8, memory_type="belief")
   ```
 - **When making a non-obvious decision**: Record the reasoning for future agents.
   ```
   amfs_write("<repo>/<module>", "decision-<topic>", "<decision and rationale>")
+  ```
+- **When logging actions taken**: Record what you did so future agents can retrace steps. Experiences decay slower.
+  ```
+  amfs_write("<repo>/<module>", "action-<desc>", "<what you did>", memory_type="experience")
+  ```
+- **When consulting external tools or APIs**: Record the context so decision traces are complete.
+  ```
+  amfs_record_context("<label>", "<summary of what was found>", source="<tool name>")
+  ```
+- **When reviewing how a memory changed**: Check the version history of an entry.
+  ```
+  amfs_history("<entity_path>", "<key>")
   ```
 
 ## When to COMMIT OUTCOMES

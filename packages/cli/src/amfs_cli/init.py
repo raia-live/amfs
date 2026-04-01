@@ -11,7 +11,7 @@ console = Console()
 
 _DEFAULT_CONFIG = """\
 # AMFS Configuration
-# Docs: https://github.com/senselab/amfs
+# Docs: https://github.com/raia-live/amfs
 
 namespace: {namespace}
 

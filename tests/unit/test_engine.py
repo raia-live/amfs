@@ -226,6 +226,58 @@ class TestReadTracker:
         assert not tracker.contains("svc/other")
 
 
+class TestReadTrackerExternalContexts:
+    def test_record_context_adds_to_list(self) -> None:
+        tracker = ReadTracker()
+        tracker.record_context("git-log", "15 commits since last deploy", source="git")
+        assert len(tracker.external_contexts) == 1
+        ctx = tracker.external_contexts[0]
+        assert ctx["label"] == "git-log"
+        assert ctx["summary"] == "15 commits since last deploy"
+        assert ctx["source"] == "git"
+        assert "recorded_at" in ctx
+
+    def test_record_context_source_optional(self) -> None:
+        tracker = ReadTracker()
+        tracker.record_context("manual-check", "Verified deployment config")
+        ctx = tracker.external_contexts[0]
+        assert ctx["source"] is None
+
+    def test_record_context_preserves_order(self) -> None:
+        tracker = ReadTracker()
+        tracker.record_context("step-1", "first")
+        tracker.record_context("step-2", "second")
+        tracker.record_context("step-3", "third")
+        labels = [c["label"] for c in tracker.external_contexts]
+        assert labels == ["step-1", "step-2", "step-3"]
+
+    def test_external_contexts_returns_copy(self) -> None:
+        tracker = ReadTracker()
+        tracker.record_context("a", "b")
+        contexts = tracker.external_contexts
+        contexts.append({"label": "injected"})
+        assert len(tracker.external_contexts) == 1
+
+    def test_clear_removes_external_contexts(self) -> None:
+        tracker = ReadTracker()
+        entry = MemoryEntry(
+            entity_path="svc", key="k1", version=1, value="v",
+            provenance=Provenance(
+                agent_id="a", session_id="s",
+                written_at=datetime.now(timezone.utc),
+            ),
+        )
+        tracker.record(entry)
+        tracker.record_context("tool", "output")
+        assert tracker.read_count == 1
+        assert len(tracker.external_contexts) == 1
+
+        tracker.clear()
+        assert tracker.read_count == 0
+        assert tracker.causal_keys == []
+        assert tracker.external_contexts == []
+
+
 class TestCoWEngineWithReadTracker:
     def test_read_auto_tracks(self) -> None:
         adapter = MockAdapter()

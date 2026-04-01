@@ -78,6 +78,7 @@ The adapter auto-creates two tables and associated triggers:
 | `provenance` | `JSONB` | Agent, session, timestamp, pattern_refs |
 | `confidence` | `FLOAT` | Trust score |
 | `outcome_count` | `INT` | Outcomes applied |
+| `memory_type` | `TEXT` | Memory type: `fact`, `belief`, or `experience` (default: `fact`) |
 | `superseded_at` | `TIMESTAMP` | When this version was superseded (NULL = current) |
 
 ### `amfs_outcomes`

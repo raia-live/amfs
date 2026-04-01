@@ -78,10 +78,11 @@ write(
     confidence: float = 1.0,
     ttl_at: datetime | None = None,
     pattern_refs: list[str] | None = None,
+    memory_type: MemoryType = MemoryType.FACT,
 ) -> MemoryEntry
 ```
 
-Creates a new version of the entry. If the key already exists, the previous version is superseded (CoW).
+Creates a new version of the entry. If the key already exists, the previous version is superseded (CoW). The `memory_type` parameter controls decay behavior — `belief` decays 2× faster, `experience` decays 1.5× slower.
 
 ---
 
@@ -159,6 +160,62 @@ Record an outcome and update confidence on causal entries. If `causal_entry_keys
 
 ---
 
+### history
+
+```python
+history(
+    entity_path: str,
+    key: str,
+    *,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> list[MemoryEntry]
+```
+
+Returns all versions of an entry, optionally filtered by time range. Entries are sorted by version ascending.
+
+---
+
+### record_context
+
+```python
+record_context(
+    label: str,
+    summary: str,
+    *,
+    source: str | None = None,
+) -> None
+```
+
+Record external context (tool call, API response, database query) in the causal chain without writing to storage. These appear in the `external_contexts` field of `explain()` output, making decision traces complete.
+
+---
+
+### explain
+
+```python
+explain(
+    outcome_ref: str | None = None,
+) -> dict[str, Any]
+```
+
+Returns the causal chain for the current session: which AMFS entries were read, which external contexts were recorded, and their details. If `outcome_ref` is provided, labels the explanation with that reference.
+
+Returns:
+
+```python
+{
+    "outcome_ref": str | None,
+    "agent_id": str,
+    "session_id": str,
+    "causal_chain_length": int,
+    "causal_entries": list[dict],       # AMFS entries that were read
+    "external_contexts": list[dict],    # tool/API inputs via record_context()
+}
+```
+
+---
+
 ### stats
 
 ```python
@@ -173,20 +230,25 @@ Returns memory statistics.
 
 ```python
 class MemoryEntry:
-    amfs_version: str       # Protocol version ("0.1.0")
-    entity_path: str        # Entity scope
-    key: str                # Entry key
-    version: int            # Version number
-    value: Any              # Stored data
-    provenance: Provenance  # Authorship metadata
-    confidence: float       # Trust score
-    outcome_count: int      # Outcomes applied
-    ttl_at: datetime | None # Expiration timestamp
+    amfs_version: str           # Protocol version ("0.2.0")
+    entity_path: str            # Entity scope
+    key: str                    # Entry key
+    version: int                # Version number
+    value: Any                  # Stored data
+    provenance: Provenance      # Authorship metadata
+    confidence: float           # Trust score
+    outcome_count: int          # Outcomes applied
+    memory_type: MemoryType     # fact, belief, or experience
+    ttl_at: datetime | None     # Expiration timestamp
     embedding: list[float] | None  # Vector embedding
 
     @property
     def entry_key(self) -> str:
         """Canonical reference: 'entity_path/key'"""
+
+    @property
+    def provenance_tier(self) -> ProvenanceTier:
+        """Computed quality tier based on agent ID and outcome history."""
 ```
 
 ---
@@ -211,6 +273,29 @@ class OutcomeType(str, Enum):
     P2_INCIDENT = "p2_incident"      # × 1.10
     REGRESSION = "regression"        # × 1.08
     CLEAN_DEPLOY = "clean_deploy"    # × 0.97
+```
+
+---
+
+## MemoryType
+
+```python
+class MemoryType(str, Enum):
+    FACT = "fact"              # Objective knowledge, standard decay
+    BELIEF = "belief"          # Subjective inference, 2× faster decay
+    EXPERIENCE = "experience"  # Action log, 1.5× slower decay
+```
+
+---
+
+## ProvenanceTier
+
+```python
+class ProvenanceTier(int, Enum):
+    PRODUCTION_VALIDATED = 1   # Production agent + outcomes applied
+    PRODUCTION_OBSERVED = 2    # Production agent, no outcomes yet
+    DEVELOPMENT = 3            # Dev/test environment
+    MANUAL = 4                 # Manually seeded
 ```
 
 ---
@@ -255,6 +340,7 @@ amfs_write(
     value: str,
     confidence: float = 1.0,
     pattern_refs: list[str] | None = None,
+    memory_type: str = "fact",  # "fact" | "belief" | "experience"
 ) -> str (JSON)
 ```
 
@@ -294,3 +380,38 @@ amfs_commit_outcome(
     outcome_type: str,  # "p1_incident" | "p2_incident" | "regression" | "clean_deploy"
 ) -> str (JSON)
 ```
+
+### amfs_record_context
+
+```
+amfs_record_context(
+    label: str,
+    summary: str,
+    source: str = "",
+) -> str (JSON)
+```
+
+Record external context (tool call, API response) in the causal chain. Appears in `amfs_explain()` output.
+
+### amfs_history
+
+```
+amfs_history(
+    entity_path: str,
+    key: str,
+    since: str | None = None,  # ISO 8601 datetime
+    until: str | None = None,  # ISO 8601 datetime
+) -> str (JSON)
+```
+
+Returns all versions of an entry, optionally bounded by a time range. Dates are ISO 8601 strings.
+
+### amfs_explain
+
+```
+amfs_explain(
+    outcome_ref: str | None = None,
+) -> str (JSON)
+```
+
+Returns the causal read chain for the current session: which entries were read and their details.

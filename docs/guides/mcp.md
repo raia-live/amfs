@@ -21,7 +21,7 @@ AMFS provides a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
 
 ## What You Get
 
-After setup, your AI agents have 6 memory tools:
+After setup, your AI agents have 9 memory tools:
 
 | Tool | Description |
 |:-----|:------------|
@@ -31,6 +31,9 @@ After setup, your AI agents have 6 memory tools:
 | `amfs_list` | List entries for an entity |
 | `amfs_stats` | Get a memory overview (entry counts, outcome counts) |
 | `amfs_commit_outcome` | Record outcomes with auto-causal linking |
+| `amfs_record_context` | Capture external tool/API inputs in the causal chain |
+| `amfs_history` | Retrieve version history of an entry with optional time range |
+| `amfs_explain` | Inspect the full decision trace for the current session |
 
 ---
 
@@ -219,9 +222,11 @@ Override with `AMFS_AGENT_ID`:
 
 1. **Agent starts** — MCP server launches, creates an `AgentMemory` instance with auto-detected agent ID.
 2. **Agent searches** — Before working, the agent calls `amfs_search` to check for existing context.
-3. **Agent writes** — After completing tasks, decisions and risks are recorded with `amfs_write`.
-4. **Outcomes propagate** — `amfs_commit_outcome` updates confidence on all entries the agent read.
-5. **Knowledge compounds** — The next agent starts with context instead of from scratch.
+3. **Agent gathers context** — External tool calls are captured with `amfs_record_context` so the decision trace is complete.
+4. **Agent writes** — After completing tasks, decisions and risks are recorded with `amfs_write` (optionally specifying `memory_type`: `fact`, `belief`, or `experience`).
+5. **Outcomes propagate** — `amfs_commit_outcome` updates confidence on all entries the agent read.
+6. **Agent reviews** — `amfs_history` shows how a memory evolved over time; `amfs_explain` reveals the full decision trace including external inputs.
+7. **Knowledge compounds** — The next agent starts with context instead of from scratch.
 
 ### Example Scenario
 

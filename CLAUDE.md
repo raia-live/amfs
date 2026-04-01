@@ -5,11 +5,14 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS is sh
 ## Available MCP Tools
 
 - `amfs_read(entity_path, key)` — read a specific memory entry
-- `amfs_write(entity_path, key, value, confidence?, pattern_refs?)` — write knowledge with automatic provenance
+- `amfs_write(entity_path, key, value, confidence?, pattern_refs?, memory_type?)` — write knowledge with automatic provenance. `memory_type` can be `"fact"` (default), `"belief"` (decays faster), or `"experience"` (decays slower)
 - `amfs_search(query?, entity_path?, min_confidence?, agent_id?, sort_by?, limit?)` — search across all entries
 - `amfs_list(entity_path?)` — list entries for an entity
 - `amfs_stats()` — memory overview
 - `amfs_commit_outcome(outcome_ref, outcome_type)` — record outcomes, auto-links to read log
+- `amfs_record_context(label, summary, source?)` — capture external tool/API context in the causal chain (appears in `amfs_explain` output)
+- `amfs_history(entity_path, key, since?, until?)` — retrieve version history of an entry, optionally filtered by time range
+- `amfs_explain(outcome_ref?)` — inspect the full decision trace: AMFS reads + external contexts
 
 ## Workflow
 
@@ -32,9 +35,27 @@ amfs_write("<repo>/<module>", "pattern-<name>", "<description>", pattern_refs=["
 ```
 
 ### When finding bugs or risks
-Warn other agents:
+Warn other agents (use `memory_type="belief"` for hypotheses that need validation):
 ```
-amfs_write("<repo>/<module>", "risk-<name>", "<what could go wrong>", confidence=0.8)
+amfs_write("<repo>/<module>", "risk-<name>", "<what could go wrong>", confidence=0.8, memory_type="belief")
+```
+
+### When logging actions taken
+Record what you did so future agents can retrace steps (experiences decay slower):
+```
+amfs_write("<repo>/<module>", "action-<desc>", "<what you did>", memory_type="experience")
+```
+
+### When consulting external tools or APIs
+Record external context so the decision trace is complete:
+```
+amfs_record_context("pagerduty-incidents", "3 SEV-1 in last 24h", source="PagerDuty API")
+```
+
+### When reviewing history
+Check how a memory evolved over time:
+```
+amfs_history("<entity_path>", "<key>")
 ```
 
 ### When something significant happens
