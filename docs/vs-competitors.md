@@ -64,15 +64,6 @@ The AI memory space is evolving fast. Here's how AMFS compares to the leading al
 - **Multi-agent native** — AMFS supports conflict detection, auto-causal linking, and per-agent identity. Mem0 is designed primarily for single-user conversational context.
 - **Decision traces** — AMFS's `explain()` API and `record_context()` capture the full causal chain. Mem0 doesn't track why decisions were made.
 
-### Best Fit
-
-| Use Case | Better Choice |
-|:---------|:-------------|
-| Chatbot remembers user preferences | Mem0 |
-| Multi-agent coding workflows with outcome tracking | AMFS |
-| Personal AI assistant memory | Mem0 |
-| Production-grade agent memory with audit trail | AMFS |
-
 ---
 
 ## AMFS vs Cognee
@@ -93,15 +84,6 @@ The AI memory space is evolving fast. Here's how AMFS compares to the leading al
 - **Versioning and provenance** — AMFS preserves full history and tracks authorship. Cognee's graph is a living structure that's updated in place.
 - **Pluggable storage** — AMFS runs on filesystem or Postgres. Cognee has its own storage layer.
 - **Decision explainability** — AMFS can explain why a decision was made (what was read, what external context was gathered). Cognee focuses on what's in the graph, not how it was used.
-
-### Best Fit
-
-| Use Case | Better Choice |
-|:---------|:-------------|
-| Build knowledge graph from document corpus | Cognee |
-| Multi-hop QA over research papers | Cognee |
-| Agent memory with versioning and outcomes | AMFS |
-| Multi-agent shared knowledge with decision traces | AMFS |
 
 ---
 
@@ -124,15 +106,6 @@ The AI memory space is evolving fast. Here's how AMFS compares to the leading al
 - **Pluggable backends** — AMFS supports filesystem (dev) and Postgres (production) with the same API. Zep requires its own infrastructure.
 - **Decision traces** — AMFS captures the full causal chain including external tool context. Zep focuses on conversation-derived knowledge.
 
-### Best Fit
-
-| Use Case | Better Choice |
-|:---------|:-------------|
-| AI assistant with conversation history | Zep |
-| Temporal knowledge graph with entity resolution | Graphiti |
-| Multi-agent memory with production feedback | AMFS |
-| Decision audit trail and causal explainability | AMFS |
-
 ---
 
 ## AMFS vs LangMem
@@ -154,15 +127,6 @@ The AI memory space is evolving fast. Here's how AMFS compares to the leading al
 - **MCP-native** — AMFS has a built-in MCP server for IDE integration (Cursor, Claude Code). LangMem doesn't support MCP.
 - **Self-hosted with pluggable storage** — AMFS runs on filesystem or Postgres. LangMem is primarily a managed service.
 
-### Best Fit
-
-| Use Case | Better Choice |
-|:---------|:-------------|
-| Memory inside a LangGraph pipeline | LangMem |
-| Framework-agnostic agent memory | AMFS |
-| MCP-based IDE integration (Cursor, Claude Code) | AMFS |
-| Memory that learns from production outcomes | AMFS |
-
 ---
 
 ## What Makes AMFS Unique
@@ -179,18 +143,3 @@ Across all competitors, AMFS's differentiators are:
 
 5. **Framework and infrastructure agnostic** — Works with any agent framework, any IDE via MCP, any storage backend via adapters. Not locked into one ecosystem.
 
----
-
-## Choosing the Right Tool
-
-| Your Situation | Recommendation |
-|:---------------|:---------------|
-| Building a chatbot that remembers user preferences | Mem0 or Zep |
-| Processing documents into a knowledge graph | Cognee |
-| Building a temporal knowledge graph from conversations | Graphiti |
-| Need memory inside LangGraph only | LangMem |
-| Multi-agent system that needs shared memory with provenance | **AMFS** |
-| Agent memory that learns from production outcomes | **AMFS** |
-| Need decision traces and audit trail for agent actions | **AMFS** |
-| IDE integration for AI coding agents (Cursor, Claude Code) | **AMFS** |
-| Need versioned, explainable agent memory across frameworks | **AMFS** |
