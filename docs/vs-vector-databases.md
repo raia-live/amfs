@@ -125,22 +125,6 @@ chain = mem.explain("DEP-500")
 
 ---
 
-## When to Use Which
-
-| Scenario | Use |
-|:---------|:----|
-| RAG over large document corpus | Vector database |
-| Semantic search across millions of records | Vector database |
-| Agent memory that persists across sessions | AMFS |
-| Multi-agent shared knowledge with provenance | AMFS |
-| Confidence scoring based on real-world outcomes | AMFS |
-| Decision audit trail and explainability | AMFS |
-| Temporal queries ("what did we know last week?") | AMFS |
-| Real-time similarity recommendations | Vector database |
-| Knowledge that needs to learn from production | AMFS |
-
----
-
 ## Using Both Together
 
 AMFS and vector databases are complementary. A common architecture:
