@@ -1,4 +1,4 @@
-"""CoWEngine and CausalTagger — core write logic for AMFS."""
+"""CoWEngine, CausalTagger, and ReadTracker — core write logic for AMFS."""
 
 from __future__ import annotations
 
@@ -35,6 +35,49 @@ class CausalTagger:
         )
 
 
+class ReadTracker:
+    """Automatically records every read within a session for causal linking
+    and conflict detection.
+
+    When an agent reads entries and later commits an outcome, the tracker
+    provides the causal chain without the developer manually specifying
+    which entries were involved.
+
+    Also tracks the version at read time so the engine can detect stale
+    writes (another agent modified the entry since we last read it).
+    """
+
+    def __init__(self) -> None:
+        self._reads: dict[str, datetime] = {}
+        self._versions: dict[str, int] = {}
+
+    def record(self, entry: MemoryEntry) -> None:
+        """Record that an entry was read during this session."""
+        self._reads[entry.entry_key] = datetime.now(timezone.utc)
+        self._versions[entry.entry_key] = entry.version
+
+    @property
+    def causal_keys(self) -> list[str]:
+        """All entry keys read in this session, ordered by read time."""
+        return [k for k, _ in sorted(self._reads.items(), key=lambda x: x[1])]
+
+    @property
+    def read_count(self) -> int:
+        return len(self._reads)
+
+    def read_version(self, entry_key: str) -> int | None:
+        """Return the version we last read for an entry, or None if never read."""
+        return self._versions.get(entry_key)
+
+    def clear(self) -> None:
+        """Reset the read log (e.g. between sub-tasks within a session)."""
+        self._reads.clear()
+        self._versions.clear()
+
+    def contains(self, entry_key: str) -> bool:
+        return entry_key in self._reads
+
+
 class CoWEngine:
     """Copy-on-Write engine that reads existing entries, increments versions,
     and delegates writes to the underlying adapter.
@@ -45,11 +88,20 @@ class CoWEngine:
         The storage adapter to use.
     tagger:
         A CausalTagger for stamping provenance.
+    read_tracker:
+        Optional ReadTracker for auto-causal linking. If provided, every
+        successful read is logged for later use in commit_outcome().
     """
 
-    def __init__(self, adapter: AdapterABC, tagger: CausalTagger) -> None:
+    def __init__(
+        self,
+        adapter: AdapterABC,
+        tagger: CausalTagger,
+        read_tracker: ReadTracker | None = None,
+    ) -> None:
         self._adapter = adapter
         self._tagger = tagger
+        self._read_tracker = read_tracker
 
     @property
     def adapter(self) -> AdapterABC:
@@ -59,6 +111,10 @@ class CoWEngine:
     def tagger(self) -> CausalTagger:
         return self._tagger
 
+    @property
+    def read_tracker(self) -> ReadTracker | None:
+        return self._read_tracker
+
     def read(
         self,
         entity_path: str,
@@ -66,8 +122,15 @@ class CoWEngine:
         *,
         min_confidence: float = 0.0,
     ) -> MemoryEntry | None:
-        """Read the current version of a key from the adapter."""
-        return self._adapter.read(entity_path, key, min_confidence=min_confidence)
+        """Read the current version of a key from the adapter.
+
+        If a ReadTracker is attached, the read is automatically logged
+        for causal linking.
+        """
+        entry = self._adapter.read(entity_path, key, min_confidence=min_confidence)
+        if entry is not None and self._read_tracker is not None:
+            self._read_tracker.record(entry)
+        return entry
 
     def write(
         self,

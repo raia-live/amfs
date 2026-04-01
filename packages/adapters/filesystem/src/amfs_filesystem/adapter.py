@@ -162,6 +162,7 @@ class FilesystemAdapter(AdapterABC):
             new_confidence = current.confidence * multiplier * record.causal_confidence
             new_entry = current.model_copy(
                 update={
+                    "version": 1,
                     "confidence": new_confidence,
                     "outcome_count": current.outcome_count + 1,
                 }

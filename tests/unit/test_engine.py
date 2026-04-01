@@ -1,4 +1,4 @@
-"""Unit tests for CoWEngine and CausalTagger."""
+"""Unit tests for CoWEngine, CausalTagger, and ReadTracker."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from amfs_core.abc import AdapterABC, WatchHandle
-from amfs_core.engine import CausalTagger, CoWEngine
+from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker
 from amfs_core.models import MemoryEntry, OutcomeRecord, Provenance
 
 
@@ -165,3 +165,92 @@ class TestCoWEngine:
         entries = engine.list("svc-a")
         assert len(entries) == 1
         assert entries[0].entity_path == "svc-a"
+
+
+# ---------------------------------------------------------------------------
+# ReadTracker tests
+# ---------------------------------------------------------------------------
+
+class TestReadTracker:
+    def test_record_and_causal_keys(self) -> None:
+        tracker = ReadTracker()
+        entry = MemoryEntry(
+            entity_path="svc", key="k1", version=1, value="v",
+            provenance=Provenance(
+                agent_id="a", session_id="s",
+                written_at=datetime.now(timezone.utc),
+            ),
+        )
+        tracker.record(entry)
+        assert tracker.causal_keys == ["svc/k1"]
+        assert tracker.read_count == 1
+
+    def test_deduplication(self) -> None:
+        tracker = ReadTracker()
+        entry = MemoryEntry(
+            entity_path="svc", key="k1", version=1, value="v",
+            provenance=Provenance(
+                agent_id="a", session_id="s",
+                written_at=datetime.now(timezone.utc),
+            ),
+        )
+        tracker.record(entry)
+        tracker.record(entry)
+        assert tracker.read_count == 1
+
+    def test_clear(self) -> None:
+        tracker = ReadTracker()
+        entry = MemoryEntry(
+            entity_path="svc", key="k1", version=1, value="v",
+            provenance=Provenance(
+                agent_id="a", session_id="s",
+                written_at=datetime.now(timezone.utc),
+            ),
+        )
+        tracker.record(entry)
+        tracker.clear()
+        assert tracker.read_count == 0
+        assert tracker.causal_keys == []
+
+    def test_contains(self) -> None:
+        tracker = ReadTracker()
+        entry = MemoryEntry(
+            entity_path="svc", key="k1", version=1, value="v",
+            provenance=Provenance(
+                agent_id="a", session_id="s",
+                written_at=datetime.now(timezone.utc),
+            ),
+        )
+        tracker.record(entry)
+        assert tracker.contains("svc/k1")
+        assert not tracker.contains("svc/other")
+
+
+class TestCoWEngineWithReadTracker:
+    def test_read_auto_tracks(self) -> None:
+        adapter = MockAdapter()
+        tagger = CausalTagger(agent_id="t", session_id="s")
+        tracker = ReadTracker()
+        engine = CoWEngine(adapter, tagger, tracker)
+
+        engine.write("svc", "key", "val")
+        engine.read("svc", "key")
+
+        assert tracker.causal_keys == ["svc/key"]
+
+    def test_read_miss_not_tracked(self) -> None:
+        adapter = MockAdapter()
+        tagger = CausalTagger(agent_id="t", session_id="s")
+        tracker = ReadTracker()
+        engine = CoWEngine(adapter, tagger, tracker)
+
+        engine.read("nonexistent", "nope")
+        assert tracker.read_count == 0
+
+    def test_engine_without_tracker_still_works(self) -> None:
+        adapter = MockAdapter()
+        tagger = CausalTagger(agent_id="t", session_id="s")
+        engine = CoWEngine(adapter, tagger)
+        engine.write("svc", "key", "val")
+        result = engine.read("svc", "key")
+        assert result is not None
