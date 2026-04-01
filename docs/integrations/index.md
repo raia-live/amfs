@@ -1,7 +1,7 @@
 ---
 title: Integrations
 layout: default
-nav_order: 6
+nav_order: 7
 description: "Use AMFS with CrewAI, LangGraph, LangChain, and AutoGen."
 permalink: /integrations/
 ---

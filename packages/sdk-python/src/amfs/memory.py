@@ -332,11 +332,38 @@ class AgentMemory:
         """
         return self._engine.history(entity_path, key, since=since, until=until)
 
+    def record_context(
+        self,
+        label: str,
+        summary: str,
+        *,
+        source: str | None = None,
+    ) -> None:
+        """Record external context in the causal chain without writing to storage.
+
+        Call this after consulting an external tool, API, or data source so
+        that ``explain()`` returns a complete decision trace — not just which
+        AMFS entries were read, but also which external inputs informed the
+        agent's decisions.
+
+        Example::
+
+            mem.record_context(
+                "pagerduty-incidents",
+                "3 SEV-1 incidents in the last 24h for checkout-service",
+                source="PagerDuty API",
+            )
+        """
+        self._read_tracker.record_context(label, summary, source=source)
+
     def explain(self, outcome_ref: str | None = None) -> dict[str, Any]:
         """Return the causal chain for the current session or a specific outcome.
 
         Shows which memories were read (and in what order) before the outcome
-        was committed, enabling production-grounded explainability.
+        was committed, plus any external contexts recorded via
+        ``record_context()``.  This is production-grounded explainability:
+        not what the LLM inferred, but which stored knowledge and external
+        inputs actually drove the decision.
         """
         causal_keys = self._read_tracker.causal_keys
         entries: list[dict[str, Any]] = []
@@ -357,6 +384,7 @@ class AgentMemory:
             "session_id": self.session_id,
             "causal_chain_length": len(causal_keys),
             "causal_entries": entries,
+            "external_contexts": self._read_tracker.external_contexts,
         }
 
     # ------------------------------------------------------------------

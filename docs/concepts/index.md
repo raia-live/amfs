@@ -12,7 +12,7 @@ permalink: /concepts/
 Understanding the building blocks of AMFS.
 {: .fs-6 .fw-300 }
 
-AMFS is built around a few core ideas that work together: **memory entries** store knowledge, **copy-on-write** preserves history, **provenance** tracks authorship, **confidence** scores reflect trust, and **outcomes** close the feedback loop.
+AMFS is built around a few core ideas that work together: **memory entries** store knowledge with a **memory type** (fact, belief, or experience), **copy-on-write** preserves history, **provenance** tracks authorship and **provenance tiers** rank quality, **confidence** scores reflect trust with type-specific decay, and **outcomes** close the feedback loop.
 
 ---
 
@@ -23,6 +23,7 @@ Agent writes →  MemoryEntry created
                   ├── entity_path: "checkout-service"
                   ├── key: "retry-pattern"
                   ├── value: { ... }
+                  ├── memory_type: fact   ← fact / belief / experience
                   ├── version: 3          ← CoW versioning
                   ├── confidence: 0.85    ← evolves with outcomes
                   └── provenance:

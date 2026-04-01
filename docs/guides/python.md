@@ -70,6 +70,7 @@ entry = mem.write(
     {"max_retries": 3},          # value (any JSON-serializable data)
     confidence=0.85,             # optional, default 1.0
     pattern_refs=["retry"],      # optional cross-references
+    memory_type=MemoryType.FACT, # optional: fact (default), belief, or experience
 )
 ```
 
@@ -162,6 +163,112 @@ OutcomeType.P2_INCIDENT    # × 1.10
 OutcomeType.REGRESSION     # × 1.08
 OutcomeType.CLEAN_DEPLOY   # × 0.97
 ```
+
+---
+
+## Memory Types
+
+Classify entries to control decay behavior:
+
+```python
+from amfs import MemoryType
+
+# Facts (default) — objective knowledge, standard decay
+mem.write("svc", "config", {"pool_size": 10}, memory_type=MemoryType.FACT)
+
+# Beliefs — subjective inferences, decay 2× faster
+mem.write("svc", "hypothesis", "Likely an N+1 query issue", memory_type=MemoryType.BELIEF)
+
+# Experiences — action logs, decay 1.5× slower
+mem.write("svc", "action-log", "Added index on user_id", memory_type=MemoryType.EXPERIENCE)
+```
+
+---
+
+## History (Temporal Queries)
+
+Retrieve the full version history of an entry with optional time filtering:
+
+```python
+from datetime import datetime, timedelta, timezone
+
+# All versions
+versions = mem.history("checkout-service", "retry-pattern")
+for v in versions:
+    print(f"v{v.version} — confidence: {v.confidence} — {v.provenance.written_at}")
+
+# Versions from the last 7 days
+since = datetime.now(timezone.utc) - timedelta(days=7)
+recent = mem.history("checkout-service", "retry-pattern", since=since)
+```
+
+---
+
+## Explainability
+
+Inspect the causal chain — which entries were read during the current session and how they connect to outcomes:
+
+```python
+chain = mem.explain()
+print(chain["session_id"])
+print(chain["causal_keys"])   # list of entity_path/key pairs that were read
+print(chain["entries"])       # full entry details for each causal key
+```
+
+Filter by outcome reference:
+
+```python
+chain = mem.explain(outcome_ref="INC-1042")
+```
+
+---
+
+## Tool Context
+
+When agents call external tools or APIs, there are two ways to capture that context in AMFS depending on your needs.
+
+### Record in the causal chain (lightweight)
+
+Use `record_context()` to add external inputs to the causal chain without writing to storage. This makes `explain()` return a complete decision trace:
+
+```python
+entry = mem.read("checkout-service", "retry-pattern")
+
+mem.record_context(
+    "pagerduty-incidents",
+    "3 SEV-1 incidents in the last 24h for checkout-service",
+    source="PagerDuty API",
+)
+mem.record_context(
+    "git-log",
+    "15 commits since last deploy, 3 touching retry logic",
+    source="git",
+)
+
+mem.commit_outcome("DEP-500", OutcomeType.CLEAN_DEPLOY)
+
+chain = mem.explain()
+print(chain["causal_entries"])     # AMFS entries that were read
+print(chain["external_contexts"])  # tool/API inputs that informed the decision
+```
+
+### Persist for other agents (durable)
+
+Use `MemoryType.EXPERIENCE` with a TTL to store tool results so downstream agents can retrieve them:
+
+```python
+from datetime import datetime, timedelta, timezone
+
+mem.write(
+    "checkout-service",
+    "tool-result-pagerduty",
+    {"incidents": 3, "sev1": True, "last_24h": True},
+    memory_type=MemoryType.EXPERIENCE,
+    ttl_at=datetime.now(timezone.utc) + timedelta(hours=1),
+)
+```
+
+The next agent reads it with `mem.read("checkout-service", "tool-result-pagerduty")` instead of re-calling the API.
 
 ---
 

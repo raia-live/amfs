@@ -73,6 +73,29 @@ export AMFS_AGENT_ID="deploy-bot"
 
 ---
 
+## Provenance Tiers
+
+AMFS computes a **provenance tier** for each entry based on the agent ID and outcome history. This enables downstream systems to prioritize production-validated knowledge over manually seeded assumptions.
+
+| Tier | Value | Criteria |
+|:-----|:------|:---------|
+| `PRODUCTION_VALIDATED` | 1 | Agent ID starts with `agent/`, `prod/`, or `prod-` AND `outcome_count > 0` |
+| `PRODUCTION_OBSERVED` | 2 | Production agent, no outcomes yet |
+| `DEVELOPMENT` | 3 | Agent ID starts with `dev/`, `test/`, `dev-`, or `test-` |
+| `MANUAL` | 4 | Agent ID starts with `manual/`, `seed/`, or `human/` |
+
+```python
+from amfs import ProvenanceTier
+
+entry = mem.read("svc", "pattern")
+if entry.provenance_tier == ProvenanceTier.PRODUCTION_VALIDATED:
+    print("This memory has been validated by production outcomes")
+```
+
+The tier is a computed property — it derives from `provenance.agent_id` and `outcome_count`, not stored as a separate field.
+
+---
+
 ## Querying by Provenance
 
 Search for entries written by a specific agent:

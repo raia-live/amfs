@@ -343,6 +343,30 @@ def amfs_history(
 
 
 @mcp.tool
+def amfs_record_context(
+    label: str,
+    summary: str,
+    source: str = "",
+) -> str:
+    """Record external context that influenced this session's decisions.
+
+    Call this after consulting an external tool, API, or data source.
+    The context is added to the causal chain returned by amfs_explain(),
+    making decision traces complete.
+
+    Args:
+        label: Short name for the context (e.g. "pagerduty-incidents", "git-log")
+        summary: Brief summary of what was found
+        source: Optional source identifier (e.g. "PagerDuty API", "git")
+
+    Example: amfs_record_context("git-log", "15 commits since last deploy", "git")
+    """
+    mem = _get_memory()
+    mem.record_context(label, summary, source=source or None)
+    return json.dumps({"recorded": label, "source": source or None})
+
+
+@mcp.tool
 def amfs_explain(outcome_ref: str | None = None) -> str:
     """Explain the causal chain — which memories influenced this session's decisions.
 

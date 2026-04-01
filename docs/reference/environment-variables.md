@@ -30,6 +30,7 @@ AMFS supports the following environment variables. They override values set in `
 | `AMFS_HOST` | HTTP server bind host | `0.0.0.0` |
 | `AMFS_PORT` | HTTP server bind port | `8000` |
 | `AMFS_PATH` | HTTP server URL path | `/mcp` |
+| `AMFS_TTL_SWEEP_INTERVAL` | Seconds between TTL sweep runs (set to enable automatic expiry) | — |
 
 ---
 

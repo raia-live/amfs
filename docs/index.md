@@ -81,6 +81,10 @@ entry = mem.read("checkout-service", "risk-race-condition")
 | **Copy-on-Write versioning** | Every write creates a new version. Full history is preserved. |
 | **Confidence scores** | Each entry carries a confidence score that evolves based on outcomes. |
 | **Outcome back-propagation** | Link deploys and incidents to memory entries. Confidence adjusts automatically. |
+| **Memory types** | Classify entries as `fact`, `belief`, or `experience` with type-specific decay rates. |
+| **Provenance tiers** | Automatically tier entries by quality: production-validated, observed, dev, or manual. |
+| **Temporal queries** | Retrieve the full version history of any entry, filtered by time range. |
+| **Causal explainability** | Inspect which entries were read and how they connect to outcomes. |
 | **Provenance tracking** | Every entry records which agent wrote it, when, and from which session. |
 | **Multiple adapters** | Filesystem (default), Postgres, or build your own. |
 | **MCP integration** | First-class MCP server for Cursor, Claude Code, and any MCP-compatible client. |
@@ -99,6 +103,14 @@ entry = mem.read("checkout-service", "risk-race-condition")
 | `amfs-cli` | Python | `pip install amfs-cli` |
 | `amfs-mcp-server` | Python | `pip install amfs-mcp-server` |
 | `@amfs/sdk` | TypeScript | `npm install @amfs/sdk` |
+
+---
+
+## OSS vs Pro
+
+AMFS is available in two editions. The open-source layer provides the full memory primitive — versioning, confidence, outcomes, adapters, and MCP. The Pro layer adds an intelligence layer with LLM-driven extraction, automated quality auditing, memory distillation, safety validation, and multi-strategy retrieval.
+
+[Compare editions](/amfs/editions/){: .btn .btn-outline .fs-5 .mb-4 .mb-md-0 }
 
 ---
 

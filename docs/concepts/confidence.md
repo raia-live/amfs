@@ -100,6 +100,30 @@ This is powered by the **ReadTracker**, which logs every `read()` call during a 
 
 ---
 
+## Type-Specific Decay
+
+When `decay_half_life_days` is configured, confidence decays over time. The decay rate varies by memory type:
+
+| Memory Type | Decay Multiplier | Effect |
+|:------------|:----------------|:-------|
+| `fact` | 1.0× | Standard half-life |
+| `belief` | 0.5× | Half-life is halved (decays 2× faster) |
+| `experience` | 1.5× | Half-life is 50% longer (decays slower) |
+
+Additionally, entries with `outcome_count > 0` decay at **half the rate** of unvalidated entries. This means a production-validated fact with a 30-day half-life effectively has a 60-day half-life.
+
+```python
+mem = AgentMemory(
+    agent_id="my-agent",
+    decay_half_life_days=30.0,  # facts decay with 30-day half-life
+)
+
+# A belief with the same setting decays with a 15-day half-life
+# An experience decays with a 45-day half-life
+```
+
+---
+
 ## Filtering by Confidence
 
 Use `min_confidence` to filter out low-confidence entries:

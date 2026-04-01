@@ -27,8 +27,10 @@ A filesystem-modeled protocol and SDK that gives multi-agent AI systems a standa
 **Key concepts:**
 
 - **MemoryEntry** — A versioned key-value pair with provenance (who wrote it, when, why) and a confidence score
+- **Memory Types** — Classify entries as facts, beliefs, or experiences with type-specific decay rates
 - **Copy-on-Write (CoW)** — Every write creates a new version; old versions are preserved as superseded
 - **Outcome back-propagation** — When an incident or clean deploy happens, confidence scores on causal entries are automatically adjusted
+- **Provenance Tiers** — Entries are automatically tiered by quality: production-validated, observed, dev, or manual
 - **Adapters** — Pluggable storage backends (filesystem, Postgres, Redis)
 
 ## Installation
@@ -84,6 +86,10 @@ mem.commit_outcome(
 |:--------|:------------|
 | Copy-on-Write versioning | Every write creates a new version. Full history is preserved. |
 | Confidence & outcomes | Entries carry confidence scores that evolve based on real-world outcomes. |
+| Memory types | Classify entries as `fact`, `belief`, or `experience` with type-specific decay. |
+| Provenance tiers | Entries auto-tier by quality: production-validated > observed > dev > manual. |
+| Temporal queries | Retrieve the full version history of any entry, filtered by time range. |
+| Causal explainability | Inspect which entries were read and how they connect to outcomes. |
 | Provenance tracking | Every entry records which agent wrote it, when, and from which session. |
 | Multiple adapters | Filesystem (default), Postgres, or build your own. |
 | MCP integration | First-class MCP server for Cursor, Claude Code, and any MCP client. |
@@ -109,12 +115,17 @@ Give your AI coding agents persistent, shared memory via MCP:
 
 **[Full MCP setup guide →](https://raia-live.github.io/amfs/guides/mcp/)**
 
+## OSS vs Pro
+
+AMFS is available in two editions. The OSS layer provides the full memory primitive. The Pro layer adds an intelligence layer with LLM-driven extraction, automated quality auditing, memory distillation, safety validation, and multi-strategy retrieval. [See the comparison →](https://raia-live.github.io/amfs/editions/)
+
 ## Documentation
 
 Visit **[raia-live.github.io/amfs](https://raia-live.github.io/amfs/)** for the full documentation:
 
 - [Getting Started](https://raia-live.github.io/amfs/getting-started/) — installation, quick start, configuration
 - [Core Concepts](https://raia-live.github.io/amfs/concepts/) — memory entries, CoW, confidence, provenance
+- [OSS vs Pro](https://raia-live.github.io/amfs/editions/) — feature comparison and when to use which
 - [Guides](https://raia-live.github.io/amfs/guides/) — Python SDK, TypeScript SDK, CLI, MCP setup
 - [Adapters](https://raia-live.github.io/amfs/adapters/) — filesystem, Postgres, custom adapters
 - [Integrations](https://raia-live.github.io/amfs/integrations/) — CrewAI, LangGraph, LangChain, AutoGen

@@ -1,7 +1,7 @@
 ---
 title: Adapters
 layout: default
-nav_order: 5
+nav_order: 6
 has_children: true
 description: "Storage backends for AMFS: filesystem, Postgres, and custom adapters."
 permalink: /adapters/

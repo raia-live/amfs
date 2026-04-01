@@ -4,16 +4,19 @@ This guide walks you through setting up AMFS as shared memory for AI coding agen
 
 ## What You Get
 
-After setup, your AI coding agents will have 6 memory tools available:
+After setup, your AI coding agents will have 9 memory tools available:
 
 | Tool | Description |
 |------|-------------|
 | `amfs_read` | Read a memory entry by entity path and key |
-| `amfs_write` | Write knowledge with automatic provenance |
+| `amfs_write` | Write knowledge with automatic provenance (supports `memory_type`: `fact`, `belief`, `experience`) |
 | `amfs_search` | Search across all entries with filters |
 | `amfs_list` | List entries for an entity |
 | `amfs_stats` | Memory overview |
 | `amfs_commit_outcome` | Record outcomes, auto-links to read log |
+| `amfs_record_context` | Capture external tool/API inputs in the decision trace |
+| `amfs_history` | Retrieve version history of an entry with optional time range |
+| `amfs_explain` | Inspect the full decision trace (AMFS reads + external contexts) |
 
 ## Prerequisites
 
@@ -215,6 +218,7 @@ Machine B (Claude Code/Alice):
 | `AMFS_HOST` | HTTP bind host (default: `0.0.0.0`) |
 | `AMFS_PORT` | HTTP bind port (default: `8000`) |
 | `AMFS_PATH` | HTTP URL path (default: `/mcp`) |
+| `AMFS_TTL_SWEEP_INTERVAL` | Seconds between TTL sweep runs |
 | `CURSOR_SESSION_ID` | Auto-set by Cursor (used for detection) |
 | `VSCODE_PID` | Auto-set by VS Code/Cursor (used for detection) |
 | `CLAUDE_CODE_SESSION` | Auto-set by Claude Code (used for detection) |

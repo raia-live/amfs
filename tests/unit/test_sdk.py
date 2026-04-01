@@ -311,6 +311,46 @@ class TestAutoCausalTracking:
         mem.clear_read_log()
         assert mem.read_log == []
 
+    def test_record_context(self, mem: AgentMemory) -> None:
+        mem.record_context("git-log", "15 commits since last deploy", source="git")
+        chain = mem.explain()
+        assert len(chain["external_contexts"]) == 1
+        ctx = chain["external_contexts"][0]
+        assert ctx["label"] == "git-log"
+        assert ctx["summary"] == "15 commits since last deploy"
+        assert ctx["source"] == "git"
+
+    def test_record_context_source_optional(self, mem: AgentMemory) -> None:
+        mem.record_context("manual-check", "Verified config")
+        chain = mem.explain()
+        assert chain["external_contexts"][0]["source"] is None
+
+    def test_explain_includes_both_reads_and_contexts(self, mem: AgentMemory) -> None:
+        mem.write("svc", "pattern", "exponential backoff")
+        mem.read("svc", "pattern")
+        mem.record_context("pagerduty", "2 open incidents", source="PagerDuty API")
+
+        chain = mem.explain("DEP-100")
+        assert chain["outcome_ref"] == "DEP-100"
+        assert chain["agent_id"] == "causal-agent"
+        assert chain["causal_chain_length"] == 1
+        assert len(chain["causal_entries"]) == 1
+        assert chain["causal_entries"][0]["key"] == "pattern"
+        assert len(chain["external_contexts"]) == 1
+        assert chain["external_contexts"][0]["label"] == "pagerduty"
+
+    def test_clear_read_log_clears_contexts(self, mem: AgentMemory) -> None:
+        mem.record_context("tool", "output")
+        assert len(mem.explain()["external_contexts"]) == 1
+        mem.clear_read_log()
+        assert mem.explain()["external_contexts"] == []
+
+    def test_explain_empty_session(self, mem: AgentMemory) -> None:
+        chain = mem.explain()
+        assert chain["causal_chain_length"] == 0
+        assert chain["causal_entries"] == []
+        assert chain["external_contexts"] == []
+
 
 # ---------------------------------------------------------------------------
 # Confidence decay tests

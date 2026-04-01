@@ -1,7 +1,7 @@
 ---
 title: Guides
 layout: default
-nav_order: 4
+nav_order: 5
 has_children: true
 description: "In-depth guides for using AMFS with Python, TypeScript, CLI, and MCP."
 permalink: /guides/
