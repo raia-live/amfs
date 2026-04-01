@@ -42,7 +42,7 @@ callouts:
 back_to_top: true
 back_to_top_text: "Back to top"
 
-footer_content: 'AMFS is licensed under <a href="https://github.com/raia-live/amfs/blob/main/LICENSE">Apache 2.0</a>. Copyright &copy; 2025 Bruno Andrade.'
+footer_content: 'AMFS is licensed under <a href="https://github.com/raia-live/amfs/blob/main/LICENSE">Apache 2.0</a>. Copyright &copy; 2026 SenseLab.'
 
 last_edit_timestamp: true
 last_edit_time_format: "%b %e %Y at %I:%M %p"
