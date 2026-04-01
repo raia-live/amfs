@@ -29,7 +29,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from amfs import AgentMemory, OutcomeType
+from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
 from amfs_core.models import AMFSConfig, LayerConfig
 
@@ -51,8 +51,16 @@ def _get_memory() -> AgentMemory:
     agent_id = detect_agent_id()
     config = _resolve_config()
 
+    ttl_interval_str = os.environ.get("AMFS_TTL_SWEEP_INTERVAL")
+    ttl_sweep_interval = float(ttl_interval_str) if ttl_interval_str else 300.0
+
     logger.info("AMFS MCP server starting — agent_id=%s", agent_id)
-    _memory = AgentMemory(agent_id=agent_id, config_path=None, adapter=None)
+    _memory = AgentMemory(
+        agent_id=agent_id,
+        config_path=None,
+        adapter=None,
+        ttl_sweep_interval=ttl_sweep_interval,
+    )
 
     _memory._config = config
     from amfs.factory import create_adapter_from_config
@@ -136,6 +144,7 @@ def amfs_write(
     value: str,
     confidence: float = 1.0,
     pattern_refs: list[str] | None = None,
+    memory_type: str = "fact",
 ) -> str:
     """Write a memory entry with automatic provenance tracking.
 
@@ -149,6 +158,7 @@ def amfs_write(
         value: The knowledge to store — can be plain text or JSON string
         confidence: How confident you are (0.0-1.0, default 1.0)
         pattern_refs: Optional list of related pattern keys for cross-referencing
+        memory_type: One of "fact" (default), "belief", or "experience"
 
     Example: amfs_write("checkout-service", "retry-pattern", '{"max_retries": 3}')
     """
@@ -160,12 +170,16 @@ def amfs_write(
     except (json.JSONDecodeError, TypeError):
         pass
 
+    type_map = {"fact": MemoryType.FACT, "belief": MemoryType.BELIEF, "experience": MemoryType.EXPERIENCE}
+    mt = type_map.get(memory_type.lower(), MemoryType.FACT)
+
     entry = mem.write(
         entity_path,
         key,
         parsed_value,
         confidence=confidence,
         pattern_refs=pattern_refs,
+        memory_type=mt,
     )
     return json.dumps(_serialize_entry(entry), default=str)
 
@@ -288,6 +302,62 @@ def amfs_commit_outcome(
         },
         default=str,
     )
+
+
+@mcp.tool
+def amfs_history(
+    entity_path: str,
+    key: str,
+    since: str | None = None,
+    until: str | None = None,
+) -> str:
+    """Get the full version history of a memory entry over time.
+
+    Returns all CoW versions of a key, showing how the value and confidence
+    evolved. Useful for temporal reasoning — "how did this decision change?"
+
+    Args:
+        entity_path: Entity path (e.g. "checkout-service")
+        key: Memory key to trace (e.g. "retry-pattern")
+        since: Optional ISO timestamp to filter versions after this time
+        until: Optional ISO timestamp to filter versions before this time
+
+    Example: amfs_history("checkout-service", "retry-pattern")
+    """
+    from datetime import datetime as dt
+
+    mem = _get_memory()
+    since_dt = dt.fromisoformat(since) if since else None
+    until_dt = dt.fromisoformat(until) if until else None
+
+    versions = mem.history(entity_path, key, since=since_dt, until=until_dt)
+    return json.dumps(
+        {
+            "entity_path": entity_path,
+            "key": key,
+            "version_count": len(versions),
+            "versions": [_serialize_entry(e) for e in versions],
+        },
+        default=str,
+    )
+
+
+@mcp.tool
+def amfs_explain(outcome_ref: str | None = None) -> str:
+    """Explain the causal chain — which memories influenced this session's decisions.
+
+    Shows every memory the agent read (in order) before committing an outcome.
+    This is production-grounded explainability: not what the LLM inferred,
+    but which stored knowledge actually drove the decision.
+
+    Args:
+        outcome_ref: Optional outcome reference to label the explanation
+
+    Example: amfs_explain("deploy-v1.2.3")
+    """
+    mem = _get_memory()
+    explanation = mem.explain(outcome_ref)
+    return json.dumps(explanation, default=str)
 
 
 # ──────────────────────────────────────────────────────────────────────

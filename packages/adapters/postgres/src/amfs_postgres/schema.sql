@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS amfs_memory_entries (
     confidence NUMERIC(6,4) DEFAULT 1.0,
     outcome_count INTEGER DEFAULT 0,
     ttl_at TIMESTAMPTZ,
+    memory_type TEXT DEFAULT 'fact',
     superseded_at TIMESTAMPTZ,
     CONSTRAINT uq_entry_version UNIQUE (namespace, entity_path, key, version)
 );
@@ -61,13 +62,13 @@ BEGIN
 
     FOREACH entry_key IN ARRAY NEW.causal_entry_keys
     LOOP
-        -- Parse "entity_path/key"
-        parts := string_to_array(entry_key, '/');
-        IF array_length(parts, 1) != 2 THEN
+        -- Parse "entity_path/key" using last-slash split (matches Python rsplit("/", 1))
+        -- e.g. "myapp/checkout/risk" -> ep="myapp/checkout", k="risk"
+        IF position('/' in entry_key) = 0 THEN
             CONTINUE;
         END IF;
-        ep := parts[1];
-        k := parts[2];
+        k := substring(entry_key from '([^/]+)$');
+        ep := left(entry_key, length(entry_key) - length(k) - 1);
 
         -- Find current (non-superseded) entry
         SELECT * INTO cur FROM amfs_memory_entries
@@ -87,12 +88,12 @@ BEGIN
             INSERT INTO amfs_memory_entries (
                 namespace, entity_path, key, version, value,
                 agent_id, session_id, written_at, pattern_refs,
-                confidence, outcome_count, ttl_at
+                confidence, outcome_count, ttl_at, memory_type
             ) VALUES (
                 cur.namespace, cur.entity_path, cur.key, cur.version + 1, cur.value,
                 cur.agent_id, cur.session_id, cur.written_at, cur.pattern_refs,
                 cur.confidence * multiplier * NEW.causal_confidence,
-                cur.outcome_count + 1, cur.ttl_at
+                cur.outcome_count + 1, cur.ttl_at, cur.memory_type
             );
         END IF;
     END LOOP;

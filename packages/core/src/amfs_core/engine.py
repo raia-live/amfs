@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from amfs_core.abc import AdapterABC
-from amfs_core.models import MemoryEntry, Provenance
+from amfs_core.models import MemoryEntry, MemoryType, Provenance
 
 
 class CausalTagger:
@@ -141,6 +141,7 @@ class CoWEngine:
         confidence: float = 1.0,
         ttl_at: datetime | None = None,
         pattern_refs: list[str] | None = None,
+        memory_type: MemoryType = MemoryType.FACT,
     ) -> MemoryEntry:
         """Write a new version of a key with CoW semantics.
 
@@ -160,6 +161,7 @@ class CoWEngine:
             confidence=confidence,
             outcome_count=current.outcome_count if current else 0,
             ttl_at=ttl_at,
+            memory_type=memory_type,
         )
 
         return self._adapter.write(entry)
@@ -172,3 +174,27 @@ class CoWEngine:
     ) -> list[MemoryEntry]:
         """List entries from the adapter."""
         return self._adapter.list(entity_path, include_superseded=include_superseded)
+
+    def history(
+        self,
+        entity_path: str,
+        key: str,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[MemoryEntry]:
+        """Return all versions of a key ordered by version ascending.
+
+        Enables temporal queries like "how did this memory change over time?"
+        Optionally filter to a time window using *since* and *until*.
+        """
+        all_versions = self._adapter.list(entity_path, include_superseded=True)
+        versions = [e for e in all_versions if e.key == key]
+        versions.sort(key=lambda e: e.version)
+
+        if since is not None:
+            versions = [e for e in versions if e.provenance.written_at >= since]
+        if until is not None:
+            versions = [e for e in versions if e.provenance.written_at <= until]
+
+        return versions
