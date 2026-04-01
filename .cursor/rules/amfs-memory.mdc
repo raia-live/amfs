@@ -1,0 +1,71 @@
+---
+description: Rules for using AMFS (Agent Memory File System) as shared memory across coding sessions
+globs:
+alwaysApply: true
+---
+
+# AMFS Memory — Agent Behavioral Rules
+
+You have access to AMFS (Agent Memory File System) through MCP tools. AMFS is shared memory that persists across sessions, agents, and machines. Use it to build institutional knowledge over time.
+
+## When to READ memory
+
+- **Before starting work**: Search AMFS for context about the entity you're modifying.
+  ```
+  amfs_search(entity_path="<repo>/<service-or-module>")
+  ```
+- **Before making architectural decisions**: Check if patterns or decisions already exist.
+  ```
+  amfs_search(query="<topic>", min_confidence=0.5)
+  ```
+- **When encountering errors**: Check if another agent already solved similar problems.
+  ```
+  amfs_search(query="<error-keyword>")
+  ```
+
+## When to WRITE memory
+
+- **After completing a task**: Write a structured summary of what was done and why.
+  ```
+  amfs_write("<repo>/<module>", "task-summary-<short-desc>", "<what you did and key decisions>")
+  ```
+- **When discovering a pattern**: Write it with pattern_refs for cross-referencing.
+  ```
+  amfs_write("<repo>/<module>", "pattern-<name>", "<pattern description>", pattern_refs=["related-key"])
+  ```
+- **When finding a bug or risk**: Record it so other agents are warned.
+  ```
+  amfs_write("<repo>/<module>", "risk-<name>", "<what could go wrong>", confidence=0.8)
+  ```
+- **When making a non-obvious decision**: Record the reasoning for future agents.
+  ```
+  amfs_write("<repo>/<module>", "decision-<topic>", "<decision and rationale>")
+  ```
+
+## When to COMMIT OUTCOMES
+
+- After a **successful deployment**: `amfs_commit_outcome("deploy-<version>", "clean_deploy")`
+- After a **bug or regression**: `amfs_commit_outcome("<ticket>", "regression")`
+- After an **incident**: `amfs_commit_outcome("<incident-id>", "p1_incident")` or `"p2_incident"`
+
+## Entity naming convention
+
+Use hierarchical paths: `{repo}/{service-or-module}`
+
+Examples:
+- `amfs/core-engine` — the core AMFS engine
+- `myapp/checkout-service` — a checkout service
+- `myapp/auth` — authentication module
+
+## Confidence guidelines
+
+- `1.0` — verified fact, tested pattern, confirmed decision
+- `0.7-0.9` — high confidence based on analysis, not yet validated in production
+- `0.4-0.6` — hypothesis, initial observation, needs validation
+- `< 0.4` — speculative, early signal
+
+## Important
+
+- Don't write trivial information (e.g. "added a comment"). Write things that would help a future agent working on the same code.
+- Keep values concise but informative — think of it as writing a note to a colleague.
+- Confidence decays over time. Entries validated by outcomes decay slower.

@@ -3,6 +3,7 @@ name = "amfs-adapter-filesystem"
 version = "0.1.0"
 description = "AMFS filesystem adapter with CoW via atomic rename"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 dependencies = [
     "amfs-core",
     "watchdog>=4.0,<5",

@@ -3,6 +3,7 @@ name = "amfs-crewai"
 version = "0.1.0"
 description = "AMFS integration for CrewAI"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 dependencies = ["amfs"]
 optional-dependencies = { crewai = ["crewai>=0.30"] }
 

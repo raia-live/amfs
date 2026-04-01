@@ -3,6 +3,7 @@ name = "amfs-autogen"
 version = "0.1.0"
 description = "AMFS integration for AutoGen"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 dependencies = ["amfs"]
 optional-dependencies = { autogen = ["pyautogen>=0.2"] }
 

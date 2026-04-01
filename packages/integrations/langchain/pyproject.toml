@@ -3,6 +3,7 @@ name = "amfs-langchain"
 version = "0.1.0"
 description = "AMFS integration for LangChain"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 dependencies = ["amfs"]
 optional-dependencies = { langchain = ["langchain-core>=0.1"] }
 

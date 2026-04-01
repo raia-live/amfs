@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "amfs": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/your/amfs", "amfs-mcp-server"],
+      "env": {}
+    }
+  }
+}
