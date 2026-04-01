@@ -3,6 +3,7 @@ name = "amfs-cli"
 version = "0.1.0"
 description = "AMFS CLI — snapshot, inspect, and manage agent memory"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 dependencies = [
     "amfs",
     "typer>=0.12,<1",

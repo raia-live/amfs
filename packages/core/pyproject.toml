@@ -3,6 +3,7 @@ name = "amfs-core"
 version = "0.1.0"
 description = "AMFS core models, engine, and adapter ABC"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 dependencies = [
     "pydantic>=2.0,<3",
 ]

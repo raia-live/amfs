@@ -3,6 +3,7 @@ name = "amfs-workspace"
 version = "0.0.0"
 description = "AMFS workspace root"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 
 [dependency-groups]
 dev = [

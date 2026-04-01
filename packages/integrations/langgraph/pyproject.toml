@@ -3,6 +3,7 @@ name = "amfs-langgraph"
 version = "0.1.0"
 description = "AMFS integration for LangGraph"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 dependencies = ["amfs"]
 optional-dependencies = { langgraph = ["langgraph>=0.0.30"] }
 
