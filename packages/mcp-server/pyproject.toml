@@ -3,6 +3,7 @@ name = "amfs-mcp-server"
 version = "0.1.0"
 description = "AMFS MCP Server — expose Agent Memory as MCP tools for Cursor and Claude Code"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 dependencies = [
     "amfs",
     "fastmcp>=2.0",

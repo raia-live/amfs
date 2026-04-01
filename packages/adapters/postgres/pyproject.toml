@@ -3,6 +3,7 @@ name = "amfs-adapter-postgres"
 version = "0.1.0"
 description = "AMFS Postgres adapter with back-propagation triggers"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 dependencies = [
     "amfs-core",
     "psycopg[binary]>=3.1,<4",
