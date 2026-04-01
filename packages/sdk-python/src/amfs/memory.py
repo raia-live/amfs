@@ -16,6 +16,7 @@ from amfs_core.models import (
     ConflictPolicy,
     MemoryEntry,
     MemoryStats,
+    MemoryType,
     OutcomeType,
     SearchQuery,
     SemanticQuery,
@@ -147,6 +148,7 @@ class AgentMemory:
         confidence: float = 1.0,
         ttl_at: datetime | None = None,
         pattern_refs: list[str] | None = None,
+        memory_type: MemoryType = MemoryType.FACT,
     ) -> MemoryEntry:
         """Write a new version of a key with automatic provenance.
 
@@ -192,6 +194,7 @@ class AgentMemory:
             confidence=confidence,
             ttl_at=ttl_at,
             pattern_refs=pattern_refs,
+            memory_type=memory_type,
         )
 
         if self._embedder is not None:
@@ -308,6 +311,53 @@ class AgentMemory:
             causal_confidence=causal_confidence,
         )
         return self._propagator.propagate(record)
+
+    # ------------------------------------------------------------------
+    # Temporal & Explainability
+    # ------------------------------------------------------------------
+
+    def history(
+        self,
+        entity_path: str,
+        key: str,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[MemoryEntry]:
+        """Return the full version history of a key, ordered by version.
+
+        Enables temporal queries like "how did this memory change over time?"
+        Each entry in the returned list is a CoW snapshot with its confidence
+        and provenance at the time it was written.
+        """
+        return self._engine.history(entity_path, key, since=since, until=until)
+
+    def explain(self, outcome_ref: str | None = None) -> dict[str, Any]:
+        """Return the causal chain for the current session or a specific outcome.
+
+        Shows which memories were read (and in what order) before the outcome
+        was committed, enabling production-grounded explainability.
+        """
+        causal_keys = self._read_tracker.causal_keys
+        entries: list[dict[str, Any]] = []
+        for ek in causal_keys:
+            parts = ek.rsplit("/", 1)
+            if len(parts) != 2:
+                continue
+            ep, k = parts
+            entry = self._adapter.read(ep, k)
+            if entry:
+                data = entry.model_dump(mode="json")
+                data.pop("embedding", None)
+                data["read_version"] = self._read_tracker.read_version(ek)
+                entries.append(data)
+        return {
+            "outcome_ref": outcome_ref,
+            "agent_id": self.agent_id,
+            "session_id": self.session_id,
+            "causal_chain_length": len(causal_keys),
+            "causal_entries": entries,
+        }
 
     # ------------------------------------------------------------------
     # Read tracker management

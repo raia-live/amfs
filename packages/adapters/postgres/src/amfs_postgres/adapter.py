@@ -18,6 +18,7 @@ from amfs_core.exceptions import AdapterError, VersionConflictError
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
     MemoryEntry,
+    MemoryType,
     OutcomeRecord,
     Provenance,
 )
@@ -135,8 +136,8 @@ class PostgresAdapter(AdapterABC):
                     INSERT INTO amfs_memory_entries (
                         id, namespace, entity_path, key, version, value,
                         agent_id, session_id, written_at, pattern_refs,
-                        confidence, outcome_count, ttl_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        confidence, outcome_count, ttl_at, memory_type
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         str(entry_id),
@@ -152,6 +153,7 @@ class PostgresAdapter(AdapterABC):
                         entry.confidence,
                         entry.outcome_count,
                         entry.ttl_at,
+                        entry.memory_type.value,
                     ),
                 )
 
@@ -282,6 +284,11 @@ class PostgresAdapter(AdapterABC):
         value = row["value"]
         if isinstance(value, str):
             value = json.loads(value)
+        raw_type = row.get("memory_type", "fact")
+        try:
+            memory_type = MemoryType(raw_type)
+        except ValueError:
+            memory_type = MemoryType.FACT
         return MemoryEntry(
             entity_path=row["entity_path"],
             key=row["key"],
@@ -296,6 +303,7 @@ class PostgresAdapter(AdapterABC):
             confidence=float(row["confidence"]),
             outcome_count=row["outcome_count"],
             ttl_at=row.get("ttl_at"),
+            memory_type=memory_type,
         )
 
     def close(self) -> None:
