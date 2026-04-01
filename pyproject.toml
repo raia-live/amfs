@@ -12,6 +12,7 @@ dev = [
     "amfs-adapter-filesystem",
     "amfs",
     "amfs-cli",
+    "amfs-mcp-server",
 ]
 
 [tool.uv.workspace]
@@ -21,6 +22,7 @@ members = [
     "packages/adapters/postgres",
     "packages/sdk-python",
     "packages/cli",
+    "packages/mcp-server",
 ]
 
 [tool.pytest.ini_options]
@@ -39,6 +41,7 @@ amfs-core = { workspace = true }
 amfs-adapter-filesystem = { workspace = true }
 amfs = { workspace = true }
 amfs-cli = { workspace = true }
+amfs-mcp-server = { workspace = true }
 
 [tool.mypy]
 python_version = "3.11"
