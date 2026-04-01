@@ -1,7 +1,7 @@
 ---
 title: Contributing
 layout: default
-nav_order: 9
+nav_order: 11
 description: "Set up a development environment and contribute to AMFS."
 permalink: /contributing/
 ---
