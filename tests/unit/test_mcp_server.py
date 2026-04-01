@@ -261,6 +261,163 @@ class TestMCPTools:
 
 
 # ---------------------------------------------------------------------------
+# Transport / CLI arg parsing tests
+# ---------------------------------------------------------------------------
+
+
+class TestTransportConfig:
+    def test_parse_default_stdio(self) -> None:
+        from amfs_mcp.server import _parse_args, _TRANSPORT_ALIASES
+        import sys
+
+        with patch.object(sys, "argv", ["amfs-mcp-server"]):
+            args = _parse_args()
+            assert args.transport is None
+
+    def test_parse_http_transport(self) -> None:
+        from amfs_mcp.server import _parse_args
+        import sys
+
+        with patch.object(sys, "argv", ["amfs-mcp-server", "--transport", "http"]):
+            args = _parse_args()
+            assert args.transport == "http"
+
+    def test_parse_streamable_http_transport(self) -> None:
+        from amfs_mcp.server import _parse_args
+        import sys
+
+        with patch.object(sys, "argv", ["amfs-mcp-server", "-t", "streamable-http"]):
+            args = _parse_args()
+            assert args.transport == "streamable-http"
+
+    def test_parse_host_port_path(self) -> None:
+        from amfs_mcp.server import _parse_args
+        import sys
+
+        argv = [
+            "amfs-mcp-server",
+            "--transport", "http",
+            "--host", "127.0.0.1",
+            "--port", "9000",
+            "--path", "/amfs",
+        ]
+        with patch.object(sys, "argv", argv):
+            args = _parse_args()
+            assert args.host == "127.0.0.1"
+            assert args.port == 9000
+            assert args.path == "/amfs"
+
+    def test_transport_alias_mapping(self) -> None:
+        from amfs_mcp.server import _TRANSPORT_ALIASES
+
+        assert _TRANSPORT_ALIASES["stdio"] == "stdio"
+        assert _TRANSPORT_ALIASES["http"] == "streamable-http"
+        assert _TRANSPORT_ALIASES["streamable-http"] == "streamable-http"
+
+    def test_main_stdio_calls_run(self) -> None:
+        from amfs_mcp.server import main, mcp
+        import sys
+
+        with (
+            patch.object(sys, "argv", ["amfs-mcp-server"]),
+            patch.object(mcp, "run") as mock_run,
+        ):
+            main()
+            mock_run.assert_called_once_with(transport="stdio")
+
+    def test_main_http_calls_run_with_defaults(self) -> None:
+        from amfs_mcp.server import main, mcp
+        import sys
+
+        with (
+            patch.object(sys, "argv", ["amfs-mcp-server", "--transport", "http"]),
+            patch.object(mcp, "run") as mock_run,
+        ):
+            main()
+            mock_run.assert_called_once_with(
+                transport="streamable-http",
+                host="0.0.0.0",
+                port=8000,
+                path="/mcp",
+            )
+
+    def test_main_http_custom_host_port_path(self) -> None:
+        from amfs_mcp.server import main, mcp
+        import sys
+
+        argv = [
+            "amfs-mcp-server",
+            "-t", "http",
+            "--host", "127.0.0.1",
+            "-p", "9000",
+            "--path", "/amfs",
+        ]
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(mcp, "run") as mock_run,
+        ):
+            main()
+            mock_run.assert_called_once_with(
+                transport="streamable-http",
+                host="127.0.0.1",
+                port=9000,
+                path="/amfs",
+            )
+
+    def test_main_env_transport_override(self) -> None:
+        from amfs_mcp.server import main, mcp
+        import sys
+
+        with (
+            patch.object(sys, "argv", ["amfs-mcp-server"]),
+            patch.dict(os.environ, {"AMFS_TRANSPORT": "http"}, clear=False),
+            patch.object(mcp, "run") as mock_run,
+        ):
+            main()
+            mock_run.assert_called_once_with(
+                transport="streamable-http",
+                host="0.0.0.0",
+                port=8000,
+                path="/mcp",
+            )
+
+    def test_main_env_host_port_path(self) -> None:
+        from amfs_mcp.server import main, mcp
+        import sys
+
+        env = {
+            "AMFS_TRANSPORT": "http",
+            "AMFS_HOST": "10.0.0.1",
+            "AMFS_PORT": "3000",
+            "AMFS_PATH": "/memory",
+        }
+        with (
+            patch.object(sys, "argv", ["amfs-mcp-server"]),
+            patch.dict(os.environ, env, clear=False),
+            patch.object(mcp, "run") as mock_run,
+        ):
+            main()
+            mock_run.assert_called_once_with(
+                transport="streamable-http",
+                host="10.0.0.1",
+                port=3000,
+                path="/memory",
+            )
+
+    def test_cli_flag_overrides_env(self) -> None:
+        from amfs_mcp.server import main, mcp
+        import sys
+
+        with (
+            patch.object(sys, "argv", ["amfs-mcp-server", "--transport", "stdio"]),
+            patch.dict(os.environ, {"AMFS_TRANSPORT": "http"}, clear=False),
+            patch.object(mcp, "run") as mock_run,
+        ):
+            main()
+            mock_run.assert_called_once_with(transport="stdio")
+
+
+# ---------------------------------------------------------------------------
 # Config resolution tests
 # ---------------------------------------------------------------------------
 

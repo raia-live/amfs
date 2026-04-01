@@ -119,6 +119,64 @@ To store filesystem data in a specific location:
 export AMFS_DATA_DIR="/shared/mount/amfs-data"
 ```
 
+## Step 4: Streamable HTTP (Remote / Team Server)
+
+For team deployments, you can run AMFS as an HTTP server that multiple agents connect to remotely — instead of each IDE spawning its own local stdio process.
+
+### Start the HTTP server
+
+```bash
+# Default: listens on 0.0.0.0:8000/mcp
+uv run amfs-mcp-server --transport http
+
+# Custom host/port/path
+uv run amfs-mcp-server --transport http --host 127.0.0.1 --port 9000 --path /amfs
+```
+
+Or use environment variables:
+
+```bash
+export AMFS_TRANSPORT=http
+export AMFS_HOST=0.0.0.0
+export AMFS_PORT=8000
+export AMFS_PATH=/mcp
+uv run amfs-mcp-server
+```
+
+### Connect from Cursor (Streamable HTTP)
+
+```json
+{
+  "mcpServers": {
+    "amfs": {
+      "url": "http://your-server:8000/mcp"
+    }
+  }
+}
+```
+
+### Connect from Claude Code (Streamable HTTP)
+
+```json
+{
+  "mcpServers": {
+    "amfs": {
+      "url": "http://your-server:8000/mcp"
+    }
+  }
+}
+```
+
+### When to use Streamable HTTP vs stdio
+
+| | stdio (default) | Streamable HTTP |
+|---|---|---|
+| **Use when** | Local dev, single machine | Team sharing, remote server |
+| **Setup** | MCP config spawns process | Run server separately, point clients to URL |
+| **Agents** | One per IDE session | Many agents connect to one server |
+| **Network** | None (local pipes) | HTTP (supports load balancers, firewalls) |
+| **Persistence** | Per-process lifetime | Server stays up independently |
+
 ## How It Works
 
 1. **Agent starts a session** — The MCP server launches, creates an `AgentMemory` instance with auto-detected `agent_id` (e.g., `cursor/bruno` or `claude-code/alice`).
@@ -153,6 +211,10 @@ Machine B (Claude Code/Alice):
 | `AMFS_AGENT_ID` | Override auto-detected agent identity |
 | `AMFS_POSTGRES_DSN` | Postgres connection string for shared memory |
 | `AMFS_DATA_DIR` | Custom filesystem data directory |
+| `AMFS_TRANSPORT` | Transport: `stdio` (default) or `http` |
+| `AMFS_HOST` | HTTP bind host (default: `0.0.0.0`) |
+| `AMFS_PORT` | HTTP bind port (default: `8000`) |
+| `AMFS_PATH` | HTTP URL path (default: `/mcp`) |
 | `CURSOR_SESSION_ID` | Auto-set by Cursor (used for detection) |
 | `VSCODE_PID` | Auto-set by VS Code/Cursor (used for detection) |
 | `CLAUDE_CODE_SESSION` | Auto-set by Claude Code (used for detection) |

@@ -3,21 +3,34 @@
 Designed for Cursor, Claude Code, and any MCP-compatible AI agent.
 One AgentMemory instance persists for the lifetime of the server process,
 giving agents a continuous session with automatic causal tracking.
+
+Supports two transports:
+
+- **stdio** (default) — for Cursor and Claude Code local MCP integration.
+- **streamable-http** — for remote/team access over HTTP. Ideal when the
+  AMFS server runs on a shared host and multiple agents connect remotely.
+
+Transport selection via CLI or environment:
+
+    amfs-mcp-server                           # stdio (default)
+    amfs-mcp-server --transport http          # streamable-http on 0.0.0.0:8000/mcp
+    amfs-mcp-server --transport http --port 9000 --host 127.0.0.1 --path /amfs
+
+    AMFS_TRANSPORT=http amfs-mcp-server       # env-based selection
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
 
 from amfs import AgentMemory, OutcomeType
-from amfs.config import load_config, load_config_or_default
+from amfs.config import load_config_or_default
 from amfs_core.models import AMFSConfig, LayerConfig
 
 from amfs_mcp.agent_id import detect_agent_id
@@ -281,6 +294,42 @@ def amfs_commit_outcome(
 # Entry point
 # ──────────────────────────────────────────────────────────────────────
 
+_TRANSPORT_ALIASES: dict[str, str] = {
+    "stdio": "stdio",
+    "http": "streamable-http",
+    "streamable-http": "streamable-http",
+}
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="amfs-mcp-server",
+        description="AMFS MCP Server — shared agent memory over MCP",
+    )
+    parser.add_argument(
+        "--transport", "-t",
+        choices=["stdio", "http", "streamable-http"],
+        default=None,
+        help='Transport to use: "stdio" (default) or "http" / "streamable-http"',
+    )
+    parser.add_argument(
+        "--host",
+        default=None,
+        help="Host to bind for HTTP transport (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--port", "-p",
+        type=int,
+        default=None,
+        help="Port to bind for HTTP transport (default: 8000)",
+    )
+    parser.add_argument(
+        "--path",
+        default=None,
+        help="URL path for HTTP transport (default: /mcp)",
+    )
+    return parser.parse_args()
+
 
 def create_server() -> FastMCP:
     """Return the configured FastMCP server instance (for programmatic use)."""
@@ -288,8 +337,31 @@ def create_server() -> FastMCP:
 
 
 def main() -> None:
-    """Run the AMFS MCP server over stdio."""
-    mcp.run()
+    """Run the AMFS MCP server.
+
+    Transport is resolved in order:
+    1. ``--transport`` CLI flag
+    2. ``AMFS_TRANSPORT`` env var
+    3. Default: ``stdio``
+    """
+    args = _parse_args()
+
+    raw_transport = (
+        args.transport
+        or os.environ.get("AMFS_TRANSPORT")
+        or "stdio"
+    )
+    transport = _TRANSPORT_ALIASES.get(raw_transport, raw_transport)
+
+    if transport == "streamable-http":
+        host = args.host or os.environ.get("AMFS_HOST", "0.0.0.0")
+        port = args.port or int(os.environ.get("AMFS_PORT", "8000"))
+        path = args.path or os.environ.get("AMFS_PATH", "/mcp")
+        logger.info("Starting AMFS MCP server — transport=%s %s:%d%s", transport, host, port, path)
+        mcp.run(transport=transport, host=host, port=port, path=path)
+    else:
+        logger.info("Starting AMFS MCP server — transport=stdio")
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
