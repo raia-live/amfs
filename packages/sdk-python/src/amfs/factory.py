@@ -31,6 +31,14 @@ def _ensure_builtins() -> None:
         except ImportError:
             pass  # psycopg not installed
 
+    if "s3" not in _ADAPTER_REGISTRY:
+        try:
+            from amfs_s3.adapter import S3Adapter
+
+            register_adapter("s3", S3Adapter)
+        except ImportError:
+            pass  # boto3 not installed
+
 
 def create_adapter(layer: LayerConfig, namespace: str) -> AdapterABC:
     """Create an adapter instance from a LayerConfig."""

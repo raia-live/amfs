@@ -21,6 +21,7 @@ members = [
     "packages/core",
     "packages/adapters/filesystem",
     "packages/adapters/postgres",
+    "packages/adapters/s3",
     "packages/sdk-python",
     "packages/cli",
     "packages/mcp-server",
