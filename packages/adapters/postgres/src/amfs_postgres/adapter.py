@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import threading
@@ -14,19 +15,48 @@ import psycopg
 from psycopg.rows import dict_row
 
 from amfs_core.abc import AdapterABC, WatchHandle
+from amfs_core.embedder import EmbedderABC
 from amfs_core.exceptions import AdapterError, VersionConflictError
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
     ArtifactRef,
     MemoryEntry,
+    MemoryStats,
     MemoryType,
     OutcomeRecord,
+    OutcomeType,
     Provenance,
+    SearchQuery,
+    SemanticQuery,
 )
+
+try:
+    from psycopg_pool import ConnectionPool as _ConnectionPool
+except ImportError:  # pragma: no cover
+    _ConnectionPool = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
+
+
+class _SingleConnectionPool:
+    """Minimal pool shim wrapping a single connection for environments
+    without ``psycopg_pool`` installed.  Provides the same
+    ``.connection()`` context-manager interface so the adapter code
+    doesn't need branching.
+    """
+
+    def __init__(self, dsn: str, **kwargs: Any) -> None:
+        connect_kwargs = kwargs.get("kwargs", {})
+        self._conn = psycopg.connect(dsn, **connect_kwargs)
+
+    @contextlib.contextmanager
+    def connection(self):  # noqa: ANN204
+        yield self._conn
+
+    def close(self) -> None:
+        self._conn.close()
 
 
 class PostgresAdapter(AdapterABC):
@@ -40,6 +70,10 @@ class PostgresAdapter(AdapterABC):
         Logical namespace for this adapter instance.
     auto_schema:
         If True, create tables/triggers on init.
+    min_pool_size:
+        Minimum number of connections in the pool (requires ``psycopg_pool``).
+    max_pool_size:
+        Maximum number of connections in the pool (requires ``psycopg_pool``).
     """
 
     def __init__(
@@ -48,19 +82,55 @@ class PostgresAdapter(AdapterABC):
         namespace: str = "default",
         *,
         auto_schema: bool = True,
+        min_pool_size: int = 2,
+        max_pool_size: int = 10,
     ) -> None:
         self._dsn = dsn
         self._namespace = namespace
-        self._conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+        self._has_embedding_col = False
+        pool_kwargs: dict[str, Any] = {
+            "kwargs": {"row_factory": dict_row, "autocommit": True},
+        }
+        if _ConnectionPool is not None:
+            self._pool = _ConnectionPool(
+                dsn,
+                min_size=min_pool_size,
+                max_size=max_pool_size,
+                **pool_kwargs,
+            )
+        else:
+            logger.info(
+                "psycopg_pool not installed — falling back to single connection"
+            )
+            self._pool = _SingleConnectionPool(dsn, **pool_kwargs)
         if auto_schema:
             self._apply_schema()
+        self._detect_optional_columns()
         self._listen_thread: threading.Thread | None = None
         self._listen_stop = threading.Event()
         self._watchers: dict[str, list[Callable[[MemoryEntry], None]]] = {}
 
     def _apply_schema(self) -> None:
-        with self._conn.cursor() as cur:
-            cur.execute(_SCHEMA_SQL)
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_SCHEMA_SQL)
+
+    def _detect_optional_columns(self) -> None:
+        """Check whether optional columns (embedding, search_tsv) exist.
+
+        These are added by migration 002_search_indexes.sql and require
+        the pgvector extension.  The adapter works without them.
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'amfs_memory_entries'
+                      AND column_name = 'embedding'
+                    """,
+                )
+                self._has_embedding_col = cur.fetchone() is not None
 
     # ------------------------------------------------------------------
     # read
@@ -73,17 +143,18 @@ class PostgresAdapter(AdapterABC):
         *,
         min_confidence: float = 0.0,
     ) -> MemoryEntry | None:
-        with self._conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT * FROM amfs_memory_entries
-                WHERE namespace = %s AND entity_path = %s AND key = %s
-                  AND superseded_at IS NULL
-                ORDER BY version DESC LIMIT 1
-                """,
-                (self._namespace, entity_path, key),
-            )
-            row = cur.fetchone()
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM amfs_memory_entries
+                    WHERE namespace = %s AND entity_path = %s AND key = %s
+                      AND superseded_at IS NULL
+                    ORDER BY version DESC LIMIT 1
+                    """,
+                    (self._namespace, entity_path, key),
+                )
+                row = cur.fetchone()
         if row is None:
             return None
         entry = self._row_to_entry(row)
@@ -96,52 +167,51 @@ class PostgresAdapter(AdapterABC):
     # ------------------------------------------------------------------
 
     def write(self, entry: MemoryEntry) -> MemoryEntry:
-        with self._conn.transaction():
-            with self._conn.cursor() as cur:
-                # Find current version
-                cur.execute(
-                    """
-                    SELECT version FROM amfs_memory_entries
-                    WHERE namespace = %s AND entity_path = %s AND key = %s
-                      AND superseded_at IS NULL
-                    ORDER BY version DESC LIMIT 1
-                    FOR UPDATE
-                    """,
-                    (self._namespace, entry.entity_path, entry.key),
-                )
-                row = cur.fetchone()
-                current_version = row["version"] if row else 0
-                new_version = current_version + 1
-
-                if entry.version > 1 and entry.version != new_version:
-                    raise VersionConflictError(
-                        entry.entity_path, entry.key, entry.version, current_version
-                    )
-
-                # Supersede old version
-                if row:
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
                     cur.execute(
                         """
-                        UPDATE amfs_memory_entries
-                        SET superseded_at = NOW()
+                        SELECT version FROM amfs_memory_entries
                         WHERE namespace = %s AND entity_path = %s AND key = %s
                           AND superseded_at IS NULL
+                        ORDER BY version DESC LIMIT 1
+                        FOR UPDATE
                         """,
                         (self._namespace, entry.entity_path, entry.key),
                     )
+                    row = cur.fetchone()
+                    current_version = row["version"] if row else 0
+                    new_version = current_version + 1
 
-                # Insert new version
-                entry_id = uuid.uuid4()
-                cur.execute(
-                    """
-                    INSERT INTO amfs_memory_entries (
-                        id, namespace, entity_path, key, version, value,
-                        agent_id, session_id, written_at, pattern_refs,
-                        confidence, outcome_count, ttl_at, memory_type,
-                        artifact_refs
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
+                    if entry.version > 1 and entry.version != new_version:
+                        raise VersionConflictError(
+                            entry.entity_path,
+                            entry.key,
+                            entry.version,
+                            current_version,
+                        )
+
+                    if row:
+                        cur.execute(
+                            """
+                            UPDATE amfs_memory_entries
+                            SET superseded_at = NOW()
+                            WHERE namespace = %s AND entity_path = %s AND key = %s
+                              AND superseded_at IS NULL
+                            """,
+                            (self._namespace, entry.entity_path, entry.key),
+                        )
+
+                    entry_id = uuid.uuid4()
+
+                    columns = [
+                        "id", "namespace", "entity_path", "key", "version",
+                        "value", "agent_id", "session_id", "written_at",
+                        "pattern_refs", "confidence", "outcome_count",
+                        "ttl_at", "memory_type", "artifact_refs",
+                    ]
+                    params: list[Any] = [
                         str(entry_id),
                         self._namespace,
                         entry.entity_path,
@@ -156,9 +226,27 @@ class PostgresAdapter(AdapterABC):
                         entry.outcome_count,
                         entry.ttl_at,
                         entry.memory_type.value,
-                        json.dumps([ref.model_dump(mode="json") for ref in entry.artifact_refs], default=str),
-                    ),
-                )
+                        json.dumps(
+                            [ref.model_dump(mode="json") for ref in entry.artifact_refs],
+                            default=str,
+                        ),
+                    ]
+
+                    if self._has_embedding_col and entry.embedding:
+                        columns.append("embedding")
+                        params.append(
+                            f"[{','.join(str(v) for v in entry.embedding)}]"
+                        )
+
+                    cols_sql = ", ".join(columns)
+                    placeholders = ", ".join(["%s"] * len(params))
+                    cur.execute(
+                        f"""
+                        INSERT INTO amfs_memory_entries ({cols_sql})
+                        VALUES ({placeholders})
+                        """,
+                        params,
+                    )
 
         return entry.model_copy(update={"version": new_version})
 
@@ -185,11 +273,180 @@ class PostgresAdapter(AdapterABC):
         where = " AND ".join(conditions)
         query = f"SELECT * FROM amfs_memory_entries WHERE {where} ORDER BY entity_path, key, version"
 
-        with self._conn.cursor() as cur:
-            cur.execute(query, params)
-            rows = cur.fetchall()
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
 
         return [self._row_to_entry(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # search (full-text via tsvector when available, SQL filter otherwise)
+    # ------------------------------------------------------------------
+
+    def search(self, query: SearchQuery) -> list[MemoryEntry]:
+        """Search using PostgreSQL full-text search when a text query is available."""
+        conditions = ["namespace = %s", "superseded_at IS NULL"]
+        params: list[Any] = [self._namespace]
+
+        if query.entity_path is not None:
+            conditions.append("entity_path = %s")
+            params.append(query.entity_path)
+        if query.min_confidence > 0:
+            conditions.append("confidence >= %s")
+            params.append(query.min_confidence)
+        if query.max_confidence is not None:
+            conditions.append("confidence <= %s")
+            params.append(query.max_confidence)
+        if query.agent_id is not None:
+            conditions.append("agent_id = %s")
+            params.append(query.agent_id)
+        if query.since is not None:
+            conditions.append("written_at >= %s")
+            params.append(query.since)
+        if query.pattern_ref is not None:
+            conditions.append("%s = ANY(pattern_refs)")
+            params.append(query.pattern_ref)
+
+        order_map = {
+            "confidence": "confidence DESC",
+            "recency": "written_at DESC",
+            "version": "version DESC",
+        }
+        order = order_map.get(query.sort_by, "confidence DESC")
+
+        where = " AND ".join(conditions)
+        sql = f"""
+            SELECT * FROM amfs_memory_entries
+            WHERE {where}
+            ORDER BY {order}
+            LIMIT %s
+        """
+        params.append(query.limit)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        return [self._row_to_entry(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # semantic_search (pgvector cosine similarity)
+    # ------------------------------------------------------------------
+
+    def semantic_search(
+        self, query: SemanticQuery, embedder: EmbedderABC
+    ) -> list[tuple[MemoryEntry, float]]:
+        """Search using pgvector cosine similarity.
+
+        Falls back to the base in-memory implementation when the
+        ``embedding`` column is not available (pgvector not installed).
+        """
+        if not self._has_embedding_col:
+            return super().semantic_search(query, embedder)
+
+        query_vec = embedder.embed(query.text)
+
+        conditions = ["namespace = %s", "superseded_at IS NULL", "embedding IS NOT NULL"]
+        params: list[Any] = [self._namespace]
+
+        if query.entity_path is not None:
+            conditions.append("entity_path = %s")
+            params.append(query.entity_path)
+        if query.min_confidence > 0:
+            conditions.append("confidence >= %s")
+            params.append(query.min_confidence)
+
+        where = " AND ".join(conditions)
+        vec_str = f"[{','.join(str(v) for v in query_vec)}]"
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT *, 1 - (embedding <=> %s::vector) AS similarity
+                    FROM amfs_memory_entries
+                    WHERE {where}
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    [vec_str] + params + [vec_str, query.limit],
+                )
+                rows = cur.fetchall()
+
+        results: list[tuple[MemoryEntry, float]] = []
+        for row in rows:
+            sim = float(row.get("similarity", 0))
+            if sim >= query.min_similarity:
+                results.append((self._row_to_entry(row), sim))
+        return results
+
+    # ------------------------------------------------------------------
+    # stats (SQL aggregates)
+    # ------------------------------------------------------------------
+
+    def stats(self) -> MemoryStats:
+        """Compute stats using SQL aggregates instead of full scan."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) as total_entries,
+                        COUNT(DISTINCT entity_path) as total_entities,
+                        COUNT(DISTINCT agent_id) as total_agents,
+                        AVG(confidence) as confidence_avg,
+                        MIN(confidence) as confidence_min,
+                        MAX(confidence) as confidence_max,
+                        COUNT(*) FILTER (WHERE outcome_count > 0) as outcome_linked_count,
+                        MIN(written_at) as oldest_entry_at,
+                        MAX(written_at) as newest_entry_at
+                    FROM amfs_memory_entries
+                    WHERE namespace = %s AND superseded_at IS NULL
+                    """,
+                    (self._namespace,),
+                )
+                row = cur.fetchone()
+
+                cur.execute(
+                    """
+                    SELECT agent_id, COUNT(*) as cnt
+                    FROM amfs_memory_entries
+                    WHERE namespace = %s AND superseded_at IS NULL
+                    GROUP BY agent_id
+                    """,
+                    (self._namespace,),
+                )
+                agent_rows = cur.fetchall()
+
+                cur.execute(
+                    """
+                    SELECT entity_path, COUNT(*) as cnt
+                    FROM amfs_memory_entries
+                    WHERE namespace = %s AND superseded_at IS NULL
+                    GROUP BY entity_path
+                    """,
+                    (self._namespace,),
+                )
+                entity_rows = cur.fetchall()
+
+        if not row or row["total_entries"] == 0:
+            return MemoryStats()
+
+        return MemoryStats(
+            total_entries=row["total_entries"],
+            total_entities=row["total_entities"],
+            total_agents=row["total_agents"],
+            agents={r["agent_id"]: r["cnt"] for r in agent_rows},
+            entities={r["entity_path"]: r["cnt"] for r in entity_rows},
+            confidence_avg=float(row["confidence_avg"] or 0),
+            confidence_min=float(row["confidence_min"] or 0),
+            confidence_max=float(row["confidence_max"] or 0),
+            outcome_linked_count=row["outcome_linked_count"],
+            oldest_entry_at=row["oldest_entry_at"],
+            newest_entry_at=row["newest_entry_at"],
+        )
 
     # ------------------------------------------------------------------
     # watch
@@ -247,26 +504,26 @@ class PostgresAdapter(AdapterABC):
     # ------------------------------------------------------------------
 
     def commit_outcome(self, record: OutcomeRecord) -> list[MemoryEntry]:
-        with self._conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO amfs_outcomes (
-                    namespace, outcome_ref, outcome_type, causal_confidence,
-                    committed_at, causal_entry_keys, agent_id
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    self._namespace,
-                    record.outcome_ref,
-                    record.outcome_type.value,
-                    record.causal_confidence,
-                    record.committed_at,
-                    record.causal_entry_keys,
-                    record.agent_id,
-                ),
-            )
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_outcomes (
+                        namespace, outcome_ref, outcome_type, causal_confidence,
+                        committed_at, causal_entry_keys, agent_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        self._namespace,
+                        record.outcome_ref,
+                        record.outcome_type.value,
+                        record.causal_confidence,
+                        record.committed_at,
+                        record.causal_entry_keys,
+                        record.agent_id,
+                    ),
+                )
 
-        # Read back the affected entries (trigger already propagated)
         updated: list[MemoryEntry] = []
         for spec in record.causal_entry_keys:
             parts = spec.rsplit("/", 1)
@@ -288,12 +545,14 @@ class PostgresAdapter(AdapterABC):
         entity_path: str | None = None,
         since: datetime | None = None,
         limit: int = 1000,
-    ) -> list["OutcomeRecord"]:
+    ) -> list[OutcomeRecord]:
         conditions = ["namespace = %s"]
         params: list[Any] = [self._namespace]
 
         if entity_path is not None:
-            conditions.append("EXISTS (SELECT 1 FROM unnest(causal_entry_keys) AS ek WHERE ek LIKE %s)")
+            conditions.append(
+                "EXISTS (SELECT 1 FROM unnest(causal_entry_keys) AS ek WHERE ek LIKE %s)"
+            )
             params.append(f"{entity_path}/%")
 
         if since is not None:
@@ -301,7 +560,7 @@ class PostgresAdapter(AdapterABC):
             params.append(since)
 
         where = " AND ".join(conditions)
-        query = f"""
+        sql = f"""
             SELECT outcome_ref, outcome_type, causal_confidence,
                    committed_at, causal_entry_keys, agent_id
             FROM amfs_outcomes
@@ -311,11 +570,10 @@ class PostgresAdapter(AdapterABC):
         """
         params.append(limit)
 
-        from amfs_core.models import OutcomeRecord, OutcomeType
-
-        with self._conn.cursor() as cur:
-            cur.execute(query, params)
-            rows = cur.fetchall()
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
 
         results: list[OutcomeRecord] = []
         for row in rows:
@@ -323,14 +581,16 @@ class PostgresAdapter(AdapterABC):
                 otype = OutcomeType(row["outcome_type"])
             except ValueError:
                 continue
-            results.append(OutcomeRecord(
-                outcome_ref=row["outcome_ref"],
-                outcome_type=otype,
-                causal_confidence=float(row["causal_confidence"]),
-                committed_at=row["committed_at"],
-                causal_entry_keys=row.get("causal_entry_keys") or [],
-                agent_id=row["agent_id"],
-            ))
+            results.append(
+                OutcomeRecord(
+                    outcome_ref=row["outcome_ref"],
+                    outcome_type=otype,
+                    causal_confidence=float(row["causal_confidence"]),
+                    committed_at=row["committed_at"],
+                    causal_entry_keys=row.get("causal_entry_keys") or [],
+                    agent_id=row["agent_id"],
+                )
+            )
         return results
 
     # ------------------------------------------------------------------
@@ -366,8 +626,8 @@ class PostgresAdapter(AdapterABC):
         )
 
     def close(self) -> None:
-        """Stop listener and close connection."""
+        """Stop listener and close connection pool."""
         self._listen_stop.set()
         if self._listen_thread is not None:
             self._listen_thread.join(timeout=2)
-        self._conn.close()
+        self._pool.close()
