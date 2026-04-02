@@ -7,6 +7,7 @@ license = "Apache-2.0"
 dependencies = [
     "amfs-core",
     "psycopg[binary]>=3.1,<4",
+    "psycopg-pool>=3.1",
 ]
 
 [build-system]
