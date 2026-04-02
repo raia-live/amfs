@@ -26,6 +26,7 @@ members = [
     "packages/cli",
     "packages/mcp-server",
     "packages/http-server",
+    "packages/connectors",
     "packages/integrations/crewai",
 ]
 
@@ -47,6 +48,7 @@ amfs = { workspace = true }
 amfs-cli = { workspace = true }
 amfs-mcp-server = { workspace = true }
 amfs-http-server = { workspace = true }
+amfs-connectors = { workspace = true }
 
 [tool.mypy]
 python_version = "3.11"
