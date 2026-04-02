@@ -149,7 +149,7 @@ curl http://localhost:8080/api/v1/entries/checkout-service/retry-pattern
 
 ## OSS vs Pro
 
-AMFS is available in two editions. The open-source layer provides the full memory primitive — versioning, confidence, outcomes, adapters, and MCP. The Pro layer adds an intelligence layer with LLM-driven extraction, automated quality auditing, memory distillation, safety validation, and multi-strategy retrieval.
+AMFS is available in two editions. The open-source layer provides the full memory primitive — versioning, confidence, outcomes, adapters, and MCP. The Pro layer adds a multi-tenant SaaS foundation (RBAC, scoped API keys, Postgres RLS), persistent decision traces, cross-system ingestion (PagerDuty, Slack, GitHub webhooks), automated pattern detection and alerting, LLM-powered intelligence, and an enterprise dashboard.
 
 [Compare editions](/amfs/editions/){: .btn .btn-outline .fs-5 .mb-4 .mb-md-0 }
 [AMFS vs Vector DBs](/amfs/vs-vector-databases/){: .btn .btn-outline .fs-5 .mb-4 .mb-md-0 }

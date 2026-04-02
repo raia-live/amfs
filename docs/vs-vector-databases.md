@@ -152,6 +152,24 @@ AMFS even supports semantic search via pluggable embedders — so for small-to-m
 
 ---
 
+## The Compounding Loop
+
+The fundamental difference becomes clear over time. A vector database stores static embeddings that you retrieve. AMFS builds a **compounding knowledge asset** that gets more valuable the longer you use it:
+
+```
+Week 1:   Agent writes patterns → basic memory
+Week 4:   Outcomes validate patterns → confidence evolves
+Week 12:  Decision traces show what worked → precedent search
+Week 24:  Pattern detection surfaces recurring failures → proactive alerting
+Week 52:  Learned ranking personalizes retrieval → domain-calibrated intelligence
+```
+
+With Pro, this loop extends to cross-system context (PagerDuty incidents, GitHub PRs, Slack threads automatically ingested), persistent decision traces queryable months later, and automated pattern detection that surfaces recurring failures before they become incidents.
+
+No vector database provides this lifecycle. They are a retrieval layer. AMFS is a **memory system that compounds**.
+
+---
+
 ## Summary
 
 | | Vector Database | AMFS |
@@ -160,3 +178,6 @@ AMFS even supports semantic search via pluggable embedders — so for small-to-m
 | **Best for** | Finding relevant data | Remembering, learning, and explaining decisions |
 | **Data lifecycle** | Write once, query many | Write, version, track outcomes, decay, explain |
 | **Multi-agent** | Shared index | Shared memory with provenance, conflicts, and causal chains |
+| **Cross-system context** | Manual ingestion | Pro: auto-ingest from PagerDuty, Slack, GitHub, Jira |
+| **Pattern intelligence** | None | Pro: recurring failures, stale clusters, confidence drift |
+| **Enterprise readiness** | Auth varies by vendor | Pro: RLS isolation, RBAC, scoped API keys, audit logging |

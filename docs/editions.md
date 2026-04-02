@@ -9,7 +9,7 @@ permalink: /editions/
 # OSS vs Pro
 {: .no_toc }
 
-AMFS is split into two layers: a fully open-source core and a proprietary Pro layer. The OSS layer gives you everything you need to build production-ready agent memory. Pro adds multi-tenant SaaS infrastructure, persistent decision traces, LLM-powered intelligence, and an enterprise dashboard.
+AMFS is split into two layers: a fully open-source core and a proprietary Pro layer. The OSS layer gives you everything you need to build production-ready agent memory. Pro adds multi-tenant SaaS infrastructure, persistent decision traces, cross-system ingestion, automated pattern detection, LLM-powered intelligence, and an enterprise dashboard.
 {: .fs-6 .fw-300 }
 
 ## Table of Contents
@@ -36,14 +36,25 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │  │  Precedent Search · Cross-Session Trace Queries      │ │
 │  └──────────────────────────────────────────────────────┘ │
 │                                                          │
+│  ┌─ Cross-System Ingestion ───────────────────────────┐   │
+│  │  Webhooks · HMAC Verification · Deduplication        │ │
+│  │  PagerDuty · Slack · GitHub · Jira Connectors        │ │
+│  └──────────────────────────────────────────────────────┘ │
+│                                                          │
+│  ┌─ Automated Pattern Detection ──────────────────────┐   │
+│  │  Recurring Failures · Hot Entities · Stale Clusters  │ │
+│  │  Confidence Drift · Configurable Alert Rules         │ │
+│  └──────────────────────────────────────────────────────┘ │
+│                                                          │
 │  ┌─ Intelligence Layer ─────────────────────────────────┐ │
 │  │  Extraction · Critic · Distiller · Safety · Retrieval │ │
 │  │  Learned Ranking · Confidence Calibration · ML Export │ │
 │  └──────────────────────────────────────────────────────┘ │
 │                                                          │
 │  ┌─ Dashboard ──────────────────────────────────────────┐ │
-│  │  Memory Explorer · Trace Visualizer · Team Mgmt      │ │
+│  │  Memory Explorer · Context Graph · Trace Explorer     │ │
 │  │  API Key Console · Audit Viewer · Usage Analytics    │ │
+│  │  Pattern Alerts · Team Management                     │ │
 │  └──────────────────────────────────────────────────────┘ │
 │                                                          │
 ├──────────────────────────────────────────────────────────┤
@@ -88,14 +99,28 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | Account-level tenant isolation (RLS) | — | Yes |
 | RBAC (Admin, Developer, User) | — | Yes |
 | Scoped API keys with entity-path permissions | — | Yes |
+| Permissioned inference (scope-filtered search/explain) | — | Yes |
 | OAuth 2.0 / OIDC for dashboard users | — | Yes |
 | Append-only audit logging | — | Yes |
-| Usage quotas + rate limiting | — | Yes |
+| Usage quotas + sliding-window rate limiting | — | Yes |
 | **Persistent Decision Traces (Pro)** | | |
 | Durable causal chains across sessions | — | Yes |
 | Historical `explain(outcome_ref)` | — | Yes |
 | `search_traces` / precedent search API | — | Yes |
 | Cross-agent, cross-session trace queries | — | Yes |
+| **Cross-System Ingestion (Pro)** | | |
+| Generic webhook endpoint with HMAC verification | — | Yes |
+| Payload deduplication (idempotency) | — | Yes |
+| Pluggable transform pipeline with pattern matching | — | Yes |
+| PagerDuty incident connector | — | Yes |
+| Extensible connector framework (`ConnectorABC`) | — | Yes |
+| **Automated Pattern Detection (Pro)** | | |
+| Recurring failure detection across causal chains | — | Yes |
+| Hot entity detection (disproportionate activity) | — | Yes |
+| Stale cluster detection (unvalidated entries) | — | Yes |
+| Confidence drift detection (outlier entries) | — | Yes |
+| Configurable alert rules with cooldown suppression | — | Yes |
+| Alert callbacks (Slack, PagerDuty, email routing) | — | Yes |
 | **Intelligence Layer (Pro)** | | |
 | LLM-driven memory extraction | — | Yes |
 | Automated memory critic | — | Yes |
@@ -106,11 +131,13 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | Adaptive confidence calibration | — | Yes |
 | Training data export (SFT, DPO, reward model) | — | Yes |
 | **Dashboard (Pro)** | | |
-| Memory explorer with graph visualization | — | Yes |
-| Decision trace visualizer | — | Yes |
-| Team & API key management | — | Yes |
+| Memory explorer with context graph visualization | — | Yes |
+| Decision trace explorer (expandable causal chains) | — | Yes |
+| Pattern alert monitoring | — | Yes |
+| Team & user management | — | Yes |
+| API key management console | — | Yes |
 | Audit log viewer | — | Yes |
-| Usage analytics & billing | — | Yes |
+| Usage analytics & quota monitoring | — | Yes |
 | Extended MCP server (Pro tools) | — | Yes |
 
 ---
@@ -200,7 +227,9 @@ Agents can only access memory within their permitted scope — this is **permiss
 
 **Audit Logging** — Every state-changing operation is recorded in an append-only audit log with actor, action, resource, and IP address.
 
-**Usage Quotas** — Tiered limits on entries, API keys, users, and decision traces. Hard-capped at the database level, with external billing integration (Stripe, etc.) for metering.
+**Rate Limiting** — Per-key sliding-window rate limiting (RPM) with admin bypass. Response headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`) let clients adapt.
+
+**Usage Quotas** — Tiered limits on entries, API keys, users, and decision traces. Hard-capped at the database level, with external billing integration (Stripe, etc.) for metering. Three tiers: Starter, Team, Enterprise (unlimited).
 
 ### Persistent Decision Traces
 
@@ -225,6 +254,72 @@ result = recorder.explain("DEP-500")
 traces = recorder.search_traces(entity_path="checkout-service", outcome_type="p1_incident")
 ```
 
+### Cross-System Ingestion
+
+Automatically ingest events from external systems into AMFS memory, turning your infrastructure events into queryable agent context.
+
+**Webhook Ingester** — Generic endpoint for receiving JSON payloads from any system. Includes HMAC signature verification, payload size limits, idempotency deduplication, and a pluggable transform pipeline with glob-style pattern matching.
+
+**Connector Framework** — Extensible `ConnectorABC` base class for building connectors to any external system. Each connector transforms raw events into AMFS `write()` or `record_context()` operations.
+
+**Built-in connectors:**
+
+| Connector | What it ingests |
+|:----------|:---------------|
+| **PagerDuty** | Incident webhooks (triggered/acknowledged/resolved), extracts severity, service, assignees |
+| **Slack** | *(coming soon)* Channel messages, thread context, bot interactions |
+| **GitHub** | *(coming soon)* PR events, deployment status, issue updates |
+| **Jira** | *(coming soon)* Issue transitions, sprint events, release notes |
+
+```python
+from amfs_connectors import WebhookIngester, WebhookConfig
+from amfs_connectors.providers.pagerduty import transform_pagerduty_incident
+
+ingester = WebhookIngester(
+    WebhookConfig(name="pd-webhook", entity_path="incidents", secret="whsec_..."),
+    memory=mem,
+)
+ingester.register_transform("incident.*", transform_pagerduty_incident)
+
+# In your FastAPI endpoint:
+results = ingester.ingest(payload_bytes, headers, source="pagerduty", event_type="incident.triggered")
+```
+
+### Automated Pattern Detection
+
+Continuously analyze your memory store to surface recurring patterns, anomalies, and risks — before they become incidents.
+
+**Pattern Detector** — Scans memory entries and decision trace data for four pattern types:
+
+| Pattern | What it finds | Severity |
+|:--------|:-------------|:---------|
+| **Recurring failures** | Entries that repeatedly appear in incident causal chains | Warning / Critical |
+| **Hot entities** | Entities with disproportionate write/outcome activity vs. average | Info |
+| **Stale clusters** | Groups of old entries with no outcome links that may need pruning | Warning |
+| **Confidence drift** | Entries whose confidence diverges significantly from their entity average | Info |
+
+**Alert Manager** — Configurable rules that fire when matching patterns are detected:
+
+```python
+from amfs_patterns import PatternDetector, AlertManager, AlertRule
+
+detector = PatternDetector(incident_threshold=2, stale_days=30)
+report = detector.analyze(entries, outcome_data=outcomes)
+
+manager = AlertManager()
+manager.add_rule(AlertRule(
+    name="Critical recurring failures",
+    pattern_type="recurring_failure",
+    min_severity="critical",
+    cooldown_minutes=60,
+))
+manager.on_alert(lambda eval: send_slack_notification(eval))
+
+evaluations = manager.evaluate(report)
+```
+
+Features: severity filtering, entity-path scoping, cooldown-based suppression (prevent alert fatigue), and callback registration for routing to Slack, PagerDuty, email, or custom systems.
+
 ### Intelligence Layer
 
 **Extraction** — Turns raw text (conversations, logs, documents) into structured memory operations using LLMs. The extractor classifies each piece of information as an **ADD**, **UPDATE**, **DELETE**, or **NOOP** operation.
@@ -241,7 +336,21 @@ traces = recorder.search_traces(entity_path="checkout-service", outcome_type="p1
 
 ### Dashboard
 
-A web dashboard (Next.js 15 + React 19) for non-technical team members to explore memory, visualize decision traces, manage teams and API keys, review audit logs, and monitor usage.
+A web dashboard (Next.js 15 + React 19) for exploring memory, visualizing decisions, and managing your AMFS deployment.
+
+| Page | Description |
+|:-----|:------------|
+| **Overview** | Account-wide stats, recent activity, health indicators |
+| **Memory Explorer** | Browse entities, view entries with confidence badges, version history |
+| **Context Graph** | Interactive D3 force-directed graph of entity relationships and causal chains |
+| **Decision Traces** | Expandable trace cards with causal entries, external contexts, outcome badges, and search |
+| **Incidents** | Incident timeline with causal chain drill-down |
+| **Patterns** | Detected pattern dashboard with severity indicators |
+| **Teams** | User and role management |
+| **API Keys** | Key management console with scopes, rate limits, expiry, and usage |
+| **Audit Log** | Searchable, filterable log of all state-changing operations |
+| **Usage & Quotas** | Quota progress bars, request metrics, top agents/entities breakdown |
+| **Pro Tools** | Retrieval playground, critic panel, distiller view, calibration dashboard, training data export |
 
 ### Pro MCP Server
 
@@ -275,9 +384,17 @@ Extends the OSS MCP server with 7 additional tools:
             │                   │  Multi-Tenant Layer:      │
             │                   │  Auth · RBAC · RLS        │
             │                   │  Scopes · Audit · Quotas  │
+            │                   │  Rate Limiting             │
             │                   │                           │
             │                   │  Decision Traces:         │
             │                   │  Recorder · Store · Search │
+            │                   │                           │
+            │                   │  Ingestion Layer:         │
+            │                   │  Webhooks · Connectors    │
+            │                   │  PagerDuty · Slack · etc. │
+            │                   │                           │
+            │                   │  Pattern Detection:       │
+            │                   │  Detector · AlertManager  │
             │                   │                           │
             │                   │  Intelligence Layer:       │
             │                   │  Critic · Distiller        │
@@ -301,7 +418,7 @@ Extends the OSS MCP server with 7 additional tools:
        Adapter    Adapter   Adapter
 ```
 
-The Pro API layer wraps `AgentMemory` and `CoWEngine` with authentication, tenant isolation, scope enforcement, and audit logging — all backed by Postgres RLS for defense-in-depth.
+The Pro API layer wraps `AgentMemory` and `CoWEngine` with authentication, tenant isolation, scope enforcement, rate limiting, and audit logging — all backed by Postgres RLS for defense-in-depth.
 
 ---
 
@@ -319,6 +436,9 @@ The Pro API layer wraps `AgentMemory` and `CoWEngine` with authentication, tenan
 | Compliance audit logging | **Pro** |
 | Persistent decision traces that survive sessions | **Pro** |
 | Precedent search ("how did we handle similar situations?") | **Pro** |
+| Auto-ingest PagerDuty/Slack/GitHub events | **Pro** (connectors) |
+| Detect recurring failure patterns automatically | **Pro** (pattern detection) |
+| Alert on stale memory or confidence drift | **Pro** (alert manager) |
 | Need memory quality auditing at scale | **Pro** |
 | Want LLM-driven extraction from conversations/logs | **Pro** |
 | Onboarding new agents with curated knowledge | **Pro** (bootstrap sets) |
