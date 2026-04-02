@@ -276,6 +276,61 @@ class PostgresAdapter(AdapterABC):
         return updated
 
     # ------------------------------------------------------------------
+    # list_outcomes
+    # ------------------------------------------------------------------
+
+    def list_outcomes(
+        self,
+        *,
+        entity_path: str | None = None,
+        since: datetime | None = None,
+        limit: int = 1000,
+    ) -> list["OutcomeRecord"]:
+        conditions = ["namespace = %s"]
+        params: list[Any] = [self._namespace]
+
+        if entity_path is not None:
+            conditions.append("EXISTS (SELECT 1 FROM unnest(causal_entry_keys) AS ek WHERE ek LIKE %s)")
+            params.append(f"{entity_path}/%")
+
+        if since is not None:
+            conditions.append("committed_at >= %s")
+            params.append(since)
+
+        where = " AND ".join(conditions)
+        query = f"""
+            SELECT outcome_ref, outcome_type, causal_confidence,
+                   committed_at, causal_entry_keys, agent_id
+            FROM amfs_outcomes
+            WHERE {where}
+            ORDER BY committed_at DESC
+            LIMIT %s
+        """
+        params.append(limit)
+
+        from amfs_core.models import OutcomeRecord, OutcomeType
+
+        with self._conn.cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+        results: list[OutcomeRecord] = []
+        for row in rows:
+            try:
+                otype = OutcomeType(row["outcome_type"])
+            except ValueError:
+                continue
+            results.append(OutcomeRecord(
+                outcome_ref=row["outcome_ref"],
+                outcome_type=otype,
+                causal_confidence=float(row["causal_confidence"]),
+                committed_at=row["committed_at"],
+                causal_entry_keys=row.get("causal_entry_keys") or [],
+                agent_id=row["agent_id"],
+            ))
+        return results
+
+    # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
 

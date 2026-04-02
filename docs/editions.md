@@ -27,6 +27,7 @@ AMFS is split into two layers: a fully open-source core and a proprietary intell
 │                   AMFS Pro (Proprietary)              │
 │                                                      │
 │  Extraction · Critic · Distiller · Safety · Retrieval │
+│  Learned Ranking · Confidence Calibration · ML Export │
 │                                                      │
 ├──────────────────────────────────────────────────────┤
 │                   AMFS OSS (Apache 2.0)               │
@@ -64,6 +65,9 @@ AMFS is split into two layers: a fully open-source core and a proprietary intell
 | Memory distillation & bootstrap sets | — | Yes |
 | Memory safety validation | — | Yes |
 | Multi-strategy retrieval (semantic + BM25 + temporal) | — | Yes |
+| Learned retrieval ranking from outcome data | — | Yes |
+| Adaptive confidence calibration | — | Yes |
+| Training data export (SFT, DPO, reward model) | — | Yes |
 | Extended MCP server (Pro tools) | — | Yes |
 
 ---
@@ -182,16 +186,47 @@ Advanced search that goes beyond single-embedding lookup by combining multiple r
 
 Results are merged using **Reciprocal Rank Fusion (RRF)** to produce a single ranked list.
 
+### ML Layer
+
+The ML layer learns from your outcome data to make AMFS smarter over time. Three capabilities:
+
+**Learned Retrieval Ranking** — Trains a gradient-boosted model on your outcome history to predict which memories are most useful. Entries read before clean deploys are positive signals; entries read before incidents are negative. Once trained, the model automatically enhances `amfs_retrieve` results. Falls back to heuristic ranking when insufficient data (< 20 outcome-linked entries).
+
+Features extracted from each `MemoryEntry`:
+
+| Feature | Signal |
+|:--------|:-------|
+| Confidence | Current trust score |
+| Outcome count | How many outcomes validated this entry |
+| Version | How many times it's been updated |
+| Age | Time since creation (days and log-hours) |
+| Memory type | Fact, belief, or experience (one-hot) |
+| Provenance tier | Production-validated through manual (one-hot) |
+| Pattern refs | Whether cross-references exist and how many |
+
+**Adaptive Confidence Calibration** — Learns optimal outcome multipliers from historical data instead of the fixed defaults (P1 = 1.15, clean_deploy = 0.97). Analyzes how entries linked to each outcome type perform in subsequent outcomes, then computes calibrated multipliers per entity. Also estimates optimal decay half-life from the age distribution of actively-used entries.
+
+**Training Data Export** — Exports your decision traces as fine-tuning datasets. AMFS doesn't train your LLMs — it generates the structured training data from its outcome-linked causal chains:
+
+| Format | Description |
+|:-------|:------------|
+| **SFT** | Successful decision traces as (context, decision) examples |
+| **DPO** | Paired (chosen, rejected) from positive vs negative outcomes |
+| **Reward Model** | Entries labeled by outcome quality score |
+
 ### Pro MCP Server
 
-Extends the OSS MCP server with 4 additional tools:
+Extends the OSS MCP server with 7 additional tools:
 
 | Tool | Description |
 |:-----|:------------|
 | `amfs_critique` | Run the Memory Critic and get a quality report |
 | `amfs_distill` | Trigger distillation (prune, consolidate, or generate bootstrap set) |
 | `amfs_validate` | Validate a candidate memory before writing |
-| `amfs_retrieve` | Multi-strategy retrieval with RRF-merged results |
+| `amfs_retrieve` | Multi-strategy retrieval with RRF-merged results (+ learned ranking) |
+| `amfs_retrain` | Train the learned ranking model from outcome data |
+| `amfs_calibrate` | Learn optimal confidence multipliers from outcome history |
+| `amfs_export_training_data` | Export decision traces as SFT/DPO/reward model datasets |
 
 ---
 
@@ -206,12 +241,20 @@ The Pro layer wraps the OSS layer — it never replaces it. All Pro features rea
                              │
               ┌──────────────┴──────────────┐
               ▼                             ▼
-   ┌─────────────────┐          ┌─────────────────────┐
-   │  MCP Server OSS │          │  MCP Server Pro      │
-   │  (9 tools)      │          │  (9 + 4 tools)       │
-   └────────┬────────┘          └──────────┬──────────┘
-            │                              │
-            └──────────┬───────────────────┘
+   ┌─────────────────┐          ┌───────────────────────────┐
+   │  MCP Server OSS │          │  MCP Server Pro            │
+   │  (9 tools)      │          │  (9 + 7 tools)             │
+   └────────┬────────┘          │                           │
+            │                   │  Intelligence Layer:       │
+            │                   │  Critic · Distiller        │
+            │                   │  Safety · Retrieval        │
+            │                   │                           │
+            │                   │  ML Layer:                │
+            │                   │  Ranking · Calibration    │
+            │                   │  Training Data Export     │
+            │                   └─────────────┬─────────────┘
+            │                                 │
+            └──────────┬──────────────────────┘
                        ▼
             ┌─────────────────┐
             │   AgentMemory   │  ← Python SDK
@@ -224,7 +267,7 @@ The Pro layer wraps the OSS layer — it never replaces it. All Pro features rea
        Adapter    Adapter    Adapter
 ```
 
-The Pro MCP server imports and re-exports all 9 OSS tools, then adds the 4 Pro tools on top. You only run one server — either OSS or Pro.
+The Pro MCP server imports and re-exports all 9 OSS tools, then adds the 7 Pro tools on top. You only run one server — either OSS or Pro.
 
 ---
 
@@ -239,7 +282,10 @@ The Pro MCP server imports and re-exports all 9 OSS tools, then adds the 4 Pro t
 | Want LLM-driven extraction from conversations/logs | Pro |
 | Onboarding new agents with curated knowledge | Pro (bootstrap sets) |
 | Compliance or safety requirements for memory writes | Pro (safety validator) |
-| Advanced retrieval across large stores | Pro (multi-strategy) |
+| Advanced retrieval across large stores | Pro (multi-strategy + learned ranking) |
+| Want retrieval that improves as outcomes accumulate | Pro (ML layer) |
+| Need optimized confidence multipliers per entity | Pro (adaptive calibration) |
+| Want to fine-tune agents on your decision history | Pro (training data export) |
 
 ---
 

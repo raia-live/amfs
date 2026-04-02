@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Callable
 
 from amfs_core.embedder import EmbedderABC, cosine_similarity
@@ -85,6 +86,21 @@ class AdapterABC(ABC):
 
         Returns the list of entries whose confidence was updated.
         """
+
+    def list_outcomes(
+        self,
+        *,
+        entity_path: str | None = None,
+        since: datetime | None = None,
+        limit: int = 1000,
+    ) -> list[OutcomeRecord]:
+        """Return historical outcome records.
+
+        Used by the Pro ML layer for training ranking models and calibrating
+        confidence multipliers.  Default implementation returns an empty list;
+        adapters that persist outcomes (e.g. Postgres) should override.
+        """
+        return []
 
     def search(self, query: SearchQuery) -> list[MemoryEntry]:
         """Search entries with rich filters. Default: filter over list().
