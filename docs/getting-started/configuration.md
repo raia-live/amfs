@@ -58,6 +58,19 @@ layers:
       dsn: postgresql://user:pass@localhost:5432/amfs_db
 ```
 
+### S3 Adapter Config
+
+```yaml
+namespace: production
+layers:
+  primary:
+    adapter: s3
+    options:
+      bucket: my-amfs-bucket
+      prefix: amfs/
+      endpoint_url: https://s3.acceleratedcloudstorage.com  # optional, for non-AWS
+```
+
 ---
 
 ## Environment Variables
@@ -67,8 +80,11 @@ Environment variables override config file values:
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `AMFS_POSTGRES_DSN` | Postgres connection string; overrides adapter to Postgres | — |
+| `AMFS_S3_BUCKET` | S3 bucket name; overrides adapter to S3 | — |
+| `AMFS_S3_ENDPOINT` | Custom S3 endpoint URL (for ACS, MinIO, R2) | — |
 | `AMFS_DATA_DIR` | Custom filesystem data directory | `.amfs` |
 | `AMFS_AGENT_ID` | Override auto-detected agent identity | Auto-detected |
+| `AMFS_API_KEYS` | HTTP API authentication keys (comma-separated) | — |
 | `AMFS_TRANSPORT` | MCP transport: `stdio` or `http` | `stdio` |
 | `AMFS_HOST` | HTTP server bind host | `0.0.0.0` |
 | `AMFS_PORT` | HTTP server bind port | `8000` |
@@ -133,5 +149,7 @@ The default namespace is `default`.
 ## Next Steps
 
 - [Core Concepts](/amfs/concepts/) — understand how AMFS works
-- [Adapters](/amfs/adapters/) — filesystem, Postgres, and custom adapters
+- [Adapters](/amfs/adapters/) — filesystem, Postgres, S3, and custom adapters
+- [HTTP API Server](/amfs/guides/http-server/) — access AMFS over REST from any language
+- [Docker & Kubernetes](/amfs/guides/docker/) — deploy AMFS in containers
 - [MCP Setup](/amfs/guides/mcp/) — connect AMFS to your AI coding agents

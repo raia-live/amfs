@@ -13,31 +13,57 @@ A filesystem-modeled protocol and SDK that gives multi-agent AI systems a standa
        │                   │                   │
        └───────────┬───────┴───────────────────┘
                    │
-            ┌──────▼──────┐
-            │ AgentMemory │  ← Python/TypeScript SDK
-            │   (CoW)     │
-            └──────┬──────┘
+       ┌───────────┴───────────┐
+       │ AgentMemory (CoW)     │  ← Python/TypeScript SDK
+       └───────────┬───────────┘
                    │
-         ┌─────────┼─────────┐
-         ▼         ▼         ▼
-    Filesystem  Postgres    Redis
-     Adapter    Adapter    Adapter
+       ┌───────────┴───────────┐
+       │ HTTP API / MCP Server │  ← REST + SSE / stdio + HTTP
+       └───────────┬───────────┘
+                   │
+     ┌─────────┬───┴────┬─────────┐
+     ▼         ▼        ▼         ▼
+ Filesystem  Postgres   S3      Custom
+  Adapter    Adapter  Adapter   Adapter
+                     (ACS, R2,
+                      MinIO)
 ```
 
 **Key concepts:**
 
-- **MemoryEntry** — A versioned key-value pair with provenance (who wrote it, when, why) and a confidence score
+- **MemoryEntry** — A versioned key-value pair with provenance (who wrote it, when, why), a confidence score, and optional artifact references
 - **Memory Types** — Classify entries as facts, beliefs, or experiences with type-specific decay rates
 - **Copy-on-Write (CoW)** — Every write creates a new version; old versions are preserved as superseded
 - **Outcome back-propagation** — When an incident or clean deploy happens, confidence scores on causal entries are automatically adjusted
 - **Provenance Tiers** — Entries are automatically tiered by quality: production-validated, observed, dev, or manual
-- **Adapters** — Pluggable storage backends (filesystem, Postgres, Redis)
+- **Adapters** — Pluggable storage backends (filesystem, Postgres, S3-compatible, or custom)
+- **HTTP API** — REST + SSE server for universal access from any language or service
+- **Artifact References** — Link memory entries to external blobs in S3, local files, or URLs
+
+## Run with Docker
+
+The fastest way to get AMFS running — no Python install required:
+
+```bash
+# HTTP API server with filesystem storage
+docker run -p 8080:8080 -v amfs-data:/data ghcr.io/raia-live/amfs
+
+# With Postgres backend
+docker run -p 8080:8080 -e AMFS_POSTGRES_DSN=postgresql://user:pass@host:5432/amfs ghcr.io/raia-live/amfs
+
+# Full stack (HTTP server + Postgres) with docker compose
+docker compose up
+```
+
+**[Docker & Kubernetes guide →](https://raia-live.github.io/amfs/guides/docker/)**
 
 ## Installation
 
 ```bash
 pip install amfs                    # Python SDK (includes filesystem adapter)
 pip install amfs-adapter-postgres   # Postgres adapter
+pip install amfs-adapter-s3         # S3-compatible adapter (AWS, ACS, MinIO, R2)
+pip install amfs-http-server        # HTTP/REST API server
 pip install amfs-cli                # CLI tools
 npm install @amfs/sdk               # TypeScript SDK
 ```
@@ -91,11 +117,37 @@ mem.commit_outcome(
 | Temporal queries | Retrieve the full version history of any entry, filtered by time range. |
 | Causal explainability | Inspect which entries were read and how they connect to outcomes. |
 | Provenance tracking | Every entry records which agent wrote it, when, and from which session. |
-| Multiple adapters | Filesystem (default), Postgres, or build your own. |
+| Artifact references | Link memory entries to external blobs in S3, local files, or URLs. |
+| HTTP/REST API | FastAPI server with 12 endpoints, SSE streaming, and API key auth. |
+| Multiple adapters | Filesystem (default), Postgres (with full-text + vector search), S3-compatible, or custom. |
 | MCP integration | First-class MCP server for Cursor, Claude Code, and any MCP client. |
 | Framework integrations | CrewAI, LangGraph, LangChain, AutoGen. |
 | CLI tools | Inspect, diff, snapshot, and restore memory from the terminal. |
+| Docker & Kubernetes | Single-command deployment with Docker or Helm chart. |
 | Python & TypeScript | SDKs for both languages with the same conceptual API. |
+
+## HTTP API
+
+Access AMFS from any language or service over HTTP:
+
+```bash
+amfs-http --port 8080
+```
+
+```bash
+# Write
+curl -X POST http://localhost:8080/api/v1/entries \
+  -H "Content-Type: application/json" \
+  -d '{"entity_path": "checkout-service", "key": "retry-pattern", "value": {"max_retries": 3}}'
+
+# Read
+curl http://localhost:8080/api/v1/entries/checkout-service/retry-pattern
+
+# Stream real-time events
+curl http://localhost:8080/api/v1/stream
+```
+
+**[HTTP API guide →](https://raia-live.github.io/amfs/guides/http-server/)**
 
 ## MCP Setup (Cursor / Claude Code)
 
@@ -123,13 +175,13 @@ AMFS is available in two editions. The OSS layer provides the full memory primit
 
 Visit **[raia-live.github.io/amfs](https://raia-live.github.io/amfs/)** for the full documentation:
 
-- [Getting Started](https://raia-live.github.io/amfs/getting-started/) — installation, quick start, configuration
+- [Getting Started](https://raia-live.github.io/amfs/getting-started/) — installation, quick start, configuration, Docker
 - [Core Concepts](https://raia-live.github.io/amfs/concepts/) — memory entries, CoW, confidence, provenance
 - [OSS vs Pro](https://raia-live.github.io/amfs/editions/) — feature comparison and when to use which
 - [AMFS vs Vector Databases](https://raia-live.github.io/amfs/vs-vector-databases/) — when to use which, and how they complement each other
 - [AMFS vs Competitors](https://raia-live.github.io/amfs/vs-competitors/) — comparison with Mem0, Cognee, Zep/Graphiti, LangMem
-- [Guides](https://raia-live.github.io/amfs/guides/) — Python SDK, TypeScript SDK, CLI, MCP setup
-- [Adapters](https://raia-live.github.io/amfs/adapters/) — filesystem, Postgres, custom adapters
+- [Guides](https://raia-live.github.io/amfs/guides/) — Python SDK, TypeScript SDK, CLI, MCP, HTTP API, Docker & Kubernetes
+- [Adapters](https://raia-live.github.io/amfs/adapters/) — filesystem, Postgres, S3-compatible, custom adapters
 - [Integrations](https://raia-live.github.io/amfs/integrations/) — CrewAI, LangGraph, LangChain, AutoGen
 - [API Reference](https://raia-live.github.io/amfs/reference/) — complete API and configuration reference
 - [Contributing](https://raia-live.github.io/amfs/contributing/) — development setup, testing, code quality
@@ -139,7 +191,7 @@ Visit **[raia-live.github.io/amfs](https://raia-live.github.io/amfs/)** for the 
 ```bash
 git clone https://github.com/raia-live/amfs.git
 cd amfs
-uv pip install -e packages/core -e packages/adapters/filesystem -e packages/sdk-python -e packages/cli
+uv pip install -e packages/core -e packages/adapters/filesystem -e packages/sdk-python -e packages/cli -e packages/http-server
 uv run pytest tests/ -v
 ```
 

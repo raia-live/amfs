@@ -17,8 +17,33 @@ AMFS supports the following environment variables. They override values set in `
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `AMFS_AGENT_ID` | Override auto-detected agent identity | Auto-detected from environment |
+| `AMFS_NAMESPACE` | Memory namespace for isolation | `default` |
 | `AMFS_DATA_DIR` | Custom filesystem data directory path | `.amfs` |
 | `AMFS_POSTGRES_DSN` | Postgres connection string; switches adapter to Postgres | — |
+
+---
+
+## S3 Adapter
+
+| Variable | Description | Default |
+|:---------|:------------|:--------|
+| `AMFS_S3_BUCKET` | S3 bucket name; switches adapter to S3 | — |
+| `AMFS_S3_PREFIX` | Object key prefix in the bucket | `amfs/` |
+| `AMFS_S3_ENDPOINT` | Custom S3 endpoint URL (for ACS, MinIO, R2) | — |
+| `AWS_DEFAULT_REGION` | AWS region | `us-east-1` |
+| `AWS_ACCESS_KEY_ID` | AWS access key | — |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key | — |
+
+---
+
+## HTTP API Server
+
+| Variable | Description | Default |
+|:---------|:------------|:--------|
+| `AMFS_HTTP_HOST` | HTTP server bind host | `0.0.0.0` |
+| `AMFS_HTTP_PORT` | HTTP server bind port | `8080` |
+| `AMFS_API_KEYS` | Comma-separated API keys for authentication (empty = no auth) | — |
+| `AMFS_CORS_ORIGINS` | Comma-separated CORS allowed origins | `*` |
 
 ---
 
@@ -27,9 +52,9 @@ AMFS supports the following environment variables. They override values set in `
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `AMFS_TRANSPORT` | Transport protocol: `stdio` or `http` | `stdio` |
-| `AMFS_HOST` | HTTP server bind host | `0.0.0.0` |
-| `AMFS_PORT` | HTTP server bind port | `8000` |
-| `AMFS_PATH` | HTTP server URL path | `/mcp` |
+| `AMFS_HOST` | MCP HTTP server bind host | `0.0.0.0` |
+| `AMFS_PORT` | MCP HTTP server bind port | `8000` |
+| `AMFS_PATH` | MCP HTTP server URL path | `/mcp` |
 | `AMFS_TTL_SWEEP_INTERVAL` | Seconds between TTL sweep runs (set to enable automatic expiry) | — |
 
 ---

@@ -3,7 +3,7 @@ title: Adapters
 layout: default
 nav_order: 8
 has_children: true
-description: "Storage backends for AMFS: filesystem, Postgres, and custom adapters."
+description: "Storage backends for AMFS: filesystem, Postgres, S3-compatible, and custom adapters."
 permalink: /adapters/
 ---
 
@@ -19,7 +19,20 @@ AMFS uses a pluggable adapter system for storage. All adapters implement the sam
 | Adapter | Package | Best For |
 |:--------|:--------|:---------|
 | [Filesystem](/amfs/adapters/filesystem/) | `amfs` (included) | Local development, single machine |
-| [Postgres](/amfs/adapters/postgres/) | `amfs-adapter-postgres` | Team sharing, production, multi-machine |
+| [Postgres](/amfs/adapters/postgres/) | `amfs-adapter-postgres` | Team sharing, production, full-text + vector search |
+| [S3](/amfs/adapters/s3/) | `amfs-adapter-s3` | Distributed teams, AI pipelines, cloud-native |
+| [Custom](/amfs/adapters/custom/) | — | Build your own adapter |
+
+---
+
+## Choosing an Adapter
+
+```
+Local dev, single machine         → Filesystem
+Team sharing, search-heavy        → Postgres (with pgvector for semantic search)
+Cloud-native, multi-region        → S3 (AWS, ACS, MinIO, R2)
+Custom requirements               → Build your own with AdapterABC
+```
 
 ---
 

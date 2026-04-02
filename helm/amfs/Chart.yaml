@@ -1,0 +1,18 @@
+apiVersion: v2
+name: amfs
+description: Agent Memory File System — shared, versioned memory for multi-agent AI systems
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - ai
+  - agents
+  - memory
+  - llm
+  - multi-agent
+home: https://raia-live.github.io/amfs/
+sources:
+  - https://github.com/raia-live/amfs
+maintainers:
+  - name: SenseLab
+    url: https://raia.live
