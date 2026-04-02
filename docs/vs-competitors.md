@@ -42,6 +42,8 @@ The AI memory space is evolving fast. Here's how AMFS compares to the leading al
 | Self-hosted / OSS | Apache 2.0 | OSS + Cloud | OSS + Cloud | OSS + Cloud | OSS |
 | Pluggable storage backends | Yes | No | No | No | No |
 | TTL / automatic expiry | Yes | No | No | Yes | No |
+| Learned ranking from outcomes | Pro | No | No | No | No |
+| Training data export (SFT/DPO) | Pro | No | No | No | No |
 
 ---
 
@@ -142,4 +144,6 @@ Across all competitors, AMFS's differentiators are:
 4. **Multi-agent native** — Provenance tracking, conflict detection (`LAST_WRITE_WINS` / `RAISE`), auto-causal linking, and per-agent identity are built in. Competitors are primarily designed for single-agent or single-user use.
 
 5. **Framework and infrastructure agnostic** — Works with any agent framework, any IDE via MCP, any storage backend via adapters. Not locked into one ecosystem.
+
+6. **ML that improves with use** (Pro) — Outcome data trains a learned ranking model that gets better at surfacing useful memories. Confidence multipliers calibrate to your domain. Decision traces export as fine-tuning datasets (SFT, DPO, reward model) so your agents themselves improve from their own history.
 

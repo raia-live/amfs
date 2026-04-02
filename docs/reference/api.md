@@ -415,3 +415,88 @@ amfs_explain(
 ```
 
 Returns the causal read chain for the current session: which entries were read and their details.
+
+---
+
+## Pro MCP Tools
+
+The following tools are available only with the AMFS Pro MCP server.
+
+### amfs_critique
+
+```
+amfs_critique() -> str (JSON)
+```
+
+Run the Memory Critic to detect toxic, stale, contradictory, uncalibrated, and orphaned entries.
+
+### amfs_distill
+
+```
+amfs_distill(
+    min_confidence: float = 0.3,
+    max_entries: int = 500,
+) -> str (JSON)
+```
+
+Generate a distilled memory set for bootstrapping new agents.
+
+### amfs_validate
+
+```
+amfs_validate(
+    entity_path: str,
+    key: str,
+    value: str,
+    confidence: float = 1.0,
+    memory_type: str = "fact",
+) -> str (JSON)
+```
+
+Validate a proposed memory write against safety checks (contradiction detection, temporal consistency, confidence thresholds).
+
+### amfs_retrieve
+
+```
+amfs_retrieve(
+    query: str,
+    entity_path: str | None = None,
+    min_confidence: float = 0.0,
+    limit: int = 10,
+) -> str (JSON)
+```
+
+Multi-strategy retrieval combining semantic, keyword, temporal, confidence, and learned ranking signals via Reciprocal Rank Fusion. When a learned model is trained (via `amfs_retrain`), it automatically contributes to ranking.
+
+### amfs_retrain
+
+```
+amfs_retrain(
+    entity_path: str | None = None,
+) -> str (JSON)
+```
+
+Train (or retrain) the learned ranking model from outcome data. Requires at least 20 outcome-linked entries. Returns training metrics including accuracy, sample counts, and feature importances. Once trained, the model enhances `amfs_retrieve` results automatically.
+
+### amfs_calibrate
+
+```
+amfs_calibrate(
+    entity_path: str | None = None,
+    per_entity: bool = false,
+) -> str (JSON)
+```
+
+Learn optimal confidence multipliers from historical outcome data. Returns calibrated multipliers and estimated decay half-life. Set `per_entity=true` to also produce entity-specific overrides.
+
+### amfs_export_training_data
+
+```
+amfs_export_training_data(
+    format: str = "sft",
+    entity_path: str | None = None,
+    limit: int = 10000,
+) -> str (JSON)
+```
+
+Export decision traces as fine-tuning datasets. Format options: `"sft"` (supervised fine-tuning), `"dpo"` (direct preference optimization), `"reward_model"` (reward model training). See the [ML Layer guide](/amfs/guides/ml-layer/) for format details.
