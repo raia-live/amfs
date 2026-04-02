@@ -121,6 +121,8 @@ mem.commit_outcome(
 | HTTP/REST API | FastAPI server with 12 endpoints, SSE streaming, and API key auth. |
 | Multiple adapters | Filesystem (default), Postgres (with full-text + vector search), S3-compatible, or custom. |
 | MCP integration | First-class MCP server for Cursor, Claude Code, and any MCP client. |
+| Connector ecosystem | Ingest events from PagerDuty, GitHub, Slack, Jira, or build your own. |
+| Composite recall scoring | Rank results by relevance, recency, confidence, and outcome history. |
 | Framework integrations | CrewAI, LangGraph, LangChain, AutoGen. |
 | CLI tools | Inspect, diff, snapshot, and restore memory from the terminal. |
 | Docker & Kubernetes | Single-command deployment with Docker or Helm chart. |
@@ -167,11 +169,28 @@ Give your AI coding agents persistent, shared memory via MCP:
 
 **[Full MCP setup guide →](https://raia-live.github.io/amfs/guides/mcp/)**
 
+## Connectors
+
+AMFS connectors ingest events from external systems — PagerDuty, GitHub, Slack, Jira — and turn them into structured memory entries. Install built-in connectors or build your own:
+
+```bash
+amfs connector install pagerduty   # Install a connector
+amfs connector list                # See installed connectors
+```
+
+External systems send webhooks to `/api/v1/webhooks/{connector}`. AMFS handles HMAC verification, deduplication, and transformation into memory operations.
+
+**Built-in connectors:** PagerDuty (incident lifecycle), GitHub (PRs, deploys, issues), Slack (messages, threads), Jira (issue transitions, sprints).
+
+**Build your own:** Subclass `ConnectorABC`, define a `connector.yaml` manifest, and publish to PyPI as `amfs-connector-{name}`.
+
+**[Connector guide →](https://raia-live.github.io/amfs/guides/connectors/)**
+
 ## OSS vs Pro
 
 AMFS is available in two editions:
 
-**OSS (Apache 2.0)** — The full memory primitive: CoW versioning, confidence scoring, outcome back-propagation, session-level explainability, filesystem/Postgres/S3 adapters, HTTP API, MCP server, Python & TypeScript SDKs.
+**OSS (Apache 2.0)** — The full memory primitive: CoW versioning, confidence scoring, outcome back-propagation, session-level explainability, connector ecosystem, composite recall scoring, filesystem/Postgres/S3 adapters, HTTP API, MCP server, Python & TypeScript SDKs.
 
 **Pro (Proprietary)** — The compounding intelligence layer:
 - **Multi-Tenant SaaS** — Account isolation (Postgres RLS), RBAC, scoped API keys, OAuth/OIDC, audit logging, rate limiting, usage quotas
@@ -192,7 +211,7 @@ Visit **[raia-live.github.io/amfs](https://raia-live.github.io/amfs/)** for the 
 - [Core Concepts](https://raia-live.github.io/amfs/concepts/) — memory entries, CoW, confidence, provenance
 - [OSS vs Pro](https://raia-live.github.io/amfs/editions/) — feature comparison and when to use which
 - [AMFS vs Vector Databases](https://raia-live.github.io/amfs/vs-vector-databases/) — when to use which, and how they complement each other
-- [AMFS vs Competitors](https://raia-live.github.io/amfs/vs-competitors/) — comparison with Mem0, Cognee, Zep/Graphiti, LangMem
+- [AMFS vs Competitors](https://raia-live.github.io/amfs/vs-competitors/) — comparison with Mem0, Cognee, Zep/Graphiti, CrewAI Memory, LangMem
 - [Guides](https://raia-live.github.io/amfs/guides/) — Python SDK, TypeScript SDK, CLI, MCP, HTTP API, Docker & Kubernetes
 - [Adapters](https://raia-live.github.io/amfs/adapters/) — filesystem, Postgres, S3-compatible, custom adapters
 - [Integrations](https://raia-live.github.io/amfs/integrations/) — CrewAI, LangGraph, LangChain, AutoGen

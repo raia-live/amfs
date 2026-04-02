@@ -2,14 +2,14 @@
 title: AMFS vs Competitors
 layout: default
 nav_order: 6
-description: "How AMFS compares to Mem0, Cognee, Zep/Graphiti, LangMem, and other AI memory systems."
+description: "How AMFS compares to Mem0, Cognee, Zep/Graphiti, LangMem, CrewAI Memory, and other AI memory systems."
 permalink: /vs-competitors/
 ---
 
 # AMFS vs Competitors
 {: .no_toc }
 
-The AI memory space is evolving fast. Here's how AMFS compares to the leading alternatives and where each excels.
+The AI memory space is evolving fast. Here's how AMFS compares to the leading alternatives — Mem0, Cognee, Zep/Graphiti, CrewAI Memory, and LangMem — and where each excels.
 {: .fs-6 .fw-300 }
 
 ## Table of Contents
@@ -22,32 +22,37 @@ The AI memory space is evolving fast. Here's how AMFS compares to the leading al
 
 ## Feature Matrix
 
-| Feature | AMFS | Mem0 | Cognee | Zep / Graphiti | LangMem |
-|:--------|:----:|:----:|:------:|:--------------:|:-------:|
-| Persistent memory across sessions | Yes | Yes | Yes | Yes | Yes |
-| Versioning (full history) | CoW | No | No | Temporal | No |
-| Provenance (who wrote, when) | Yes | No | No | Partial | No |
-| Confidence scoring | Yes | No | No | No | No |
-| Outcome back-propagation | Yes | No | No | No | No |
-| Memory types (fact/belief/experience) | Yes | No | No | No | No |
-| Provenance tiers | Yes | No | No | No | No |
-| Causal explainability | Yes | No | No | No | No |
-| Persistent decision traces | Pro | No | No | No | No |
-| Cross-system ingestion (webhooks) | Pro | No | No | No | No |
-| Automated pattern detection | Pro | No | No | No | No |
-| Knowledge graph | Via pattern_refs | No | Yes | Yes | No |
-| Semantic search | Yes | Yes | Yes | Yes | Yes |
-| Multi-agent support | Native | Partial | No | No | No |
-| Conflict detection | Yes | No | No | No | No |
-| Multi-tenant with RLS | Pro | Cloud-only | Cloud-only | Cloud-only | Cloud-only |
-| Scoped API keys per agent | Pro | No | No | No | No |
-| MCP server | Yes | Yes | No | No | No |
-| Framework integrations | Yes | Yes | Yes | Yes | Yes |
-| Self-hosted / OSS | Apache 2.0 | OSS + Cloud | OSS + Cloud | OSS + Cloud | OSS |
-| Pluggable storage backends | Yes | No | No | No | No |
-| Enterprise dashboard | Pro | Cloud | Cloud | Cloud | Cloud |
-| Learned ranking from outcomes | Pro | No | No | No | No |
-| Training data export (SFT/DPO) | Pro | No | No | No | No |
+| Feature | AMFS | Mem0 | Cognee | Zep / Graphiti | LangMem | CrewAI Memory |
+|:--------|:----:|:----:|:------:|:--------------:|:-------:|:-------------:|
+| Persistent memory across sessions | Yes | Yes | Yes | Yes | Yes | Yes |
+| Versioning (full history) | CoW | No | No | Temporal | No | No |
+| Provenance (who wrote, when) | Yes | No | No | Partial | No | No |
+| Confidence scoring | Yes | No | No | No | No | Composite |
+| Outcome back-propagation | Yes | No | No | No | No | No |
+| Memory types (fact/belief/experience) | Yes | No | No | No | No | Short/Long/Entity |
+| Provenance tiers | Yes | No | No | No | No | No |
+| Causal explainability | Yes | No | No | No | No | No |
+| LLM-powered organization | No | No | Yes | No | No | Yes |
+| Composite scoring (relevance+recency+importance) | Yes | No | No | No | No | Yes |
+| Scope tree (hierarchical scoping) | Pro | No | No | No | No | Yes |
+| Deep recall (multi-step retrieval) | Pro | No | No | No | No | Yes |
+| Persistent decision traces | Pro | No | No | No | No | No |
+| Cross-system ingestion (webhooks) | Yes | No | No | No | No | No |
+| Connector ecosystem | Yes | No | No | No | No | No |
+| Automated pattern detection | Pro | No | No | No | No | No |
+| Knowledge graph | Via pattern_refs | No | Yes | Yes | No | No |
+| Semantic search | Yes | Yes | Yes | Yes | Yes | Yes |
+| Multi-agent support | Native | Partial | No | No | No | Native |
+| Conflict detection | Yes | No | No | No | No | No |
+| Multi-tenant with RLS | Pro | Cloud-only | Cloud-only | Cloud-only | Cloud-only | No |
+| Scoped API keys per agent | Pro | No | No | No | No | No |
+| MCP server | Yes | Yes | No | No | No | No |
+| Framework integrations | Yes | Yes | Yes | Yes | Yes | CrewAI only |
+| Self-hosted / OSS | Apache 2.0 | OSS + Cloud | OSS + Cloud | OSS + Cloud | OSS | OSS |
+| Pluggable storage backends | Yes | No | No | No | No | Yes |
+| Enterprise dashboard | Pro | Cloud | Cloud | Cloud | Cloud | No |
+| Learned ranking from outcomes | Pro | No | No | No | No | No |
+| Training data export (SFT/DPO) | Pro | No | No | No | No | No |
 
 ---
 
@@ -117,6 +122,53 @@ The AI memory space is evolving fast. Here's how AMFS compares to the leading al
 - **Decision traces** — AMFS captures the full causal chain including external tool context. Pro persists traces durably with precedent search across all historical decisions. Zep focuses on conversation-derived knowledge.
 - **Cross-system context** — AMFS Pro's webhook ingester and connectors automatically pull context from PagerDuty, Slack, GitHub into the memory store. Zep only processes conversations.
 - **Pattern intelligence** — AMFS Pro detects recurring failures, stale knowledge, and confidence anomalies automatically. Zep doesn't analyze memory quality.
+
+---
+
+## AMFS vs CrewAI Memory
+
+[CrewAI](https://crewai.com) includes a built-in memory system designed for multi-agent crews, with short-term, long-term, and entity memory backed by a pluggable storage layer.
+
+### Where CrewAI Memory Excels
+
+- **LLM-powered auto-organization** — CrewAI uses LLMs to automatically categorize and organize memories, reducing manual overhead.
+- **Composite scoring** — Memories are scored by a composite of relevance, recency, and importance, enabling nuanced retrieval.
+- **Deep recall (RecallFlow)** — Multi-step retrieval pipeline that refines and enriches results through iterative LLM passes.
+- **Scope tree** — Hierarchical scoping lets you define memory boundaries at crew, agent, task, or custom levels.
+- **Native multi-agent** — Memory is shared across agents within a crew by default, with scoping for isolation when needed.
+- **Short/Long/Entity memory types** — Purpose-built memory categories for different retention needs.
+
+### Where AMFS Differs
+
+- **Outcome back-propagation** — AMFS adjusts confidence scores based on real-world outcomes (deploys, incidents, regressions). CrewAI's composite scoring doesn't incorporate production feedback.
+- **Copy-on-Write versioning** — Every AMFS write creates an immutable version. You can reconstruct the state of knowledge at any point in time. CrewAI overwrites memories in place.
+- **Provenance tiers** — AMFS automatically ranks entries by how they were created: production-validated, observed, dev, or manual. CrewAI doesn't distinguish provenance quality.
+- **Persistent decision traces** — AMFS captures the full causal chain (what was read, what external context was gathered, what decision was made) and can persist it indefinitely. CrewAI doesn't track decision provenance.
+- **Connector ecosystem** — AMFS ingests events from PagerDuty, GitHub, Slack, Jira, and custom systems via webhooks. CrewAI memory only captures agent-generated knowledge.
+- **Multi-tenant isolation** — AMFS Pro provides hard tenant isolation via Postgres RLS, RBAC, scoped API keys, and audit logging. CrewAI memory is single-tenant.
+- **Framework agnostic** — AMFS works with any framework (CrewAI, LangGraph, AutoGen, standalone). CrewAI memory is tightly coupled to the CrewAI framework.
+- **MCP server** — AMFS exposes memory to IDE agents (Cursor, Claude Code) via MCP. CrewAI memory is only accessible from within CrewAI crews.
+
+### Better Together
+
+AMFS can serve as the storage backend for CrewAI's memory system via `AMFSStorageBackend`. This gives you the best of both worlds:
+
+- **CrewAI's UX** — LLM-powered organization, composite scoring, scope trees, RecallFlow — all the features that make CrewAI's memory ergonomic for crew orchestration.
+- **AMFS's durability** — CoW versioning, outcome feedback, provenance tracking, connector ingestion, and persistent decision traces underneath.
+
+```python
+from crewai.memory import Memory
+from amfs.integrations.crewai import AMFSStorageBackend
+
+backend = AMFSStorageBackend(agent_id="my-crew", entity_path="my-project")
+crew = Crew(
+    agents=[...],
+    tasks=[...],
+    memory=Memory(storage=backend),
+)
+```
+
+See the [CrewAI Integration guide](/amfs/guides/crewai/) for full setup instructions.
 
 ---
 

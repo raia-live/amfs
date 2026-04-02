@@ -62,8 +62,10 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │                                                          │
 │  CoW Engine · Memory Types · Provenance Tiers             │
 │  Temporal Queries · Session-Level Causal Explainability   │
-│  Adapters (Filesystem, Postgres, S3) · HTTP/REST API      │
-│  MCP Server · Python SDK · TypeScript SDK · CLI           │
+│  Composite Recall Scoring · Multi-Scope Search            │
+│  Connector Framework · CLI · Built-in Connectors          │
+│  Webhook Receiver · Adapters (FS, Postgres, S3)           │
+│  HTTP/REST API · MCP Server · Python SDK · TS SDK · CLI   │
 │  Docker + Helm Charts                                     │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -82,6 +84,13 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | Provenance tiers (production-validated → manual) | Yes | Yes |
 | Temporal queries (`history`) | Yes | Yes |
 | Session-level causal explainability (`explain`) | Yes | Yes |
+| Composite recall scoring | Yes | Yes |
+| Multi-scope search | Yes | Yes |
+| **Connectors** | | |
+| Connector framework (`ConnectorABC`) | Yes | Yes |
+| Connector CLI (`amfs connector install/list/remove`) | Yes | Yes |
+| Built-in connectors (PagerDuty, GitHub, Slack, Jira) | Yes | Yes |
+| Webhook receiver (`/api/v1/webhooks/{name}`) | Yes | Yes |
 | **Adapters & Infrastructure** | | |
 | Filesystem adapter | Yes | Yes |
 | Postgres adapter (triggers, LISTEN/NOTIFY) | Yes | Yes |
@@ -108,12 +117,12 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | Historical `explain(outcome_ref)` | — | Yes |
 | `search_traces` / precedent search API | — | Yes |
 | Cross-agent, cross-session trace queries | — | Yes |
-| **Cross-System Ingestion (Pro)** | | |
-| Generic webhook endpoint with HMAC verification | — | Yes |
-| Payload deduplication (idempotency) | — | Yes |
-| Pluggable transform pipeline with pattern matching | — | Yes |
-| PagerDuty incident connector | — | Yes |
-| Extensible connector framework (`ConnectorABC`) | — | Yes |
+| **Cross-System Ingestion** | | |
+| Generic webhook endpoint with HMAC verification | Yes | Yes |
+| Payload deduplication (idempotency) | Yes | Yes |
+| Pluggable transform pipeline with pattern matching | Yes | Yes |
+| PagerDuty incident connector | Yes | Yes |
+| Extensible connector framework (`ConnectorABC`) | Yes | Yes |
 | **Automated Pattern Detection (Pro)** | | |
 | Recurring failure detection across causal chains | — | Yes |
 | Hot entity detection (disproportionate activity) | — | Yes |
@@ -144,7 +153,7 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 
 ## OSS Layer — What's Included
 
-The open-source layer ([github.com/raia-live/amfs](https://github.com/raia-live/amfs)) provides the full memory primitive: read, write, version, search, and learn from outcomes.
+The open-source layer ([github.com/raia-live/amfs](https://github.com/raia-live/amfs)) provides the full memory primitive: read, write, version, search, and learn from outcomes. It also includes a connector framework for ingesting events from external systems, composite recall scoring, and multi-scope search.
 
 ### Packages
 
