@@ -16,6 +16,9 @@ cli = ["typer>=0.12"]
 
 [project.entry-points."amfs.connectors"]
 pagerduty = "amfs_connectors.providers.pagerduty:PagerDutyConnector"
+github = "amfs_connectors.providers.github_events:GitHubConnector"
+slack = "amfs_connectors.providers.slack:SlackConnector"
+jira = "amfs_connectors.providers.jira:JiraConnector"
 
 [build-system]
 requires = ["hatchling"]
