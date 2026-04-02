@@ -24,6 +24,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
+from starlette.requests import Request
 
 from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
@@ -49,8 +50,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from amfs_connectors.registry import ConnectorRegistry
+from amfs_connectors.webhook import WebhookIngester, WebhookConfig
+
 _memory: AgentMemory | None = None
 _sse_manager = SSEManager()
+_connector_registry: ConnectorRegistry | None = None
+
+
+def _get_connector_registry() -> ConnectorRegistry:
+    global _connector_registry
+    if _connector_registry is not None:
+        return _connector_registry
+    _connector_registry = ConnectorRegistry(auto_discover=True)
+    return _connector_registry
 
 
 def _get_memory() -> AgentMemory:
@@ -340,6 +353,48 @@ async def explain(
 ) -> dict[str, Any]:
     mem = _get_memory()
     return mem.explain(outcome_ref)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Webhooks / Connectors
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/v1/webhooks/{connector_name}")
+async def receive_webhook(
+    connector_name: str,
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    registry = _get_connector_registry()
+    connector = registry.get(connector_name)
+    if connector is None:
+        return {"error": f"Connector '{connector_name}' not installed", "available": registry.list_available()}
+
+    body = await request.body()
+    headers = dict(request.headers)
+    secret = os.environ.get(f"AMFS_WEBHOOK_SECRET_{connector_name.upper()}")
+
+    ingester = WebhookIngester(
+        WebhookConfig(name=connector_name, entity_path=connector.config.entity_path, secret=secret),
+        memory=_get_memory(),
+    )
+    ingester.register_transform("*", lambda event: connector.transform(event.payload))
+    results = ingester.ingest(body, headers, source=connector_name)
+
+    return {
+        "connector": connector_name,
+        "processed": len(results),
+        "results": [r.model_dump(mode="json") for r in results],
+    }
+
+
+@app.get("/api/v1/webhooks")
+async def list_connectors(
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    registry = _get_connector_registry()
+    return {"connectors": registry.list_installed()}
 
 
 # ──────────────────────────────────────────────────────────────────────
