@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import typer
 
+from amfs_cli.connector import app as connector_app
 from amfs_cli.init import init_command
 from amfs_cli.snapshot import app as snapshot_app
 from amfs_cli.inspect import app as inspect_app
@@ -17,6 +18,7 @@ app = typer.Typer(
 app.command(name="init", help="Initialise an AMFS project")(init_command)
 app.add_typer(snapshot_app, name="snapshot", help="Export and restore memory snapshots")
 app.add_typer(inspect_app, name="inspect", help="List, read, and diff memory entries")
+app.add_typer(connector_app, name="connector", help="Manage AMFS connectors")
 
 
 if __name__ == "__main__":
