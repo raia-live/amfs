@@ -1,0 +1,23 @@
+[project]
+name = "amfs-http-server"
+version = "0.1.0"
+description = "AMFS HTTP/REST API server with SSE support"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "amfs",
+    "amfs-core",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sse-starlette>=2.0",
+]
+
+[project.scripts]
+amfs-http = "amfs_http.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/amfs_http"]
