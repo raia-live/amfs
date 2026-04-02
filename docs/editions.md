@@ -9,7 +9,7 @@ permalink: /editions/
 # OSS vs Pro
 {: .no_toc }
 
-AMFS is split into two layers: a fully open-source core and a proprietary intelligence layer. The OSS layer gives you everything you need to build production-ready agent memory. The Pro layer adds LLM-powered automation on top.
+AMFS is split into two layers: a fully open-source core and a proprietary Pro layer. The OSS layer gives you everything you need to build production-ready agent memory. Pro adds multi-tenant SaaS infrastructure, persistent decision traces, LLM-powered intelligence, and an enterprise dashboard.
 {: .fs-6 .fw-300 }
 
 ## Table of Contents
@@ -23,20 +23,38 @@ AMFS is split into two layers: a fully open-source core and a proprietary intell
 ## At a Glance
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                   AMFS Pro (Proprietary)              │
-│                                                      │
-│  Extraction · Critic · Distiller · Safety · Retrieval │
-│  Learned Ranking · Confidence Calibration · ML Export │
-│                                                      │
-├──────────────────────────────────────────────────────┤
-│                   AMFS OSS (Apache 2.0)               │
-│                                                      │
-│  CoW Engine · Memory Types · Provenance Tiers         │
-│  Temporal Queries · Causal Explainability             │
-│  Adapters (Filesystem, Postgres) · MCP Server         │
-│  Python SDK · TypeScript SDK · CLI                    │
-└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                    AMFS Pro (Proprietary)                  │
+│                                                          │
+│  ┌─ Multi-Tenant SaaS ─────────────────────────────────┐ │
+│  │  Accounts · RBAC · Scoped API Keys · Audit · Quotas │ │
+│  │  Row-Level Security · OAuth/OIDC · Rate Limiting     │ │
+│  └──────────────────────────────────────────────────────┘ │
+│                                                          │
+│  ┌─ Persistent Decision Traces ─────────────────────────┐ │
+│  │  Durable Causal Chains · Historical explain()        │ │
+│  │  Precedent Search · Cross-Session Trace Queries      │ │
+│  └──────────────────────────────────────────────────────┘ │
+│                                                          │
+│  ┌─ Intelligence Layer ─────────────────────────────────┐ │
+│  │  Extraction · Critic · Distiller · Safety · Retrieval │ │
+│  │  Learned Ranking · Confidence Calibration · ML Export │ │
+│  └──────────────────────────────────────────────────────┘ │
+│                                                          │
+│  ┌─ Dashboard ──────────────────────────────────────────┐ │
+│  │  Memory Explorer · Trace Visualizer · Team Mgmt      │ │
+│  │  API Key Console · Audit Viewer · Usage Analytics    │ │
+│  └──────────────────────────────────────────────────────┘ │
+│                                                          │
+├──────────────────────────────────────────────────────────┤
+│                    AMFS OSS (Apache 2.0)                  │
+│                                                          │
+│  CoW Engine · Memory Types · Provenance Tiers             │
+│  Temporal Queries · Session-Level Causal Explainability   │
+│  Adapters (Filesystem, Postgres, S3) · HTTP/REST API      │
+│  MCP Server · Python SDK · TypeScript SDK · CLI           │
+│  Docker + Helm Charts                                     │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -45,21 +63,40 @@ AMFS is split into two layers: a fully open-source core and a proprietary intell
 
 | Capability | OSS | Pro |
 |:-----------|:---:|:---:|
+| **Core Memory Primitives** | | |
 | Copy-on-Write versioning | Yes | Yes |
 | Confidence scoring with outcome back-propagation | Yes | Yes |
 | Memory types (fact, belief, experience) | Yes | Yes |
 | Type-specific confidence decay | Yes | Yes |
 | Provenance tiers (production-validated → manual) | Yes | Yes |
 | Temporal queries (`history`) | Yes | Yes |
-| Causal explainability (`explain`) | Yes | Yes |
+| Session-level causal explainability (`explain`) | Yes | Yes |
+| **Adapters & Infrastructure** | | |
 | Filesystem adapter | Yes | Yes |
 | Postgres adapter (triggers, LISTEN/NOTIFY) | Yes | Yes |
+| S3 adapter | Yes | Yes |
+| HTTP/REST API server | Yes | Yes |
+| Docker + Docker Compose + Helm charts | Yes | Yes |
 | MCP server (9 tools) | Yes | Yes |
-| Python SDK | Yes | Yes |
-| TypeScript SDK | Yes | Yes |
+| **SDKs & Clients** | | |
+| Python SDK (full parity) | Yes | Yes |
+| TypeScript SDK (full parity) | Yes | Yes |
 | CLI tools | Yes | Yes |
 | Framework integrations (CrewAI, LangGraph, etc.) | Yes | Yes |
 | Bundled lightweight embedder | Yes | Yes |
+| **Multi-Tenant SaaS (Pro)** | | |
+| Account-level tenant isolation (RLS) | — | Yes |
+| RBAC (Admin, Developer, User) | — | Yes |
+| Scoped API keys with entity-path permissions | — | Yes |
+| OAuth 2.0 / OIDC for dashboard users | — | Yes |
+| Append-only audit logging | — | Yes |
+| Usage quotas + rate limiting | — | Yes |
+| **Persistent Decision Traces (Pro)** | | |
+| Durable causal chains across sessions | — | Yes |
+| Historical `explain(outcome_ref)` | — | Yes |
+| `search_traces` / precedent search API | — | Yes |
+| Cross-agent, cross-session trace queries | — | Yes |
+| **Intelligence Layer (Pro)** | | |
 | LLM-driven memory extraction | — | Yes |
 | Automated memory critic | — | Yes |
 | Memory distillation & bootstrap sets | — | Yes |
@@ -68,6 +105,12 @@ AMFS is split into two layers: a fully open-source core and a proprietary intell
 | Learned retrieval ranking from outcome data | — | Yes |
 | Adaptive confidence calibration | — | Yes |
 | Training data export (SFT, DPO, reward model) | — | Yes |
+| **Dashboard (Pro)** | | |
+| Memory explorer with graph visualization | — | Yes |
+| Decision trace visualizer | — | Yes |
+| Team & API key management | — | Yes |
+| Audit log viewer | — | Yes |
+| Usage analytics & billing | — | Yes |
 | Extended MCP server (Pro tools) | — | Yes |
 
 ---
@@ -81,12 +124,14 @@ The open-source layer ([github.com/raia-live/amfs](https://github.com/raia-live/
 | Package | Description |
 |:--------|:------------|
 | `amfs-core` | CoW engine, models (`MemoryEntry`, `MemoryType`, `ProvenanceTier`), read tracking, causal tagging, default embedder |
-| `amfs` (SDK) | `AgentMemory` class — `read`, `write`, `list`, `search`, `history`, `explain`, `commit_outcome` |
+| `amfs` (SDK) | `AgentMemory` class — `read`, `write`, `list`, `search`, `history`, `explain`, `commit_outcome`, `record_context` |
 | `amfs-adapter-filesystem` | JSON-file-based adapter for local development |
 | `amfs-adapter-postgres` | PostgreSQL adapter with PL/pgSQL triggers for outcome propagation and `LISTEN/NOTIFY` for watch |
+| `amfs-adapter-s3` | Amazon S3 / S3-compatible adapter for cloud-native storage |
+| `amfs-http-server` | REST API server (FastAPI/Uvicorn) for remote access |
 | `amfs-mcp-server` | MCP server exposing 9 tools: `amfs_read`, `amfs_write`, `amfs_search`, `amfs_list`, `amfs_stats`, `amfs_commit_outcome`, `amfs_record_context`, `amfs_history`, `amfs_explain` |
 | `amfs-cli` | Terminal tools for inspecting, diffing, snapshotting, and restoring memory |
-| `@amfs/sdk` | TypeScript SDK |
+| `@amfs/sdk` | TypeScript SDK (full parity with Python: ReadTracker, search, stats, history, explain, recordContext) |
 
 ### Key Primitives
 
@@ -128,91 +173,75 @@ chain = mem.explain()
 
 ## Pro Layer — What's Added
 
-The Pro layer builds an intelligence layer on top of the OSS primitives. It adds LLM-powered automation for extraction, quality control, compaction, safety, and retrieval.
+The Pro layer wraps the OSS layer — it never replaces it. All Pro features read from and write to the same memory store using the same adapters and SDK.
 
-### Extraction
+### Multi-Tenant SaaS Foundation
 
-Turns raw text (conversations, logs, documents) into structured memory operations using LLMs. Instead of blind writes, the extractor classifies each piece of information as an **ADD**, **UPDATE**, **DELETE**, or **NOOP** operation.
+The foundation for running AMFS as a hosted service. Every API request is authenticated, authorized, scoped, and audited.
+
+**Account Isolation** — Hard isolation between tenants using Postgres Row-Level Security. Company A cannot see Company B's data, even if there's a bug in application code.
+
+**RBAC** — Three roles with graduated permissions:
+
+| Role | Can do |
+|:-----|:-------|
+| **Admin** | Full account management, user invites, key management, all memory ops |
+| **Developer** | Create/revoke API keys, read/write memory, view audit logs |
+| **User** | Read memory within scoped paths |
+
+**Scoped API Keys** — Each agent/tool gets its own key with entity-path permissions:
 
 ```
-Raw input → LLM Extractor → [ADD "svc/pattern-retry", UPDATE "svc/config", NOOP, ...]
+amfs_sk_live_...  →  checkout-service/**  [READ_WRITE]
+                     shared/patterns/*     [READ]
 ```
 
-Supports multiple LLM backends (OpenAI, Anthropic) with a common `ExtractorABC` interface.
+Agents can only access memory within their permitted scope — this is **permissioned inference** enforced at the database level.
 
-### Memory Critic
+**Audit Logging** — Every state-changing operation is recorded in an append-only audit log with actor, action, resource, and IP address.
 
-An automated quality analyzer that scans the memory store and detects problematic entries. Runs offline or on a schedule to keep the store healthy.
+**Usage Quotas** — Tiered limits on entries, API keys, users, and decision traces. Hard-capped at the database level, with external billing integration (Stripe, etc.) for metering.
 
-Detects five issue classes:
+### Persistent Decision Traces
 
-| Issue | Description |
-|:------|:------------|
-| **Toxic** | Entries with repeated negative outcome correlations |
-| **Stale** | Entries that haven't been read or validated in a long time |
-| **Contradictory** | Entries that conflict with other entries in the same entity |
-| **Uncalibrated** | Entries whose confidence doesn't match their outcome history |
-| **Orphaned** | Entries with no reads, no outcomes, and no cross-references |
+The OSS `explain()` only works within the active session. Pro persists the full causal chain — which AMFS entries were read, which external tools were consulted, what decision was made, and what outcome occurred — so it's queryable forever.
 
-Produces a `CriticReport` with prioritized recommendations.
+```python
+from amfs_traces import TraceRecorder, InMemoryTraceStore
 
-### Memory Distiller
+recorder = TraceRecorder(memory, store, account_id=acct.id)
 
-Compacts large memory stores into smaller, higher-quality sets. Three operations:
+# Reads and external contexts are tracked automatically
+recorder.memory.read("svc", "retry-pattern")
+recorder.memory.record_context("pagerduty", "3 SEV-1", source="PagerDuty API")
 
-- **Pruning** — Removes low-value entries (orphaned, expired, low-confidence)
-- **Consolidation** — Merges related entries into unified summaries
-- **Bootstrap sets** — Generates compact `DistilledSet` packages that can onboard new agents quickly (teacher-to-student knowledge transfer)
+# Outcome commits automatically persist the trace
+updated, trace = recorder.commit_outcome("DEP-500", OutcomeType.CLEAN_DEPLOY)
 
-### Memory Safety Validator
+# Months later, explain still works
+result = recorder.explain("DEP-500")
 
-Pre-write guardrails that validate candidate memories before they enter the store:
+# Search across all decisions
+traces = recorder.search_traces(entity_path="checkout-service", outcome_type="p1_incident")
+```
 
-- **Contradiction detection** — Flags entries that conflict with existing knowledge
-- **Temporal consistency** — Ensures timestamps and version sequences are coherent
-- **Confidence thresholds** — Rejects entries with implausible confidence values
-- **Causal chain integrity** — Verifies that referenced causal keys exist
+### Intelligence Layer
 
-### Multi-Strategy Retrieval
+**Extraction** — Turns raw text (conversations, logs, documents) into structured memory operations using LLMs. The extractor classifies each piece of information as an **ADD**, **UPDATE**, **DELETE**, or **NOOP** operation.
 
-Advanced search that goes beyond single-embedding lookup by combining multiple retrieval strategies:
+**Memory Critic** — Automated quality analyzer that scans the memory store and detects five issue classes: Toxic (repeated negative correlations), Stale, Contradictory, Uncalibrated, and Orphaned entries.
 
-| Strategy | Signal |
-|:---------|:-------|
-| Semantic | Vector similarity via embeddings |
-| BM25 | Keyword relevance scoring |
-| Temporal | Recency weighting |
-| Confidence | Trust-score ranking |
+**Memory Distiller** — Compacts large stores into smaller, higher-quality sets via pruning, consolidation, and bootstrap set generation for agent onboarding.
 
-Results are merged using **Reciprocal Rank Fusion (RRF)** to produce a single ranked list.
+**Memory Safety Validator** — Pre-write guardrails: contradiction detection, temporal consistency, confidence thresholds, and causal chain integrity.
 
-### ML Layer
+**Multi-Strategy Retrieval** — Combines semantic, BM25, temporal, and confidence signals via Reciprocal Rank Fusion (RRF).
 
-The ML layer learns from your outcome data to make AMFS smarter over time. Three capabilities:
+**ML Layer** — Learned retrieval ranking (gradient-boosted model on outcome history), adaptive confidence calibration (learns optimal multipliers per entity), and training data export (SFT, DPO, reward model datasets from decision traces).
 
-**Learned Retrieval Ranking** — Trains a gradient-boosted model on your outcome history to predict which memories are most useful. Entries read before clean deploys are positive signals; entries read before incidents are negative. Once trained, the model automatically enhances `amfs_retrieve` results. Falls back to heuristic ranking when insufficient data (< 20 outcome-linked entries).
+### Dashboard
 
-Features extracted from each `MemoryEntry`:
-
-| Feature | Signal |
-|:--------|:-------|
-| Confidence | Current trust score |
-| Outcome count | How many outcomes validated this entry |
-| Version | How many times it's been updated |
-| Age | Time since creation (days and log-hours) |
-| Memory type | Fact, belief, or experience (one-hot) |
-| Provenance tier | Production-validated through manual (one-hot) |
-| Pattern refs | Whether cross-references exist and how many |
-
-**Adaptive Confidence Calibration** — Learns optimal outcome multipliers from historical data instead of the fixed defaults (P1 = 1.15, clean_deploy = 0.97). Analyzes how entries linked to each outcome type perform in subsequent outcomes, then computes calibrated multipliers per entity. Also estimates optimal decay half-life from the age distribution of actively-used entries.
-
-**Training Data Export** — Exports your decision traces as fine-tuning datasets. AMFS doesn't train your LLMs — it generates the structured training data from its outcome-linked causal chains:
-
-| Format | Description |
-|:-------|:------------|
-| **SFT** | Successful decision traces as (context, decision) examples |
-| **DPO** | Paired (chosen, rejected) from positive vs negative outcomes |
-| **Reward Model** | Entries labeled by outcome quality score |
+A web dashboard (Next.js 15 + React 19) for non-technical team members to explore memory, visualize decision traces, manage teams and API keys, review audit logs, and monitor usage.
 
 ### Pro MCP Server
 
@@ -232,8 +261,6 @@ Extends the OSS MCP server with 7 additional tools:
 
 ## Architecture
 
-The Pro layer wraps the OSS layer — it never replaces it. All Pro features read from and write to the same memory store using the same adapters and SDK.
-
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        Agent / IDE                          │
@@ -245,6 +272,13 @@ The Pro layer wraps the OSS layer — it never replaces it. All Pro features rea
    │  MCP Server OSS │          │  MCP Server Pro            │
    │  (9 tools)      │          │  (9 + 7 tools)             │
    └────────┬────────┘          │                           │
+            │                   │  Multi-Tenant Layer:      │
+            │                   │  Auth · RBAC · RLS        │
+            │                   │  Scopes · Audit · Quotas  │
+            │                   │                           │
+            │                   │  Decision Traces:         │
+            │                   │  Recorder · Store · Search │
+            │                   │                           │
             │                   │  Intelligence Layer:       │
             │                   │  Critic · Distiller        │
             │                   │  Safety · Retrieval        │
@@ -257,17 +291,17 @@ The Pro layer wraps the OSS layer — it never replaces it. All Pro features rea
             └──────────┬──────────────────────┘
                        ▼
             ┌─────────────────┐
-            │   AgentMemory   │  ← Python SDK
+            │   AgentMemory   │  ← Python / TypeScript SDK
             │   (CoW Engine)  │
             └────────┬────────┘
                      │
            ┌─────────┼─────────┐
            ▼         ▼         ▼
-      Filesystem  Postgres    Custom
-       Adapter    Adapter    Adapter
+      Filesystem  Postgres    S3
+       Adapter    Adapter   Adapter
 ```
 
-The Pro MCP server imports and re-exports all 9 OSS tools, then adds the 7 Pro tools on top. You only run one server — either OSS or Pro.
+The Pro API layer wraps `AgentMemory` and `CoWEngine` with authentication, tenant isolation, scope enforcement, and audit logging — all backed by Postgres RLS for defense-in-depth.
 
 ---
 
@@ -278,14 +312,22 @@ The Pro MCP server imports and re-exports all 9 OSS tools, then adds the 7 Pro t
 | Single developer, local memory | OSS |
 | Small team sharing via Postgres | OSS |
 | CI/CD outcome tracking | OSS |
-| Need memory quality auditing at scale | Pro |
-| Want LLM-driven extraction from conversations/logs | Pro |
-| Onboarding new agents with curated knowledge | Pro (bootstrap sets) |
-| Compliance or safety requirements for memory writes | Pro (safety validator) |
-| Advanced retrieval across large stores | Pro (multi-strategy + learned ranking) |
-| Want retrieval that improves as outcomes accumulate | Pro (ML layer) |
-| Need optimized confidence multipliers per entity | Pro (adaptive calibration) |
-| Want to fine-tune agents on your decision history | Pro (training data export) |
+| Remote HTTP API access | OSS |
+| S3-based cloud storage | OSS |
+| Multi-tenant SaaS with account isolation | **Pro** |
+| Scoped API keys per agent/tool | **Pro** |
+| Compliance audit logging | **Pro** |
+| Persistent decision traces that survive sessions | **Pro** |
+| Precedent search ("how did we handle similar situations?") | **Pro** |
+| Need memory quality auditing at scale | **Pro** |
+| Want LLM-driven extraction from conversations/logs | **Pro** |
+| Onboarding new agents with curated knowledge | **Pro** (bootstrap sets) |
+| Compliance or safety requirements for memory writes | **Pro** (safety validator) |
+| Advanced retrieval across large stores | **Pro** (multi-strategy + learned ranking) |
+| Retrieval that improves as outcomes accumulate | **Pro** (ML layer) |
+| Need optimized confidence multipliers per entity | **Pro** (adaptive calibration) |
+| Want to fine-tune agents on your decision history | **Pro** (training data export) |
+| Team dashboard for non-technical users | **Pro** (dashboard) |
 
 ---
 

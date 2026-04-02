@@ -3,11 +3,13 @@
  */
 
 export { AgentMemory } from "./memory.js";
-export type { AgentMemoryOptions } from "./memory.js";
+export type { AgentMemoryOptions, SearchOptions, MemoryStats } from "./memory.js";
 export type { AmfsAdapter, WatchHandle } from "./adapter.js";
 export { createWatchHandle } from "./adapter.js";
 export { InMemoryAdapter } from "./adapters/filesystem.js";
 export { CausalTagger, CoWEngine } from "./engine.js";
+export { ReadTracker } from "./tracker.js";
+export type { ExternalContext } from "./tracker.js";
 export { OutcomeBackPropagator } from "./outcome.js";
 export { defaultConfig } from "./config.js";
 export {
@@ -18,6 +20,7 @@ export type {
   MemoryEntry,
   OutcomeRecord,
   Provenance,
+  ArtifactRef,
   AMFSConfig,
   LayerConfig,
 } from "./models.js";

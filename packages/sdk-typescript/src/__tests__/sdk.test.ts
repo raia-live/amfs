@@ -4,6 +4,7 @@ import {
   InMemoryAdapter,
   CausalTagger,
   CoWEngine,
+  ReadTracker,
   OutcomeBackPropagator,
   OutcomeType,
   OUTCOME_MULTIPLIERS,
@@ -268,5 +269,129 @@ describe("AgentMemory", () => {
     mem.write("svc", "key", "val", { confidence: 0.3 });
     expect(mem.read("svc", "key", { minConfidence: 0.5 })).toBeNull();
     expect(mem.read("svc", "key", { minConfidence: 0.2 })).not.toBeNull();
+  });
+
+  it("read tracker records reads automatically", () => {
+    const mem = new AgentMemory("test-agent");
+    mem.write("svc", "k1", "v1");
+    mem.write("svc", "k2", "v2");
+    mem.read("svc", "k1");
+    mem.read("svc", "k2");
+    expect(mem.readTracker.readCount).toBe(2);
+    expect(mem.readTracker.causalKeys).toContain("svc/k1");
+    expect(mem.readTracker.causalKeys).toContain("svc/k2");
+  });
+
+  it("auto-causal commitOutcome uses read tracker", () => {
+    const mem = new AgentMemory("test-agent");
+    mem.write("svc", "k1", "v1");
+    mem.read("svc", "k1");
+    const updated = mem.commitOutcome("DEP-1", OutcomeType.CLEAN_DEPLOY);
+    expect(updated).toHaveLength(1);
+    expect(updated[0].confidence).toBeCloseTo(0.97);
+  });
+
+  it("clearReadLog resets tracker", () => {
+    const mem = new AgentMemory("test-agent");
+    mem.write("svc", "k1", "v1");
+    mem.read("svc", "k1");
+    expect(mem.readTracker.readCount).toBe(1);
+    mem.clearReadLog();
+    expect(mem.readTracker.readCount).toBe(0);
+  });
+
+  it("history returns all versions", () => {
+    const mem = new AgentMemory("test-agent");
+    mem.write("svc", "k", "v1");
+    mem.write("svc", "k", "v2");
+    mem.write("svc", "k", "v3");
+    const versions = mem.history("svc", "k");
+    expect(versions).toHaveLength(3);
+    expect(versions[0].version).toBe(1);
+    expect(versions[2].version).toBe(3);
+  });
+
+  it("search with confidence filter", () => {
+    const mem = new AgentMemory("test-agent");
+    mem.write("svc", "high", "v", { confidence: 0.9 });
+    mem.write("svc", "low", "v", { confidence: 0.2 });
+    const results = mem.search({ minConfidence: 0.5 });
+    expect(results).toHaveLength(1);
+    expect(results[0].key).toBe("high");
+  });
+
+  it("search with limit", () => {
+    const mem = new AgentMemory("test-agent");
+    for (let i = 0; i < 10; i++) {
+      mem.write("svc", `k${i}`, `v${i}`);
+    }
+    const results = mem.search({ limit: 3 });
+    expect(results).toHaveLength(3);
+  });
+
+  it("stats returns correct counts", () => {
+    const mem = new AgentMemory("test-agent");
+    mem.write("svc-a", "k1", "v1");
+    mem.write("svc-b", "k2", "v2");
+    const s = mem.stats();
+    expect(s.totalEntries).toBe(2);
+    expect(s.totalEntities).toBe(2);
+    expect(s.totalAgents).toBe(1);
+  });
+
+  it("recordContext and explain", () => {
+    const mem = new AgentMemory("test-agent");
+    mem.write("svc", "pattern", "retry logic");
+    mem.read("svc", "pattern");
+    mem.recordContext("pagerduty", "3 SEV-1 incidents", { source: "PagerDuty API" });
+    const result = mem.explain("DEP-500");
+    expect(result.outcomeRef).toBe("DEP-500");
+    expect(result.agentId).toBe("test-agent");
+    expect(result.causalChainLength).toBe(1);
+    expect((result.causalEntries as unknown[]).length).toBe(1);
+    expect((result.externalContexts as unknown[]).length).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------
+// ReadTracker
+// ---------------------------------------------------------------
+
+describe("ReadTracker", () => {
+  it("records reads and returns causal keys in order", () => {
+    const tracker = new ReadTracker();
+    tracker.record(makeEntry({ entityPath: "svc", key: "k1" }));
+    tracker.record(makeEntry({ entityPath: "svc", key: "k2" }));
+    expect(tracker.causalKeys).toEqual(["svc/k1", "svc/k2"]);
+  });
+
+  it("records external contexts", () => {
+    const tracker = new ReadTracker();
+    tracker.recordContext("pd", "3 incidents", { source: "PagerDuty" });
+    expect(tracker.externalContexts).toHaveLength(1);
+    expect(tracker.externalContexts[0].source).toBe("PagerDuty");
+  });
+
+  it("read version tracking", () => {
+    const tracker = new ReadTracker();
+    tracker.record(makeEntry({ entityPath: "svc", key: "k1", version: 5 }));
+    expect(tracker.readVersion("svc/k1")).toBe(5);
+    expect(tracker.readVersion("svc/missing")).toBeUndefined();
+  });
+
+  it("clear resets everything", () => {
+    const tracker = new ReadTracker();
+    tracker.record(makeEntry({ entityPath: "svc", key: "k1" }));
+    tracker.recordContext("test", "test");
+    tracker.clear();
+    expect(tracker.readCount).toBe(0);
+    expect(tracker.externalContexts).toHaveLength(0);
+  });
+
+  it("contains check", () => {
+    const tracker = new ReadTracker();
+    tracker.record(makeEntry({ entityPath: "svc", key: "k1" }));
+    expect(tracker.contains("svc/k1")).toBe(true);
+    expect(tracker.contains("svc/k2")).toBe(false);
   });
 });

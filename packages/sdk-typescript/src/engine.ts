@@ -4,6 +4,7 @@
 
 import type { AmfsAdapter } from "./adapter.js";
 import type { MemoryEntry, Provenance } from "./models.js";
+import { ReadTracker } from "./tracker.js";
 
 export class CausalTagger {
   readonly agentId: string;
@@ -28,10 +29,16 @@ export class CausalTagger {
 export class CoWEngine {
   readonly adapter: AmfsAdapter;
   readonly tagger: CausalTagger;
+  readonly readTracker: ReadTracker | null;
 
-  constructor(adapter: AmfsAdapter, tagger: CausalTagger) {
+  constructor(
+    adapter: AmfsAdapter,
+    tagger: CausalTagger,
+    readTracker?: ReadTracker
+  ) {
     this.adapter = adapter;
     this.tagger = tagger;
+    this.readTracker = readTracker ?? null;
   }
 
   read(
@@ -39,7 +46,11 @@ export class CoWEngine {
     key: string,
     options?: { minConfidence?: number }
   ): MemoryEntry | null {
-    return this.adapter.read(entityPath, key, options);
+    const entry = this.adapter.read(entityPath, key, options);
+    if (entry && this.readTracker) {
+      this.readTracker.record(entry);
+    }
+    return entry;
   }
 
   write(
@@ -75,5 +86,28 @@ export class CoWEngine {
     options?: { includeSuperseded?: boolean }
   ): MemoryEntry[] {
     return this.adapter.list(entityPath, options);
+  }
+
+  history(
+    entityPath: string,
+    key: string,
+    options?: { since?: string; until?: string }
+  ): MemoryEntry[] {
+    const all = this.adapter.list(entityPath, { includeSuperseded: true });
+    let versions = all
+      .filter((e) => e.key === key)
+      .sort((a, b) => a.version - b.version);
+
+    if (options?.since) {
+      versions = versions.filter(
+        (e) => e.provenance.writtenAt >= options.since!
+      );
+    }
+    if (options?.until) {
+      versions = versions.filter(
+        (e) => e.provenance.writtenAt <= options.until!
+      );
+    }
+    return versions;
   }
 }
