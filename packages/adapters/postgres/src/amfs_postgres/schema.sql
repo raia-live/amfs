@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS amfs_memory_entries (
     outcome_count INTEGER DEFAULT 0,
     ttl_at TIMESTAMPTZ,
     memory_type TEXT DEFAULT 'fact',
+    artifact_refs JSONB DEFAULT '[]',
     superseded_at TIMESTAMPTZ,
     CONSTRAINT uq_entry_version UNIQUE (namespace, entity_path, key, version)
 );
@@ -88,12 +89,14 @@ BEGIN
             INSERT INTO amfs_memory_entries (
                 namespace, entity_path, key, version, value,
                 agent_id, session_id, written_at, pattern_refs,
-                confidence, outcome_count, ttl_at, memory_type
+                confidence, outcome_count, ttl_at, memory_type,
+                artifact_refs
             ) VALUES (
                 cur.namespace, cur.entity_path, cur.key, cur.version + 1, cur.value,
                 cur.agent_id, cur.session_id, cur.written_at, cur.pattern_refs,
                 cur.confidence * multiplier * NEW.causal_confidence,
-                cur.outcome_count + 1, cur.ttl_at, cur.memory_type
+                cur.outcome_count + 1, cur.ttl_at, cur.memory_type,
+                cur.artifact_refs
             );
         END IF;
     END LOOP;

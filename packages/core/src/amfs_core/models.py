@@ -71,6 +71,14 @@ class Provenance(BaseModel):
     pattern_refs: list[str] = Field(default_factory=list)
 
 
+class ArtifactRef(BaseModel):
+    """Reference to an external artifact (blob, file, model checkpoint, etc.)."""
+    uri: str  # s3://bucket/path, file:///path, https://...
+    media_type: str | None = None  # e.g. "application/json", "model/onnx"
+    label: str | None = None  # human-readable description
+    size_bytes: int | None = None
+
+
 class MemoryEntry(BaseModel):
     """A single versioned memory entry within the AMFS namespace."""
 
@@ -84,6 +92,7 @@ class MemoryEntry(BaseModel):
     outcome_count: int = 0
     ttl_at: datetime | None = None
     embedding: list[float] | None = None
+    artifact_refs: list[ArtifactRef] = Field(default_factory=list)
     memory_type: MemoryType = MemoryType.FACT
 
     def effective_confidence(self, *, decay_half_life_days: float | None = None) -> float:

@@ -17,6 +17,7 @@ from amfs_core.abc import AdapterABC, WatchHandle
 from amfs_core.exceptions import AdapterError, VersionConflictError
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
+    ArtifactRef,
     MemoryEntry,
     MemoryType,
     OutcomeRecord,
@@ -136,8 +137,9 @@ class PostgresAdapter(AdapterABC):
                     INSERT INTO amfs_memory_entries (
                         id, namespace, entity_path, key, version, value,
                         agent_id, session_id, written_at, pattern_refs,
-                        confidence, outcome_count, ttl_at, memory_type
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        confidence, outcome_count, ttl_at, memory_type,
+                        artifact_refs
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         str(entry_id),
@@ -154,6 +156,7 @@ class PostgresAdapter(AdapterABC):
                         entry.outcome_count,
                         entry.ttl_at,
                         entry.memory_type.value,
+                        json.dumps([ref.model_dump(mode="json") for ref in entry.artifact_refs], default=str),
                     ),
                 )
 
@@ -358,6 +361,7 @@ class PostgresAdapter(AdapterABC):
             confidence=float(row["confidence"]),
             outcome_count=row["outcome_count"],
             ttl_at=row.get("ttl_at"),
+            artifact_refs=[ArtifactRef.model_validate(r) for r in (row.get("artifact_refs") or [])],
             memory_type=memory_type,
         )
 

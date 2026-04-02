@@ -145,6 +145,7 @@ def amfs_write(
     confidence: float = 1.0,
     pattern_refs: list[str] | None = None,
     memory_type: str = "fact",
+    artifact_refs: list[dict[str, Any]] | None = None,
 ) -> str:
     """Write a memory entry with automatic provenance tracking.
 
@@ -159,9 +160,14 @@ def amfs_write(
         confidence: How confident you are (0.0-1.0, default 1.0)
         pattern_refs: Optional list of related pattern keys for cross-referencing
         memory_type: One of "fact" (default), "belief", or "experience"
+        artifact_refs: Optional list of external artifact references. Each dict
+            should have "uri" (required), and optionally "media_type", "label",
+            "size_bytes".
 
     Example: amfs_write("checkout-service", "retry-pattern", '{"max_retries": 3}')
     """
+    from amfs_core.models import ArtifactRef
+
     mem = _get_memory()
 
     parsed_value: Any = value
@@ -173,6 +179,10 @@ def amfs_write(
     type_map = {"fact": MemoryType.FACT, "belief": MemoryType.BELIEF, "experience": MemoryType.EXPERIENCE}
     mt = type_map.get(memory_type.lower(), MemoryType.FACT)
 
+    parsed_artifact_refs = [
+        ArtifactRef.model_validate(r) for r in (artifact_refs or [])
+    ]
+
     entry = mem.write(
         entity_path,
         key,
@@ -180,6 +190,7 @@ def amfs_write(
         confidence=confidence,
         pattern_refs=pattern_refs,
         memory_type=mt,
+        artifact_refs=parsed_artifact_refs,
     )
     return json.dumps(_serialize_entry(entry), default=str)
 
