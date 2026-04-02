@@ -8,7 +8,25 @@ description: "Install the AMFS SDK, CLI, and adapters."
 
 # Installation
 
-AMFS is distributed as several packages so you can install only what you need.
+AMFS is distributed as several packages so you can install only what you need. The fastest way to get started is with Docker — no Python required.
+
+---
+
+## Docker (Recommended)
+
+Get a running AMFS server in one command:
+
+```bash
+docker run -p 8080:8080 -v amfs-data:/data ghcr.io/raia-live/amfs
+```
+
+Or with Postgres (full-text + vector search):
+
+```bash
+docker compose up
+```
+
+See the [Docker & Kubernetes guide](/amfs/guides/docker/) for the full setup.
 
 ---
 
@@ -23,28 +41,14 @@ pip install amfs
 {: .note }
 Requires Python 3.11 or later.
 
-### Optional: Postgres adapter
-
-For shared memory across machines and team members:
+### Optional packages
 
 ```bash
-pip install amfs-adapter-postgres
-```
-
-### Optional: CLI
-
-Command-line tools for inspecting, diffing, and snapshotting memory:
-
-```bash
-pip install amfs-cli
-```
-
-### Optional: MCP Server
-
-Model Context Protocol server for AI coding agents:
-
-```bash
-pip install amfs-mcp-server
+pip install amfs-adapter-postgres   # Postgres adapter (full-text + vector search)
+pip install amfs-adapter-s3         # S3-compatible adapter (AWS, ACS, MinIO, R2)
+pip install amfs-http-server        # HTTP/REST API server
+pip install amfs-cli                # CLI tools
+pip install amfs-mcp-server         # MCP server for AI coding agents
 ```
 
 ---
@@ -108,4 +112,6 @@ print("AMFS is working!")
 
 - [Quick Start](/amfs/getting-started/quickstart/) — write, read, and search memory
 - [Configuration](/amfs/getting-started/configuration/) — YAML config, adapters, and options
+- [Docker & Kubernetes](/amfs/guides/docker/) — run AMFS in containers
+- [HTTP API Server](/amfs/guides/http-server/) — access AMFS from any language over HTTP
 - [Core Concepts](/amfs/concepts/) — understand how AMFS works under the hood

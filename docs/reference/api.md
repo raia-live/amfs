@@ -79,10 +79,13 @@ write(
     ttl_at: datetime | None = None,
     pattern_refs: list[str] | None = None,
     memory_type: MemoryType = MemoryType.FACT,
+    artifact_refs: list[ArtifactRef] | None = None,
 ) -> MemoryEntry
 ```
 
 Creates a new version of the entry. If the key already exists, the previous version is superseded (CoW). The `memory_type` parameter controls decay behavior — `belief` decays 2× faster, `experience` decays 1.5× slower.
+
+The optional `artifact_refs` parameter links external blobs (S3 objects, files, URLs) to this entry. See [ArtifactRef](#artifactref) below.
 
 ---
 
@@ -230,17 +233,18 @@ Returns memory statistics.
 
 ```python
 class MemoryEntry:
-    amfs_version: str           # Protocol version ("0.2.0")
-    entity_path: str            # Entity scope
-    key: str                    # Entry key
-    version: int                # Version number
-    value: Any                  # Stored data
-    provenance: Provenance      # Authorship metadata
-    confidence: float           # Trust score
-    outcome_count: int          # Outcomes applied
-    memory_type: MemoryType     # fact, belief, or experience
-    ttl_at: datetime | None     # Expiration timestamp
-    embedding: list[float] | None  # Vector embedding
+    amfs_version: str               # Protocol version ("0.2.0")
+    entity_path: str                # Entity scope
+    key: str                        # Entry key
+    version: int                    # Version number
+    value: Any                      # Stored data
+    provenance: Provenance          # Authorship metadata
+    confidence: float               # Trust score
+    outcome_count: int              # Outcomes applied
+    memory_type: MemoryType         # fact, belief, or experience
+    ttl_at: datetime | None         # Expiration timestamp
+    embedding: list[float] | None   # Vector embedding
+    artifact_refs: list[ArtifactRef]  # Linked external blobs
 
     @property
     def entry_key(self) -> str:
@@ -249,6 +253,41 @@ class MemoryEntry:
     @property
     def provenance_tier(self) -> ProvenanceTier:
         """Computed quality tier based on agent ID and outcome history."""
+```
+
+---
+
+## ArtifactRef
+
+Link memory entries to external blobs — model weights, datasets, logs, screenshots, or any binary artifact stored outside AMFS.
+
+```python
+class ArtifactRef:
+    uri: str                    # S3 URI, file path, or URL
+    media_type: str | None      # MIME type (e.g. "application/json")
+    label: str | None           # Human-readable label
+    size_bytes: int | None      # File size in bytes
+```
+
+Example:
+
+```python
+from amfs_core.models import ArtifactRef
+
+mem.write(
+    "training-pipeline",
+    "model-v3-checkpoint",
+    {"epoch": 42, "loss": 0.023},
+    confidence=0.95,
+    artifact_refs=[
+        ArtifactRef(
+            uri="s3://my-bucket/models/v3/checkpoint.pt",
+            media_type="application/octet-stream",
+            label="Model checkpoint",
+            size_bytes=1_500_000_000,
+        ),
+    ],
+)
 ```
 
 ---
@@ -341,11 +380,14 @@ amfs_write(
     confidence: float = 1.0,
     pattern_refs: list[str] | None = None,
     memory_type: str = "fact",  # "fact" | "belief" | "experience"
+    artifact_refs: list[dict] | None = None,
 ) -> str (JSON)
 ```
 
 {: .note }
 `value` is passed as a string. If it's valid JSON, it's parsed automatically; otherwise stored as a plain string.
+
+Each item in `artifact_refs` should be a dict with `uri` (required), and optionally `media_type`, `label`, and `size_bytes`.
 
 ### amfs_search
 
@@ -415,6 +457,41 @@ amfs_explain(
 ```
 
 Returns the causal read chain for the current session: which entries were read and their details.
+
+---
+
+## HTTP REST API
+
+When using the [HTTP API server](/amfs/guides/http-server/), the following REST endpoints are available:
+
+### Entries
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/entries/{entity_path}/{key}` | Read current version |
+| `POST` | `/api/v1/entries` | Write new entry (CoW) |
+| `GET` | `/api/v1/entries` | List entries |
+| `GET` | `/api/v1/entries/{entity_path}/{key}/history` | Version history |
+| `GET` | `/api/v1/search` | Search with filters |
+
+### Outcomes
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `POST` | `/api/v1/outcomes` | Commit outcome |
+| `GET` | `/api/v1/outcomes` | List outcomes |
+
+### Observability
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/stats` | Memory statistics |
+| `POST` | `/api/v1/context` | Record external context |
+| `GET` | `/api/v1/explain` | Causal trace |
+| `GET` | `/api/v1/stream` | SSE event stream |
+| `GET` | `/health` | Health check |
+
+Authentication is via the `X-AMFS-API-Key` header. Set `AMFS_API_KEYS` to enable. Interactive API docs are available at `/docs` (Swagger UI).
 
 ---
 

@@ -28,15 +28,18 @@ AMFS is a filesystem-modeled protocol and SDK that gives multi-agent AI systems 
        │                   │                   │
        └───────────┬───────┴───────────────────┘
                    │
-            ┌──────▼──────┐
-            │ AgentMemory │  ← Python / TypeScript SDK
-            │   (CoW)     │
-            └──────┬──────┘
+       ┌───────────┴───────────┐
+       │ AgentMemory (CoW)     │  ← Python / TypeScript SDK
+       └───────────┬───────────┘
                    │
-         ┌─────────┼─────────┐
-         ▼         ▼         ▼
-    Filesystem  Postgres    Redis
-     Adapter    Adapter    Adapter
+       ┌───────────┴───────────┐
+       │ HTTP API / MCP Server │  ← REST + SSE / stdio + HTTP
+       └───────────┬───────────┘
+                   │
+     ┌─────────┬───┴────┬─────────┐
+     ▼         ▼        ▼         ▼
+ Filesystem  Postgres   S3      Custom
+  Adapter    Adapter  Adapter   Adapter
 ```
 
 ### Why AMFS?
@@ -49,7 +52,9 @@ AMFS solves this by giving agents a **shared memory layer** with:
 - **Provenance tracking** — Know which agent wrote what, and when.
 - **Confidence scoring** — Entries carry a confidence score that evolves over time based on real-world outcomes.
 - **Outcome back-propagation** — Incidents increase confidence on risky patterns. Clean deploys decay it.
-- **Pluggable storage** — Start with the local filesystem, scale to Postgres for team sharing.
+- **Pluggable storage** — Filesystem, Postgres (with full-text + vector search), S3-compatible, or custom.
+- **HTTP API** — Access AMFS from any language or service over REST. Real-time streaming via SSE.
+- **Artifact references** — Link memory entries to external blobs (model weights, datasets, logs) in S3 or elsewhere.
 
 ### Quick Example
 
@@ -86,11 +91,45 @@ entry = mem.read("checkout-service", "risk-race-condition")
 | **Temporal queries** | Retrieve the full version history of any entry, filtered by time range. |
 | **Causal explainability** | Inspect which entries were read and how they connect to outcomes. |
 | **Provenance tracking** | Every entry records which agent wrote it, when, and from which session. |
-| **Multiple adapters** | Filesystem (default), Postgres, or build your own. |
+| **Artifact references** | Link entries to external blobs in S3, local files, or URLs. |
+| **HTTP/REST API** | FastAPI server with 12 endpoints, SSE streaming, and API key auth. |
+| **Multiple adapters** | Filesystem (default), Postgres (with full-text + vector search), S3-compatible, or custom. |
 | **MCP integration** | First-class MCP server for Cursor, Claude Code, and any MCP-compatible client. |
 | **Framework integrations** | Works with CrewAI, LangGraph, LangChain, and AutoGen. |
 | **CLI tools** | Inspect, diff, snapshot, and restore memory from the command line. |
+| **Docker & Kubernetes** | One-command deployment with Docker or Helm chart. |
 | **Python & TypeScript** | SDKs for both languages with the same conceptual API. |
+
+---
+
+## Quick Start with Docker
+
+The fastest way to get AMFS running — no Python install required:
+
+```bash
+docker run -p 8080:8080 -v amfs-data:/data ghcr.io/raia-live/amfs
+```
+
+Or with Postgres for full-text + vector search:
+
+```bash
+docker compose up
+```
+
+Then interact via HTTP:
+
+```bash
+# Write
+curl -X POST http://localhost:8080/api/v1/entries \
+  -H "Content-Type: application/json" \
+  -d '{"entity_path": "checkout-service", "key": "retry-pattern", "value": {"max_retries": 3}}'
+
+# Read
+curl http://localhost:8080/api/v1/entries/checkout-service/retry-pattern
+```
+
+[Docker & Kubernetes guide](/amfs/guides/docker/){: .btn .btn-outline .fs-5 .mb-4 .mb-md-0 }
+[HTTP API reference](/amfs/guides/http-server/){: .btn .btn-outline .fs-5 .mb-4 .mb-md-0 }
 
 ---
 
@@ -100,6 +139,8 @@ entry = mem.read("checkout-service", "risk-race-condition")
 |:--------|:---------|:--------|
 | `amfs` | Python | `pip install amfs` |
 | `amfs-adapter-postgres` | Python | `pip install amfs-adapter-postgres` |
+| `amfs-adapter-s3` | Python | `pip install amfs-adapter-s3` |
+| `amfs-http-server` | Python | `pip install amfs-http-server` |
 | `amfs-cli` | Python | `pip install amfs-cli` |
 | `amfs-mcp-server` | Python | `pip install amfs-mcp-server` |
 | `@amfs/sdk` | TypeScript | `npm install @amfs/sdk` |

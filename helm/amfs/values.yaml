@@ -1,0 +1,65 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/raia-live/amfs
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: amfs.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# AMFS configuration
+amfs:
+  namespace: default
+  agentId: amfs-server
+  # API key authentication (leave empty to disable)
+  apiKeys: ""
+
+# Storage backend: "filesystem", "postgres", or "s3"
+storage:
+  backend: postgres
+
+# Postgres settings (when storage.backend=postgres)
+postgres:
+  # Use external Postgres
+  external: false
+  dsn: ""
+  # Built-in Postgres (set external=false)
+  image: pgvector/pgvector:pg16
+  password: amfs
+  storage: 10Gi
+
+# S3 settings (when storage.backend=s3)
+s3:
+  bucket: ""
+  prefix: amfs/
+  endpoint: ""
+  region: ""
+  accessKeyId: ""
+  secretAccessKey: ""
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70

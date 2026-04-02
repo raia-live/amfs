@@ -1,0 +1,71 @@
+{{- if and (eq .Values.storage.backend "postgres") (not .Values.postgres.external) }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "amfs.fullname" . }}-postgres
+  labels:
+    {{- include "amfs.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  serviceName: {{ include "amfs.fullname" . }}-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "amfs.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: database
+  template:
+    metadata:
+      labels:
+        {{- include "amfs.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: database
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: amfs
+            - name: POSTGRES_PASSWORD
+              value: {{ .Values.postgres.password | quote }}
+            - name: POSTGRES_DB
+              value: amfs
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "amfs"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "amfs"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "amfs.fullname" . }}-postgres
+  labels:
+    {{- include "amfs.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+  selector:
+    {{- include "amfs.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+{{- end }}

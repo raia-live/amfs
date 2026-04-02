@@ -3,13 +3,13 @@ title: Postgres
 layout: default
 parent: Adapters
 nav_order: 2
-description: "The Postgres adapter — shared memory across machines with database-level triggers."
+description: "The Postgres adapter — shared memory across machines with database-level triggers, full-text search, and vector similarity."
 ---
 
 # Postgres Adapter
 {: .no_toc }
 
-For team sharing and production deployments. Uses PostgreSQL with database-level triggers for outcome propagation and `LISTEN/NOTIFY` for real-time watch.
+For team sharing and production deployments. Uses PostgreSQL with database-level triggers for outcome propagation, `LISTEN/NOTIFY` for real-time watch, native full-text search via tsvector/GIN, and vector similarity search via pgvector.
 
 ## Table of Contents
 {: .no_toc .text-delta }
@@ -25,7 +25,7 @@ For team sharing and production deployments. Uses PostgreSQL with database-level
 pip install amfs-adapter-postgres
 ```
 
-Requires PostgreSQL 14+ and `psycopg3`.
+Requires PostgreSQL 14+ with `psycopg3`. For vector search, install the [pgvector](https://github.com/pgvector/pgvector) extension (included in the `pgvector/pgvector` Docker image).
 
 ---
 
@@ -79,6 +79,9 @@ The adapter auto-creates two tables and associated triggers:
 | `confidence` | `FLOAT` | Trust score |
 | `outcome_count` | `INT` | Outcomes applied |
 | `memory_type` | `TEXT` | Memory type: `fact`, `belief`, or `experience` (default: `fact`) |
+| `artifact_refs` | `JSONB` | Linked external blobs (default: `[]`) |
+| `search_tsv` | `TSVECTOR` | Auto-generated full-text search vector (GIN-indexed) |
+| `embedding` | `VECTOR(384)` | Vector embedding for semantic search (HNSW-indexed, requires pgvector) |
 | `superseded_at` | `TIMESTAMP` | When this version was superseded (NULL = current) |
 
 ### `amfs_outcomes`
@@ -129,9 +132,43 @@ export AMFS_POSTGRES_DSN="postgresql://postgres:amfs@localhost:5432/amfs"
 
 ---
 
+## Search
+
+### Full-Text Search
+
+The adapter automatically maintains a `search_tsv` column (GIN-indexed) that combines the `key`, `entity_path`, and `value` fields. The `search()` method uses SQL `WHERE` clauses with `@@` operators for efficient filtering — no in-memory scanning.
+
+### Vector Similarity Search (pgvector)
+
+When an embedder is configured, the adapter stores vector embeddings in a `VECTOR(384)` column with an HNSW index. The `semantic_search()` method uses cosine similarity directly in SQL via pgvector's `<=>` operator.
+
+To use pgvector, install the extension in your database:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+{: .tip }
+The `pgvector/pgvector:pg16` Docker image ships with pgvector pre-installed. The `docker-compose.yml` in the repo uses this image.
+
+### Connection Pooling
+
+The adapter uses `psycopg_pool.ConnectionPool` for efficient connection management. The pool size is configurable and defaults to sensible limits for most deployments.
+
+---
+
 ## When to Use
 
 - Team environments (multiple developers/agents sharing memory)
-- Production deployments
+- Production deployments with full-text and vector search
 - When you need database-level consistency guarantees
 - When you want memory to survive machine restarts
+- When you need efficient search across large memory stores
+
+---
+
+## Next Steps
+
+- [S3 Adapter](/amfs/adapters/s3/) — cloud-native storage for distributed teams
+- [HTTP API Server](/amfs/guides/http-server/) — expose AMFS over REST
+- [Docker & Kubernetes](/amfs/guides/docker/) — deploy AMFS + Postgres in containers

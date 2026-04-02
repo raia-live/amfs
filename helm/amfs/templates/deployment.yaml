@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "amfs.fullname" . }}
+  labels:
+    {{- include "amfs.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "amfs.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "amfs.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: amfs
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: AMFS_AGENT_ID
+              value: {{ .Values.amfs.agentId | quote }}
+            - name: AMFS_NAMESPACE
+              value: {{ .Values.amfs.namespace | quote }}
+            {{- if .Values.amfs.apiKeys }}
+            - name: AMFS_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "amfs.fullname" . }}-auth
+                  key: api-keys
+            {{- end }}
+            {{- if eq .Values.storage.backend "postgres" }}
+            {{- if .Values.postgres.external }}
+            - name: AMFS_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "amfs.fullname" . }}-db
+                  key: dsn
+            {{- else }}
+            - name: AMFS_POSTGRES_DSN
+              value: "postgresql://amfs:{{ .Values.postgres.password }}@{{ include "amfs.fullname" . }}-postgres:5432/amfs"
+            {{- end }}
+            {{- end }}
+            {{- if eq .Values.storage.backend "s3" }}
+            - name: AMFS_S3_BUCKET
+              value: {{ .Values.s3.bucket | quote }}
+            - name: AMFS_S3_PREFIX
+              value: {{ .Values.s3.prefix | quote }}
+            {{- if .Values.s3.endpoint }}
+            - name: AMFS_S3_ENDPOINT
+              value: {{ .Values.s3.endpoint | quote }}
+            {{- end }}
+            {{- if .Values.s3.region }}
+            - name: AWS_DEFAULT_REGION
+              value: {{ .Values.s3.region | quote }}
+            {{- end }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
