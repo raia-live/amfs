@@ -169,7 +169,20 @@ Give your AI coding agents persistent, shared memory via MCP:
 
 ## OSS vs Pro
 
-AMFS is available in two editions. The OSS layer provides the full memory primitive. The Pro layer adds an intelligence layer with LLM-driven extraction, automated quality auditing, memory distillation, safety validation, and multi-strategy retrieval. [See the comparison →](https://raia-live.github.io/amfs/editions/)
+AMFS is available in two editions:
+
+**OSS (Apache 2.0)** — The full memory primitive: CoW versioning, confidence scoring, outcome back-propagation, session-level explainability, filesystem/Postgres/S3 adapters, HTTP API, MCP server, Python & TypeScript SDKs.
+
+**Pro (Proprietary)** — The compounding intelligence layer:
+- **Multi-Tenant SaaS** — Account isolation (Postgres RLS), RBAC, scoped API keys, OAuth/OIDC, audit logging, rate limiting, usage quotas
+- **Persistent Decision Traces** — Durable causal chains, historical `explain()`, precedent search across all past decisions
+- **Cross-System Ingestion** — Webhook endpoint with HMAC verification, deduplication, PagerDuty/Slack/GitHub/Jira connectors
+- **Automated Pattern Detection** — Recurring failures, hot entities, stale clusters, confidence drift, configurable alert rules
+- **Intelligence Layer** — LLM extraction, memory critic, distiller, safety validator, multi-strategy retrieval, learned ranking
+- **ML Layer** — Adaptive confidence calibration, training data export (SFT, DPO, reward model)
+- **Dashboard** — Memory explorer, context graph, decision trace explorer, API key console, audit viewer, usage analytics
+
+[See the full comparison →](https://raia-live.github.io/amfs/editions/)
 
 ## Documentation
 
