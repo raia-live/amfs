@@ -70,3 +70,16 @@ export interface AMFSConfig {
   namespace: string;
   layers: Record<string, LayerConfig>;
 }
+
+export interface RecallConfig {
+  semanticWeight?: number;
+  recencyWeight?: number;
+  confidenceWeight?: number;
+  recencyHalfLifeDays?: number;
+}
+
+export interface ScoredEntry {
+  entry: MemoryEntry;
+  score: number;
+  breakdown: Record<string, number>;
+}

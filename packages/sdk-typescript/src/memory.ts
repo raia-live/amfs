@@ -6,7 +6,7 @@ import type { AmfsAdapter, WatchHandle } from "./adapter.js";
 import { InMemoryAdapter } from "./adapters/filesystem.js";
 import { defaultConfig } from "./config.js";
 import { CausalTagger, CoWEngine } from "./engine.js";
-import type { AMFSConfig, MemoryEntry, ScopeInfo } from "./models.js";
+import type { AMFSConfig, MemoryEntry, RecallConfig, ScopeInfo, ScoredEntry } from "./models.js";
 import { OutcomeType } from "./models.js";
 import { OutcomeBackPropagator } from "./outcome.js";
 import { ReadTracker } from "./tracker.js";
@@ -24,6 +24,7 @@ export interface SearchOptions {
   agentId?: string;
   limit?: number;
   sortBy?: "confidence" | "recency" | "version";
+  recallConfig?: RecallConfig;
 }
 
 export interface MemoryStats {
@@ -103,8 +104,10 @@ export class AgentMemory {
     return this.engine.history(entityPath, key, options);
   }
 
-  /** Search entries with filters. Supports multi-scope via entityPaths. */
-  search(options?: SearchOptions): MemoryEntry[] {
+  /** Search entries with filters. Supports multi-scope via entityPaths and composite scoring via recallConfig. */
+  search(options: SearchOptions & { recallConfig: RecallConfig }): ScoredEntry[];
+  search(options?: SearchOptions): MemoryEntry[];
+  search(options?: SearchOptions): MemoryEntry[] | ScoredEntry[] {
     const paths =
       options?.entityPaths ??
       (options?.entityPath ? [options.entityPath] : [undefined]);
@@ -144,7 +147,45 @@ export class AgentMemory {
       merged.sort((a, b) => b.version - a.version);
     }
 
-    return merged.slice(0, options?.limit ?? 100);
+    const limited = merged.slice(0, options?.limit ?? 100);
+
+    if (!options?.recallConfig) {
+      return limited;
+    }
+
+    const rc = options.recallConfig;
+    const semanticWeight = rc.semanticWeight ?? 0.5;
+    const recencyWeight = rc.recencyWeight ?? 0.3;
+    const confidenceWeight = rc.confidenceWeight ?? 0.2;
+    const halfLife = rc.recencyHalfLifeDays ?? 30.0;
+    const now = Date.now();
+    const LN2 = Math.LN2;
+
+    const scored: ScoredEntry[] = limited.map((entry) => {
+      const writtenMs = new Date(entry.provenance.writtenAt).getTime();
+      const ageDays = (now - writtenMs) / 86_400_000;
+
+      const recencyScore =
+        halfLife > 0 ? Math.exp(-LN2 * ageDays / halfLife) : 0;
+      const confidenceScore = Math.max(0, Math.min(1, entry.confidence));
+
+      const semanticComponent = semanticWeight * 1.0;
+      const recencyComponent = recencyWeight * recencyScore;
+      const confidenceComponent = confidenceWeight * confidenceScore;
+
+      return {
+        entry,
+        score: semanticComponent + recencyComponent + confidenceComponent,
+        breakdown: {
+          semantic: semanticComponent,
+          recency: recencyComponent,
+          confidence: confidenceComponent,
+        },
+      };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+    return scored;
   }
 
   /** Aggregate statistics about current memory state. */

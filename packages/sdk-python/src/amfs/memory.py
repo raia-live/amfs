@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -19,7 +20,9 @@ from amfs_core.models import (
     MemoryStats,
     MemoryType,
     OutcomeType,
+    RecallConfig,
     ScopeInfo,
+    ScoredEntry,
     SearchQuery,
     SemanticQuery,
 )
@@ -241,12 +244,16 @@ class AgentMemory:
         pattern_ref: str | None = None,
         limit: int = 100,
         sort_by: str = "confidence",
-    ) -> list[MemoryEntry]:
+        recall_config: RecallConfig | None = None,
+    ) -> list[MemoryEntry] | list[ScoredEntry]:
         """Search across all entities with rich filters.
 
         When *entity_paths* is provided, runs a search for each path and merges
         the results.  *entity_path* (singular) is still supported for backwards
         compatibility; if both are given, *entity_paths* takes precedence.
+
+        When *recall_config* is provided, returns ``ScoredEntry`` objects
+        sorted by composite recall score instead.
         """
         paths = entity_paths or ([entity_path] if entity_path else [None])
 
@@ -262,6 +269,7 @@ class AgentMemory:
                 pattern_ref=pattern_ref,
                 limit=limit,
                 sort_by=sort_by,
+                recall_config=recall_config,
             )
             for entry in self._adapter.search(query):
                 if entry.entry_key not in seen_keys:
@@ -276,7 +284,38 @@ class AgentMemory:
         else:
             sort_key = lambda e: e.confidence
         merged.sort(key=sort_key, reverse=True)
-        return merged[:limit]
+        entries = merged[:limit]
+
+        if recall_config is None:
+            return entries
+
+        now = datetime.now(timezone.utc)
+        scored: list[ScoredEntry] = []
+        for entry in entries:
+            age = now - entry.provenance.written_at
+            age_days = age.total_seconds() / 86400.0
+            half_life = recall_config.recency_half_life_days
+
+            recency_score = math.exp(-math.log(2) * age_days / half_life) if half_life > 0 else 0.0
+            confidence_score = max(0.0, min(1.0, entry.confidence))
+
+            composite = (
+                recall_config.semantic_weight * 1.0
+                + recall_config.recency_weight * recency_score
+                + recall_config.confidence_weight * confidence_score
+            )
+            scored.append(ScoredEntry(
+                entry=entry,
+                score=composite,
+                breakdown={
+                    "semantic": recall_config.semantic_weight * 1.0,
+                    "recency": recall_config.recency_weight * recency_score,
+                    "confidence": recall_config.confidence_weight * confidence_score,
+                },
+            ))
+
+        scored.sort(key=lambda s: s.score, reverse=True)
+        return scored
 
     def semantic_search(
         self,
