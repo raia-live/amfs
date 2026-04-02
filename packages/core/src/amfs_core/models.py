@@ -160,6 +160,7 @@ class SearchQuery(BaseModel):
     """Filters for searching across memory entries."""
 
     entity_path: str | None = None
+    entity_paths: list[str] | None = None
     min_confidence: float = 0.0
     max_confidence: float | None = None
     agent_id: str | None = None
@@ -183,6 +184,17 @@ class MemoryStats(BaseModel):
     outcome_linked_count: int = 0
     oldest_entry_at: datetime | None = None
     newest_entry_at: datetime | None = None
+
+
+class ScopeInfo(BaseModel):
+    """Summary info about a scope (entity_path)."""
+
+    path: str
+    entry_count: int
+    avg_confidence: float
+    keys: list[str] = Field(default_factory=list)
+    oldest: datetime | None = None
+    newest: datetime | None = None
 
 
 class ConflictPolicy(str, Enum):

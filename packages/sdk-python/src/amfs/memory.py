@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -18,6 +19,7 @@ from amfs_core.models import (
     MemoryStats,
     MemoryType,
     OutcomeType,
+    ScopeInfo,
     SearchQuery,
     SemanticQuery,
 )
@@ -231,6 +233,7 @@ class AgentMemory:
         self,
         *,
         entity_path: str | None = None,
+        entity_paths: list[str] | None = None,
         min_confidence: float = 0.0,
         max_confidence: float | None = None,
         agent_id: str | None = None,
@@ -241,19 +244,39 @@ class AgentMemory:
     ) -> list[MemoryEntry]:
         """Search across all entities with rich filters.
 
-        Returns entries matching ALL specified criteria, sorted and limited.
+        When *entity_paths* is provided, runs a search for each path and merges
+        the results.  *entity_path* (singular) is still supported for backwards
+        compatibility; if both are given, *entity_paths* takes precedence.
         """
-        query = SearchQuery(
-            entity_path=entity_path,
-            min_confidence=min_confidence,
-            max_confidence=max_confidence,
-            agent_id=agent_id,
-            since=since,
-            pattern_ref=pattern_ref,
-            limit=limit,
-            sort_by=sort_by,
-        )
-        return self._adapter.search(query)
+        paths = entity_paths or ([entity_path] if entity_path else [None])
+
+        seen_keys: set[str] = set()
+        merged: list[MemoryEntry] = []
+        for ep in paths:
+            query = SearchQuery(
+                entity_path=ep,
+                min_confidence=min_confidence,
+                max_confidence=max_confidence,
+                agent_id=agent_id,
+                since=since,
+                pattern_ref=pattern_ref,
+                limit=limit,
+                sort_by=sort_by,
+            )
+            for entry in self._adapter.search(query):
+                if entry.entry_key not in seen_keys:
+                    seen_keys.add(entry.entry_key)
+                    merged.append(entry)
+
+        sort_key: Callable[[MemoryEntry], Any]
+        if sort_by == "recency":
+            sort_key = lambda e: e.provenance.written_at
+        elif sort_by == "version":
+            sort_key = lambda e: e.version
+        else:
+            sort_key = lambda e: e.confidence
+        merged.sort(key=sort_key, reverse=True)
+        return merged[:limit]
 
     def semantic_search(
         self,
@@ -390,6 +413,71 @@ class AgentMemory:
         }
 
     # ------------------------------------------------------------------
+    # Scoped access
+    # ------------------------------------------------------------------
+
+    def scope(self, entity_path: str, *, readonly: bool = False) -> MemoryScope:
+        """Return a :class:`MemoryScope` bound to *entity_path*."""
+        return MemoryScope(self, entity_path, readonly=readonly)
+
+    def list_scopes(self) -> list[str]:
+        """Return all unique entity paths that contain at least one entry."""
+        entries = self.list()
+        return sorted({e.entity_path for e in entries})
+
+    def info(self, entity_path: str) -> ScopeInfo:
+        """Return summary information about a single scope."""
+        entries = [e for e in self.list() if e.entity_path == entity_path]
+        if not entries:
+            return ScopeInfo(path=entity_path, entry_count=0, avg_confidence=0.0)
+        timestamps = [e.provenance.written_at for e in entries]
+        return ScopeInfo(
+            path=entity_path,
+            entry_count=len(entries),
+            avg_confidence=sum(e.confidence for e in entries) / len(entries),
+            keys=[e.key for e in entries],
+            oldest=min(timestamps),
+            newest=max(timestamps),
+        )
+
+    def tree(self, max_depth: int = 3) -> str:
+        """Render all entity paths as an indented tree with entry counts.
+
+        Example output::
+
+            myapp (5)
+              auth (2)
+              checkout-service (3)
+        """
+        entries = self.list()
+        path_counts: dict[str, int] = defaultdict(int)
+        for e in entries:
+            path_counts[e.entity_path] += 1
+
+        tree_nodes: dict[str, Any] = {}
+        for path in sorted(path_counts):
+            parts = path.split("/")[:max_depth]
+            node = tree_nodes
+            for part in parts:
+                node = node.setdefault(part, {})
+
+        lines: list[str] = []
+
+        def _walk(node: dict[str, Any], prefix: str, depth: int) -> None:
+            for name in sorted(node):
+                current = f"{prefix}/{name}" if prefix else name
+                count = sum(
+                    c for p, c in path_counts.items()
+                    if p == current or p.startswith(f"{current}/")
+                )
+                lines.append(f"{'  ' * depth}{name} ({count})")
+                if depth < max_depth - 1:
+                    _walk(node[name], current, depth + 1)
+
+        _walk(tree_nodes, "", 0)
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
     # Read tracker management
     # ------------------------------------------------------------------
 
@@ -413,3 +501,51 @@ class AgentMemory:
 
     def __exit__(self, *args: Any) -> None:
         self.close()
+
+
+class MemoryScope:
+    """A scoped view of :class:`AgentMemory` bound to a fixed entity path.
+
+    All operations are automatically routed to the underlying memory with
+    the configured *entity_path*.  When *readonly* is ``True``, writes
+    raise :class:`PermissionError`.
+    """
+
+    def __init__(
+        self,
+        memory: AgentMemory,
+        entity_path: str,
+        *,
+        readonly: bool = False,
+    ) -> None:
+        self._memory = memory
+        self._entity_path = entity_path
+        self._readonly = readonly
+
+    @property
+    def entity_path(self) -> str:
+        return self._entity_path
+
+    @property
+    def readonly(self) -> bool:
+        return self._readonly
+
+    def read(self, key: str, **kwargs: Any) -> MemoryEntry | None:
+        return self._memory.read(self._entity_path, key, **kwargs)
+
+    def write(self, key: str, value: Any, **kwargs: Any) -> MemoryEntry:
+        if self._readonly:
+            raise PermissionError("Read-only scope")
+        return self._memory.write(self._entity_path, key, value, **kwargs)
+
+    def list(self, **kwargs: Any) -> list[MemoryEntry]:
+        return self._memory.list(self._entity_path, **kwargs)
+
+    def search(self, **kwargs: Any) -> list[MemoryEntry]:
+        return self._memory.search(entity_path=self._entity_path, **kwargs)
+
+    def history(self, key: str, **kwargs: Any) -> list[MemoryEntry]:
+        return self._memory.history(self._entity_path, key, **kwargs)
+
+    def info(self) -> ScopeInfo:
+        return self._memory.info(self._entity_path)

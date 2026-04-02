@@ -6,7 +6,7 @@ import type { AmfsAdapter, WatchHandle } from "./adapter.js";
 import { InMemoryAdapter } from "./adapters/filesystem.js";
 import { defaultConfig } from "./config.js";
 import { CausalTagger, CoWEngine } from "./engine.js";
-import type { AMFSConfig, MemoryEntry } from "./models.js";
+import type { AMFSConfig, MemoryEntry, ScopeInfo } from "./models.js";
 import { OutcomeType } from "./models.js";
 import { OutcomeBackPropagator } from "./outcome.js";
 import { ReadTracker } from "./tracker.js";
@@ -19,6 +19,7 @@ export interface AgentMemoryOptions {
 
 export interface SearchOptions {
   entityPath?: string;
+  entityPaths?: string[];
   minConfidence?: number;
   agentId?: string;
   limit?: number;
@@ -102,31 +103,48 @@ export class AgentMemory {
     return this.engine.history(entityPath, key, options);
   }
 
-  /** Search entries with filters. */
+  /** Search entries with filters. Supports multi-scope via entityPaths. */
   search(options?: SearchOptions): MemoryEntry[] {
-    let entries = this.engine.list(options?.entityPath);
+    const paths =
+      options?.entityPaths ??
+      (options?.entityPath ? [options.entityPath] : [undefined]);
 
-    if (options?.minConfidence) {
-      entries = entries.filter((e) => e.confidence >= options.minConfidence!);
-    }
-    if (options?.agentId) {
-      entries = entries.filter(
-        (e) => e.provenance.agentId === options.agentId
-      );
+    const seenKeys = new Set<string>();
+    let merged: MemoryEntry[] = [];
+
+    for (const ep of paths) {
+      let entries = this.engine.list(ep);
+
+      if (options?.minConfidence) {
+        entries = entries.filter((e) => e.confidence >= options.minConfidence!);
+      }
+      if (options?.agentId) {
+        entries = entries.filter(
+          (e) => e.provenance.agentId === options.agentId
+        );
+      }
+
+      for (const entry of entries) {
+        const ek = `${entry.entityPath}/${entry.key}`;
+        if (!seenKeys.has(ek)) {
+          seenKeys.add(ek);
+          merged.push(entry);
+        }
+      }
     }
 
     const sortBy = options?.sortBy ?? "confidence";
     if (sortBy === "confidence") {
-      entries.sort((a, b) => b.confidence - a.confidence);
+      merged.sort((a, b) => b.confidence - a.confidence);
     } else if (sortBy === "recency") {
-      entries.sort((a, b) =>
+      merged.sort((a, b) =>
         b.provenance.writtenAt.localeCompare(a.provenance.writtenAt)
       );
     } else if (sortBy === "version") {
-      entries.sort((a, b) => b.version - a.version);
+      merged.sort((a, b) => b.version - a.version);
     }
 
-    return entries.slice(0, options?.limit ?? 100);
+    return merged.slice(0, options?.limit ?? 100);
   }
 
   /** Aggregate statistics about current memory state. */
@@ -220,8 +238,118 @@ export class AgentMemory {
     return this.propagator.propagate(record);
   }
 
+  /** Return a MemoryScope bound to the given entity path. */
+  scope(entityPath: string, options?: { readonly?: boolean }): MemoryScope {
+    return new MemoryScope(this, entityPath, options?.readonly ?? false);
+  }
+
+  /** Return all unique entity paths that contain at least one entry. */
+  listScopes(): string[] {
+    const entries = this.engine.list();
+    const paths = new Set(entries.map((e) => e.entityPath));
+    return [...paths].sort();
+  }
+
+  /** Return summary information about a single scope. */
+  info(entityPath: string): ScopeInfo {
+    const entries = this.engine.list().filter((e) => e.entityPath === entityPath);
+    if (entries.length === 0) {
+      return { path: entityPath, entryCount: 0, avgConfidence: 0, keys: [], oldest: null, newest: null };
+    }
+    const timestamps = entries.map((e) => e.provenance.writtenAt);
+    return {
+      path: entityPath,
+      entryCount: entries.length,
+      avgConfidence: entries.reduce((s, e) => s + e.confidence, 0) / entries.length,
+      keys: entries.map((e) => e.key),
+      oldest: timestamps.reduce((a, b) => (a < b ? a : b)),
+      newest: timestamps.reduce((a, b) => (a > b ? a : b)),
+    };
+  }
+
+  /** Render all entity paths as an indented tree with entry counts. */
+  tree(maxDepth = 3): string {
+    const entries = this.engine.list();
+    const pathCounts: Record<string, number> = {};
+    for (const e of entries) {
+      pathCounts[e.entityPath] = (pathCounts[e.entityPath] ?? 0) + 1;
+    }
+
+    type TreeNode = Record<string, TreeNode>;
+    const root: TreeNode = {};
+    for (const path of Object.keys(pathCounts).sort()) {
+      const parts = path.split("/").slice(0, maxDepth);
+      let node = root;
+      for (const part of parts) {
+        node[part] ??= {};
+        node = node[part];
+      }
+    }
+
+    const lines: string[] = [];
+    const walk = (node: TreeNode, prefix: string, depth: number): void => {
+      for (const name of Object.keys(node).sort()) {
+        const current = prefix ? `${prefix}/${name}` : name;
+        let count = 0;
+        for (const [p, c] of Object.entries(pathCounts)) {
+          if (p === current || p.startsWith(`${current}/`)) count += c;
+        }
+        lines.push(`${"  ".repeat(depth)}${name} (${count})`);
+        if (depth < maxDepth - 1) walk(node[name], current, depth + 1);
+      }
+    };
+
+    walk(root, "", 0);
+    return lines.join("\n");
+  }
+
   /** Reset the session read log. */
   clearReadLog(): void {
     this.readTracker.clear();
+  }
+}
+
+/**
+ * A scoped view of AgentMemory bound to a fixed entity path.
+ * When readonly is true, writes throw an error.
+ */
+export class MemoryScope {
+  readonly entityPath: string;
+  readonly isReadonly: boolean;
+  private memory: AgentMemory;
+
+  constructor(memory: AgentMemory, entityPath: string, isReadonly = false) {
+    this.memory = memory;
+    this.entityPath = entityPath;
+    this.isReadonly = isReadonly;
+  }
+
+  read(key: string, options?: { minConfidence?: number }): MemoryEntry | null {
+    return this.memory.read(this.entityPath, key, options);
+  }
+
+  write(
+    key: string,
+    value: unknown,
+    options?: { confidence?: number; ttlAt?: string | null; patternRefs?: string[] }
+  ): MemoryEntry {
+    if (this.isReadonly) throw new Error("Read-only scope");
+    return this.memory.write(this.entityPath, key, value, options);
+  }
+
+  list(options?: { includeSuperseded?: boolean }): MemoryEntry[] {
+    return this.memory.list(this.entityPath, options);
+  }
+
+  search(options?: Omit<SearchOptions, "entityPath" | "entityPaths">): MemoryEntry[] {
+    return this.memory.search({ ...options, entityPath: this.entityPath });
+  }
+
+  history(key: string, options?: { since?: string; until?: string }): MemoryEntry[] {
+    return this.memory.history(this.entityPath, key, options);
+  }
+
+  info(): ScopeInfo {
+    return this.memory.info(this.entityPath);
   }
 }

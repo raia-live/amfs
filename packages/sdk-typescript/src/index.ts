@@ -2,7 +2,7 @@
  * @amfs/sdk — Agent Memory File System TypeScript SDK
  */
 
-export { AgentMemory } from "./memory.js";
+export { AgentMemory, MemoryScope } from "./memory.js";
 export type { AgentMemoryOptions, SearchOptions, MemoryStats } from "./memory.js";
 export type { AmfsAdapter, WatchHandle } from "./adapter.js";
 export { createWatchHandle } from "./adapter.js";
@@ -23,4 +23,5 @@ export type {
   ArtifactRef,
   AMFSConfig,
   LayerConfig,
+  ScopeInfo,
 } from "./models.js";

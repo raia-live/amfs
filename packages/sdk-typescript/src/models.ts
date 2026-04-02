@@ -52,6 +52,15 @@ export interface OutcomeRecord {
   agentId: string;
 }
 
+export interface ScopeInfo {
+  path: string;
+  entryCount: number;
+  avgConfidence: number;
+  keys: string[];
+  oldest: string | null;
+  newest: string | null;
+}
+
 export interface LayerConfig {
   adapter: string;
   options: Record<string, unknown>;
