@@ -275,7 +275,7 @@ export class AgentMemory {
       pathCounts[e.entityPath] = (pathCounts[e.entityPath] ?? 0) + 1;
     }
 
-    type TreeNode = Record<string, TreeNode>;
+    interface TreeNode { [segment: string]: TreeNode }
     const root: TreeNode = {};
     for (const path of Object.keys(pathCounts).sort()) {
       const parts = path.split("/").slice(0, maxDepth);
