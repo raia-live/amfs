@@ -156,6 +156,23 @@ class OutcomeRecord(BaseModel):
     agent_id: str
 
 
+class RecallConfig(BaseModel):
+    """Weights for composite recall scoring."""
+
+    semantic_weight: float = 0.5
+    recency_weight: float = 0.3
+    confidence_weight: float = 0.2
+    recency_half_life_days: float = 30.0
+
+
+class ScoredEntry(BaseModel):
+    """A memory entry with composite recall score."""
+
+    entry: MemoryEntry
+    score: float
+    breakdown: dict[str, float] = Field(default_factory=dict)
+
+
 class SearchQuery(BaseModel):
     """Filters for searching across memory entries."""
 
@@ -168,6 +185,7 @@ class SearchQuery(BaseModel):
     pattern_ref: str | None = None
     limit: int = 100
     sort_by: str = "confidence"  # "confidence", "recency", "version"
+    recall_config: RecallConfig | None = None
 
 
 class MemoryStats(BaseModel):

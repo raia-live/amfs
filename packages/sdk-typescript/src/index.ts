@@ -23,5 +23,7 @@ export type {
   ArtifactRef,
   AMFSConfig,
   LayerConfig,
+  RecallConfig,
   ScopeInfo,
+  ScoredEntry,
 } from "./models.js";
