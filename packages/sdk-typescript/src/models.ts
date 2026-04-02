@@ -23,6 +23,13 @@ export interface Provenance {
   patternRefs: string[];
 }
 
+export interface ArtifactRef {
+  uri: string;
+  mediaType?: string | null;
+  label?: string | null;
+  sizeBytes?: number | null;
+}
+
 export interface MemoryEntry {
   amfsVersion: string;
   entityPath: string;
@@ -33,6 +40,7 @@ export interface MemoryEntry {
   confidence: number;
   outcomeCount: number;
   ttlAt: string | null;
+  artifactRefs?: ArtifactRef[];
 }
 
 export interface OutcomeRecord {

@@ -149,6 +149,7 @@ class AgentMemory:
         ttl_at: datetime | None = None,
         pattern_refs: list[str] | None = None,
         memory_type: MemoryType = MemoryType.FACT,
+        artifact_refs: list | None = None,
     ) -> MemoryEntry:
         """Write a new version of a key with automatic provenance.
 
@@ -195,6 +196,7 @@ class AgentMemory:
             ttl_at=ttl_at,
             pattern_refs=pattern_refs,
             memory_type=memory_type,
+            artifact_refs=artifact_refs,
         )
 
         if self._embedder is not None:

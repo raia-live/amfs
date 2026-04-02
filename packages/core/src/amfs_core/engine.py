@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from amfs_core.abc import AdapterABC
-from amfs_core.models import MemoryEntry, MemoryType, Provenance
+from amfs_core.models import ArtifactRef, MemoryEntry, MemoryType, Provenance
 
 ExternalContext = dict[str, Any]
 
@@ -172,6 +172,7 @@ class CoWEngine:
         ttl_at: datetime | None = None,
         pattern_refs: list[str] | None = None,
         memory_type: MemoryType = MemoryType.FACT,
+        artifact_refs: list[ArtifactRef] | None = None,
     ) -> MemoryEntry:
         """Write a new version of a key with CoW semantics.
 
@@ -191,6 +192,7 @@ class CoWEngine:
             confidence=confidence,
             outcome_count=current.outcome_count if current else 0,
             ttl_at=ttl_at,
+            artifact_refs=artifact_refs or [],
             memory_type=memory_type,
         )
 
