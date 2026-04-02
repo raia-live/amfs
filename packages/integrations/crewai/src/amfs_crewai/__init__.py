@@ -1,5 +1,3 @@
-"""AMFS CrewAI integration — AMFSTool for CrewAI agents."""
+from amfs_crewai.backend import AMFSStorageBackend
 
-from amfs_crewai.tool import AMFSTool
-
-__all__ = ["AMFSTool"]
+__all__ = ["AMFSStorageBackend"]

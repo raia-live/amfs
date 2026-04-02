@@ -26,6 +26,7 @@ members = [
     "packages/cli",
     "packages/mcp-server",
     "packages/http-server",
+    "packages/integrations/crewai",
 ]
 
 [tool.pytest.ini_options]
