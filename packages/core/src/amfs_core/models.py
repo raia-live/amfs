@@ -167,6 +167,7 @@ class TraceEntry(BaseModel):
     memory_type: str | None = None
     written_by: str | None = None
     read_at: datetime | None = None
+    duration_ms: float | None = None
 
 
 class ExternalContext(BaseModel):
@@ -188,6 +189,34 @@ class QueryEvent(BaseModel):
     occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class ErrorEvent(BaseModel):
+    """An error that occurred during a decision session."""
+
+    operation: str  # "read", "write", "search", "tool", "adapter"
+    error_type: str
+    message: str
+    stack_trace: str | None = None
+    occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ConfidenceChange(BaseModel):
+    """Records a confidence change caused by an outcome."""
+
+    entity_path: str
+    key: str
+    before: float
+    after: float
+    outcome_ref: str
+
+
+class MemoryStateDiff(BaseModel):
+    """Summary of memory changes during a session."""
+
+    entries_created: int = 0
+    entries_updated: int = 0
+    confidence_changes: list[ConfidenceChange] = Field(default_factory=list)
+
+
 class DecisionTrace(BaseModel):
     """A persisted record of the causal chain behind an outcome."""
 
@@ -200,6 +229,8 @@ class DecisionTrace(BaseModel):
     causal_entries: list[TraceEntry] = Field(default_factory=list)
     external_contexts: list[ExternalContext] = Field(default_factory=list)
     query_events: list[QueryEvent] = Field(default_factory=list)
+    error_events: list[ErrorEvent] = Field(default_factory=list)
+    state_diff: MemoryStateDiff | None = None
     session_started_at: datetime | None = None
     session_ended_at: datetime | None = None
     session_duration_ms: float | None = None

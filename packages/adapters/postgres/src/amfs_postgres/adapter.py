@@ -21,8 +21,10 @@ from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
     ArtifactRef,
     DecisionTrace,
+    ErrorEvent,
     ExternalContext,
     MemoryEntry,
+    MemoryStateDiff,
     MemoryStats,
     MemoryType,
     OutcomeRecord,
@@ -634,7 +636,8 @@ class PostgresAdapter(AdapterABC):
                     SELECT id, agent_id, session_id, outcome_ref, outcome_type,
                            decision_summary, causal_entries, external_contexts,
                            query_events, session_started_at, session_ended_at,
-                           session_duration_ms, created_at
+                           session_duration_ms,
+                           error_events, state_diff, created_at
                     FROM amfs_decision_traces
                     WHERE id = %s AND namespace = %s
                     """,
@@ -656,9 +659,10 @@ class PostgresAdapter(AdapterABC):
                         (namespace, agent_id, session_id, outcome_ref, outcome_type,
                          decision_summary, causal_entries, external_contexts,
                          query_events, session_started_at, session_ended_at,
-                         session_duration_ms, created_at)
+                         session_duration_ms,
+                         error_events, state_diff, created_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb,
-                            %s::jsonb, %s, %s, %s, %s)
+                            %s::jsonb, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
                     RETURNING id, created_at
                     """,
                     (
@@ -674,6 +678,8 @@ class PostgresAdapter(AdapterABC):
                         trace.session_started_at,
                         trace.session_ended_at,
                         trace.session_duration_ms,
+                        json.dumps([e.model_dump(mode="json") for e in trace.error_events]),
+                        json.dumps(trace.state_diff.model_dump(mode="json")) if trace.state_diff else None,
                         trace.created_at,
                     ),
                 )
@@ -709,7 +715,8 @@ class PostgresAdapter(AdapterABC):
             SELECT id, agent_id, session_id, outcome_ref, outcome_type,
                    decision_summary, causal_entries, external_contexts,
                    query_events, session_started_at, session_ended_at,
-                   session_duration_ms, created_at
+                   session_duration_ms,
+                   error_events, state_diff, created_at
             FROM amfs_decision_traces
             WHERE {where}
             ORDER BY created_at DESC
@@ -732,12 +739,18 @@ class PostgresAdapter(AdapterABC):
         ce_raw = row["causal_entries"] or []
         ec_raw = row["external_contexts"] or []
         qe_raw = row.get("query_events") or []
+        ee_raw = row.get("error_events") or []
+        sd_raw = row.get("state_diff")
         if isinstance(ce_raw, str):
             ce_raw = json.loads(ce_raw)
         if isinstance(ec_raw, str):
             ec_raw = json.loads(ec_raw)
         if isinstance(qe_raw, str):
             qe_raw = json.loads(qe_raw)
+        if isinstance(ee_raw, str):
+            ee_raw = json.loads(ee_raw)
+        if isinstance(sd_raw, str):
+            sd_raw = json.loads(sd_raw)
 
         duration = row.get("session_duration_ms")
         if duration is not None:
@@ -753,6 +766,8 @@ class PostgresAdapter(AdapterABC):
             causal_entries=[TraceEntry(**e) for e in ce_raw],
             external_contexts=[ExternalContext(**c) for c in ec_raw],
             query_events=[QueryEvent(**q) for q in qe_raw],
+            error_events=[ErrorEvent(**e) for e in ee_raw],
+            state_diff=MemoryStateDiff(**sd_raw) if sd_raw else None,
             session_started_at=row.get("session_started_at"),
             session_ended_at=row.get("session_ended_at"),
             session_duration_ms=duration,

@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS amfs_decision_traces (
     causal_entries JSONB DEFAULT '[]',
     external_contexts JSONB DEFAULT '[]',
     query_events JSONB DEFAULT '[]',
+    error_events JSONB DEFAULT '[]',
+    state_diff JSONB,
     session_started_at TIMESTAMPTZ,
     session_ended_at TIMESTAMPTZ,
     session_duration_ms NUMERIC,

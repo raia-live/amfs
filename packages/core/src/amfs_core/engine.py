@@ -56,6 +56,8 @@ class ReadTracker:
         self._contexts: list[ExternalContext] = []
         self._queries: list[dict] = []
         self._session_started_at: datetime = datetime.now(timezone.utc)
+        self._errors: list[dict] = []
+        self._writes: list[dict] = []
 
     def record(self, entry: MemoryEntry) -> None:
         """Record that an entry was read during this session."""
@@ -97,6 +99,39 @@ class ReadTracker:
     def external_contexts(self) -> list[ExternalContext]:
         """All external contexts recorded in this session, in order."""
         return list(self._contexts)
+
+    def record_error(
+        self,
+        operation: str,
+        error_type: str,
+        message: str,
+        stack_trace: str | None = None,
+    ) -> None:
+        """Record an error that occurred during this session."""
+        self._errors.append({
+            "operation": operation,
+            "error_type": error_type,
+            "message": message,
+            "stack_trace": stack_trace,
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    @property
+    def error_events(self) -> list[dict]:
+        return list(self._errors)
+
+    def record_write(self, entity_path: str, key: str, version: int, is_new: bool) -> None:
+        """Record a write operation for state diff computation."""
+        self._writes.append({
+            "entity_path": entity_path,
+            "key": key,
+            "version": version,
+            "is_new": is_new,
+        })
+
+    @property
+    def write_events(self) -> list[dict]:
+        return list(self._writes)
 
     @property
     def read_count(self) -> int:
@@ -142,6 +177,8 @@ class ReadTracker:
         self._entries.clear()
         self._contexts.clear()
         self._queries.clear()
+        self._errors.clear()
+        self._writes.clear()
 
     def contains(self, entry_key: str) -> bool:
         return entry_key in self._reads
