@@ -31,9 +31,11 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │  │  Row-Level Security · OAuth/OIDC · Rate Limiting     │ │
 │  └──────────────────────────────────────────────────────┘ │
 │                                                          │
-│  ┌─ Persistent Decision Traces ─────────────────────────┐ │
-│  │  Durable Causal Chains · Historical explain()        │ │
-│  │  Precedent Search · Cross-Session Trace Queries      │ │
+│  ┌─ Immutable Decision Trace Store ────────────────────┐ │
+│  │  Durable Causal Chains · Cryptographic Integrity     │ │
+│  │  LLM Call Spans · Token/Cost Tracking · Replay       │ │
+│  │  Enriched Traces · Error Events · State Diff         │ │
+│  │  OpenTelemetry Export · Precedent Search              │ │
 │  └──────────────────────────────────────────────────────┘ │
 │                                                          │
 │  ┌─ Cross-System Ingestion ───────────────────────────┐   │
@@ -49,12 +51,14 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │  ┌─ Intelligence Layer ─────────────────────────────────┐ │
 │  │  Extraction · Critic · Distiller · Safety · Retrieval │ │
 │  │  Learned Ranking · Confidence Calibration · ML Export │ │
+│  │  Auto Entity/Relationship Extraction from Traces     │ │
 │  └──────────────────────────────────────────────────────┘ │
 │                                                          │
 │  ┌─ Dashboard ──────────────────────────────────────────┐ │
-│  │  Memory Explorer · Context Graph · Trace Explorer     │ │
+│  │  Memory Explorer · Interactive Causal Graph           │ │
+│  │  Trace Detail with Enriched Context · Agent Graph     │ │
 │  │  API Key Console · Audit Viewer · Usage Analytics    │ │
-│  │  Pattern Alerts · Team Management                     │ │
+│  │  Pattern Detection · Team Management · Snapshots     │ │
 │  └──────────────────────────────────────────────────────┘ │
 │                                                          │
 ├──────────────────────────────────────────────────────────┤
@@ -62,7 +66,9 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │                                                          │
 │  CoW Engine · Memory Types · Provenance Tiers             │
 │  Temporal Queries · Session-Level Causal Explainability   │
+│  Enriched Decision Traces · Query/Error Event Tracking    │
 │  Composite Recall Scoring · Multi-Scope Search            │
+│  Per-Agent Memory Graph · Agent Activity Timeline         │
 │  Connector Framework · CLI · Built-in Connectors          │
 │  Webhook Receiver · Adapters (FS, Postgres, S3)           │
 │  HTTP/REST API · MCP Server · Python SDK · TS SDK · CLI   │
@@ -84,6 +90,9 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | Provenance tiers (production-validated → manual) | Yes | Yes |
 | Temporal queries (`history`) | Yes | Yes |
 | Session-level causal explainability (`explain`) | Yes | Yes |
+| Enriched decision traces (query events, error events, state diff) | Yes | Yes |
+| Session timing and per-operation latency tracking | Yes | Yes |
+| Per-agent memory graph and activity timeline | Yes | Yes |
 | Composite recall scoring | Yes | Yes |
 | Multi-scope search | Yes | Yes |
 | **Connectors** | | |
@@ -112,8 +121,12 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | OAuth 2.0 / OIDC for dashboard users | — | Yes |
 | Append-only audit logging | — | Yes |
 | Usage quotas + sliding-window rate limiting | — | Yes |
-| **Persistent Decision Traces (Pro)** | | |
+| **Immutable Decision Trace Store (Pro)** | | |
 | Durable causal chains across sessions | — | Yes |
+| Cryptographic signing (HMAC-SHA256) and Merkle chain linking | — | Yes |
+| LLM call span tracking (model, tokens, cost, latency) | — | Yes |
+| Write events, tool calls, and agent interaction recording | — | Yes |
+| OpenTelemetry export (GenAI semantic conventions) | — | Yes |
 | Historical `explain(outcome_ref)` | — | Yes |
 | `search_traces` / precedent search API | — | Yes |
 | Cross-agent, cross-session trace queries | — | Yes |
@@ -132,6 +145,7 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | Alert callbacks (Slack, PagerDuty, email routing) | — | Yes |
 | **Intelligence Layer (Pro)** | | |
 | LLM-driven memory extraction | — | Yes |
+| Auto entity/relationship extraction from traces | — | Yes |
 | Automated memory critic | — | Yes |
 | Memory distillation & bootstrap sets | — | Yes |
 | Memory safety validation | — | Yes |
@@ -140,13 +154,15 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | Adaptive confidence calibration | — | Yes |
 | Training data export (SFT, DPO, reward model) | — | Yes |
 | **Dashboard (Pro)** | | |
-| Memory explorer with context graph visualization | — | Yes |
-| Decision trace explorer (expandable causal chains) | — | Yes |
-| Pattern alert monitoring | — | Yes |
-| Team & user management | — | Yes |
-| API key management console | — | Yes |
-| Audit log viewer | — | Yes |
+| Memory explorer with interactive causal graph | — | Yes |
+| Decision trace explorer with enriched context and causal graph | — | Yes |
+| Per-agent memory graph and activity timeline | — | Yes |
+| Pattern detection dashboard with severity indicators | — | Yes |
+| Team & user management with roles | — | Yes |
+| API key management console with scopes | — | Yes |
+| Audit log viewer with search/filter | — | Yes |
 | Usage analytics & quota monitoring | — | Yes |
+| Snapshot capture, compare, and export | — | Yes |
 | Extended MCP server (Pro tools) | — | Yes |
 
 ---
@@ -240,9 +256,24 @@ Agents can only access memory within their permitted scope — this is **permiss
 
 **Usage Quotas** — Tiered limits on entries, API keys, users, and decision traces. Hard-capped at the database level, with external billing integration (Stripe, etc.) for metering. Three tiers: Starter, Team, Enterprise (unlimited).
 
-### Persistent Decision Traces
+### Immutable Decision Trace Store
 
-The OSS `explain()` only works within the active session. Pro persists the full causal chain — which AMFS entries were read, which external tools were consulted, what decision was made, and what outcome occurred — so it's queryable forever.
+The OSS `explain()` only works within the active session and captures enriched trace data (query events, error events, session timing, state diffs). Pro builds on this with persistent, cryptographically signed, immutable traces — the full causal chain is queryable forever.
+
+**OSS trace enrichment** — every `commit_outcome` automatically captures:
+
+- **Session timing** — `session_started_at`, `session_ended_at`, `session_duration_ms`
+- **Query events** — every `search()` and `list()` call with parameters, result counts, and per-operation latency
+- **Error events** — any errors during reads, writes, or tool calls
+- **State diff** — entries created, updated, and confidence changes during the session
+- **Full entry snapshots** — `value`, `memory_type`, and `written_by` captured at read time
+
+**Pro immutable traces** add:
+
+- **Cryptographic integrity** — HMAC-SHA256 content hashing with Merkle chain linking across sessions
+- **LLM call spans** — model, provider, prompt/completion token counts, cost, latency, temperature, finish reason
+- **Write events, tool calls, agent interactions** — full record of every action
+- **Token and cost aggregates** — `total_llm_calls`, `total_tokens`, `total_cost_usd` per trace
 
 ```python
 from amfs_traces import TraceRecorder, InMemoryTraceStore
@@ -252,6 +283,13 @@ recorder = TraceRecorder(memory, store, account_id=acct.id)
 # Reads and external contexts are tracked automatically
 recorder.memory.read("svc", "retry-pattern")
 recorder.memory.record_context("pagerduty", "3 SEV-1", source="PagerDuty API")
+
+# Record LLM calls for token/cost tracking
+recorder.record_llm_call(
+    model="gpt-4o", provider="openai",
+    prompt_tokens=1200, completion_tokens=450,
+    latency_ms=2340, cost_usd=0.0285,
+)
 
 # Outcome commits automatically persist the trace
 updated, trace = recorder.commit_outcome("DEP-500", OutcomeType.CLEAN_DEPLOY)
@@ -333,6 +371,8 @@ Features: severity filtering, entity-path scoping, cooldown-based suppression (p
 
 **Extraction** — Turns raw text (conversations, logs, documents) into structured memory operations using LLMs. The extractor classifies each piece of information as an **ADD**, **UPDATE**, **DELETE**, or **NOOP** operation.
 
+**Auto Entity & Relationship Extraction** — Automatically extracts entities (services, people, tools, infrastructure) and relationships (depends_on, uses, manages, monitors) from decision traces and memory entries using LLMs. Extracted data is stored in dedicated tables with confidence scores, temporal validity, and trace provenance. Enable with `AMFS_AUTO_EXTRACT=true`.
+
 **Memory Critic** — Automated quality analyzer that scans the memory store and detects five issue classes: Toxic (repeated negative correlations), Stale, Contradictory, Uncalibrated, and Orphaned entries.
 
 **Memory Distiller** — Compacts large stores into smaller, higher-quality sets via pruning, consolidation, and bootstrap set generation for agent onboarding.
@@ -349,21 +389,35 @@ A web dashboard (Next.js 15 + React 19) for exploring memory, visualizing decisi
 
 | Page | Description |
 |:-----|:------------|
-| **Overview** | Account-wide stats, recent activity, health indicators |
-| **Memory Explorer** | Browse entities, view entries with confidence badges, version history |
-| **Context Graph** | Interactive D3 force-directed graph of entity relationships and causal chains |
-| **Decision Traces** | Expandable trace cards with causal entries, external contexts, outcome badges, and search |
+| **Overview** | Account-wide stats, recent activity, health indicators, live SSE status |
+| **Entities** | Browse entities, view entries with confidence badges, version history, provenance details |
+| **Traces** | Enriched trace cards with causal entries (full values), external contexts, query/error events, session timing, outcome badges, and search/filter |
+| **Trace Detail** | Full trace view with interactive causal graph (D3), timeline, entry snapshots, and state diff |
+| **Agents** | Per-agent overview with memory graph visualization (entity relationships, read/write activity) and activity timeline |
 | **Incidents** | Incident timeline with causal chain drill-down |
-| **Patterns** | Detected pattern dashboard with severity indicators |
-| **Teams** | User and role management |
+| **Patterns** | Detected pattern dashboard (recurring failures, hot entities, stale clusters, confidence drift) with severity indicators and resolution tracking |
+| **Teams** | Team CRUD with member management (admin, developer, viewer roles) |
+| **Snapshots** | Memory snapshot capture, comparison, and JSON export |
 | **API Keys** | Key management console with scopes, rate limits, expiry, and usage |
 | **Audit Log** | Searchable, filterable log of all state-changing operations |
 | **Usage & Quotas** | Quota progress bars, request metrics, top agents/entities breakdown |
 | **Pro Tools** | Retrieval playground, critic panel, distiller view, calibration dashboard, training data export |
 
+### OpenTelemetry Export
+
+Export AMFS decision traces as OpenTelemetry spans for integration with existing observability stacks (Jaeger, Grafana Tempo, Datadog, Honeycomb). Traces are mapped to hierarchical spans following GenAI semantic conventions — each LLM call becomes a `gen_ai` span, and memory operations become `amfs` spans.
+
+```python
+from amfs_otel import TraceExporter, configure_otel
+
+configure_otel(endpoint="http://localhost:4317", service_name="my-agent")
+exporter = TraceExporter()
+exporter.export_trace(trace)  # sends spans to your OTel collector
+```
+
 ### Pro MCP Server
 
-Extends the OSS MCP server with 7 additional tools:
+Extends the OSS MCP server with 8 additional tools:
 
 | Tool | Description |
 |:-----|:------------|
@@ -374,6 +428,7 @@ Extends the OSS MCP server with 7 additional tools:
 | `amfs_retrain` | Train the learned ranking model from outcome data |
 | `amfs_calibrate` | Learn optimal confidence multipliers from outcome history |
 | `amfs_export_training_data` | Export decision traces as SFT/DPO/reward model datasets |
+| `amfs_record_llm_call` | Record an LLM call with model, tokens, cost, and latency |
 
 ---
 
@@ -443,7 +498,12 @@ The Pro API layer wraps `AgentMemory` and `CoWEngine` with authentication, tenan
 | Multi-tenant SaaS with account isolation | **Pro** |
 | Scoped API keys per agent/tool | **Pro** |
 | Compliance audit logging | **Pro** |
-| Persistent decision traces that survive sessions | **Pro** |
+| Enriched decision traces with error/query events and session timing | OSS |
+| Per-agent memory graph and activity timeline | OSS |
+| Immutable, cryptographically signed traces | **Pro** |
+| LLM call span tracking with token/cost analytics | **Pro** |
+| OpenTelemetry export for existing observability stacks | **Pro** |
+| Auto entity/relationship extraction from traces | **Pro** |
 | Precedent search ("how did we handle similar situations?") | **Pro** |
 | Auto-ingest PagerDuty/Slack/GitHub events | **Pro** (connectors) |
 | Detect recurring failure patterns automatically | **Pro** (pattern detection) |

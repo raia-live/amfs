@@ -156,10 +156,20 @@ commit_outcome(
     causal_entry_keys: list[str] | None = None,
     *,
     causal_confidence: float = 1.0,
+    decision_summary: str | None = None,
 ) -> list[MemoryEntry]
 ```
 
 Record an outcome and update confidence on causal entries. If `causal_entry_keys` is `None`, uses auto-causal linking (all entries read in this session).
+
+The optional `decision_summary` parameter adds a human-readable description of the decision to the persisted trace.
+
+When called, the trace automatically captures:
+- **Causal entry snapshots** with full `value`, `memory_type`, `written_by`, and `read_at` timestamps
+- **Query events** from all `search()` and `list()` calls during the session, with parameters, result counts, and per-operation latency
+- **Error events** from any failed operations
+- **Session timing** — `session_started_at`, `session_ended_at`, `session_duration_ms`
+- **State diff** — entries created, updated, and confidence changes
 
 ---
 
@@ -481,6 +491,21 @@ When using the [HTTP API server](/amfs/guides/http-server/), the following REST 
 | `POST` | `/api/v1/outcomes` | Commit outcome |
 | `GET` | `/api/v1/outcomes` | List outcomes |
 
+### Decision Traces
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/traces` | List decision traces (supports `?outcome_type=`, `?agent_id=`, `?limit=`) |
+| `GET` | `/api/v1/traces/{trace_id}` | Get full trace detail with causal entries, external contexts, query/error events, state diff |
+
+### Agents
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/agents` | List agents with entry counts, entities touched, and last active time |
+| `GET` | `/api/v1/agents/{agent_id}/memory-graph` | Get agent's memory graph (entities and entries touched) |
+| `GET` | `/api/v1/agents/{agent_id}/activity` | Get agent's activity timeline (writes, outcomes, traces) |
+
 ### Observability
 
 | Method | Path | Description |
@@ -489,7 +514,22 @@ When using the [HTTP API server](/amfs/guides/http-server/), the following REST 
 | `POST` | `/api/v1/context` | Record external context |
 | `GET` | `/api/v1/explain` | Causal trace |
 | `GET` | `/api/v1/stream` | SSE event stream |
+| `GET` | `/api/v1/admin/usage` | Usage statistics and metrics |
 | `GET` | `/health` | Health check |
+
+### Admin — API Keys
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/admin/api-keys` | List API keys |
+| `POST` | `/api/v1/admin/api-keys` | Create a new API key |
+| `DELETE` | `/api/v1/admin/api-keys/{key_id}` | Revoke an API key |
+
+### Admin — Audit Log
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/admin/audit` | List audit log entries |
 
 Authentication is via the `X-AMFS-API-Key` header. Set `AMFS_API_KEYS` to enable. Interactive API docs are available at `/docs` (Swagger UI).
 
@@ -577,3 +617,22 @@ amfs_export_training_data(
 ```
 
 Export decision traces as fine-tuning datasets. Format options: `"sft"` (supervised fine-tuning), `"dpo"` (direct preference optimization), `"reward_model"` (reward model training). See the [ML Layer guide](/amfs/guides/ml-layer/) for format details.
+
+### amfs_record_llm_call
+
+```
+amfs_record_llm_call(
+    model: str,
+    provider: str = "",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    latency_ms: float = 0,
+    cost_usd: float = 0,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    finish_reason: str | None = None,
+    error: str | None = None,
+) -> str (JSON)
+```
+
+Record an LLM call in the current decision trace. Captures model, provider, token counts, cost, latency, and sampling parameters. Aggregated as `total_llm_calls`, `total_tokens`, and `total_cost_usd` in the trace.

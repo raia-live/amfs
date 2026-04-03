@@ -192,6 +192,49 @@ Entries validated by positive outcomes decay slower. Entries correlated with inc
 
 ---
 
+## Enriched Decision Traces
+
+When `commit_outcome()` is called, AMFS automatically captures a rich snapshot of the session:
+
+```python
+# Everything below is captured automatically — no extra instrumentation needed
+mem.read("checkout-service", "retry-pattern")
+mem.search(entity_path="checkout-service", min_confidence=0.5)
+mem.record_context("pagerduty", "No active incidents", source="PagerDuty API")
+mem.write("checkout-service", "deploy-v2.14", {"version": "2.14.0"})
+
+mem.commit_outcome("DEP-500", OutcomeType.CLEAN_DEPLOY,
+                    decision_summary="Deployed after verifying retry pattern")
+```
+
+The resulting trace includes:
+
+| Field | Description |
+|:------|:------------|
+| `causal_entries` | Full snapshots of every read entry (value, memory_type, written_by, read_at, duration_ms) |
+| `external_contexts` | All `record_context()` calls with timestamps |
+| `query_events` | Every `search()` and `list()` call with parameters, result counts, and per-operation latency |
+| `error_events` | Any errors during reads, writes, or tool calls |
+| `state_diff` | Entries created, entries updated, and detailed confidence changes |
+| `session_started_at` / `session_ended_at` / `session_duration_ms` | Session timing |
+| `decision_summary` | Optional human-readable summary |
+
+---
+
+## Per-Agent Memory Graph
+
+AMFS tracks which agents interact with which entities, enabling per-agent memory views:
+
+```
+GET /api/v1/agents                              → list all agents
+GET /api/v1/agents/{agent_id}/memory-graph       → agent's entity relationships
+GET /api/v1/agents/{agent_id}/activity           → timeline of writes and outcomes
+```
+
+The agent memory graph shows every entity an agent has read from or written to, with entry counts and relationship types — giving you a complete picture of any agent's knowledge footprint.
+
+---
+
 ## Immutability and Replay
 
 Because AMFS uses Copy-on-Write versioning, decision traces are **immutable**. You can reconstruct the exact state of the world at any past decision point:
@@ -211,6 +254,17 @@ state_at_decision = versions[-1] if versions else None
 ```
 
 This is the difference between a system of record (stores the current state) and a context graph (stores the decision lineage). AMFS preserves both.
+
+### Pro: Immutable Decision Trace Store
+
+Pro extends OSS traces with cryptographic guarantees and advanced telemetry:
+
+- **HMAC-SHA256 signing** — every trace is signed with `content_hash` and chained to the previous trace via `parent_hash`, forming a Merkle chain that detects tampering
+- **LLM call spans** — record model, provider, prompt/completion tokens, cost, latency, temperature, and finish reason for every LLM call during a session
+- **Write events, tool calls, agent interactions** — full audit trail of every action
+- **OpenTelemetry export** — export traces as OTel spans following GenAI semantic conventions, compatible with Jaeger, Grafana Tempo, Datadog, and Honeycomb
+- **Auto entity extraction** — LLM-powered extraction of entities (services, people, tools) and relationships (depends_on, uses, manages) from trace data
+- **Immutability enforcement** — Postgres RULEs block UPDATE and DELETE on the trace table
 
 ---
 

@@ -75,6 +75,41 @@ Both `AMFS_API_URL` and `NEXT_PUBLIC_AMFS_API_URL` should be set to the same val
 
 ---
 
+## Decision Traces (Pro)
+
+| Variable | Description | Default |
+|:---------|:------------|:--------|
+| `AMFS_TRACE_SIGNING_KEY` | HMAC signing key for immutable trace integrity. When set, all immutable traces are cryptographically signed and linked via Merkle chains. | — |
+
+---
+
+## OpenTelemetry Export (Pro)
+
+| Variable | Description | Default |
+|:---------|:------------|:--------|
+| `AMFS_OTEL_ENDPOINT` | OpenTelemetry collector endpoint (gRPC) | `http://localhost:4317` |
+| `AMFS_OTEL_SERVICE_NAME` | Service name for OTel spans | `amfs` |
+
+---
+
+## Auto Entity Extraction (Pro)
+
+| Variable | Description | Default |
+|:---------|:------------|:--------|
+| `AMFS_AUTO_EXTRACT` | Enable automatic entity/relationship extraction from traces (`true`/`false`) | `false` |
+| `AMFS_EXTRACTION_MODEL` | LLM model to use for extraction | `gpt-4o-mini` |
+| `AMFS_EXTRACTION_PROVIDER` | LLM provider for extraction (`openai`, `anthropic`) | `openai` |
+
+---
+
+## ML Layer (Pro)
+
+| Variable | Description | Default |
+|:---------|:------------|:--------|
+| `AMFS_ML_MODEL_DIR` | Directory for learned ranking model checkpoints | — |
+
+---
+
 ## Auto-Detection (Read-Only)
 
 These are set by IDEs and read by AMFS for agent identity detection. You don't set these yourself.
