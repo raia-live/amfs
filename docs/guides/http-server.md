@@ -85,6 +85,21 @@ The server is available at `http://localhost:8080` with interactive API docs at 
 |:-------|:-----|:------------|
 | `GET` | `/api/v1/patterns` | List unique pattern_refs with usage counts |
 
+### Decision Traces
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/traces` | List decision traces with enriched data (query events, error events, state diff, session timing) |
+| `GET` | `/api/v1/traces/{trace_id}` | Get full trace detail |
+
+### Agents
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/agents` | List agents with entry counts and last activity |
+| `GET` | `/api/v1/agents/{agent_id}/memory-graph` | Get agent's entity relationship graph |
+| `GET` | `/api/v1/agents/{agent_id}/activity` | Get agent's activity timeline |
+
 ### Observability
 
 | Method | Path | Description |
@@ -93,7 +108,22 @@ The server is available at `http://localhost:8080` with interactive API docs at 
 | `POST` | `/api/v1/context` | Record external context in the causal chain |
 | `GET` | `/api/v1/explain` | Get the causal trace for the current session |
 | `GET` | `/api/v1/stream` | SSE stream of real-time memory events |
+| `GET` | `/api/v1/admin/usage` | Usage statistics and metrics |
 | `GET` | `/health` | Health check |
+
+### Admin — API Keys
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/admin/api-keys` | List API keys |
+| `POST` | `/api/v1/admin/api-keys` | Create a new API key |
+| `DELETE` | `/api/v1/admin/api-keys/{key_id}` | Revoke an API key |
+
+### Admin — Audit Log
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/admin/audit` | List audit log entries |
 
 ### Admin — Teams (Pro)
 

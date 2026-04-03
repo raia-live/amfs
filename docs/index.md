@@ -90,6 +90,8 @@ entry = mem.read("checkout-service", "risk-race-condition")
 | **Provenance tiers** | Automatically tier entries by quality: production-validated, observed, dev, or manual. |
 | **Temporal queries** | Retrieve the full version history of any entry, filtered by time range. |
 | **Causal explainability** | Inspect which entries were read and how they connect to outcomes. |
+| **Enriched decision traces** | Traces capture full entry snapshots, query/error events, session timing, and state diffs. |
+| **Per-agent memory graph** | View any agent's complete knowledge footprint across entities. |
 | **Provenance tracking** | Every entry records which agent wrote it, when, and from which session. |
 | **Artifact references** | Link entries to external blobs in S3, local files, or URLs. |
 | **HTTP/REST API** | FastAPI server with 12 endpoints, SSE streaming, and API key auth. |
@@ -149,7 +151,7 @@ curl http://localhost:8080/api/v1/entries/checkout-service/retry-pattern
 
 ## OSS vs Pro
 
-AMFS is available in two editions. The open-source layer provides the full memory primitive — versioning, confidence, outcomes, adapters, and MCP. The Pro layer adds a multi-tenant SaaS foundation (RBAC, scoped API keys, Postgres RLS), persistent decision traces, cross-system ingestion (PagerDuty, Slack, GitHub webhooks), automated pattern detection and alerting, LLM-powered intelligence, and an enterprise dashboard.
+AMFS is available in two editions. The open-source layer provides the full memory primitive — versioning, confidence, outcomes, enriched decision traces, per-agent memory graphs, adapters, and MCP. The Pro layer adds a multi-tenant SaaS foundation (RBAC, scoped API keys, Postgres RLS), immutable decision trace store with cryptographic integrity and LLM call tracking, OpenTelemetry export, auto entity extraction, cross-system ingestion (PagerDuty, Slack, GitHub webhooks), automated pattern detection and alerting, LLM-powered intelligence, and an interactive dashboard with causal graph visualization.
 
 [Compare editions](/amfs/editions/){: .btn .btn-outline .fs-5 .mb-4 .mb-md-0 }
 [AMFS vs Vector DBs](/amfs/vs-vector-databases/){: .btn .btn-outline .fs-5 .mb-4 .mb-md-0 }

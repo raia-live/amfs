@@ -268,6 +268,18 @@ Or configure the MCP server to connect to the remote AMFS HTTP API, so all your 
 
 ---
 
+## Seeding Test Data
+
+A comprehensive seed script is included for development and testing. It populates all tables with realistic, interconnected data:
+
+```bash
+AMFS_POSTGRES_DSN=postgresql://amfs:amfs@localhost:5432/amfs python scripts/seed_database.py
+```
+
+This seeds memory entries across 7 entities and 5 agents, decision traces with rich causal chains, detected patterns, teams with members, API keys, audit log entries, and more. Run it after your Docker Compose stack is up.
+
+---
+
 ## Production Checklist
 
 - [ ] Set `AMFS_API_KEYS` to enable authentication
