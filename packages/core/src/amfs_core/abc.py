@@ -128,6 +128,17 @@ class AdapterABC(ABC):
                 return entry
         return None
 
+    def get_trace(self, trace_id: str) -> DecisionTrace | None:
+        """Return a single trace by ID, or None if not found.
+
+        Default implementation scans ``list_traces()``; adapters with
+        indexed storage (e.g. Postgres) should override for O(1) lookup.
+        """
+        for t in self.list_traces(limit=10_000):
+            if t.id == trace_id:
+                return t
+        return None
+
     def save_trace(self, trace: DecisionTrace) -> DecisionTrace:
         """Persist a decision trace. Default is a no-op; adapters with
         persistent storage (e.g. Postgres) should override."""

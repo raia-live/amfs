@@ -622,6 +622,44 @@ class PostgresAdapter(AdapterABC):
     # decision traces
     # ------------------------------------------------------------------
 
+    def get_trace(self, trace_id: str) -> "DecisionTrace | None":
+        from amfs_core.models import DecisionTrace, TraceEntry, ExternalContext
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, agent_id, session_id, outcome_ref, outcome_type,
+                           decision_summary, causal_entries, external_contexts, created_at
+                    FROM amfs_decision_traces
+                    WHERE id = %s AND namespace = %s
+                    """,
+                    (trace_id, self._namespace),
+                )
+                row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        ce_raw = row["causal_entries"] or []
+        ec_raw = row["external_contexts"] or []
+        if isinstance(ce_raw, str):
+            ce_raw = json.loads(ce_raw)
+        if isinstance(ec_raw, str):
+            ec_raw = json.loads(ec_raw)
+        return DecisionTrace(
+            id=str(row["id"]),
+            agent_id=row["agent_id"],
+            session_id=row["session_id"],
+            outcome_ref=row.get("outcome_ref"),
+            outcome_type=row.get("outcome_type"),
+            decision_summary=row.get("decision_summary"),
+            causal_entries=[TraceEntry(**e) for e in ce_raw],
+            external_contexts=[ExternalContext(**c) for c in ec_raw],
+            created_at=row["created_at"],
+            namespace=self._namespace,
+        )
+
     def save_trace(self, trace: "DecisionTrace") -> "DecisionTrace":
         from amfs_core.models import DecisionTrace, TraceEntry, ExternalContext
 

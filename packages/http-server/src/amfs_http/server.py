@@ -400,6 +400,19 @@ async def list_traces(
     return {"traces": [t.model_dump(mode="json") for t in traces]}
 
 
+@app.get("/api/v1/traces/{trace_id}")
+async def get_trace(
+    trace_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    trace = mem._adapter.get_trace(trace_id)
+    if trace is None:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "Trace not found"}, status_code=404)
+    return trace.model_dump(mode="json")
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Admin — Usage
 # ──────────────────────────────────────────────────────────────────────
