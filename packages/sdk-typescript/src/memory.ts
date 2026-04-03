@@ -21,7 +21,10 @@ export interface SearchOptions {
   entityPath?: string;
   entityPaths?: string[];
   minConfidence?: number;
+  maxConfidence?: number;
   agentId?: string;
+  since?: string;
+  patternRef?: string;
   limit?: number;
   sortBy?: "confidence" | "recency" | "version";
   recallConfig?: RecallConfig;
@@ -121,9 +124,22 @@ export class AgentMemory {
       if (options?.minConfidence) {
         entries = entries.filter((e) => e.confidence >= options.minConfidence!);
       }
+      if (options?.maxConfidence != null) {
+        entries = entries.filter((e) => e.confidence <= options.maxConfidence!);
+      }
       if (options?.agentId) {
         entries = entries.filter(
           (e) => e.provenance.agentId === options.agentId
+        );
+      }
+      if (options?.since) {
+        const sinceTs = options.since;
+        entries = entries.filter((e) => e.provenance.writtenAt >= sinceTs);
+      }
+      if (options?.patternRef) {
+        const ref = options.patternRef;
+        entries = entries.filter(
+          (e) => e.provenance.patternRefs.includes(ref)
         );
       }
 

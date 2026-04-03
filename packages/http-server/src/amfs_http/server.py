@@ -14,14 +14,16 @@ Run directly::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import secrets
 from datetime import datetime
 from typing import Any
 
 import uvicorn
-from fastapi import Depends, FastAPI, Query
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
@@ -30,7 +32,18 @@ from amfs.config import load_config_or_default
 from amfs_core.models import AMFSConfig, LayerConfig, MemoryEntry
 
 from amfs_http.auth import verify_api_key
-from amfs_http.models import ContextRequest, OutcomeRequest, SearchRequest, WriteRequest
+from amfs_http.models import (
+    AddTeamMemberRequest,
+    ContextRequest,
+    CreateAPIKeyRequest,
+    CreateTeamRequest,
+    OutcomeRequest,
+    RunPatternDetectionRequest,
+    SearchRequest,
+    UpdateTeamMemberRequest,
+    UpdateTeamRequest,
+    WriteRequest,
+)
 from amfs_http.sse import SSEManager
 
 logger = logging.getLogger(__name__)
@@ -51,6 +64,13 @@ app.add_middleware(
 
 _memory: AgentMemory | None = None
 _sse_manager = SSEManager()
+
+try:
+    from amfs_traces.api import mount_pro_routes
+    mount_pro_routes(app)
+    logger.info("Pro trace endpoints mounted at /api/v1/pro/traces")
+except ImportError:
+    pass
 
 
 def _get_memory() -> AgentMemory:
@@ -158,6 +178,7 @@ async def read_entry(
 @app.post("/api/v1/entries")
 async def write_entry(
     req: WriteRequest,
+    request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     mem = _get_memory()
@@ -178,6 +199,11 @@ async def write_entry(
         memory_type=mt,
     )
     _sse_manager.broadcast(entry)
+    _audit_log(
+        "memory.write",
+        resource=f"{req.entity_path}/{req.key}",
+        ip_address=request.client.host if request.client else None,
+    )
     return _entry_to_response(entry)
 
 
@@ -185,10 +211,10 @@ async def write_entry(
 async def list_entries(
     entity_path: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     mem = _get_memory()
     entries = mem.list(entity_path)
-    return [_entry_to_response(e) for e in entries]
+    return {"entries": [_entry_to_response(e) for e in entries]}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -205,7 +231,10 @@ async def search_entries(
     results = mem.search(
         entity_path=req.entity_path,
         min_confidence=req.min_confidence,
+        max_confidence=req.max_confidence,
         agent_id=req.agent_id,
+        since=req.since,
+        pattern_ref=req.pattern_ref,
         sort_by=req.sort_by,
         limit=req.limit,
     )
@@ -278,6 +307,7 @@ _OUTCOME_TYPE_MAP = {
 @app.post("/api/v1/outcomes")
 async def commit_outcome(
     req: OutcomeRequest,
+    request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     mem = _get_memory()
@@ -293,6 +323,11 @@ async def commit_outcome(
         causal_entry_keys=req.causal_entry_keys,
         causal_confidence=req.causal_confidence,
     )
+    _audit_log(
+        "outcome.commit",
+        resource=req.outcome_ref,
+        ip_address=request.client.host if request.client else None,
+    )
     return {
         "outcome_ref": req.outcome_ref,
         "outcome_type": req.outcome_type,
@@ -307,7 +342,7 @@ async def list_outcomes(
     since: str | None = Query(None),
     limit: int = Query(100),
     _auth: str | None = Depends(verify_api_key),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     mem = _get_memory()
     since_dt = datetime.fromisoformat(since) if since else None
     records = mem._adapter.list_outcomes(
@@ -315,7 +350,7 @@ async def list_outcomes(
         since=since_dt,
         limit=limit,
     )
-    return [r.model_dump(mode="json") for r in records]
+    return {"outcomes": [r.model_dump(mode="json") for r in records]}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -340,6 +375,782 @@ async def explain(
 ) -> dict[str, Any]:
     mem = _get_memory()
     return mem.explain(outcome_ref)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Decision Traces
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/traces")
+async def list_traces(
+    entity_path: str | None = Query(None),
+    agent_id: str | None = Query(None),
+    outcome_type: str | None = Query(None),
+    limit: int = Query(100),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    traces = mem._adapter.list_traces(
+        entity_path=entity_path,
+        agent_id=agent_id,
+        outcome_type=outcome_type,
+        limit=limit,
+    )
+    return {"traces": [t.model_dump(mode="json") for t in traces]}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Admin — Usage
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/admin/usage")
+async def get_usage(
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    st = mem.stats()
+    outcomes = mem._adapter.list_outcomes(limit=10000)
+
+    top_agents = sorted(st.agents.items(), key=lambda x: x[1], reverse=True)[:10]
+    top_entities = sorted(st.entities.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    return {
+        "requestsToday": 0,
+        "requestsThisMonth": 0,
+        "peakRpm": 0,
+        "avgLatencyMs": 0,
+        "quotas": [
+            {"label": "Memory entries", "current": st.total_entries, "limit": 0},
+            {"label": "Decision traces", "current": len(outcomes), "limit": 0},
+            {"label": "API keys", "current": 0, "limit": 0},
+            {"label": "Users", "current": st.total_agents, "limit": 0},
+        ],
+        "topAgents": [
+            {"agentId": aid, "requests": count} for aid, count in top_agents
+        ],
+        "topEntities": [
+            {"entityPath": ep, "reads": 0, "writes": count}
+            for ep, count in top_entities
+        ],
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Admin — API Keys
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _get_db_pool():
+    """Return the underlying database pool if using the Postgres adapter."""
+    mem = _get_memory()
+    adapter = mem._adapter
+    if hasattr(adapter, "_pool"):
+        return adapter._pool
+    return None
+
+
+def _audit_log(
+    action: str,
+    *,
+    resource: str | None = None,
+    actor_type: str = "api_key",
+    actor_name: str = "api",
+    ip_address: str | None = None,
+) -> None:
+    """Write an entry to the audit log. Silently no-ops without Postgres."""
+    pool = _get_db_pool()
+    if pool is None:
+        return
+    try:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO amfs_audit_log
+                           (actor_type, actor_name, action, resource, ip_address)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (actor_type, actor_name, action, resource, ip_address),
+                )
+    except Exception:
+        logger.debug("Failed to write audit log", exc_info=True)
+
+
+@app.get("/api/v1/admin/api-keys")
+async def list_api_keys(
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    pool = _get_db_pool()
+    if pool is None:
+        return {"keys": []}
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, name, prefix, key_type, active, scopes,
+                          rate_limit_rpm, last_used, created_at, expires_at
+                   FROM amfs_api_keys ORDER BY created_at DESC"""
+            )
+            rows = cur.fetchall()
+    keys = []
+    for row in rows:
+        scopes = row["scopes"] or []
+        if isinstance(scopes, str):
+            scopes = json.loads(scopes)
+        keys.append({
+            "id": str(row["id"]),
+            "name": row["name"],
+            "prefix": row["prefix"],
+            "keyType": row["key_type"],
+            "active": row["active"],
+            "scopes": scopes,
+            "rateLimitRpm": row["rate_limit_rpm"],
+            "lastUsed": row["last_used"].isoformat() if row["last_used"] else None,
+            "createdAt": row["created_at"].isoformat(),
+            "expiresAt": row["expires_at"].isoformat() if row["expires_at"] else None,
+        })
+    return {"keys": keys}
+
+
+@app.post("/api/v1/admin/api-keys")
+async def create_api_key(
+    req: CreateAPIKeyRequest,
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    pool = _get_db_pool()
+    if pool is None:
+        return {"error": "API key management requires a Postgres backend"}
+
+    raw_key = f"amfs_{secrets.token_urlsafe(32)}"
+    prefix = raw_key[:12]
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO amfs_api_keys
+                       (name, key_hash, prefix, key_type, scopes, rate_limit_rpm, expires_at)
+                   VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s)
+                   RETURNING id, created_at""",
+                (
+                    req.name,
+                    key_hash,
+                    prefix,
+                    req.key_type,
+                    json.dumps(req.scopes),
+                    req.rate_limit_rpm,
+                    req.expires_at,
+                ),
+            )
+            row = cur.fetchone()
+
+    _audit_log(
+        "api_key.create",
+        resource=req.name,
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {
+        "id": str(row["id"]),
+        "name": req.name,
+        "key": raw_key,
+        "prefix": prefix,
+        "keyType": req.key_type,
+        "createdAt": row["created_at"].isoformat(),
+    }
+
+
+@app.delete("/api/v1/admin/api-keys/{key_id}")
+async def revoke_api_key(
+    key_id: str,
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    pool = _get_db_pool()
+    if pool is None:
+        return {"error": "API key management requires a Postgres backend"}
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE amfs_api_keys SET active = FALSE WHERE id = %s::uuid RETURNING id, name",
+                (key_id,),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return {"error": "Key not found"}
+    _audit_log(
+        "api_key.revoke",
+        resource=row.get("name", key_id),
+        ip_address=request.client.host if request.client else None,
+    )
+    return {"revoked": str(row["id"])}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Admin — Audit Log
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/admin/audit")
+async def list_audit_log(
+    action: str | None = Query(None),
+    limit: int = Query(200),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    pool = _get_db_pool()
+    if pool is None:
+        return {"entries": []}
+
+    conditions = ["1=1"]
+    params: list[Any] = []
+
+    if action is not None and action != "all":
+        conditions.append("action = %s")
+        params.append(action)
+
+    where = " AND ".join(conditions)
+    sql = f"""
+        SELECT id, actor_type, actor_name, action, resource,
+               ip_address, created_at
+        FROM amfs_audit_log
+        WHERE {where}
+        ORDER BY created_at DESC
+        LIMIT %s
+    """
+    params.append(limit)
+
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    entries = []
+    for row in rows:
+        entries.append({
+            "id": str(row["id"]),
+            "actorType": row["actor_type"],
+            "actorName": row["actor_name"],
+            "action": row["action"],
+            "resource": row["resource"],
+            "ipAddress": row["ip_address"],
+            "createdAt": row["created_at"].isoformat(),
+        })
+    return {"entries": entries}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Patterns — OSS: list pattern_refs used across entries
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/patterns")
+async def list_patterns(
+    entity_path: str | None = Query(None),
+    limit: int = Query(100),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """List unique pattern_refs used across memory entries with usage counts."""
+    mem = _get_memory()
+    entries = mem.list(entity_path)
+
+    pattern_counts: dict[str, int] = {}
+    pattern_entities: dict[str, set[str]] = {}
+    for entry in entries:
+        for ref in entry.provenance.pattern_refs:
+            pattern_counts[ref] = pattern_counts.get(ref, 0) + 1
+            if ref not in pattern_entities:
+                pattern_entities[ref] = set()
+            pattern_entities[ref].add(entry.entity_path)
+
+    sorted_patterns = sorted(pattern_counts.items(), key=lambda x: x[1], reverse=True)[:limit]
+    return {
+        "patterns": [
+            {
+                "pattern_ref": ref,
+                "usage_count": count,
+                "entity_paths": sorted(pattern_entities[ref]),
+            }
+            for ref, count in sorted_patterns
+        ],
+        "total": len(pattern_counts),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Admin — Teams (Pro)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/admin/teams")
+async def list_teams(
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    pool = _get_db_pool()
+    if pool is None:
+        return {"teams": []}
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT t.id, t.name, t.slug, t.description,
+                          t.created_at, t.updated_at,
+                          COUNT(m.id) AS member_count
+                   FROM amfs_teams t
+                   LEFT JOIN amfs_team_members m ON m.team_id = t.id
+                   GROUP BY t.id
+                   ORDER BY t.created_at DESC"""
+            )
+            rows = cur.fetchall()
+    return {
+        "teams": [
+            {
+                "id": str(row["id"]),
+                "name": row["name"],
+                "slug": row["slug"],
+                "description": row["description"],
+                "memberCount": row["member_count"],
+                "createdAt": row["created_at"].isoformat(),
+                "updatedAt": row["updated_at"].isoformat(),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/api/v1/admin/teams")
+async def create_team(
+    req: CreateTeamRequest,
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    pool = _get_db_pool()
+    if pool is None:
+        return {"error": "Team management requires a Postgres backend"}
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO amfs_teams (name, slug, description)
+                   VALUES (%s, %s, %s)
+                   RETURNING id, created_at, updated_at""",
+                (req.name, req.slug, req.description),
+            )
+            row = cur.fetchone()
+    _audit_log(
+        "team.create",
+        resource=req.slug,
+        ip_address=request.client.host if request.client else None,
+    )
+    return {
+        "id": str(row["id"]),
+        "name": req.name,
+        "slug": req.slug,
+        "description": req.description,
+        "createdAt": row["created_at"].isoformat(),
+        "updatedAt": row["updated_at"].isoformat(),
+    }
+
+
+@app.patch("/api/v1/admin/teams/{team_id}")
+async def update_team(
+    team_id: str,
+    req: UpdateTeamRequest,
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    pool = _get_db_pool()
+    if pool is None:
+        return {"error": "Team management requires a Postgres backend"}
+
+    updates: list[str] = []
+    params: list[Any] = []
+    if req.name is not None:
+        updates.append("name = %s")
+        params.append(req.name)
+    if req.description is not None:
+        updates.append("description = %s")
+        params.append(req.description)
+
+    if not updates:
+        return {"error": "No fields to update"}
+
+    updates.append("updated_at = NOW()")
+    params.append(team_id)
+
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""UPDATE amfs_teams SET {', '.join(updates)}
+                    WHERE id = %s::uuid
+                    RETURNING id, name, slug, description, created_at, updated_at""",
+                params,
+            )
+            row = cur.fetchone()
+
+    if row is None:
+        return {"error": "Team not found"}
+    _audit_log(
+        "team.update",
+        resource=str(row["slug"]),
+        ip_address=request.client.host if request.client else None,
+    )
+    return {
+        "id": str(row["id"]),
+        "name": row["name"],
+        "slug": row["slug"],
+        "description": row["description"],
+        "createdAt": row["created_at"].isoformat(),
+        "updatedAt": row["updated_at"].isoformat(),
+    }
+
+
+@app.delete("/api/v1/admin/teams/{team_id}")
+async def delete_team(
+    team_id: str,
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    pool = _get_db_pool()
+    if pool is None:
+        return {"error": "Team management requires a Postgres backend"}
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM amfs_teams WHERE id = %s::uuid RETURNING id, slug",
+                (team_id,),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return {"error": "Team not found"}
+    _audit_log(
+        "team.delete",
+        resource=row.get("slug", team_id),
+        ip_address=request.client.host if request.client else None,
+    )
+    return {"deleted": str(row["id"])}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Admin — Team Members (Pro)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/admin/teams/{team_id}/members")
+async def list_team_members(
+    team_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    pool = _get_db_pool()
+    if pool is None:
+        return {"members": []}
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, email, display_name, role,
+                          invited_at, accepted_at, created_at
+                   FROM amfs_team_members
+                   WHERE team_id = %s::uuid
+                   ORDER BY created_at""",
+                (team_id,),
+            )
+            rows = cur.fetchall()
+    return {
+        "members": [
+            {
+                "id": str(row["id"]),
+                "email": row["email"],
+                "displayName": row["display_name"],
+                "role": row["role"],
+                "invitedAt": row["invited_at"].isoformat(),
+                "acceptedAt": row["accepted_at"].isoformat() if row["accepted_at"] else None,
+                "createdAt": row["created_at"].isoformat(),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/api/v1/admin/teams/{team_id}/members")
+async def add_team_member(
+    team_id: str,
+    req: AddTeamMemberRequest,
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    pool = _get_db_pool()
+    if pool is None:
+        return {"error": "Team management requires a Postgres backend"}
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO amfs_team_members (team_id, email, display_name, role)
+                   VALUES (%s::uuid, %s, %s, %s)
+                   RETURNING id, invited_at, created_at""",
+                (team_id, req.email, req.display_name, req.role),
+            )
+            row = cur.fetchone()
+    _audit_log(
+        "team.member.add",
+        resource=f"{team_id}/{req.email}",
+        ip_address=request.client.host if request.client else None,
+    )
+    return {
+        "id": str(row["id"]),
+        "teamId": team_id,
+        "email": req.email,
+        "displayName": req.display_name,
+        "role": req.role,
+        "invitedAt": row["invited_at"].isoformat(),
+        "createdAt": row["created_at"].isoformat(),
+    }
+
+
+@app.patch("/api/v1/admin/teams/{team_id}/members/{member_id}")
+async def update_team_member(
+    team_id: str,
+    member_id: str,
+    req: UpdateTeamMemberRequest,
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    pool = _get_db_pool()
+    if pool is None:
+        return {"error": "Team management requires a Postgres backend"}
+
+    updates: list[str] = []
+    params: list[Any] = []
+    if req.role is not None:
+        updates.append("role = %s")
+        params.append(req.role)
+    if req.display_name is not None:
+        updates.append("display_name = %s")
+        params.append(req.display_name)
+
+    if not updates:
+        return {"error": "No fields to update"}
+
+    params.extend([member_id, team_id])
+
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""UPDATE amfs_team_members SET {', '.join(updates)}
+                    WHERE id = %s::uuid AND team_id = %s::uuid
+                    RETURNING id, email, display_name, role, invited_at, accepted_at, created_at""",
+                params,
+            )
+            row = cur.fetchone()
+
+    if row is None:
+        return {"error": "Member not found"}
+    _audit_log(
+        "team.member.update",
+        resource=f"{team_id}/{row['email']}",
+        ip_address=request.client.host if request.client else None,
+    )
+    return {
+        "id": str(row["id"]),
+        "email": row["email"],
+        "displayName": row["display_name"],
+        "role": row["role"],
+        "invitedAt": row["invited_at"].isoformat(),
+        "acceptedAt": row["accepted_at"].isoformat() if row["accepted_at"] else None,
+        "createdAt": row["created_at"].isoformat(),
+    }
+
+
+@app.delete("/api/v1/admin/teams/{team_id}/members/{member_id}")
+async def remove_team_member(
+    team_id: str,
+    member_id: str,
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    pool = _get_db_pool()
+    if pool is None:
+        return {"error": "Team management requires a Postgres backend"}
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """DELETE FROM amfs_team_members
+                   WHERE id = %s::uuid AND team_id = %s::uuid
+                   RETURNING id, email""",
+                (member_id, team_id),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return {"error": "Member not found"}
+    _audit_log(
+        "team.member.remove",
+        resource=f"{team_id}/{row['email']}",
+        ip_address=request.client.host if request.client else None,
+    )
+    return {"deleted": str(row["id"])}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Admin — Pattern Detection (Pro)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/admin/patterns")
+async def list_detected_patterns(
+    pattern_type: str | None = Query(None),
+    severity: str | None = Query(None),
+    resolved: bool | None = Query(None),
+    limit: int = Query(100),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """List previously detected patterns from the database."""
+    pool = _get_db_pool()
+    if pool is None:
+        return {"patterns": []}
+
+    conditions = ["1=1"]
+    params: list[Any] = []
+
+    if pattern_type is not None:
+        conditions.append("pattern_type = %s")
+        params.append(pattern_type)
+    if severity is not None:
+        conditions.append("severity = %s")
+        params.append(severity)
+    if resolved is not None:
+        conditions.append("resolved = %s")
+        params.append(resolved)
+
+    where = " AND ".join(conditions)
+    sql = f"""
+        SELECT id, pattern_type, severity, entity_path, description,
+               details, resolved, detected_at, resolved_at
+        FROM amfs_detected_patterns
+        WHERE {where}
+        ORDER BY detected_at DESC
+        LIMIT %s
+    """
+    params.append(limit)
+
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    return {
+        "patterns": [
+            {
+                "id": str(row["id"]),
+                "patternType": row["pattern_type"],
+                "severity": row["severity"],
+                "entityPath": row["entity_path"],
+                "description": row["description"],
+                "details": row["details"] or {},
+                "resolved": row["resolved"],
+                "detectedAt": row["detected_at"].isoformat(),
+                "resolvedAt": row["resolved_at"].isoformat() if row["resolved_at"] else None,
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/api/v1/admin/patterns/scan")
+async def run_pattern_scan(
+    req: RunPatternDetectionRequest,
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Run the pattern detector and persist results."""
+    try:
+        from amfs_patterns import PatternDetector
+    except ImportError:
+        return {"error": "amfs-patterns package not installed"}
+
+    mem = _get_memory()
+    entries = mem.list(req.entity_path)
+    outcomes = mem._adapter.list_outcomes(entity_path=req.entity_path, limit=10000)
+
+    detector = PatternDetector(
+        incident_threshold=req.incident_threshold,
+        stale_days=req.stale_days,
+        hot_entity_stddev=req.hot_entity_stddev,
+        drift_stddev=req.drift_stddev,
+    )
+    report = detector.analyze(entries, outcome_data=outcomes)
+
+    pool = _get_db_pool()
+    persisted = 0
+    if pool is not None:
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                for p in report.patterns:
+                    cur.execute(
+                        """INSERT INTO amfs_detected_patterns
+                               (pattern_type, severity, entity_path, description,
+                                details, detected_at)
+                           VALUES (%s, %s, %s, %s, %s::jsonb, %s)""",
+                        (
+                            p.pattern_type,
+                            p.severity,
+                            p.entity_path,
+                            p.description,
+                            json.dumps(p.details, default=str),
+                            p.detected_at,
+                        ),
+                    )
+                    persisted += 1
+
+    _audit_log(
+        "patterns.scan",
+        resource=req.entity_path or "*",
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {
+        "scannedEntries": report.scanned_entries,
+        "scannedOutcomes": report.scanned_outcomes,
+        "scanDurationMs": round(report.scan_duration_ms, 2),
+        "patternsFound": len(report.patterns),
+        "patternsPersisted": persisted,
+        "patterns": [
+            {
+                "patternType": p.pattern_type,
+                "severity": p.severity,
+                "entityPath": p.entity_path,
+                "description": p.description,
+                "details": p.details,
+                "detectedAt": p.detected_at.isoformat(),
+            }
+            for p in report.patterns
+        ],
+    }
+
+
+@app.patch("/api/v1/admin/patterns/{pattern_id}/resolve")
+async def resolve_pattern(
+    pattern_id: str,
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Mark a detected pattern as resolved."""
+    pool = _get_db_pool()
+    if pool is None:
+        return {"error": "Pattern management requires a Postgres backend"}
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE amfs_detected_patterns
+                   SET resolved = TRUE, resolved_at = NOW()
+                   WHERE id = %s::uuid
+                   RETURNING id, pattern_type, entity_path""",
+                (pattern_id,),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return {"error": "Pattern not found"}
+    _audit_log(
+        "patterns.resolve",
+        resource=pattern_id,
+        ip_address=request.client.host if request.client else None,
+    )
+    return {"resolved": str(row["id"]), "patternType": row["pattern_type"]}
 
 
 # ──────────────────────────────────────────────────────────────────────

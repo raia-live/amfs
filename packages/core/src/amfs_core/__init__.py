@@ -15,6 +15,8 @@ from amfs_core.lifecycle import LifecycleManager
 from amfs_core.models import (
     AMFSConfig,
     ConflictPolicy,
+    DecisionTrace,
+    ExternalContext,
     LayerConfig,
     MemoryEntry,
     MemoryStats,
@@ -23,6 +25,7 @@ from amfs_core.models import (
     Provenance,
     SearchQuery,
     SemanticQuery,
+    TraceEntry,
 )
 from amfs_core.outcome import OutcomeBackPropagator
 
@@ -34,8 +37,10 @@ __all__ = [
     "CausalTagger",
     "ConflictPolicy",
     "CoWEngine",
+    "DecisionTrace",
     "EmbedderABC",
     "EntryNotFoundError",
+    "ExternalContext",
     "LayerConfig",
     "LifecycleManager",
     "LockTimeoutError",
@@ -49,6 +54,7 @@ __all__ = [
     "SearchQuery",
     "SemanticQuery",
     "StaleWriteError",
+    "TraceEntry",
     "VersionConflictError",
     "WatchHandle",
     "cosine_similarity",

@@ -200,7 +200,10 @@ def amfs_search(
     query: str | None = None,
     entity_path: str | None = None,
     min_confidence: float = 0.0,
+    max_confidence: float | None = None,
     agent_id: str | None = None,
+    since: str | None = None,
+    pattern_ref: str | None = None,
     sort_by: str = "confidence",
     limit: int = 20,
 ) -> str:
@@ -213,17 +216,27 @@ def amfs_search(
         query: Optional text to match in keys/values (basic substring match)
         entity_path: Filter to a specific entity path
         min_confidence: Minimum confidence threshold (0.0-1.0)
+        max_confidence: Maximum confidence threshold (0.0-1.0)
         agent_id: Filter to entries from a specific agent
+        since: Optional ISO timestamp to filter entries written after this time
+        pattern_ref: Filter to entries tagged with this pattern reference
         sort_by: Sort order — "confidence", "recency", or "version"
         limit: Maximum results to return
 
     Example: amfs_search(entity_path="checkout-service", min_confidence=0.5)
     """
+    from datetime import datetime as dt
+
     mem = _get_memory()
+    since_dt = dt.fromisoformat(since) if since else None
+
     results = mem.search(
         entity_path=entity_path,
         min_confidence=min_confidence,
+        max_confidence=max_confidence,
         agent_id=agent_id,
+        since=since_dt,
+        pattern_ref=pattern_ref,
         sort_by=sort_by,
         limit=limit,
     )

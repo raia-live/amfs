@@ -163,6 +163,31 @@ class PostgresAdapter(AdapterABC):
         return entry
 
     # ------------------------------------------------------------------
+    # read_at_version (historical)
+    # ------------------------------------------------------------------
+
+    def read_at_version(
+        self,
+        entity_path: str,
+        key: str,
+        version: int,
+    ) -> MemoryEntry | None:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM amfs_memory_entries
+                    WHERE namespace = %s AND entity_path = %s AND key = %s
+                      AND version = %s
+                    """,
+                    (self._namespace, entity_path, key, version),
+                )
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_entry(row)
+
+    # ------------------------------------------------------------------
     # write
     # ------------------------------------------------------------------
 
@@ -594,6 +619,102 @@ class PostgresAdapter(AdapterABC):
         return results
 
     # ------------------------------------------------------------------
+    # decision traces
+    # ------------------------------------------------------------------
+
+    def save_trace(self, trace: "DecisionTrace") -> "DecisionTrace":
+        from amfs_core.models import DecisionTrace, TraceEntry, ExternalContext
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_decision_traces
+                        (namespace, agent_id, session_id, outcome_ref, outcome_type,
+                         decision_summary, causal_entries, external_contexts, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+                    RETURNING id, created_at
+                    """,
+                    (
+                        self._namespace,
+                        trace.agent_id,
+                        trace.session_id,
+                        trace.outcome_ref,
+                        trace.outcome_type,
+                        trace.decision_summary,
+                        json.dumps([e.model_dump(mode="json") for e in trace.causal_entries]),
+                        json.dumps([c.model_dump(mode="json") for c in trace.external_contexts]),
+                        trace.created_at,
+                    ),
+                )
+                row = cur.fetchone()
+        return trace.model_copy(update={"id": str(row["id"]), "created_at": row["created_at"]})
+
+    def list_traces(
+        self,
+        *,
+        entity_path: str | None = None,
+        agent_id: str | None = None,
+        outcome_type: str | None = None,
+        limit: int = 100,
+    ) -> list["DecisionTrace"]:
+        from amfs_core.models import DecisionTrace, TraceEntry, ExternalContext
+
+        conditions = ["namespace = %s"]
+        params: list[Any] = [self._namespace]
+
+        if entity_path is not None:
+            conditions.append(
+                "EXISTS (SELECT 1 FROM jsonb_array_elements(causal_entries) AS ce "
+                "WHERE ce->>'entity_path' = %s)"
+            )
+            params.append(entity_path)
+        if agent_id is not None:
+            conditions.append("agent_id = %s")
+            params.append(agent_id)
+        if outcome_type is not None:
+            conditions.append("outcome_type = %s")
+            params.append(outcome_type)
+
+        where = " AND ".join(conditions)
+        sql = f"""
+            SELECT id, agent_id, session_id, outcome_ref, outcome_type,
+                   decision_summary, causal_entries, external_contexts, created_at
+            FROM amfs_decision_traces
+            WHERE {where}
+            ORDER BY created_at DESC
+            LIMIT %s
+        """
+        params.append(limit)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        results: list[DecisionTrace] = []
+        for row in rows:
+            ce_raw = row["causal_entries"] or []
+            ec_raw = row["external_contexts"] or []
+            if isinstance(ce_raw, str):
+                ce_raw = json.loads(ce_raw)
+            if isinstance(ec_raw, str):
+                ec_raw = json.loads(ec_raw)
+            results.append(DecisionTrace(
+                id=str(row["id"]),
+                agent_id=row["agent_id"],
+                session_id=row["session_id"],
+                outcome_ref=row.get("outcome_ref"),
+                outcome_type=row.get("outcome_type"),
+                decision_summary=row.get("decision_summary"),
+                causal_entries=[TraceEntry(**e) for e in ce_raw],
+                external_contexts=[ExternalContext(**c) for c in ec_raw],
+                created_at=row["created_at"],
+                namespace=self._namespace,
+            ))
+        return results
+
+    # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
 
@@ -601,7 +722,10 @@ class PostgresAdapter(AdapterABC):
     def _row_to_entry(row: dict[str, Any]) -> MemoryEntry:
         value = row["value"]
         if isinstance(value, str):
-            value = json.loads(value)
+            try:
+                value = json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                pass
         raw_type = row.get("memory_type", "fact")
         try:
             memory_type = MemoryType(raw_type)

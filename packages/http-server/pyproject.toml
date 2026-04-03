@@ -12,6 +12,9 @@ dependencies = [
     "sse-starlette>=2.0",
 ]
 
+[project.optional-dependencies]
+pro = ["amfs-patterns"]
+
 [project.scripts]
 amfs-http = "amfs_http.server:main"
 
