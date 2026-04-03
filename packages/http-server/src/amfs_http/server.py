@@ -413,6 +413,154 @@ async def get_trace(
     return trace.model_dump(mode="json")
 
 
+@app.post("/api/v1/traces/{trace_id}/explain")
+async def explain_trace(
+    trace_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    from fastapi.responses import JSONResponse
+
+    api_key = os.environ.get("AMFS_LLM_API_KEY", "")
+    if not api_key:
+        return JSONResponse(
+            {"error": "LLM not configured. Set AMFS_LLM_API_KEY to enable AI explanations."},
+            status_code=503,
+        )
+
+    mem = _get_memory()
+    trace = mem._adapter.get_trace(trace_id)
+    if trace is None:
+        return JSONResponse({"error": "Trace not found"}, status_code=404)
+
+    provider = os.environ.get("AMFS_LLM_PROVIDER", "openai")
+    model = os.environ.get("AMFS_LLM_MODEL", "gpt-4o-mini")
+
+    td = trace.model_dump(mode="json")
+
+    entries_desc = []
+    for e in td.get("causal_entries", []):
+        desc = f"- {e['entity_path']}/{e['key']} (v{e['version']}, confidence: {e['confidence']:.0%})"
+        if e.get("value"):
+            desc += f"\n  Value: {json.dumps(e['value'], default=str)}"
+        if e.get("memory_type"):
+            desc += f"\n  Type: {e['memory_type']}"
+        if e.get("written_by"):
+            desc += f"\n  Written by: {e['written_by']}"
+        entries_desc.append(desc)
+
+    contexts_desc = []
+    for c in td.get("external_contexts", []):
+        desc = f"- {c['label']}: {c['summary']}"
+        if c.get("source"):
+            desc += f" (source: {c['source']})"
+        contexts_desc.append(desc)
+
+    queries_desc = []
+    for q in td.get("query_events", []):
+        desc = f"- {q['operation']}({json.dumps(q.get('parameters', {}))}) → {q.get('result_count', 0)} results"
+        if q.get("duration_ms"):
+            desc += f" in {q['duration_ms']:.1f}ms"
+        queries_desc.append(desc)
+
+    errors_desc = []
+    for e in td.get("error_events", []):
+        errors_desc.append(f"- [{e['operation']}] {e['error_type']}: {e['message']}")
+
+    diff_desc = ""
+    sd = td.get("state_diff")
+    if sd:
+        diff_desc = f"Entries created: {sd.get('entries_created', 0)}, updated: {sd.get('entries_updated', 0)}"
+        for cc in sd.get("confidence_changes", []):
+            diff_desc += f"\n  {cc['entity_path']}/{cc['key']}: {cc['before']:.0%} → {cc['after']:.0%}"
+
+    duration_str = ""
+    if td.get("session_duration_ms"):
+        mins = td["session_duration_ms"] / 60000
+        duration_str = f"{mins:.0f} minutes" if mins >= 1 else f"{td['session_duration_ms']:.0f}ms"
+
+    prompt = f"""You are analyzing an AI agent's decision trace from AMFS (Agent Memory File System). Your job is to explain what happened in clear, actionable language that helps a human understand the agent's reasoning and the impact of its decision.
+
+DECISION TRACE DATA:
+- Agent: {td.get('agent_id')}
+- Outcome Reference: {td.get('outcome_ref', 'None')}
+- Outcome Type: {td.get('outcome_type', 'None')}
+- Decision Summary: {td.get('decision_summary', 'No summary provided')}
+- Session Duration: {duration_str or 'Unknown'}
+
+MEMORY ENTRIES READ (what the agent knew):
+{chr(10).join(entries_desc) if entries_desc else 'None'}
+
+EXTERNAL SOURCES CONSULTED:
+{chr(10).join(contexts_desc) if contexts_desc else 'None'}
+
+SEARCHES PERFORMED:
+{chr(10).join(queries_desc) if queries_desc else 'None'}
+
+ERRORS ENCOUNTERED:
+{chr(10).join(errors_desc) if errors_desc else 'None'}
+
+STATE CHANGES:
+{diff_desc or 'None'}
+
+Respond with a JSON object containing these fields:
+- "narrative": A 2-3 paragraph human-readable story explaining what happened. Start with what the agent was trying to do, then what information it gathered and from where, then what decision it made and why, and finally what the outcome was. Use specific data values from the trace. Write as if explaining to a team lead.
+- "key_findings": An array of 3-5 bullet points highlighting the most important facts that influenced the decision. Each should be a complete sentence.
+- "risk_assessment": A paragraph assessing risks. For incidents/regressions, explain what went wrong. For clean deploys, explain what risks were mitigated and what could still go wrong.
+- "confidence_analysis": A paragraph explaining why the confidence levels are what they are, referencing specific before/after changes if available.
+- "recommendations": An array of 2-4 actionable recommendations for what should happen next based on this decision trace.
+
+Return ONLY valid JSON, no markdown formatting."""
+
+    try:
+        if provider == "openai":
+            try:
+                from openai import OpenAI
+            except ImportError:
+                return JSONResponse(
+                    {"error": "openai package not installed. Run: pip install openai"},
+                    status_code=503,
+                )
+            client = OpenAI(api_key=api_key)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                response_format={"type": "json_object"},
+            )
+            result_text = response.choices[0].message.content or "{}"
+        elif provider == "anthropic":
+            try:
+                from anthropic import Anthropic
+            except ImportError:
+                return JSONResponse(
+                    {"error": "anthropic package not installed. Run: pip install anthropic"},
+                    status_code=503,
+                )
+            client = Anthropic(api_key=api_key)
+            response = client.messages.create(
+                model=model,
+                max_tokens=2000,
+                messages=[{"role": "user", "content": prompt + "\n\nRespond with JSON only."}],
+            )
+            result_text = response.content[0].text
+        else:
+            return JSONResponse({"error": f"Unsupported LLM provider: {provider}"}, status_code=400)
+
+        explanation = json.loads(result_text)
+
+        for field in ["narrative", "key_findings", "risk_assessment", "confidence_analysis", "recommendations"]:
+            if field not in explanation:
+                explanation[field] = [] if field in ("key_findings", "recommendations") else ""
+
+        return {"explanation": explanation, "model": model, "provider": provider}
+
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "LLM returned invalid JSON", "raw": result_text[:500]}, status_code=502)
+    except Exception as exc:
+        logger.exception("LLM explain failed")
+        return JSONResponse({"error": f"LLM call failed: {exc}"}, status_code=502)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Admin — Usage
 # ──────────────────────────────────────────────────────────────────────
