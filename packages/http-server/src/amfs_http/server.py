@@ -451,6 +451,132 @@ async def get_usage(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Agents
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/agents")
+async def list_agents(
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """List all known agents with entry counts and last activity."""
+    mem = _get_memory()
+    entries = mem.list()
+    agent_data: dict[str, dict[str, Any]] = {}
+    for e in entries:
+        aid = e.provenance.agent_id
+        if aid not in agent_data:
+            agent_data[aid] = {
+                "agent_id": aid,
+                "entries_written": 0,
+                "entities_touched": set(),
+                "last_active": e.provenance.written_at,
+            }
+        agent_data[aid]["entries_written"] += 1
+        agent_data[aid]["entities_touched"].add(e.entity_path)
+        if e.provenance.written_at > agent_data[aid]["last_active"]:
+            agent_data[aid]["last_active"] = e.provenance.written_at
+
+    agents = []
+    for ad in sorted(agent_data.values(), key=lambda x: x["entries_written"], reverse=True):
+        agents.append({
+            "agentId": ad["agent_id"],
+            "entriesWritten": ad["entries_written"],
+            "entitiesTouched": len(ad["entities_touched"]),
+            "lastActive": ad["last_active"].isoformat() if ad["last_active"] else None,
+        })
+    return {"agents": agents}
+
+
+@app.get("/api/v1/agents/{agent_id}/memory-graph")
+async def agent_memory_graph(
+    agent_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """All entries written by or read by this agent, grouped by entity."""
+    mem = _get_memory()
+    entries = mem.list()
+    traces = mem._adapter.list_traces(agent_id=agent_id, limit=10000)
+
+    written_by_agent = [e for e in entries if e.provenance.agent_id == agent_id]
+    entities_written: dict[str, list[dict]] = {}
+    for e in written_by_agent:
+        ep = e.entity_path
+        if ep not in entities_written:
+            entities_written[ep] = []
+        entities_written[ep].append({
+            "key": e.key,
+            "version": e.version,
+            "confidence": e.confidence,
+            "memoryType": e.memory_type.value if hasattr(e.memory_type, "value") else str(e.memory_type),
+            "writtenAt": e.provenance.written_at.isoformat(),
+        })
+
+    read_entities: dict[str, dict[str, int]] = {}
+    for t in traces:
+        for ce in t.causal_entries:
+            ep = ce.entity_path
+            key = ce.key
+            if ep not in read_entities:
+                read_entities[ep] = {}
+            read_entities[ep][key] = read_entities[ep].get(key, 0) + 1
+
+    nodes = []
+    for ep in sorted(set(list(entities_written.keys()) + list(read_entities.keys()))):
+        nodes.append({
+            "entityPath": ep,
+            "writtenEntries": entities_written.get(ep, []),
+            "readCounts": read_entities.get(ep, {}),
+        })
+
+    return {
+        "agentId": agent_id,
+        "nodes": nodes,
+        "traceCount": len(traces),
+        "totalWritten": len(written_by_agent),
+    }
+
+
+@app.get("/api/v1/agents/{agent_id}/activity")
+async def agent_activity(
+    agent_id: str,
+    limit: int = Query(100),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Timeline of writes and outcomes for this agent."""
+    mem = _get_memory()
+    entries = [e for e in mem.list() if e.provenance.agent_id == agent_id]
+    entries.sort(key=lambda e: e.provenance.written_at, reverse=True)
+
+    writes = [
+        {
+            "type": "write",
+            "entityPath": e.entity_path,
+            "key": e.key,
+            "version": e.version,
+            "confidence": e.confidence,
+            "timestamp": e.provenance.written_at.isoformat(),
+        }
+        for e in entries[:limit]
+    ]
+
+    traces = mem._adapter.list_traces(agent_id=agent_id, limit=limit)
+    outcomes = [
+        {
+            "type": "outcome",
+            "outcomeRef": t.outcome_ref,
+            "outcomeType": t.outcome_type,
+            "causalEntryCount": len(t.causal_entries),
+            "timestamp": t.created_at.isoformat(),
+        }
+        for t in traces if t.outcome_ref
+    ]
+
+    timeline = sorted(writes + outcomes, key=lambda x: x["timestamp"], reverse=True)[:limit]
+    return {"agentId": agent_id, "timeline": timeline}
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Admin — API Keys
 # ──────────────────────────────────────────────────────────────────────
 

@@ -22,6 +22,7 @@ from amfs_core.models import (
     MemoryStats,
     MemoryType,
     OutcomeType,
+    QueryEvent,
     RecallConfig,
     ScopeInfo,
     ScoredEntry,
@@ -221,7 +222,17 @@ class AgentMemory:
         include_superseded: bool = False,
     ) -> list[MemoryEntry]:
         """List current entries, optionally filtered to an entity path."""
-        return self._engine.list(entity_path, include_superseded=include_superseded)
+        import time
+        start = time.monotonic()
+        results = self._engine.list(entity_path, include_superseded=include_superseded)
+        duration = (time.monotonic() - start) * 1000
+        self._read_tracker.record_query(
+            "list",
+            {"entity_path": entity_path, "include_superseded": include_superseded},
+            len(results),
+            duration,
+        )
+        return results
 
     def watch(
         self,
@@ -288,6 +299,12 @@ class AgentMemory:
             sort_key = lambda e: e.confidence
         merged.sort(key=sort_key, reverse=True)
         entries = merged[:limit]
+
+        self._read_tracker.record_query(
+            "search",
+            {"entity_path": entity_path, "min_confidence": min_confidence, "limit": limit, "sort_by": sort_by},
+            len(entries),
+        )
 
         if recall_config is None:
             return entries
@@ -362,6 +379,7 @@ class AgentMemory:
         causal_entry_keys: list[str] | None = None,
         *,
         causal_confidence: float = 1.0,
+        decision_summary: str | None = None,
     ) -> list[MemoryEntry]:
         """Record an outcome and back-propagate confidence changes.
 
@@ -387,9 +405,15 @@ class AgentMemory:
             ep, k = parts
             entry = self._adapter.read(ep, k)
             if entry:
+                snapshot = self._read_tracker.entry_snapshot(ek)
                 causal_trace_entries.append(TraceEntry(
                     entity_path=ep, key=k,
-                    version=entry.version, confidence=entry.confidence,
+                    version=self._read_tracker.read_version(ek) or entry.version,
+                    confidence=entry.confidence,
+                    value=snapshot.get("value") if snapshot else None,
+                    memory_type=snapshot.get("memory_type") if snapshot else None,
+                    written_by=snapshot.get("written_by") if snapshot else None,
+                    read_at=self._read_tracker._reads.get(ek),
                 ))
 
         ext_contexts = [
@@ -397,17 +421,38 @@ class AgentMemory:
                 label=c.get("label", ""),
                 summary=c.get("summary", ""),
                 source=c.get("source"),
+                recorded_at=datetime.fromisoformat(c["recorded_at"]) if c.get("recorded_at") else datetime.now(timezone.utc),
             )
             for c in self._read_tracker.external_contexts
         ]
+
+        now = datetime.now(timezone.utc)
+        query_events = [
+            QueryEvent(
+                operation=q.get("operation", ""),
+                parameters=q.get("parameters", {}),
+                result_count=q.get("result_count", 0),
+                duration_ms=q.get("duration_ms"),
+                occurred_at=datetime.fromisoformat(q["occurred_at"]) if q.get("occurred_at") else now,
+            )
+            for q in self._read_tracker.query_events
+        ]
+
+        session_started = self._read_tracker.session_started_at
+        session_duration = (now - session_started).total_seconds() * 1000
 
         trace = DecisionTrace(
             agent_id=self.agent_id,
             session_id=self.session_id,
             outcome_ref=outcome_ref,
             outcome_type=outcome_type.value,
+            decision_summary=decision_summary,
             causal_entries=causal_trace_entries,
             external_contexts=ext_contexts,
+            query_events=query_events,
+            session_started_at=session_started,
+            session_ended_at=now,
+            session_duration_ms=session_duration,
         )
         try:
             self._adapter.save_trace(trace)
