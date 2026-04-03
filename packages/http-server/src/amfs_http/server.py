@@ -72,7 +72,6 @@ try:
 except ImportError:
     pass
 
-
 def _get_memory() -> AgentMemory:
     """Lazily initialise the shared AgentMemory singleton."""
     global _memory
@@ -102,6 +101,14 @@ def _get_memory() -> AgentMemory:
     _memory._propagator._adapter = adapter
 
     return _memory
+
+
+try:
+    from amfs_pro_api import mount_pro_api
+    mount_pro_api(app, get_memory=_get_memory)
+    logger.info("Pro API endpoints mounted (intelligence, extraction)")
+except ImportError:
+    pass
 
 
 def _resolve_config() -> AMFSConfig:
@@ -1451,6 +1458,104 @@ async def stream(
     _auth: str | None = Depends(verify_api_key),
 ) -> EventSourceResponse:
     return EventSourceResponse(_sse_manager.event_generator(entity_path))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# System Config
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/admin/config")
+async def get_system_config(
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Return system configuration and active Pro module status."""
+    mem = _get_memory()
+    adapter_type = type(mem._adapter).__name__
+
+    pro_modules: dict[str, bool] = {}
+    for mod_name in ("amfs_traces", "amfs_pro_api", "amfs_critic", "amfs_distiller",
+                     "amfs_retrieval", "amfs_ml", "amfs_safety", "amfs_extraction",
+                     "amfs_pro_connectors"):
+        try:
+            __import__(mod_name)
+            pro_modules[mod_name] = True
+        except ImportError:
+            pro_modules[mod_name] = False
+
+    return {
+        "adapter": adapter_type,
+        "namespace": getattr(mem, "_namespace", os.environ.get("AMFS_NAMESPACE", "default")),
+        "agent_id": mem.agent_id,
+        "session_id": mem.session_id,
+        "postgres_configured": bool(os.environ.get("AMFS_POSTGRES_DSN")),
+        "llm_configured": bool(os.environ.get("AMFS_LLM_API_KEY")),
+        "extraction_enabled": os.environ.get("AMFS_AUTO_EXTRACT", "").lower() == "true",
+        "otel_enabled": bool(os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")),
+        "pro_modules": pro_modules,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Connectors / Webhook Ingestion
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/connectors")
+async def list_connectors(
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """List available and installed connectors."""
+    try:
+        from amfs_connectors import ConnectorRegistry
+
+        registry = ConnectorRegistry()
+        return {
+            "connectors": registry.list_installed(),
+            "total": len(registry.list_available()),
+        }
+    except ImportError:
+        return {"connectors": [], "total": 0}
+
+
+@app.post("/api/v1/webhooks/{connector_name}")
+async def ingest_webhook(
+    connector_name: str,
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Receive and process a webhook event through the connector framework."""
+    try:
+        from amfs_connectors import WebhookIngester, WebhookConfig
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Connector framework not installed")
+
+    body = await request.body()
+    headers = dict(request.headers)
+
+    mem = _get_memory()
+    config = WebhookConfig(
+        name=connector_name,
+        connector_type="webhook",
+        entity_path=connector_name,
+    )
+    ingester = WebhookIngester(config, memory=mem)
+
+    event_type = headers.get("x-event-type", "generic")
+    event_id = headers.get("x-event-id")
+
+    results = ingester.ingest(
+        body,
+        headers,
+        source=connector_name,
+        event_type=event_type,
+        event_id=event_id,
+    )
+
+    return {
+        "results": [r.model_dump(mode="json") for r in results],
+        "total": len(results),
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────
