@@ -17,8 +17,10 @@ from amfs_core.lifecycle import LifecycleManager
 from amfs_core.models import (
     ConflictPolicy,
     DecisionTrace,
+    ErrorEvent,
     ExternalContext,
     MemoryEntry,
+    MemoryStateDiff,
     MemoryStats,
     MemoryType,
     OutcomeType,
@@ -136,17 +138,26 @@ class AgentMemory:
         If *decay_half_life_days* is set, applies confidence decay before
         the min_confidence check.
         """
-        if self._decay_half_life_days is not None:
-            entry = self._engine.read(entity_path, key, min_confidence=0.0)
-            if entry is None:
-                return None
-            effective = entry.effective_confidence(
-                decay_half_life_days=self._decay_half_life_days,
+        import time
+
+        start = time.monotonic()
+        try:
+            if self._decay_half_life_days is not None:
+                entry = self._engine.read(entity_path, key, min_confidence=0.0)
+                if entry is None:
+                    return None
+                effective = entry.effective_confidence(
+                    decay_half_life_days=self._decay_half_life_days,
+                )
+                if effective < min_confidence:
+                    return None
+                return entry
+            return self._engine.read(entity_path, key, min_confidence=min_confidence)
+        except Exception as exc:
+            self._read_tracker.record_error(
+                "read", type(exc).__name__, str(exc),
             )
-            if effective < min_confidence:
-                return None
-            return entry
-        return self._engine.read(entity_path, key, min_confidence=min_confidence)
+            raise
 
     def write(
         self,
@@ -207,6 +218,7 @@ class AgentMemory:
             memory_type=memory_type,
             artifact_refs=artifact_refs,
         )
+        self._read_tracker.record_write(entity_path, key, entry.version, entry.version == 1)
 
         if self._embedder is not None:
             embedding = self._embedder.embed_value(value)
@@ -441,6 +453,23 @@ class AgentMemory:
         session_started = self._read_tracker.session_started_at
         session_duration = (now - session_started).total_seconds() * 1000
 
+        error_events = [
+            ErrorEvent(
+                operation=e.get("operation", ""),
+                error_type=e.get("error_type", ""),
+                message=e.get("message", ""),
+                stack_trace=e.get("stack_trace"),
+                occurred_at=datetime.fromisoformat(e["occurred_at"]) if e.get("occurred_at") else now,
+            )
+            for e in self._read_tracker.error_events
+        ]
+
+        writes = self._read_tracker.write_events
+        state_diff = MemoryStateDiff(
+            entries_created=sum(1 for w in writes if w.get("is_new")),
+            entries_updated=sum(1 for w in writes if not w.get("is_new")),
+        )
+
         trace = DecisionTrace(
             agent_id=self.agent_id,
             session_id=self.session_id,
@@ -453,6 +482,8 @@ class AgentMemory:
             session_started_at=session_started,
             session_ended_at=now,
             session_duration_ms=session_duration,
+            error_events=error_events,
+            state_diff=state_diff,
         )
         try:
             self._adapter.save_trace(trace)
