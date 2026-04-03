@@ -156,6 +156,39 @@ class OutcomeRecord(BaseModel):
     agent_id: str
 
 
+class TraceEntry(BaseModel):
+    """A snapshot of an entry that was read during a decision."""
+
+    entity_path: str
+    key: str
+    version: int
+    confidence: float
+
+
+class ExternalContext(BaseModel):
+    """External context recorded during a decision session."""
+
+    label: str
+    summary: str
+    source: str | None = None
+    recorded_at: datetime | None = None
+
+
+class DecisionTrace(BaseModel):
+    """A persisted record of the causal chain behind an outcome."""
+
+    id: str = Field(default_factory=lambda: "")
+    agent_id: str
+    session_id: str
+    outcome_ref: str | None = None
+    outcome_type: str | None = None
+    decision_summary: str | None = None
+    causal_entries: list[TraceEntry] = Field(default_factory=list)
+    external_contexts: list[ExternalContext] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    namespace: str = "default"
+
+
 class RecallConfig(BaseModel):
     """Weights for composite recall scoring."""
 

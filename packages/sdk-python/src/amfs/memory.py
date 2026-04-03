@@ -16,6 +16,8 @@ from amfs_core.exceptions import StaleWriteError
 from amfs_core.lifecycle import LifecycleManager
 from amfs_core.models import (
     ConflictPolicy,
+    DecisionTrace,
+    ExternalContext,
     MemoryEntry,
     MemoryStats,
     MemoryType,
@@ -25,6 +27,7 @@ from amfs_core.models import (
     ScoredEntry,
     SearchQuery,
     SemanticQuery,
+    TraceEntry,
 )
 from amfs_core.outcome import OutcomeBackPropagator
 
@@ -374,7 +377,44 @@ class AgentMemory:
             agent_id=self.agent_id,
             causal_confidence=causal_confidence,
         )
-        return self._propagator.propagate(record)
+        updated = self._propagator.propagate(record)
+
+        causal_trace_entries: list[TraceEntry] = []
+        for ek in causal_entry_keys:
+            parts = ek.rsplit("/", 1)
+            if len(parts) != 2:
+                continue
+            ep, k = parts
+            entry = self._adapter.read(ep, k)
+            if entry:
+                causal_trace_entries.append(TraceEntry(
+                    entity_path=ep, key=k,
+                    version=entry.version, confidence=entry.confidence,
+                ))
+
+        ext_contexts = [
+            ExternalContext(
+                label=c.get("label", ""),
+                summary=c.get("summary", ""),
+                source=c.get("source"),
+            )
+            for c in self._read_tracker.external_contexts
+        ]
+
+        trace = DecisionTrace(
+            agent_id=self.agent_id,
+            session_id=self.session_id,
+            outcome_ref=outcome_ref,
+            outcome_type=outcome_type.value,
+            causal_entries=causal_trace_entries,
+            external_contexts=ext_contexts,
+        )
+        try:
+            self._adapter.save_trace(trace)
+        except Exception:
+            logger.debug("Failed to persist decision trace", exc_info=True)
+
+        return updated
 
     # ------------------------------------------------------------------
     # Temporal & Explainability

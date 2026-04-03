@@ -21,7 +21,7 @@ description: "Run the AMFS HTTP/REST API server to access agent memory from any 
 
 The AMFS HTTP server exposes the full `AgentMemory` API over REST, making it accessible from any language, service, or frontend. It includes:
 
-- 12 REST endpoints covering all AMFS operations
+- Full REST endpoints covering all AMFS operations
 - Server-Sent Events (SSE) for real-time streaming
 - API key authentication
 - CORS support for browser-based dashboards
@@ -79,6 +79,12 @@ The server is available at `http://localhost:8080` with interactive API docs at 
 | `POST` | `/api/v1/outcomes` | Commit an outcome and back-propagate confidence |
 | `GET` | `/api/v1/outcomes` | List all outcomes |
 
+### Patterns
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/patterns` | List unique pattern_refs with usage counts |
+
 ### Observability
 
 | Method | Path | Description |
@@ -88,6 +94,27 @@ The server is available at `http://localhost:8080` with interactive API docs at 
 | `GET` | `/api/v1/explain` | Get the causal trace for the current session |
 | `GET` | `/api/v1/stream` | SSE stream of real-time memory events |
 | `GET` | `/health` | Health check |
+
+### Admin — Teams (Pro)
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/admin/teams` | List all teams |
+| `POST` | `/api/v1/admin/teams` | Create a team |
+| `PATCH` | `/api/v1/admin/teams/{id}` | Update a team |
+| `DELETE` | `/api/v1/admin/teams/{id}` | Delete a team |
+| `GET` | `/api/v1/admin/teams/{id}/members` | List team members |
+| `POST` | `/api/v1/admin/teams/{id}/members` | Add a team member |
+| `PATCH` | `/api/v1/admin/teams/{id}/members/{mid}` | Update member role |
+| `DELETE` | `/api/v1/admin/teams/{id}/members/{mid}` | Remove a team member |
+
+### Admin — Pattern Detection (Pro)
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/admin/patterns` | List detected patterns |
+| `POST` | `/api/v1/admin/patterns/scan` | Run pattern detection scan |
+| `PATCH` | `/api/v1/admin/patterns/{id}/resolve` | Mark a pattern as resolved |
 
 ---
 
@@ -129,6 +156,40 @@ curl -X POST http://localhost:8080/api/v1/entries \
 
 ```bash
 curl http://localhost:8080/api/v1/entries/checkout-service/retry-pattern
+```
+
+### List entries
+
+```bash
+curl http://localhost:8080/api/v1/entries
+```
+
+Response:
+
+```json
+{
+  "entries": [
+    {"entity_path": "checkout-service", "key": "retry-pattern", "version": 1, ...},
+    ...
+  ]
+}
+```
+
+### List outcomes
+
+```bash
+curl http://localhost:8080/api/v1/outcomes
+```
+
+Response:
+
+```json
+{
+  "outcomes": [
+    {"outcome_ref": "DEP-287", "outcome_type": "clean_deploy", ...},
+    ...
+  ]
+}
 ```
 
 ### Search

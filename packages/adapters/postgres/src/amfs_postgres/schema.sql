@@ -39,6 +39,134 @@ CREATE TABLE IF NOT EXISTS amfs_outcomes (
     agent_id TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS amfs_decision_traces (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    outcome_ref TEXT,
+    outcome_type TEXT,
+    decision_summary TEXT,
+    causal_entries JSONB DEFAULT '[]',
+    external_contexts JSONB DEFAULT '[]',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_traces_namespace
+    ON amfs_decision_traces (namespace, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_traces_agent
+    ON amfs_decision_traces (namespace, agent_id);
+
+CREATE INDEX IF NOT EXISTS idx_traces_outcome
+    ON amfs_decision_traces (namespace, outcome_type)
+    WHERE outcome_type IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS amfs_api_keys (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace TEXT NOT NULL DEFAULT 'default',
+    name TEXT NOT NULL,
+    key_hash TEXT NOT NULL,
+    prefix TEXT NOT NULL,
+    key_type TEXT NOT NULL DEFAULT 'agent',
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    scopes JSONB DEFAULT '[]',
+    rate_limit_rpm INTEGER DEFAULT 120,
+    last_used TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_namespace
+    ON amfs_api_keys (namespace, active);
+
+CREATE TABLE IF NOT EXISTS amfs_audit_log (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace TEXT NOT NULL DEFAULT 'default',
+    actor_type TEXT NOT NULL DEFAULT 'system',
+    actor_name TEXT NOT NULL DEFAULT 'system',
+    action TEXT NOT NULL,
+    resource TEXT,
+    ip_address TEXT,
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_namespace
+    ON amfs_audit_log (namespace, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_audit_action
+    ON amfs_audit_log (namespace, action);
+
+-- ──────────────────────────────────────────────────────────────────────
+-- Teams & Members (Pro)
+-- ──────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS amfs_teams (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace TEXT NOT NULL DEFAULT 'default',
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_team_slug UNIQUE (namespace, slug)
+);
+
+CREATE INDEX IF NOT EXISTS idx_teams_namespace
+    ON amfs_teams (namespace);
+
+CREATE TABLE IF NOT EXISTS amfs_team_members (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace TEXT NOT NULL DEFAULT 'default',
+    team_id UUID NOT NULL REFERENCES amfs_teams(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT 'developer',
+    invited_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    accepted_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_team_member UNIQUE (team_id, email),
+    CONSTRAINT chk_member_role CHECK (role IN ('admin', 'developer', 'viewer'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_members_team
+    ON amfs_team_members (team_id);
+
+CREATE INDEX IF NOT EXISTS idx_team_members_email
+    ON amfs_team_members (namespace, email);
+
+-- ──────────────────────────────────────────────────────────────────────
+-- Pattern Detection Results (Pro)
+-- ──────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS amfs_detected_patterns (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace TEXT NOT NULL DEFAULT 'default',
+    pattern_type TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'info',
+    entity_path TEXT NOT NULL,
+    description TEXT NOT NULL,
+    details JSONB DEFAULT '{}',
+    resolved BOOLEAN NOT NULL DEFAULT FALSE,
+    detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at TIMESTAMPTZ,
+    CONSTRAINT chk_pattern_type CHECK (
+        pattern_type IN ('recurring_failure', 'hot_entity', 'stale_cluster', 'confidence_drift')
+    ),
+    CONSTRAINT chk_severity CHECK (severity IN ('info', 'warning', 'critical'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_patterns_namespace
+    ON amfs_detected_patterns (namespace, detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_patterns_type
+    ON amfs_detected_patterns (namespace, pattern_type);
+
+CREATE INDEX IF NOT EXISTS idx_patterns_unresolved
+    ON amfs_detected_patterns (namespace)
+    WHERE resolved = FALSE;
+
 -- Back-propagation trigger: when an outcome is inserted,
 -- for each causal_entry_key: supersede current entry and insert
 -- a new version with confidence *= multiplier * causal_confidence.

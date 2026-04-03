@@ -59,6 +59,22 @@ AMFS supports the following environment variables. They override values set in `
 
 ---
 
+## Dashboard (Pro)
+
+These are used by the AMFS Pro Next.js dashboard to connect to the HTTP API server.
+
+| Variable | Description | Default |
+|:---------|:------------|:--------|
+| `AMFS_API_URL` | AMFS HTTP server URL for server-side code (API routes, server components) | `http://localhost:8080` |
+| `NEXT_PUBLIC_AMFS_API_URL` | AMFS HTTP server URL for client-side code (SSE live status, Pro tool panels). The `NEXT_PUBLIC_` prefix is required by Next.js to expose the variable to the browser. | — |
+| `AMFS_API_KEY` | API key for authenticating with the AMFS HTTP server | — |
+| `AMFS_ROOT` | Path to the `.amfs` directory for direct filesystem reads | — |
+| `AMFS_DEMO` | Force demo mode with synthetic data (`true`/`false`) | `false` |
+
+Both `AMFS_API_URL` and `NEXT_PUBLIC_AMFS_API_URL` should be set to the same value. The former is used by Next.js server-side rendering; the latter is inlined into the browser bundle at build time.
+
+---
+
 ## Auto-Detection (Read-Only)
 
 These are set by IDEs and read by AMFS for agent identity detection. You don't set these yourself.

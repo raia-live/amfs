@@ -134,7 +134,25 @@ curl -X POST http://localhost:8080/api/v1/entries \
 
 # Read it back
 curl http://localhost:8080/api/v1/entries/test/hello
+
+# List all entries
+curl http://localhost:8080/api/v1/entries
+# Returns: {"entries": [{...}, ...]}
 ```
+
+### Connecting the Dashboard (Pro)
+
+If you have access to the AMFS Pro dashboard, point it at the running Docker Compose stack by setting two environment variables in `dashboard/.env.local`:
+
+```bash
+# Server-side (used by Next.js API routes and server components)
+AMFS_API_URL=http://localhost:8080
+
+# Client-side (used by the browser for SSE live status and Pro tool panels)
+NEXT_PUBLIC_AMFS_API_URL=http://localhost:8080
+```
+
+Both are required. `NEXT_PUBLIC_` is a Next.js convention that exposes the variable to browser-side code. After setting them, restart the dashboard dev server (`npm run dev`) for the changes to take effect.
 
 ---
 

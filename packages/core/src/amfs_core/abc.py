@@ -7,7 +7,14 @@ from datetime import datetime
 from typing import Callable
 
 from amfs_core.embedder import EmbedderABC, cosine_similarity
-from amfs_core.models import MemoryEntry, MemoryStats, OutcomeRecord, SearchQuery, SemanticQuery
+from amfs_core.models import (
+    DecisionTrace,
+    MemoryEntry,
+    MemoryStats,
+    OutcomeRecord,
+    SearchQuery,
+    SemanticQuery,
+)
 
 
 class WatchHandle:
@@ -100,6 +107,41 @@ class AdapterABC(ABC):
         confidence multipliers.  Default implementation returns an empty list;
         adapters that persist outcomes (e.g. Postgres) should override.
         """
+        return []
+
+    def read_at_version(
+        self,
+        entity_path: str,
+        key: str,
+        version: int,
+    ) -> MemoryEntry | None:
+        """Read a specific historical version of an entry.
+
+        Returns the entry at exactly *version*, even if it has been
+        superseded.  Default implementation scans via ``list()`` with
+        ``include_superseded=True``; adapters with indexed storage
+        (e.g. Postgres) should override for O(1) lookup.
+        """
+        all_versions = self.list(entity_path, include_superseded=True)
+        for entry in all_versions:
+            if entry.key == key and entry.version == version:
+                return entry
+        return None
+
+    def save_trace(self, trace: DecisionTrace) -> DecisionTrace:
+        """Persist a decision trace. Default is a no-op; adapters with
+        persistent storage (e.g. Postgres) should override."""
+        return trace
+
+    def list_traces(
+        self,
+        *,
+        entity_path: str | None = None,
+        agent_id: str | None = None,
+        outcome_type: str | None = None,
+        limit: int = 100,
+    ) -> list[DecisionTrace]:
+        """Return persisted decision traces. Default returns an empty list."""
         return []
 
     def search(self, query: SearchQuery) -> list[MemoryEntry]:
