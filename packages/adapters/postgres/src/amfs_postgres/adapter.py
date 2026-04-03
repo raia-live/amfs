@@ -20,14 +20,18 @@ from amfs_core.exceptions import AdapterError, VersionConflictError
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
     ArtifactRef,
+    DecisionTrace,
+    ExternalContext,
     MemoryEntry,
     MemoryStats,
     MemoryType,
     OutcomeRecord,
     OutcomeType,
     Provenance,
+    QueryEvent,
     SearchQuery,
     SemanticQuery,
+    TraceEntry,
 )
 
 try:
@@ -622,15 +626,15 @@ class PostgresAdapter(AdapterABC):
     # decision traces
     # ------------------------------------------------------------------
 
-    def get_trace(self, trace_id: str) -> "DecisionTrace | None":
-        from amfs_core.models import DecisionTrace, TraceEntry, ExternalContext
-
+    def get_trace(self, trace_id: str) -> DecisionTrace | None:
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT id, agent_id, session_id, outcome_ref, outcome_type,
-                           decision_summary, causal_entries, external_contexts, created_at
+                           decision_summary, causal_entries, external_contexts,
+                           query_events, session_started_at, session_ended_at,
+                           session_duration_ms, created_at
                     FROM amfs_decision_traces
                     WHERE id = %s AND namespace = %s
                     """,
@@ -641,36 +645,20 @@ class PostgresAdapter(AdapterABC):
         if row is None:
             return None
 
-        ce_raw = row["causal_entries"] or []
-        ec_raw = row["external_contexts"] or []
-        if isinstance(ce_raw, str):
-            ce_raw = json.loads(ce_raw)
-        if isinstance(ec_raw, str):
-            ec_raw = json.loads(ec_raw)
-        return DecisionTrace(
-            id=str(row["id"]),
-            agent_id=row["agent_id"],
-            session_id=row["session_id"],
-            outcome_ref=row.get("outcome_ref"),
-            outcome_type=row.get("outcome_type"),
-            decision_summary=row.get("decision_summary"),
-            causal_entries=[TraceEntry(**e) for e in ce_raw],
-            external_contexts=[ExternalContext(**c) for c in ec_raw],
-            created_at=row["created_at"],
-            namespace=self._namespace,
-        )
+        return self._row_to_trace(row)
 
-    def save_trace(self, trace: "DecisionTrace") -> "DecisionTrace":
-        from amfs_core.models import DecisionTrace, TraceEntry, ExternalContext
-
+    def save_trace(self, trace: DecisionTrace) -> DecisionTrace:
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO amfs_decision_traces
                         (namespace, agent_id, session_id, outcome_ref, outcome_type,
-                         decision_summary, causal_entries, external_contexts, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+                         decision_summary, causal_entries, external_contexts,
+                         query_events, session_started_at, session_ended_at,
+                         session_duration_ms, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb,
+                            %s::jsonb, %s, %s, %s, %s)
                     RETURNING id, created_at
                     """,
                     (
@@ -682,6 +670,10 @@ class PostgresAdapter(AdapterABC):
                         trace.decision_summary,
                         json.dumps([e.model_dump(mode="json") for e in trace.causal_entries]),
                         json.dumps([c.model_dump(mode="json") for c in trace.external_contexts]),
+                        json.dumps([q.model_dump(mode="json") for q in trace.query_events]),
+                        trace.session_started_at,
+                        trace.session_ended_at,
+                        trace.session_duration_ms,
                         trace.created_at,
                     ),
                 )
@@ -695,9 +687,7 @@ class PostgresAdapter(AdapterABC):
         agent_id: str | None = None,
         outcome_type: str | None = None,
         limit: int = 100,
-    ) -> list["DecisionTrace"]:
-        from amfs_core.models import DecisionTrace, TraceEntry, ExternalContext
-
+    ) -> list[DecisionTrace]:
         conditions = ["namespace = %s"]
         params: list[Any] = [self._namespace]
 
@@ -717,7 +707,9 @@ class PostgresAdapter(AdapterABC):
         where = " AND ".join(conditions)
         sql = f"""
             SELECT id, agent_id, session_id, outcome_ref, outcome_type,
-                   decision_summary, causal_entries, external_contexts, created_at
+                   decision_summary, causal_entries, external_contexts,
+                   query_events, session_started_at, session_ended_at,
+                   session_duration_ms, created_at
             FROM amfs_decision_traces
             WHERE {where}
             ORDER BY created_at DESC
@@ -730,31 +722,43 @@ class PostgresAdapter(AdapterABC):
                 cur.execute(sql, params)
                 rows = cur.fetchall()
 
-        results: list[DecisionTrace] = []
-        for row in rows:
-            ce_raw = row["causal_entries"] or []
-            ec_raw = row["external_contexts"] or []
-            if isinstance(ce_raw, str):
-                ce_raw = json.loads(ce_raw)
-            if isinstance(ec_raw, str):
-                ec_raw = json.loads(ec_raw)
-            results.append(DecisionTrace(
-                id=str(row["id"]),
-                agent_id=row["agent_id"],
-                session_id=row["session_id"],
-                outcome_ref=row.get("outcome_ref"),
-                outcome_type=row.get("outcome_type"),
-                decision_summary=row.get("decision_summary"),
-                causal_entries=[TraceEntry(**e) for e in ce_raw],
-                external_contexts=[ExternalContext(**c) for c in ec_raw],
-                created_at=row["created_at"],
-                namespace=self._namespace,
-            ))
-        return results
+        return [self._row_to_trace(row) for row in rows]
 
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+
+    def _row_to_trace(self, row: dict[str, Any]) -> DecisionTrace:
+        ce_raw = row["causal_entries"] or []
+        ec_raw = row["external_contexts"] or []
+        qe_raw = row.get("query_events") or []
+        if isinstance(ce_raw, str):
+            ce_raw = json.loads(ce_raw)
+        if isinstance(ec_raw, str):
+            ec_raw = json.loads(ec_raw)
+        if isinstance(qe_raw, str):
+            qe_raw = json.loads(qe_raw)
+
+        duration = row.get("session_duration_ms")
+        if duration is not None:
+            duration = float(duration)
+
+        return DecisionTrace(
+            id=str(row["id"]),
+            agent_id=row["agent_id"],
+            session_id=row["session_id"],
+            outcome_ref=row.get("outcome_ref"),
+            outcome_type=row.get("outcome_type"),
+            decision_summary=row.get("decision_summary"),
+            causal_entries=[TraceEntry(**e) for e in ce_raw],
+            external_contexts=[ExternalContext(**c) for c in ec_raw],
+            query_events=[QueryEvent(**q) for q in qe_raw],
+            session_started_at=row.get("session_started_at"),
+            session_ended_at=row.get("session_ended_at"),
+            session_duration_ms=duration,
+            created_at=row["created_at"],
+            namespace=self._namespace,
+        )
 
     @staticmethod
     def _row_to_entry(row: dict[str, Any]) -> MemoryEntry:

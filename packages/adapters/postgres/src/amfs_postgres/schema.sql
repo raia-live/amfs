@@ -49,6 +49,10 @@ CREATE TABLE IF NOT EXISTS amfs_decision_traces (
     decision_summary TEXT,
     causal_entries JSONB DEFAULT '[]',
     external_contexts JSONB DEFAULT '[]',
+    query_events JSONB DEFAULT '[]',
+    session_started_at TIMESTAMPTZ,
+    session_ended_at TIMESTAMPTZ,
+    session_duration_ms NUMERIC,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

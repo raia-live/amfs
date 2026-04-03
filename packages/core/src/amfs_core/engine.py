@@ -52,12 +52,20 @@ class ReadTracker:
     def __init__(self) -> None:
         self._reads: dict[str, datetime] = {}
         self._versions: dict[str, int] = {}
+        self._entries: dict[str, dict] = {}
         self._contexts: list[ExternalContext] = []
+        self._queries: list[dict] = []
+        self._session_started_at: datetime = datetime.now(timezone.utc)
 
     def record(self, entry: MemoryEntry) -> None:
         """Record that an entry was read during this session."""
         self._reads[entry.entry_key] = datetime.now(timezone.utc)
         self._versions[entry.entry_key] = entry.version
+        self._entries[entry.entry_key] = {
+            "value": entry.value,
+            "memory_type": entry.memory_type.value if hasattr(entry.memory_type, 'value') else str(entry.memory_type),
+            "written_by": entry.provenance.agent_id,
+        }
 
     def record_context(
         self,
@@ -98,11 +106,42 @@ class ReadTracker:
         """Return the version we last read for an entry, or None if never read."""
         return self._versions.get(entry_key)
 
+    def record_query(
+        self,
+        operation: str,
+        parameters: dict,
+        result_count: int,
+        duration_ms: float | None = None,
+    ) -> None:
+        """Record a search or list operation."""
+        self._queries.append({
+            "operation": operation,
+            "parameters": parameters,
+            "result_count": result_count,
+            "duration_ms": duration_ms,
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    @property
+    def query_events(self) -> list[dict]:
+        """All query events recorded in this session."""
+        return list(self._queries)
+
+    @property
+    def session_started_at(self) -> datetime:
+        return self._session_started_at
+
+    def entry_snapshot(self, entry_key: str) -> dict | None:
+        """Return the snapshot captured at read time for an entry."""
+        return self._entries.get(entry_key)
+
     def clear(self) -> None:
         """Reset the read log (e.g. between sub-tasks within a session)."""
         self._reads.clear()
         self._versions.clear()
+        self._entries.clear()
         self._contexts.clear()
+        self._queries.clear()
 
     def contains(self, entry_key: str) -> bool:
         return entry_key in self._reads

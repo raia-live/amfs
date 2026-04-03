@@ -163,6 +163,10 @@ class TraceEntry(BaseModel):
     key: str
     version: int
     confidence: float
+    value: Any = None
+    memory_type: str | None = None
+    written_by: str | None = None
+    read_at: datetime | None = None
 
 
 class ExternalContext(BaseModel):
@@ -171,7 +175,17 @@ class ExternalContext(BaseModel):
     label: str
     summary: str
     source: str | None = None
-    recorded_at: datetime | None = None
+    recorded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class QueryEvent(BaseModel):
+    """A search or list operation performed during a decision session."""
+
+    operation: str  # "search" or "list"
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    result_count: int = 0
+    duration_ms: float | None = None
+    occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class DecisionTrace(BaseModel):
@@ -185,6 +199,10 @@ class DecisionTrace(BaseModel):
     decision_summary: str | None = None
     causal_entries: list[TraceEntry] = Field(default_factory=list)
     external_contexts: list[ExternalContext] = Field(default_factory=list)
+    query_events: list[QueryEvent] = Field(default_factory=list)
+    session_started_at: datetime | None = None
+    session_ended_at: datetime | None = None
+    session_duration_ms: float | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     namespace: str = "default"
 
