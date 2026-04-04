@@ -73,6 +73,13 @@ try:
 except ImportError:
     pass
 
+try:
+    from amfs_cortex_pro import mount_cortex_pro
+    mount_cortex_pro(app)
+    logger.info("Pro Cortex endpoints mounted")
+except ImportError:
+    pass
+
 def _get_memory() -> AgentMemory:
     """Lazily initialise the shared AgentMemory singleton."""
     global _memory
@@ -1727,6 +1734,24 @@ async def list_cortex_digests(
     return {"digests": [], "total": 0}
 
 
+@app.get("/api/v1/cortex/activity")
+async def cortex_activity(
+    limit: int = Query(default=50, le=200),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Get recent Cortex compilation and event activity."""
+    if _cortex_worker:
+        log = _cortex_worker.activity_log
+        recent = log[-limit:] if len(log) > limit else log
+        return {
+            "events": list(reversed(recent)),
+            "total": len(log),
+            "throughput": _cortex_worker.throughput,
+            "stats": _cortex_worker.stats,
+        }
+    return {"events": [], "total": 0, "throughput": [], "stats": None}
+
+
 @app.post("/api/v1/webhooks/{connector_name}")
 async def ingest_webhook(
     connector_name: str,
@@ -1893,12 +1918,38 @@ def main() -> None:
 
                 namespace = os.environ.get("AMFS_NAMESPACE", "default")
                 adapter = PostgresAdapter(dsn=dsn, namespace=namespace)
-                compiler = DigestCompiler(adapter=adapter, namespace=namespace)
+
+                strategies = []
+                try:
+                    from amfs_cortex_pro import get_pro_strategies
+                    strategies = get_pro_strategies()
+                    logger.info("Pro compilation strategies loaded")
+                except ImportError:
+                    pass
+
+                compiler = DigestCompiler(
+                    adapter=adapter,
+                    strategies=strategies or None,
+                    namespace=namespace,
+                )
                 _cortex_worker = CortexWorker(
                     dsn=dsn,
                     compiler=compiler,
                     use_advisory_lock=False,
                 )
+
+                try:
+                    from amfs_cortex_pro import get_outcome_wiring, HotContextTracker
+                    wiring = get_outcome_wiring(adapter, namespace)
+                    if wiring:
+                        _cortex_worker._outcome_wiring = wiring
+                        logger.info("Outcome wiring attached to embedded Cortex worker")
+                    tracker = HotContextTracker()
+                    _cortex_worker._hot_tracker = tracker
+                    logger.info("Hot context tracker attached to embedded Cortex worker")
+                except ImportError:
+                    pass
+
                 t = threading.Thread(target=_cortex_worker.run, daemon=True, name="cortex-embedded")
                 t.start()
                 logger.info("Embedded Cortex worker started")

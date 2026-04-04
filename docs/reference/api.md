@@ -229,6 +229,20 @@ Returns:
 
 ---
 
+### briefing
+
+```python
+briefing(
+    entity_path: str | None = None,
+    agent_id: str | None = None,
+    limit: int = 10,
+) -> list[Digest]
+```
+
+Get a ranked briefing of compiled knowledge digests from the Memory Cortex. Returns pre-compiled `Digest` objects ranked by relevance to the given entity or agent context. If no Cortex is running, returns an empty list.
+
+---
+
 ### stats
 
 ```python
@@ -355,6 +369,37 @@ class ProvenanceTier(int, Enum):
 class ConflictPolicy(str, Enum):
     LAST_WRITE_WINS = "last_write_wins"
     RAISE = "raise"
+```
+
+---
+
+## DigestType
+
+```python
+class DigestType(str, Enum):
+    ENTITY = "entity"              # Summary of all knowledge about an entity
+    AGENT_BRIEF = "agent_brief"    # Summary of an agent's knowledge and activity
+    SOURCE = "source"              # Summary of external data from a connector
+    CONNECTION_MAP = "connection_map"  # Cross-entity relationships (Pro)
+```
+
+---
+
+## Digest
+
+A compiled knowledge digest produced by the Memory Cortex.
+
+```python
+class Digest:
+    digest_type: DigestType
+    scope: str                          # Entity path, agent ID, or source ID
+    summary: dict[str, Any]             # Structured summary (varies by type)
+    entry_count: int                    # Number of source entries
+    source_agents: list[str]            # Agents that contributed
+    compiled_at: datetime               # When this digest was last compiled
+    staleness_ms: int                   # Age since compilation (set at query time)
+    anticipation_score: float           # Outcome-calibrated relevance (0.0–1.0)
+    namespace: str                      # Memory namespace
 ```
 
 ---
@@ -546,6 +591,18 @@ amfs_critique() -> str (JSON)
 ```
 
 Run the Memory Critic to detect toxic, stale, contradictory, uncalibrated, and orphaned entries.
+
+### amfs_briefing
+
+```
+amfs_briefing(
+    entity_path: str | None = None,
+    agent_id: str | None = None,
+    limit: int = 10,
+) -> str (JSON list of Digest objects)
+```
+
+Get a compiled knowledge briefing — what you should know right now. Returns pre-compiled digests from the Memory Cortex ranked by relevance. Includes entity summaries, agent brain briefs, and external source summaries.
 
 ### amfs_distill
 

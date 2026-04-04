@@ -26,6 +26,7 @@ The Docker image includes:
 - The AMFS HTTP API server (FastAPI)
 - All storage adapters (filesystem, Postgres, S3)
 - The MCP server
+- The Memory Cortex (streaming digest compiler)
 - Health checks and graceful shutdown
 
 ---
@@ -87,6 +88,7 @@ This starts:
 | Service | Port | Description |
 |:--------|:-----|:------------|
 | `amfs` | 8080 | AMFS HTTP API server |
+| `cortex` | — | Memory Cortex streaming digest compiler (no inbound port) |
 | `postgres` | 5432 | PostgreSQL 16 with pgvector |
 
 The compose file lives in the repo root:
@@ -103,6 +105,20 @@ services:
       postgres:
         condition: service_healthy
 
+  cortex:
+    build: .
+    entrypoint: ["amfs-cortex"]
+    environment:
+      AMFS_POSTGRES_DSN: postgresql://amfs:amfs@postgres:5432/amfs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "amfs-cortex", "--health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   postgres:
     image: pgvector/pgvector:pg16
     environment:
@@ -116,6 +132,14 @@ services:
 
 volumes:
   pgdata:
+```
+
+The Cortex worker listens for memory write events via Postgres `LISTEN/NOTIFY` and continuously compiles knowledge digests. It runs as a separate container for independent scaling.
+
+For simple single-instance deployments, you can skip the separate container and run the Cortex embedded in the HTTP server:
+
+```bash
+amfs-http --with-cortex
 ```
 
 ### Verify
@@ -202,6 +226,13 @@ helm install amfs ./helm/amfs \
 | `amfs.apiKeys` | API keys for authentication | — |
 | `amfs.namespace` | AMFS namespace | `default` |
 | `ingress.enabled` | Enable Kubernetes Ingress | `false` |
+| `cortex.enabled` | Deploy the Cortex worker | `true` |
+| `cortex.replicas` | Number of Cortex worker pods (only 1 active via advisory lock) | `1` |
+| `cortex.resources.requests.cpu` | Cortex CPU request | `50m` |
+| `cortex.resources.requests.memory` | Cortex memory request | `128Mi` |
+| `cortex.resources.limits.cpu` | Cortex CPU limit | `500m` |
+| `cortex.resources.limits.memory` | Cortex memory limit | `512Mi` |
+| `cortex.debounceMs` | Digest recompilation debounce (ms) | `3000` |
 | `autoscaling.enabled` | Enable HPA | `false` |
 | `autoscaling.maxReplicas` | Maximum pod replicas | `5` |
 
@@ -288,6 +319,7 @@ This seeds memory entries across 7 entities and 5 agents, decision traces with r
 - [ ] Enable Ingress with TLS for external access
 - [ ] Set up Postgres backups (pg_dump, WAL archiving, or managed service)
 - [ ] Monitor `/health` endpoint with your observability stack
+- [ ] Verify Cortex worker is running (`/api/v1/cortex/status`)
 - [ ] Consider HPA for traffic-heavy deployments
 
 ---

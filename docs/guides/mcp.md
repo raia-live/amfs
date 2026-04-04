@@ -21,7 +21,7 @@ AMFS provides a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
 
 ## What You Get
 
-After setup, your AI agents have 9 memory tools:
+After setup, your AI agents have 10 memory tools:
 
 | Tool | Description |
 |:-----|:------------|
@@ -34,6 +34,7 @@ After setup, your AI agents have 9 memory tools:
 | `amfs_record_context` | Capture external tool/API inputs in the causal chain |
 | `amfs_history` | Retrieve version history of an entry with optional time range |
 | `amfs_explain` | Inspect the full decision trace for the current session |
+| `amfs_briefing` | Get compiled knowledge digests from the Memory Cortex |
 
 ---
 
@@ -221,12 +222,14 @@ Override with `AMFS_AGENT_ID`:
 ## How It Works
 
 1. **Agent starts** — MCP server launches, creates an `AgentMemory` instance with auto-detected agent ID.
-2. **Agent searches** — Before working, the agent calls `amfs_search` to check for existing context.
-3. **Agent gathers context** — External tool calls are captured with `amfs_record_context` so the decision trace is complete.
-4. **Agent writes** — After completing tasks, decisions and risks are recorded with `amfs_write` (optionally specifying `memory_type`: `fact`, `belief`, or `experience`).
-5. **Outcomes propagate** — `amfs_commit_outcome` updates confidence on all entries the agent read.
-6. **Agent reviews** — `amfs_history` shows how a memory evolved over time; `amfs_explain` reveals the full decision trace including external inputs.
-7. **Knowledge compounds** — The next agent starts with context instead of from scratch.
+2. **Agent gets briefed** — The agent calls `amfs_briefing` to get pre-compiled knowledge digests from the Memory Cortex, providing instant context about relevant entities and past agent activity.
+3. **Agent searches** — For specific queries, the agent calls `amfs_search` to find individual entries.
+4. **Agent gathers context** — External tool calls are captured with `amfs_record_context` so the decision trace is complete.
+5. **Agent writes** — After completing tasks, decisions and risks are recorded with `amfs_write` (optionally specifying `memory_type`: `fact`, `belief`, or `experience`).
+6. **Cortex compiles** — The Memory Cortex continuously processes new writes and compiles them into up-to-date knowledge digests.
+7. **Outcomes propagate** — `amfs_commit_outcome` updates confidence on all entries the agent read.
+8. **Agent reviews** — `amfs_history` shows how a memory evolved over time; `amfs_explain` reveals the full decision trace including external inputs.
+9. **Knowledge compounds** — The next agent starts with compiled context instead of from scratch.
 
 ### Example Scenario
 

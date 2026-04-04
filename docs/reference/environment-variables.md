@@ -59,6 +59,16 @@ AMFS supports the following environment variables. They override values set in `
 
 ---
 
+## Memory Cortex
+
+| Variable | Description | Default |
+|:---------|:------------|:--------|
+| `AMFS_CORTEX_DEBOUNCE_MS` | Debounce interval for digest recompilation (milliseconds) | `3000` |
+| `AMFS_CONNECTOR_{NAME}_SECRET` | HMAC secret for webhook connector signature verification (e.g. `AMFS_CONNECTOR_PAGERDUTY_SECRET`) | — |
+| `AMFS_CORTEX_LLM_MODEL` | LLM model for narrative digest compilation (Pro) | `gpt-4o-mini` |
+
+---
+
 ## Dashboard (Pro)
 
 These are used by the AMFS Pro Next.js dashboard to connect to the HTTP API server.

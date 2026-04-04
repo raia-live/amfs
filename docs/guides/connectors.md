@@ -43,6 +43,9 @@ Each connector:
 - Deduplicates events (idempotency keys)
 - Transforms raw JSON into AMFS memory operations
 - Writes structured entries with proper entity paths, confidence scores, and memory types
+- Persists all data to the shared memory pool (tagged with `agent_id="webhook/{connector_name}"`)
+
+Events that don't match a registered transform are still persisted as raw entries, ensuring no data is lost.
 
 ---
 
@@ -192,6 +195,35 @@ amfs connector install jira
 - Release creation and deployment tracking
 
 **Entity path:** `projects/jira/{project_key}`
+
+---
+
+## Direct Event Ingestion
+
+For lightweight integrations that don't need the full connector framework, AMFS exposes a direct event endpoint:
+
+```
+POST /api/v1/events
+```
+
+Send a JSON body:
+
+```json
+{
+  "source": "monitoring",
+  "entity_path": "myapp/checkout",
+  "key": "high-cpu-alert",
+  "value": {"host": "prod-3", "cpu_percent": 95},
+  "event_type": "alert.triggered"
+}
+```
+
+Events ingested through this endpoint are stored as shared memory entries with `agent_id="external/{source}"`, making them visible to all agents via `search()` and automatically included in Cortex digest compilation.
+
+This is useful for:
+- Simple scripts or cron jobs that push metrics
+- CI/CD pipelines reporting deployment status
+- Any system where building a full connector is overkill
 
 ---
 

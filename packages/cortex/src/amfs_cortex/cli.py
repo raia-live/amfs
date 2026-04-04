@@ -85,6 +85,17 @@ def main() -> None:
         use_advisory_lock=not args.no_advisory_lock,
     )
 
+    try:
+        from amfs_cortex_pro import get_outcome_wiring, HotContextTracker
+        wiring = get_outcome_wiring(adapter, namespace)
+        if wiring:
+            worker._outcome_wiring = wiring
+            logger.info("Outcome wiring attached")
+        worker._hot_tracker = HotContextTracker()
+        logger.info("Hot context tracker attached")
+    except ImportError:
+        pass
+
     import signal
 
     def _shutdown(signum, frame):

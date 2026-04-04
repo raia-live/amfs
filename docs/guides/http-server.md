@@ -100,6 +100,15 @@ The server is available at `http://localhost:8080` with interactive API docs at 
 | `GET` | `/api/v1/agents/{agent_id}/memory-graph` | Get agent's entity relationship graph |
 | `GET` | `/api/v1/agents/{agent_id}/activity` | Get agent's activity timeline |
 
+### Memory Cortex
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/briefing` | Get ranked knowledge digests for an entity or agent |
+| `GET` | `/api/v1/cortex/status` | Cortex worker status and digest counts |
+| `GET` | `/api/v1/cortex/digests` | List all compiled digests (filterable by `digest_type`) |
+| `POST` | `/api/v1/events` | Ingest an event into the shared memory pool |
+
 ### Observability
 
 | Method | Path | Description |
@@ -253,6 +262,50 @@ data: {"entity_path": "checkout-service", "key": "retry-pattern", "version": 2, 
 
 event: outcome
 data: {"outcome_ref": "DEP-287", "outcome_type": "clean_deploy", ...}
+```
+
+### Get a briefing
+
+```bash
+curl "http://localhost:8080/api/v1/briefing?entity_path=checkout-service"
+```
+
+Response:
+
+```json
+{
+  "digests": [
+    {
+      "digest_type": "entity",
+      "scope": "checkout-service",
+      "summary": {"total_keys": 5, "agents": ["deploy-bot"], "avg_confidence": 0.85},
+      "entry_count": 5,
+      "anticipation_score": 0.15,
+      "compiled_at": "2026-04-04T12:00:00Z"
+    }
+  ],
+  "total": 1
+}
+```
+
+### Ingest an external event
+
+```bash
+curl -X POST http://localhost:8080/api/v1/events \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": "monitoring",
+    "entity_path": "checkout-service",
+    "key": "high-cpu-alert",
+    "value": {"host": "prod-3", "cpu": 95},
+    "event_type": "alert.triggered"
+  }'
+```
+
+### Check Cortex status
+
+```bash
+curl http://localhost:8080/api/v1/cortex/status
 ```
 
 ### Python client

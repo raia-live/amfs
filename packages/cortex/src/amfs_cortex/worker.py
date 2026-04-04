@@ -11,12 +11,16 @@ import json
 import logging
 import threading
 import time
-from typing import TYPE_CHECKING
+from collections import deque
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from amfs_cortex.compiler import DigestCompiler
 
 logger = logging.getLogger(__name__)
+
+_ACTIVITY_LOG_MAX = 200
 
 
 class CortexWorker:
@@ -40,6 +44,22 @@ class CortexWorker:
         self._digests_compiled = 0
         self._started_at: float | None = None
         self._last_event_at: float | None = None
+        self._activity_log: deque[dict[str, Any]] = deque(maxlen=_ACTIVITY_LOG_MAX)
+        self._outcome_wiring: Any = None
+        self._hot_tracker: Any = None
+        self._throughput_buckets: deque[dict[str, Any]] = deque(maxlen=60)
+        self._current_bucket_ts: float = 0
+        self._current_bucket_count: int = 0
+
+    @property
+    def activity_log(self) -> list[dict[str, Any]]:
+        """Recent compilation and event activity."""
+        return list(self._activity_log)
+
+    @property
+    def throughput(self) -> list[dict[str, Any]]:
+        """Per-minute throughput buckets (last 60 minutes)."""
+        return list(self._throughput_buckets)
 
     @property
     def stats(self) -> dict:
@@ -135,6 +155,7 @@ class CortexWorker:
         """Process a NOTIFY event from Postgres."""
         self._events_processed += 1
         self._last_event_at = time.monotonic()
+        self._record_throughput()
 
         try:
             payload = json.loads(notify.payload) if notify.payload else {}
@@ -157,6 +178,28 @@ class CortexWorker:
                     else:
                         self._pending[f"agent:{agent_id}"] = time.monotonic()
 
+                if self._hot_tracker:
+                    self._hot_tracker.record_activity(agent_id, entity_path, "write")
+
+            self._activity_log.append({
+                "type": "event_received",
+                "channel": channel,
+                "entity_path": entity_path,
+                "agent_id": agent_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+        elif channel == "amfs_outcome":
+            if self._outcome_wiring:
+                updated = self._outcome_wiring.process_outcome_event(payload)
+                self._activity_log.append({
+                    "type": "outcome_processed",
+                    "outcome_ref": payload.get("outcome_ref", ""),
+                    "outcome_type": payload.get("outcome_type", ""),
+                    "digests_updated": updated,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
     def _recompile_loop(self) -> None:
         """Background thread that recompiles debounced pending digests."""
         while not self._stop.is_set():
@@ -177,8 +220,39 @@ class CortexWorker:
 
         for scope in ready:
             try:
+                t0 = time.monotonic()
                 result = self._compiler.compile(scope)
+                elapsed_ms = round((time.monotonic() - t0) * 1000)
                 if result:
                     self._digests_compiled += 1
+                    self._activity_log.append({
+                        "type": "digest_compiled",
+                        "scope": scope,
+                        "digest_type": result.digest_type.value,
+                        "entry_count": result.entry_count,
+                        "elapsed_ms": elapsed_ms,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
             except Exception:
                 logger.exception("Failed to compile digest for %s", scope)
+                self._activity_log.append({
+                    "type": "compilation_error",
+                    "scope": scope,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+    def _record_throughput(self) -> None:
+        """Track per-minute event throughput."""
+        now = time.time()
+        bucket = int(now // 60) * 60
+        if bucket != self._current_bucket_ts:
+            if self._current_bucket_ts > 0:
+                self._throughput_buckets.append({
+                    "timestamp": datetime.fromtimestamp(
+                        self._current_bucket_ts, tz=timezone.utc
+                    ).isoformat(),
+                    "events": self._current_bucket_count,
+                })
+            self._current_bucket_ts = bucket
+            self._current_bucket_count = 0
+        self._current_bucket_count += 1
