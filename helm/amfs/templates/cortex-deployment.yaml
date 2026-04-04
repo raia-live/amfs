@@ -1,0 +1,51 @@
+{{- if .Values.cortex.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "amfs.fullname" . }}-cortex
+  labels:
+    {{- include "amfs.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cortex
+spec:
+  replicas: {{ .Values.cortex.replicas }}
+  selector:
+    matchLabels:
+      {{- include "amfs.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: cortex
+  template:
+    metadata:
+      labels:
+        {{- include "amfs.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cortex
+    spec:
+      containers:
+        - name: cortex
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["amfs-cortex"]
+          args:
+            - "--debounce-ms={{ .Values.cortex.debounceMs }}"
+          env:
+            - name: AMFS_NAMESPACE
+              value: {{ .Values.amfs.namespace | quote }}
+            {{- if eq .Values.storage.backend "postgres" }}
+            {{- if .Values.postgres.external }}
+            - name: AMFS_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "amfs.fullname" . }}-secrets
+                  key: postgres-dsn
+            {{- else }}
+            - name: AMFS_POSTGRES_DSN
+              value: "postgresql://{{ .Values.postgres.auth.username }}:{{ .Values.postgres.auth.password }}@{{ include "amfs.fullname" . }}-postgres:5432/{{ .Values.postgres.auth.database }}"
+            {{- end }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.cortex.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command: ["amfs-cortex", "--health"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+{{- end }}

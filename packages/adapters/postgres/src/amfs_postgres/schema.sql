@@ -265,3 +265,37 @@ DROP TRIGGER IF EXISTS trg_notify_write ON amfs_memory_entries;
 CREATE TRIGGER trg_notify_write
     AFTER INSERT ON amfs_memory_entries
     FOR EACH ROW EXECUTE FUNCTION amfs_notify_write();
+
+-- Compiled digests table (Memory Cortex)
+
+CREATE TABLE IF NOT EXISTS amfs_digests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace TEXT NOT NULL DEFAULT 'default',
+    digest_type TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    summary JSONB NOT NULL,
+    entry_count INTEGER NOT NULL DEFAULT 0,
+    source_agents TEXT[] DEFAULT '{}',
+    anticipation_score NUMERIC(6,4) DEFAULT 0.0,
+    compiled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_digest UNIQUE (namespace, digest_type, scope)
+);
+
+CREATE INDEX IF NOT EXISTS idx_digests_type ON amfs_digests(digest_type);
+CREATE INDEX IF NOT EXISTS idx_digests_scope ON amfs_digests(scope);
+
+CREATE OR REPLACE FUNCTION amfs_notify_digest() RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_notify('amfs_digest', json_build_object(
+        'namespace', NEW.namespace,
+        'digest_type', NEW.digest_type,
+        'scope', NEW.scope
+    )::TEXT);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_notify_digest ON amfs_digests;
+CREATE TRIGGER trg_notify_digest
+    AFTER INSERT OR UPDATE ON amfs_digests
+    FOR EACH ROW EXECUTE FUNCTION amfs_notify_digest();

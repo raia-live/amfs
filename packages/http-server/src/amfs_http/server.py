@@ -1643,6 +1643,88 @@ async def list_connectors(
         return {"connectors": [], "total": 0}
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Memory Cortex (Briefing + Status)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/briefing")
+async def get_briefing(
+    entity_path: str | None = Query(None),
+    agent_id: str | None = Query(None),
+    limit: int = Query(10, ge=1, le=100),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Get a ranked briefing of compiled knowledge digests."""
+    mem = _get_memory()
+    digests = mem.briefing(
+        entity_path=entity_path,
+        agent_id=agent_id,
+        limit=limit,
+    )
+    return {
+        "digests": [d.model_dump(mode="json") for d in digests],
+        "total": len(digests),
+    }
+
+
+@app.get("/api/v1/cortex/status")
+async def cortex_status(
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Get Cortex worker status and digest statistics."""
+    mem = _get_memory()
+    try:
+        digests = mem.briefing(limit=0)
+    except Exception:
+        digests = []
+
+    try:
+        from amfs_postgres.adapter import PostgresAdapter
+
+        adapter = mem._adapter
+        if isinstance(adapter, PostgresAdapter):
+            all_digests = adapter.list_digests()
+            return {
+                "status": "active" if all_digests else "idle",
+                "digest_count": len(all_digests),
+                "digest_types": {
+                    "entity": sum(1 for d in all_digests if d.digest_type.value == "entity"),
+                    "agent_brief": sum(1 for d in all_digests if d.digest_type.value == "agent_brief"),
+                    "source": sum(1 for d in all_digests if d.digest_type.value == "source"),
+                },
+            }
+    except (ImportError, Exception):
+        pass
+
+    return {"status": "unavailable", "digest_count": 0}
+
+
+@app.get("/api/v1/cortex/digests")
+async def list_cortex_digests(
+    digest_type: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """List all compiled digests."""
+    try:
+        from amfs_postgres.adapter import PostgresAdapter
+        from amfs_core.models import DigestType
+
+        mem = _get_memory()
+        adapter = mem._adapter
+        if isinstance(adapter, PostgresAdapter):
+            dt = DigestType(digest_type) if digest_type else None
+            digests = adapter.list_digests(digest_type=dt)
+            return {
+                "digests": [d.model_dump(mode="json") for d in digests],
+                "total": len(digests),
+            }
+    except (ImportError, ValueError, Exception):
+        pass
+
+    return {"digests": [], "total": 0}
+
+
 @app.post("/api/v1/webhooks/{connector_name}")
 async def ingest_webhook(
     connector_name: str,
@@ -1780,12 +1862,49 @@ def _parse_args() -> argparse.Namespace:
         default=False,
         help="Enable auto-reload for development",
     )
+    parser.add_argument(
+        "--with-cortex",
+        action="store_true",
+        default=False,
+        help="Run embedded Cortex worker in-process (for single-instance deployments)",
+    )
     return parser.parse_args()
+
+
+_cortex_worker = None
 
 
 def main() -> None:
     """Run the AMFS HTTP server via uvicorn."""
+    global _cortex_worker
     args = _parse_args()
+
+    if args.with_cortex:
+        dsn = os.environ.get("AMFS_POSTGRES_DSN")
+        if dsn:
+            import threading
+
+            try:
+                from amfs_postgres.adapter import PostgresAdapter
+                from amfs_cortex.compiler import DigestCompiler
+                from amfs_cortex.worker import CortexWorker
+
+                namespace = os.environ.get("AMFS_NAMESPACE", "default")
+                adapter = PostgresAdapter(dsn=dsn, namespace=namespace)
+                compiler = DigestCompiler(adapter=adapter, namespace=namespace)
+                _cortex_worker = CortexWorker(
+                    dsn=dsn,
+                    compiler=compiler,
+                    use_advisory_lock=False,
+                )
+                t = threading.Thread(target=_cortex_worker.run, daemon=True, name="cortex-embedded")
+                t.start()
+                logger.info("Embedded Cortex worker started")
+            except ImportError:
+                logger.warning("--with-cortex requires amfs-cortex package")
+        else:
+            logger.warning("--with-cortex requires AMFS_POSTGRES_DSN")
+
     logger.info("Starting AMFS HTTP server on %s:%d", args.host, args.port)
     uvicorn.run(
         "amfs_http.server:app",

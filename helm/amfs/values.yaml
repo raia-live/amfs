@@ -58,6 +58,18 @@ s3:
   accessKeyId: ""
   secretAccessKey: ""
 
+cortex:
+  enabled: true
+  replicas: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  debounceMs: 3000
+
 autoscaling:
   enabled: false
   minReplicas: 1

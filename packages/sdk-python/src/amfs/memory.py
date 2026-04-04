@@ -701,6 +701,45 @@ class AgentMemory:
         return list(self.cross_agent_reads().keys())
 
     # ------------------------------------------------------------------
+    # Briefing (Memory Cortex)
+    # ------------------------------------------------------------------
+
+    def briefing(
+        self,
+        entity_path: str | None = None,
+        agent_id: str | None = None,
+        limit: int = 10,
+    ) -> list:
+        """Get a ranked briefing of compiled knowledge digests.
+
+        Returns pre-compiled Digest objects from the Cortex, ranked by
+        relevance to the given entity or agent context. If no Cortex is
+        running, returns an empty list.
+
+        Args:
+            entity_path: Focus on digests relevant to this entity.
+            agent_id: Focus on digests relevant to this agent.
+            limit: Maximum number of digests to return.
+
+        Returns:
+            List of Digest objects ranked by relevance.
+        """
+        try:
+            from amfs_cortex.briefing import BriefingService
+
+            service = BriefingService(
+                adapter=self._adapter,
+                namespace=self._namespace,
+            )
+            return service.briefing(
+                entity_path=entity_path,
+                agent_id=agent_id or self.agent_id,
+                limit=limit,
+            )
+        except (ImportError, Exception):
+            return []
+
+    # ------------------------------------------------------------------
     # Scoped access
     # ------------------------------------------------------------------
 

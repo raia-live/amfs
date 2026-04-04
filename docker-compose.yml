@@ -20,6 +20,23 @@ services:
       timeout: 3s
       retries: 3
 
+  cortex:
+    build: .
+    image: ghcr.io/raia-live/amfs:latest
+    entrypoint: ["amfs-cortex"]
+    environment:
+      AMFS_POSTGRES_DSN: postgresql://amfs:amfs@postgres:5432/amfs
+      AMFS_NAMESPACE: default
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "amfs-cortex", "--health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   postgres:
     image: pgvector/pgvector:pg16
     environment:

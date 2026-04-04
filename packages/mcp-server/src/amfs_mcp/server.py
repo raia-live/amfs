@@ -515,6 +515,37 @@ def amfs_explain(outcome_ref: str | None = None) -> str:
     return json.dumps(explanation, default=str)
 
 
+@mcp.tool
+def amfs_briefing(
+    entity_path: str | None = None,
+    agent_id: str | None = None,
+    limit: int = 10,
+) -> str:
+    """Get a compiled knowledge briefing — what you should know right now.
+
+    Returns pre-compiled digests from the Memory Cortex, ranked by relevance.
+    Digests include entity summaries, agent brain briefs, and external source
+    summaries. Much faster and more complete than manual search.
+
+    Args:
+        entity_path: Focus on this entity (e.g. "checkout-service")
+        agent_id: Focus on this agent's context (defaults to current agent)
+        limit: Max digests to return (default 10)
+
+    Example: amfs_briefing(entity_path="checkout-service")
+    """
+    mem = _get_memory()
+    digests = mem.briefing(
+        entity_path=entity_path,
+        agent_id=agent_id,
+        limit=limit,
+    )
+    return json.dumps(
+        [d.model_dump(mode="json") for d in digests],
+        default=str,
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────────────────────────────
