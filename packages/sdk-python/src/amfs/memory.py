@@ -726,18 +726,18 @@ class AgentMemory:
         """
         try:
             from amfs_cortex.briefing import BriefingService
-
-            service = BriefingService(
-                adapter=self._adapter,
-                namespace=self._namespace,
-            )
-            return service.briefing(
-                entity_path=entity_path,
-                agent_id=agent_id or self.agent_id,
-                limit=limit,
-            )
-        except (ImportError, Exception):
+        except ImportError:
             return []
+
+        service = BriefingService(
+            adapter=self._adapter,
+            namespace=self._namespace,
+        )
+        return service.briefing(
+            entity_path=entity_path,
+            agent_id=agent_id or self.agent_id,
+            limit=limit,
+        )
 
     # ------------------------------------------------------------------
     # Scoped access
