@@ -710,6 +710,52 @@ async def agent_memory_graph(
     }
 
 
+@app.get("/api/v1/agents/{agent_id}/cross-agent-reads")
+async def agent_cross_reads(
+    agent_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Which other agents' memory this agent has read."""
+    mem = _get_memory()
+    entries = mem.list()
+    traces = mem._adapter.list_traces(agent_id=agent_id, limit=10000)
+
+    entry_authors: dict[str, str] = {}
+    for e in entries:
+        entry_authors[f"{e.entity_path}/{e.key}"] = e.provenance.agent_id
+
+    read_entities: dict[str, dict[str, int]] = {}
+    for t in traces:
+        for ce in t.causal_entries:
+            ep = ce.entity_path
+            key = ce.key
+            if ep not in read_entities:
+                read_entities[ep] = {}
+            read_entities[ep][key] = read_entities[ep].get(key, 0) + 1
+
+    cross_reads: dict[str, list[dict[str, Any]]] = {}
+    for ep, keys in read_entities.items():
+        for key, count in keys.items():
+            author = entry_authors.get(f"{ep}/{key}")
+            if author and author != agent_id:
+                if author not in cross_reads:
+                    cross_reads[author] = []
+                cross_reads[author].append({
+                    "entityPath": ep,
+                    "key": key,
+                    "readCount": count,
+                })
+
+    return {
+        "agentId": agent_id,
+        "readsFrom": cross_reads,
+        "agentsReadFrom": list(cross_reads.keys()),
+        "totalCrossAgentReads": sum(
+            r["readCount"] for reads in cross_reads.values() for r in reads
+        ),
+    }
+
+
 @app.get("/api/v1/agents/{agent_id}/activity")
 async def agent_activity(
     agent_id: str,

@@ -568,6 +568,67 @@ class AgentMemory:
         }
 
     # ------------------------------------------------------------------
+    # Cross-agent relationships
+    # ------------------------------------------------------------------
+
+    def cross_agent_reads(self) -> dict[str, list[dict[str, Any]]]:
+        """Return which other agents' memory this agent has read.
+
+        Examines the decision traces to find all entries read by this agent,
+        then identifies which of those were written by other agents.
+
+        Returns a dict mapping ``other_agent_id`` to a list of dicts with
+        ``entity_path``, ``key``, and ``read_count``.
+
+        Use this to answer questions like:
+        - "Which agents have I talked to?"
+        - "What memory did I get from agent X?"
+
+        Example::
+
+            reads = mem.cross_agent_reads()
+            # {'deploy-agent': [{'entity_path': 'checkout-service', 'key': 'retry-pattern', 'read_count': 3}]}
+        """
+        entries = self.list()
+        traces = self._adapter.list_traces(agent_id=self.agent_id, limit=10000)
+
+        entry_authors: dict[str, str] = {}
+        for e in entries:
+            entry_authors[f"{e.entity_path}/{e.key}"] = e.provenance.agent_id
+
+        read_entities: dict[str, dict[str, int]] = {}
+        for t in traces:
+            for ce in t.causal_entries:
+                ep = ce.entity_path
+                key = ce.key
+                if ep not in read_entities:
+                    read_entities[ep] = {}
+                read_entities[ep][key] = read_entities[ep].get(key, 0) + 1
+
+        cross_reads: dict[str, list[dict[str, Any]]] = {}
+        for ep, keys in read_entities.items():
+            for key, count in keys.items():
+                author = entry_authors.get(f"{ep}/{key}")
+                if author and author != self.agent_id:
+                    if author not in cross_reads:
+                        cross_reads[author] = []
+                    cross_reads[author].append({
+                        "entity_path": ep,
+                        "key": key,
+                        "read_count": count,
+                    })
+
+        return cross_reads
+
+    def agents_i_read_from(self) -> list[str]:
+        """Return a list of other agent IDs whose memory this agent has read.
+
+        A convenience wrapper around :meth:`cross_agent_reads` that returns
+        just the agent IDs.
+        """
+        return list(self.cross_agent_reads().keys())
+
+    # ------------------------------------------------------------------
     # Scoped access
     # ------------------------------------------------------------------
 

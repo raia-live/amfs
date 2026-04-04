@@ -391,6 +391,42 @@ def amfs_record_context(
 
 
 @mcp.tool
+def amfs_cross_agent_reads() -> str:
+    """Show which other agents' memory this agent has read.
+
+    Returns a mapping of other agent IDs to the specific entity/key pairs
+    read from them, with read counts. Use this to understand inter-agent
+    communication and memory sharing relationships.
+
+    Answers questions like:
+    - "Which agents have I talked to?"
+    - "What memory did I get from agent X?"
+    - "Who wrote the knowledge I'm relying on?"
+
+    Example response:
+    {
+      "agent_id": "review-agent",
+      "reads_from": {
+        "deploy-agent": [
+          {"entity_path": "checkout-service", "key": "retry-pattern", "read_count": 3}
+        ]
+      },
+      "agents_read_from": ["deploy-agent"]
+    }
+    """
+    mem = _get_memory()
+    cross_reads = mem.cross_agent_reads()
+    return json.dumps({
+        "agent_id": mem.agent_id,
+        "reads_from": cross_reads,
+        "agents_read_from": list(cross_reads.keys()),
+        "total_cross_agent_reads": sum(
+            r["read_count"] for reads in cross_reads.values() for r in reads
+        ),
+    }, default=str)
+
+
+@mcp.tool
 def amfs_explain(outcome_ref: str | None = None) -> str:
     """Explain the causal chain — which memories influenced this session's decisions.
 
