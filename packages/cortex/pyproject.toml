@@ -2,12 +2,11 @@
 name = "amfs-cortex"
 version = "0.1.0"
 description = "Memory Cortex — streaming digest compiler and briefing service for AMFS"
-readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
     "amfs-core",
-    "amfs-postgres",
+    "amfs-adapter-postgres",
     "amfs",
 ]
 
