@@ -17,6 +17,7 @@ COPY packages/sdk-python packages/sdk-python
 COPY packages/http-server packages/http-server
 COPY packages/mcp-server packages/mcp-server
 COPY packages/cortex packages/cortex
+COPY packages/connectors packages/connectors
 
 RUN pip install --no-cache-dir \
     ./packages/core \
@@ -26,7 +27,8 @@ RUN pip install --no-cache-dir \
     ./packages/sdk-python \
     ./packages/http-server \
     ./packages/mcp-server \
-    ./packages/cortex
+    ./packages/cortex \
+    ./packages/connectors
 
 FROM base AS runtime
 
