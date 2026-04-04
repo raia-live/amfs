@@ -2,6 +2,7 @@ services:
   amfs:
     build: .
     image: ghcr.io/raia-live/amfs:latest
+    command: ["--host", "0.0.0.0", "--port", "8080", "--with-cortex"]
     ports:
       - "8080:8080"
     environment:
@@ -18,23 +19,6 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 15s
       timeout: 3s
-      retries: 3
-
-  cortex:
-    build: .
-    image: ghcr.io/raia-live/amfs:latest
-    entrypoint: ["amfs-cortex"]
-    environment:
-      AMFS_POSTGRES_DSN: postgresql://amfs:amfs@postgres:5432/amfs
-      AMFS_NAMESPACE: default
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "amfs-cortex", "--health"]
-      interval: 30s
-      timeout: 5s
       retries: 3
 
   postgres:
