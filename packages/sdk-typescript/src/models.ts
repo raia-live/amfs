@@ -41,6 +41,7 @@ export interface MemoryEntry {
   outcomeCount: number;
   ttlAt: string | null;
   artifactRefs?: ArtifactRef[];
+  shared: boolean;
 }
 
 export interface OutcomeRecord {

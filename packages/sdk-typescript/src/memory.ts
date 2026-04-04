@@ -68,7 +68,11 @@ export class AgentMemory {
     key: string,
     options?: { minConfidence?: number }
   ): MemoryEntry | null {
-    return this.engine.read(entityPath, key, options);
+    const entry = this.engine.read(entityPath, key, options);
+    if (entry && !entry.shared && entry.provenance.agentId !== this.agentId) {
+      return null;
+    }
+    return entry;
   }
 
   write(
@@ -79,6 +83,7 @@ export class AgentMemory {
       confidence?: number;
       ttlAt?: string | null;
       patternRefs?: string[];
+      shared?: boolean;
     }
   ): MemoryEntry {
     return this.engine.write(entityPath, key, value, options);
@@ -88,7 +93,9 @@ export class AgentMemory {
     entityPath?: string,
     options?: { includeSuperseded?: boolean }
   ): MemoryEntry[] {
-    return this.engine.list(entityPath, options);
+    return this.engine.list(entityPath, options).filter(
+      (e) => e.shared || e.provenance.agentId === this.agentId,
+    );
   }
 
   watch(
@@ -144,6 +151,7 @@ export class AgentMemory {
       }
 
       for (const entry of entries) {
+        if (!entry.shared && entry.provenance.agentId !== this.agentId) continue;
         const ek = `${entry.entityPath}/${entry.key}`;
         if (!seenKeys.has(ek)) {
           seenKeys.add(ek);
@@ -339,7 +347,7 @@ export class AgentMemory {
     key: string,
   ): MemoryEntry | null {
     const entries = this.search({ entityPath, agentId });
-    const match = entries.find((e) => e.key === key);
+    const match = entries.find((e) => e.key === key && e.shared);
     if (!match) return null;
     this.readTracker.record(match);
     return match;

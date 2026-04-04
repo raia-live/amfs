@@ -61,6 +61,7 @@ export class CoWEngine {
       confidence?: number;
       ttlAt?: string | null;
       patternRefs?: string[];
+      shared?: boolean;
     }
   ): MemoryEntry {
     const current = this.adapter.read(entityPath, key);
@@ -76,6 +77,7 @@ export class CoWEngine {
       confidence: options?.confidence ?? 1.0,
       outcomeCount: current?.outcomeCount ?? 0,
       ttlAt: options?.ttlAt ?? null,
+      shared: options?.shared ?? true,
     };
 
     return this.adapter.write(entry);

@@ -14,6 +14,7 @@ class WriteRequest(BaseModel):
     confidence: float = 1.0
     pattern_refs: list[str] = Field(default_factory=list)
     memory_type: str = "fact"
+    shared: bool = True
 
 
 class OutcomeRequest(BaseModel):

@@ -240,7 +240,7 @@ class PostgresAdapter(AdapterABC):
                         "id", "namespace", "entity_path", "key", "version",
                         "value", "agent_id", "session_id", "written_at",
                         "pattern_refs", "confidence", "outcome_count",
-                        "ttl_at", "memory_type", "artifact_refs",
+                        "ttl_at", "memory_type", "shared", "artifact_refs",
                     ]
                     params: list[Any] = [
                         str(entry_id),
@@ -257,6 +257,7 @@ class PostgresAdapter(AdapterABC):
                         entry.outcome_count,
                         entry.ttl_at,
                         entry.memory_type.value,
+                        entry.shared,
                         json.dumps(
                             [ref.model_dump(mode="json") for ref in entry.artifact_refs],
                             default=str,
@@ -804,6 +805,7 @@ class PostgresAdapter(AdapterABC):
             ttl_at=row.get("ttl_at"),
             artifact_refs=[ArtifactRef.model_validate(r) for r in (row.get("artifact_refs") or [])],
             memory_type=memory_type,
+            shared=row.get("shared", True),
         )
 
     def close(self) -> None:

@@ -204,6 +204,7 @@ async def write_entry(
         confidence=req.confidence,
         pattern_refs=req.pattern_refs or None,
         memory_type=mt,
+        shared=req.shared,
     )
     _sse_manager.broadcast(entry)
     _audit_log(
