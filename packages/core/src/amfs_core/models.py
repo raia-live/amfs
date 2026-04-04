@@ -315,6 +315,29 @@ class SemanticQuery(BaseModel):
     min_similarity: float = 0.0
 
 
+class DigestType(str, Enum):
+    """Types of compiled knowledge digests produced by the Cortex."""
+
+    ENTITY = "entity"
+    AGENT_BRIEF = "agent_brief"
+    SOURCE = "source"
+    CONNECTION_MAP = "connection_map"
+
+
+class Digest(BaseModel):
+    """A compiled knowledge digest — distilled from raw memory entries."""
+
+    digest_type: DigestType
+    scope: str
+    summary: dict[str, Any]
+    entry_count: int = 0
+    source_agents: list[str] = Field(default_factory=list)
+    compiled_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    staleness_ms: int = 0
+    anticipation_score: float = 0.0
+    namespace: str = "default"
+
+
 class LayerConfig(BaseModel):
     """Configuration for a single storage layer."""
 

@@ -21,6 +21,8 @@ from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
     ArtifactRef,
     DecisionTrace,
+    Digest,
+    DigestType,
     ErrorEvent,
     ExternalContext,
     MemoryEntry,
@@ -806,6 +808,90 @@ class PostgresAdapter(AdapterABC):
             artifact_refs=[ArtifactRef.model_validate(r) for r in (row.get("artifact_refs") or [])],
             memory_type=memory_type,
             shared=row.get("shared", True),
+        )
+
+    # ── Digest storage (Memory Cortex) ──────────────────────────────
+
+    def upsert_digest(self, digest: Digest) -> None:
+        """Insert or update a compiled digest."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                """INSERT INTO amfs_digests
+                   (namespace, digest_type, scope, summary, entry_count,
+                    source_agents, anticipation_score, compiled_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT ON CONSTRAINT uq_digest
+                   DO UPDATE SET summary = EXCLUDED.summary,
+                                 entry_count = EXCLUDED.entry_count,
+                                 source_agents = EXCLUDED.source_agents,
+                                 anticipation_score = EXCLUDED.anticipation_score,
+                                 compiled_at = EXCLUDED.compiled_at""",
+                (
+                    digest.namespace,
+                    digest.digest_type.value,
+                    digest.scope,
+                    json.dumps(digest.summary),
+                    digest.entry_count,
+                    digest.source_agents,
+                    digest.anticipation_score,
+                    digest.compiled_at,
+                ),
+            )
+
+    def get_digest(
+        self,
+        digest_type: DigestType,
+        scope: str,
+        namespace: str = "default",
+    ) -> Digest | None:
+        """Read a single digest by type and scope."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """SELECT * FROM amfs_digests
+                   WHERE namespace = %s AND digest_type = %s AND scope = %s""",
+                (namespace, digest_type.value, scope),
+                row_factory=dict_row,
+            ).fetchone()
+        return self._row_to_digest(row) if row else None
+
+    def list_digests(
+        self,
+        digest_type: DigestType | None = None,
+        namespace: str = "default",
+    ) -> list[Digest]:
+        """List digests, optionally filtered by type."""
+        with self._pool.connection() as conn:
+            if digest_type:
+                rows = conn.execute(
+                    """SELECT * FROM amfs_digests
+                       WHERE namespace = %s AND digest_type = %s
+                       ORDER BY compiled_at DESC""",
+                    (namespace, digest_type.value),
+                    row_factory=dict_row,
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM amfs_digests
+                       WHERE namespace = %s ORDER BY compiled_at DESC""",
+                    (namespace,),
+                    row_factory=dict_row,
+                ).fetchall()
+        return [self._row_to_digest(r) for r in rows]
+
+    @staticmethod
+    def _row_to_digest(row: dict[str, Any]) -> Digest:
+        summary = row["summary"]
+        if isinstance(summary, str):
+            summary = json.loads(summary)
+        return Digest(
+            digest_type=DigestType(row["digest_type"]),
+            scope=row["scope"],
+            summary=summary,
+            entry_count=row.get("entry_count", 0),
+            source_agents=row.get("source_agents") or [],
+            compiled_at=row["compiled_at"],
+            anticipation_score=float(row.get("anticipation_score", 0.0)),
+            namespace=row.get("namespace", "default"),
         )
 
     def close(self) -> None:

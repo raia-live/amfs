@@ -12,3 +12,5 @@ node_modules/
 .next/
 !uv.lock
 !pnpm-lock.yaml
+.amfs/
+test.py

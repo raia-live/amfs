@@ -16,6 +16,7 @@ COPY packages/adapters/s3 packages/adapters/s3
 COPY packages/sdk-python packages/sdk-python
 COPY packages/http-server packages/http-server
 COPY packages/mcp-server packages/mcp-server
+COPY packages/cortex packages/cortex
 
 RUN pip install --no-cache-dir \
     ./packages/core \
@@ -24,7 +25,8 @@ RUN pip install --no-cache-dir \
     ./packages/adapters/s3 \
     ./packages/sdk-python \
     ./packages/http-server \
-    ./packages/mcp-server
+    ./packages/mcp-server \
+    ./packages/cortex
 
 FROM base AS runtime
 
