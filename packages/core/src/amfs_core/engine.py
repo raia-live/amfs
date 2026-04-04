@@ -249,6 +249,7 @@ class CoWEngine:
         pattern_refs: list[str] | None = None,
         memory_type: MemoryType = MemoryType.FACT,
         artifact_refs: list[ArtifactRef] | None = None,
+        shared: bool = True,
     ) -> MemoryEntry:
         """Write a new version of a key with CoW semantics.
 
@@ -270,6 +271,7 @@ class CoWEngine:
             ttl_at=ttl_at,
             artifact_refs=artifact_refs or [],
             memory_type=memory_type,
+            shared=shared,
         )
 
         return self._adapter.write(entry)

@@ -136,7 +136,8 @@ class AgentMemory:
 
         Automatically tracked for causal linking and conflict detection.
         If *decay_half_life_days* is set, applies confidence decay before
-        the min_confidence check.
+        the min_confidence check. Private entries from other agents are
+        not visible — use ``recall()`` to access your own private entries.
         """
         import time
 
@@ -146,13 +147,18 @@ class AgentMemory:
                 entry = self._engine.read(entity_path, key, min_confidence=0.0)
                 if entry is None:
                     return None
+                if not entry.shared and entry.provenance.agent_id != self.agent_id:
+                    return None
                 effective = entry.effective_confidence(
                     decay_half_life_days=self._decay_half_life_days,
                 )
                 if effective < min_confidence:
                     return None
                 return entry
-            return self._engine.read(entity_path, key, min_confidence=min_confidence)
+            entry = self._engine.read(entity_path, key, min_confidence=min_confidence)
+            if entry is not None and not entry.shared and entry.provenance.agent_id != self.agent_id:
+                return None
+            return entry
         except Exception as exc:
             self._read_tracker.record_error(
                 "read", type(exc).__name__, str(exc),
@@ -170,6 +176,7 @@ class AgentMemory:
         pattern_refs: list[str] | None = None,
         memory_type: MemoryType = MemoryType.FACT,
         artifact_refs: list | None = None,
+        shared: bool = True,
     ) -> MemoryEntry:
         """Write a new version of a key with automatic provenance.
 
@@ -217,6 +224,7 @@ class AgentMemory:
             pattern_refs=pattern_refs,
             memory_type=memory_type,
             artifact_refs=artifact_refs,
+            shared=shared,
         )
         self._read_tracker.record_write(entity_path, key, entry.version, entry.version == 1)
 
@@ -233,10 +241,17 @@ class AgentMemory:
         *,
         include_superseded: bool = False,
     ) -> list[MemoryEntry]:
-        """List current entries, optionally filtered to an entity path."""
+        """List current entries, optionally filtered to an entity path.
+
+        Private entries from other agents are excluded.
+        """
         import time
         start = time.monotonic()
         results = self._engine.list(entity_path, include_superseded=include_superseded)
+        results = [
+            e for e in results
+            if e.shared or e.provenance.agent_id == self.agent_id
+        ]
         duration = (time.monotonic() - start) * 1000
         self._read_tracker.record_query(
             "list",
@@ -299,6 +314,8 @@ class AgentMemory:
             )
             for entry in self._adapter.search(query):
                 if entry.entry_key not in seen_keys:
+                    if not entry.shared and entry.provenance.agent_id != self.agent_id:
+                        continue
                     seen_keys.add(entry.entry_key)
                     merged.append(entry)
 

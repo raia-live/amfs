@@ -12,6 +12,32 @@ AMFS gives each agent a **persistent brain**. When an agent writes, it's forming
 
 ---
 
+## How Memory Sharing Works
+
+All agents write to the **same storage backend**. The `agent_id` acts as a provenance tag — it marks *who* wrote each entry, not *where* the entry lives.
+
+By default, every memory is **shared**: any agent can read it. This enables collective learning — Agent B can read what Agent A learned. But agents can also write **private** memories that only they can access. This gives each agent control over what it shares.
+
+```
+┌──────────────────────────────────────────┐
+│           Shared Memory Pool             │
+│                                          │
+│  ┌──────────┐  ┌──────────┐              │
+│  │ Agent A's │  │ Agent B's │             │
+│  │  shared   │  │  shared   │  ← visible │
+│  │ memories  │  │ memories  │    to all   │
+│  └──────────┘  └──────────┘              │
+│                                          │
+│  ┌──────────┐  ┌──────────┐              │
+│  │ Agent A's │  │ Agent B's │             │
+│  │  private  │  │  private  │  ← visible │
+│  │ memories  │  │ memories  │    to owner │
+│  └──────────┘  └──────────┘    only      │
+└──────────────────────────────────────────┘
+```
+
+---
+
 ## 1. Create Your Brain
 
 Every agent gets its own brain via `AgentMemory`:
@@ -44,13 +70,40 @@ entry = mem.write(
 
 print(entry.version)                 # 1
 print(entry.provenance.agent_id)     # "review-agent"
+print(entry.shared)                  # True (default — visible to all agents)
 ```
 
 Every write creates an immutable copy-on-write version. Writing the same key again creates version 2, preserving the full history.
 
 ---
 
-## 3. Recall Your Memory
+## 3. Keep Things Private
+
+Not everything should be shared. Use `shared=False` for internal reasoning, scratchpad notes, or sensitive context:
+
+```python
+# Private memory — only this agent can see it
+mem.write(
+    "checkout-service",
+    "internal-analysis",
+    {"risk_score": 0.92, "reasoning": "Error rate doubled after last deploy"},
+    shared=False,
+)
+
+# Shared memory — the conclusion that other agents should know
+mem.write(
+    "checkout-service",
+    "risk-assessment",
+    "High risk: error rate trending up since v2.3.1",
+    confidence=0.9,
+)
+```
+
+Private entries are invisible to other agents across all methods — `read()`, `search()`, `list()`, and `read_from()` all skip them. Only the owning agent can access its private entries via `recall()` and `my_entries()`.
+
+---
+
+## 4. Recall Your Memory
 
 Ask your brain: *"What do I know about this?"*
 
@@ -61,11 +114,11 @@ print(entry.value)       # {"pattern": "exponential-backoff", ...}
 print(entry.confidence)  # 0.85
 ```
 
-`recall()` returns only entries **written by this agent**. If another agent wrote a different version, `recall()` ignores it — it's this brain's direct experience.
+`recall()` returns only entries **written by this agent**, including private ones. If another agent wrote a different version, `recall()` ignores it — it's this brain's direct experience.
 
 ---
 
-## 4. Read Shared Knowledge
+## 5. Read Shared Knowledge
 
 Ask the shared pool: *"What does anyone know about this?"*
 
@@ -73,11 +126,11 @@ Ask the shared pool: *"What does anyone know about this?"*
 entry = mem.read("checkout-service", "retry-pattern")
 ```
 
-`read()` returns the latest version by **any agent**. This is how agents benefit from collective knowledge. Both `read()` and `recall()` return `None` if no entry exists.
+`read()` returns the latest **shared** version by any agent. Private entries from other agents are never returned. Both `read()` and `recall()` return `None` if no matching entry exists.
 
 ---
 
-## 5. Learn from Another Agent
+## 6. Learn from Another Agent
 
 Explicitly pull knowledge from a specific agent's brain:
 
@@ -88,26 +141,28 @@ if entry:
     print(f"Learned from deploy-agent: {entry.value}")
 ```
 
-`read_from()` makes cross-agent knowledge transfer explicit and trackable. The read is logged in the causal chain so you can always trace where knowledge came from.
+`read_from()` makes cross-agent knowledge transfer explicit and trackable. It only returns **shared** entries — you cannot read another agent's private memories. The read is logged in the causal chain so you can always trace where knowledge came from.
 
 ---
 
-## 6. See What's in Your Brain
+## 7. See What's in Your Brain
 
 List everything this agent has written:
 
 ```python
 my_memories = mem.my_entries()
 for e in my_memories:
-    print(f"{e.entity_path}/{e.key} (v{e.version}, confidence={e.confidence})")
+    print(f"{e.entity_path}/{e.key} (v{e.version}, shared={e.shared})")
 
 # Filter to a specific entity
 checkout_memories = mem.my_entries("checkout-service")
 ```
 
+`my_entries()` returns both shared and private entries — it's your complete brain.
+
 ---
 
-## 7. Learn from Experience
+## 8. Learn from Experience
 
 When something significant happens, record the outcome. AMFS automatically adjusts confidence scores on related entries:
 
@@ -126,7 +181,7 @@ If you don't pass `causal_entry_keys`, AMFS uses **auto-causal linking** — it 
 
 ---
 
-## 8. Know Who You've Learned From
+## 9. Know Who You've Learned From
 
 Track inter-agent memory relationships:
 
@@ -142,7 +197,7 @@ agents = mem.agents_i_read_from()
 
 ---
 
-## 9. Watch for Changes
+## 10. Watch for Changes
 
 Get notified in real-time when knowledge changes:
 
@@ -158,7 +213,7 @@ handle.cancel()
 
 ---
 
-## 10. Context Manager
+## 11. Context Manager
 
 Use `AgentMemory` as a context manager for clean shutdown:
 
@@ -172,14 +227,15 @@ with AgentMemory(agent_id="review-agent") as mem:
 
 ## The Mental Model
 
-| What you want to do          | Method                  | Who wrote it?       |
-| ---------------------------- | ----------------------- | ------------------- |
-| Form a memory                | `write()`               | You (this agent)    |
-| Recall your own knowledge    | `recall()`              | Only you            |
-| Read shared knowledge        | `read()`                | Anyone (latest)     |
-| Learn from a specific agent  | `read_from(agent_id)`   | That specific agent |
-| See all your memories        | `my_entries()`          | Only you            |
-| Know who taught you          | `cross_agent_reads()`   | Other agents        |
+| What you want to do          | Method                  | Sees private?          | Who wrote it?       |
+| ---------------------------- | ----------------------- | ---------------------- | ------------------- |
+| Form a shared memory         | `write()`               | —                      | You (this agent)    |
+| Form a private memory        | `write(shared=False)`   | —                      | You (this agent)    |
+| Recall your own knowledge    | `recall()`              | Yes (yours only)       | Only you            |
+| Read shared knowledge        | `read()`                | No                     | Anyone (latest)     |
+| Learn from a specific agent  | `read_from(agent_id)`   | No                     | That specific agent |
+| See all your memories        | `my_entries()`          | Yes (yours only)       | Only you            |
+| Know who taught you          | `cross_agent_reads()`   | —                      | Other agents        |
 
 ---
 

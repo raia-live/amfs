@@ -146,6 +146,7 @@ def amfs_write(
     pattern_refs: list[str] | None = None,
     memory_type: str = "fact",
     artifact_refs: list[dict[str, Any]] | None = None,
+    shared: bool = True,
 ) -> str:
     """Write a memory entry with automatic provenance tracking.
 
@@ -163,8 +164,12 @@ def amfs_write(
         artifact_refs: Optional list of external artifact references. Each dict
             should have "uri" (required), and optionally "media_type", "label",
             "size_bytes".
+        shared: If True (default), other agents can read this entry. If False,
+            only the writing agent can access it — useful for internal reasoning,
+            scratchpad notes, or sensitive context.
 
     Example: amfs_write("checkout-service", "retry-pattern", '{"max_retries": 3}')
+    Example private: amfs_write("checkout-service", "internal-notes", "...", shared=False)
     """
     from amfs_core.models import ArtifactRef
 
@@ -191,6 +196,7 @@ def amfs_write(
         pattern_refs=pattern_refs,
         memory_type=mt,
         artifact_refs=parsed_artifact_refs,
+        shared=shared,
     )
     return json.dumps(_serialize_entry(entry), default=str)
 

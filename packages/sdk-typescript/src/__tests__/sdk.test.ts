@@ -31,6 +31,7 @@ function makeEntry(overrides?: Partial<MemoryEntry>): MemoryEntry {
     confidence: 1.0,
     outcomeCount: 0,
     ttlAt: null,
+    shared: true,
     ...overrides,
   };
 }

@@ -94,6 +94,7 @@ class MemoryEntry(BaseModel):
     embedding: list[float] | None = None
     artifact_refs: list[ArtifactRef] = Field(default_factory=list)
     memory_type: MemoryType = MemoryType.FACT
+    shared: bool = True
 
     def effective_confidence(self, *, decay_half_life_days: float | None = None) -> float:
         """Confidence adjusted for time-based decay and memory type.
