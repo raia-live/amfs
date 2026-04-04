@@ -28,7 +28,11 @@ def _confidence_label(c: float) -> str:
 
 
 def _pluralize(n: int, word: str) -> str:
-    return f"{n} {word}{'s' if n != 1 else ''}"
+    if n == 1:
+        return f"1 {word}"
+    if word.endswith("y") and not word.endswith(("ay", "ey", "oy", "uy")):
+        return f"{n} {word[:-1]}ies"
+    return f"{n} {word}s"
 
 
 class RuleBasedStrategy:
