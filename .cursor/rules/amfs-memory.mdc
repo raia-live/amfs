@@ -8,21 +8,25 @@ alwaysApply: true
 
 You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives you a **persistent brain** — memory that survives across sessions, agents, and machines. Use it to build institutional knowledge over time.
 
-## When to RECALL memory (check your own brain first)
+## When to GET BRIEFED (start every session with context)
 
-- **Before starting work**: First recall what YOU already know, then search shared knowledge.
+- **Before starting any work**: Get a compiled briefing from the Memory Cortex. This gives you pre-compiled knowledge about the entities you're about to work on — what other agents know, recent risks, external events, and confidence-ranked facts. This is your most important first step.
+  ```
+  amfs_briefing(entity_path="<repo>/<module>")
+  ```
+- Then recall your own specific memories and search for details:
   ```
   amfs_recall("<repo>/<module>", "<relevant-key>")
   amfs_search(entity_path="<repo>/<service-or-module>")
   ```
-- **Before making architectural decisions**: Check if you or others already recorded patterns.
+- **Before making architectural decisions**: Get a briefing first, then check specific patterns.
   ```
-  amfs_recall("<repo>/<module>", "decision-<topic>")
+  amfs_briefing(entity_path="<repo>/<module>")
   amfs_search(query="<topic>", min_confidence=0.5)
   ```
-- **When encountering errors**: Check if you or another agent already solved similar problems.
+- **When encountering errors**: Check if the Cortex or another agent already has context.
   ```
-  amfs_recall("<repo>/<module>", "risk-<keyword>")
+  amfs_briefing(entity_path="<repo>/<module>")
   amfs_search(query="<error-keyword>")
   ```
 
@@ -85,7 +89,8 @@ Examples:
 
 ## Important
 
-- Use `amfs_recall` before `amfs_search` — check your own brain first, then shared knowledge.
+- **Always start with `amfs_briefing`** — this gives you compiled, ranked knowledge from the Cortex before you even start looking.
+- Use `amfs_recall` for specific keys you remember, `amfs_search` for broader queries.
 - Use `amfs_read_from` when you know which agent has the knowledge you need.
 - Don't write trivial information (e.g. "added a comment"). Write things that would help a future agent.
 - Keep values concise but informative — think of it as writing a note to a colleague.

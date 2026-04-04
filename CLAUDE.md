@@ -26,7 +26,11 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
 ## Workflow
 
 ### Before starting work
-First check what you already know, then check shared knowledge:
+Get a compiled briefing from the Memory Cortex first — this gives you pre-compiled knowledge about the entity you're about to work on, including what other agents know, recent risks, external events, and confidence-ranked facts:
+```
+amfs_briefing(entity_path="<repo>/<module>")
+```
+Then check your own specific memories:
 ```
 amfs_recall("<repo>/<module>", "task-summary-<area>")
 amfs_search(entity_path="<repo>/<service-or-module>")
@@ -93,9 +97,10 @@ Use `{repo}/{service-or-module}` paths:
 
 ## Guidelines
 
+- **Always start with `amfs_briefing`** — this gives you compiled, ranked knowledge from the Cortex before you dig into specifics
 - Only write information that would help a future agent working on the same code
 - Keep values concise but informative — like writing a note to a colleague
-- Use `amfs_recall` before `amfs_search` — check your own brain first
+- Use `amfs_recall` for specific keys, `amfs_search` for broader queries
 - Use `amfs_read_from` when you know which agent has the knowledge you need
 - Search before writing to avoid duplicating existing knowledge
 - Confidence decays over time; entries validated by outcomes decay slower

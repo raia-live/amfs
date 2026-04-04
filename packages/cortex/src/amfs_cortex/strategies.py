@@ -1,6 +1,7 @@
 """Rule-based compilation strategy — OSS default.
 
 Pure structured aggregation with no LLM calls or external dependencies.
+Generates both structured data and a human-readable narrative.
 """
 
 from __future__ import annotations
@@ -12,6 +13,22 @@ from amfs_core.models import Digest, DigestType
 
 if TYPE_CHECKING:
     from amfs_postgres.adapter import PostgresAdapter
+
+
+def _confidence_label(c: float) -> str:
+    if c >= 0.95:
+        return "very high"
+    if c >= 0.8:
+        return "high"
+    if c >= 0.6:
+        return "moderate"
+    if c >= 0.4:
+        return "low"
+    return "very low"
+
+
+def _pluralize(n: int, word: str) -> str:
+    return f"{n} {word}{'s' if n != 1 else ''}"
 
 
 class RuleBasedStrategy:
@@ -35,6 +52,7 @@ class RuleBasedStrategy:
         total_confidence = 0.0
         outcome_linked = 0
         top_keys: list[dict[str, Any]] = []
+        risk_keys: list[str] = []
 
         for e in entries:
             aid = e.provenance.agent_id
@@ -45,6 +63,8 @@ class RuleBasedStrategy:
             total_confidence += e.confidence
             if e.outcome_count > 0:
                 outcome_linked += 1
+            if e.key.startswith("risk-"):
+                risk_keys.append(e.key)
 
         sorted_entries = sorted(entries, key=lambda e: e.confidence, reverse=True)
         for e in sorted_entries[:5]:
@@ -56,28 +76,75 @@ class RuleBasedStrategy:
             })
 
         last_write = max(e.provenance.written_at for e in entries)
+        avg_conf = round(total_confidence / len(entries), 3) if entries else 0
+        ext_event_count = sum(
+            1 for e in entries
+            if e.provenance.agent_id.startswith(("webhook/", "external/"))
+        )
+
+        narrative = self._narrate_entity(
+            entity_path, entries, agents, external_sources,
+            avg_conf, outcome_linked, risk_keys, ext_event_count,
+        )
 
         return Digest(
             digest_type=DigestType.ENTITY,
             scope=entity_path,
             summary={
+                "narrative": narrative,
                 "total_keys": len(entries),
                 "top_keys": top_keys,
                 "agents": sorted(agents),
                 "external_sources": sorted(external_sources),
-                "avg_confidence": round(total_confidence / len(entries), 3) if entries else 0,
+                "avg_confidence": avg_conf,
                 "last_write": last_write.isoformat(),
                 "outcome_linked": outcome_linked,
-                "external_events": sum(
-                    1 for e in entries
-                    if e.provenance.agent_id.startswith(("webhook/", "external/"))
-                ),
+                "external_events": ext_event_count,
             },
             entry_count=len(entries),
             source_agents=sorted(agents | {f"webhook/{s}" for s in external_sources} | {f"external/{s}" for s in external_sources}),
             compiled_at=datetime.now(timezone.utc),
             namespace=namespace,
         )
+
+    @staticmethod
+    def _narrate_entity(
+        entity_path: str,
+        entries: list,
+        agents: set[str],
+        external_sources: set[str],
+        avg_conf: float,
+        outcome_linked: int,
+        risk_keys: list[str],
+        ext_event_count: int,
+    ) -> str:
+        parts: list[str] = []
+
+        parts.append(
+            f"{entity_path} has {_pluralize(len(entries), 'knowledge entry')} "
+            f"from {_pluralize(len(agents), 'agent')} "
+            f"with {_confidence_label(avg_conf)} average confidence ({avg_conf:.0%})."
+        )
+
+        if outcome_linked > 0:
+            ratio = outcome_linked / len(entries)
+            parts.append(
+                f"{_pluralize(outcome_linked, 'entry')} "
+                f"({ratio:.0%}) validated by production outcomes."
+            )
+
+        if risk_keys:
+            parts.append(
+                f"Active risks: {', '.join(risk_keys)}."
+            )
+
+        if ext_event_count > 0:
+            sources = ", ".join(sorted(external_sources))
+            parts.append(
+                f"{_pluralize(ext_event_count, 'external event')} ingested from {sources}."
+            )
+
+        return " ".join(parts)
 
     def compile_agent_brief(
         self, agent_id: str, adapter: PostgresAdapter, namespace: str
@@ -119,10 +186,16 @@ class RuleBasedStrategy:
         outcomes_committed = sum(1 for e in entries if e.outcome_count > 0)
         last_active = max(e.provenance.written_at for e in entries)
 
+        narrative = self._narrate_agent(
+            agent_id, total_entries, entities_written,
+            top_knowledge, outcomes_committed,
+        )
+
         return Digest(
             digest_type=DigestType.AGENT_BRIEF,
             scope=agent_id,
             summary={
+                "narrative": narrative,
                 "entities_written": sorted(entities_written),
                 "total_entries": total_entries,
                 "top_knowledge": top_knowledge,
@@ -135,6 +208,35 @@ class RuleBasedStrategy:
             compiled_at=datetime.now(timezone.utc),
             namespace=namespace,
         )
+
+    @staticmethod
+    def _narrate_agent(
+        agent_id: str,
+        total_entries: int,
+        entities_written: set[str],
+        top_knowledge: list[dict[str, Any]],
+        outcomes_committed: int,
+    ) -> str:
+        parts: list[str] = []
+
+        parts.append(
+            f"{agent_id} has written {_pluralize(total_entries, 'entry')} "
+            f"across {_pluralize(len(entities_written), 'entity')}."
+        )
+
+        if top_knowledge:
+            top = top_knowledge[0]
+            parts.append(
+                f"Highest-confidence knowledge: {top['key']} in {top['entity']} "
+                f"({_confidence_label(top['confidence'])}, {top['confidence']:.0%})."
+            )
+
+        if outcomes_committed > 0:
+            parts.append(
+                f"{_pluralize(outcomes_committed, 'entry')} validated by outcomes."
+            )
+
+        return " ".join(parts)
 
     def compile_source(
         self, source_id: str, adapter: PostgresAdapter, namespace: str
@@ -174,10 +276,17 @@ class RuleBasedStrategy:
 
         last_event = max(e.provenance.written_at for e in entries)
 
+        narrative = (
+            f"{source_id} has sent {_pluralize(len(entries), 'event')} "
+            f"touching {_pluralize(len(entities_touched), 'entity')} "
+            f"({', '.join(sorted(entities_touched))})."
+        )
+
         return Digest(
             digest_type=DigestType.SOURCE,
             scope=source_id,
             summary={
+                "narrative": narrative,
                 "total_events": len(entries),
                 "recent_events": recent_events,
                 "entities_touched": sorted(entities_touched),
