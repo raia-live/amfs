@@ -122,6 +122,15 @@ class PostgresAdapter(AdapterABC):
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(_SCHEMA_SQL)
+                self._apply_migrations(cur)
+
+    @staticmethod
+    def _apply_migrations(cur: psycopg.Cursor) -> None:
+        """Additive migrations for columns added after initial schema."""
+        cur.execute("""
+            ALTER TABLE amfs_memory_entries
+            ADD COLUMN IF NOT EXISTS shared BOOLEAN NOT NULL DEFAULT TRUE
+        """)
 
     def _detect_optional_columns(self) -> None:
         """Check whether optional columns (embedding, search_tsv) exist.
