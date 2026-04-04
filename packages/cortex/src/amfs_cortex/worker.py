@@ -79,10 +79,11 @@ class CortexWorker:
             )
             recompile_thread.start()
 
-            for notify in conn.notifies(timeout=1.0, stop_after=None):
-                if self._stop.is_set():
-                    break
-                self._handle_notify(notify)
+            while not self._stop.is_set():
+                for notify in conn.notifies(timeout=5.0):
+                    if self._stop.is_set():
+                        break
+                    self._handle_notify(notify)
 
         except Exception:
             logger.exception("Cortex worker error")
@@ -123,10 +124,11 @@ class CortexWorker:
                 )
                 recompile_thread.start()
 
-                for notify in conn.notifies(timeout=1.0, stop_after=None):
-                    if self._stop.is_set():
-                        break
-                    self._handle_notify(notify)
+                while not self._stop.is_set():
+                    for notify in conn.notifies(timeout=5.0):
+                        if self._stop.is_set():
+                            break
+                        self._handle_notify(notify)
                 break
 
     def _handle_notify(self, notify) -> None:
