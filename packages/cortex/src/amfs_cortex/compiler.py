@@ -70,7 +70,7 @@ class DigestCompiler:
 
     def recompile_all(self) -> int:
         """Recompile all digests from scratch. Returns count of digests compiled."""
-        entries = self._adapter.list(namespace=self._namespace)
+        entries = self._adapter.list()
         entity_paths: set[str] = set()
         agent_ids: set[str] = set()
         source_ids: set[str] = set()
