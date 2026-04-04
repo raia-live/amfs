@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Any
 
 import uvicorn
-from fastapi import Depends, FastAPI, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
@@ -37,6 +37,7 @@ from amfs_http.models import (
     ContextRequest,
     CreateAPIKeyRequest,
     CreateTeamRequest,
+    EventRequest,
     OutcomeRequest,
     RunPatternDetectionRequest,
     SearchRequest,
@@ -1658,12 +1659,27 @@ async def ingest_webhook(
     headers = dict(request.headers)
 
     mem = _get_memory()
+
+    secret_env = f"AMFS_CONNECTOR_{connector_name.upper().replace('-', '_')}_SECRET"
+    secret = os.environ.get(secret_env)
+
     config = WebhookConfig(
         name=connector_name,
         connector_type="webhook",
         entity_path=connector_name,
+        secret=secret,
     )
     ingester = WebhookIngester(config, memory=mem)
+
+    try:
+        from amfs_connectors import ConnectorRegistry
+
+        registry = ConnectorRegistry()
+        connector = registry.get(connector_name)
+        if connector:
+            ingester.register_transform("*", connector.transform)
+    except Exception:
+        pass
 
     event_type = headers.get("x-event-type", "generic")
     event_id = headers.get("x-event-id")
@@ -1676,9 +1692,63 @@ async def ingest_webhook(
         event_id=event_id,
     )
 
+    original_agent = mem._tagger.agent_id
+    mem._tagger.agent_id = f"webhook/{connector_name}"
+    persisted = 0
+    try:
+        for r in results:
+            if r.success and r.action == "write":
+                entry = mem.write(
+                    r.entity_path,
+                    r.key,
+                    r.details,
+                    confidence=1.0,
+                    memory_type=MemoryType.EXPERIENCE,
+                )
+                _sse_manager.broadcast(entry)
+                persisted += 1
+    finally:
+        mem._tagger.agent_id = original_agent
+
     return {
         "results": [r.model_dump(mode="json") for r in results],
         "total": len(results),
+        "persisted": persisted,
+    }
+
+
+@app.post("/api/v1/events")
+async def ingest_event(
+    body: EventRequest,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Ingest an event directly into the shared memory pool.
+
+    Simple alternative to the webhook/connector framework for apps that
+    just want to push context into AMFS.
+    """
+    mem = _get_memory()
+
+    original_agent = mem._tagger.agent_id
+    mem._tagger.agent_id = f"external/{body.source}"
+    try:
+        entry = mem.write(
+            body.entity_path,
+            body.key,
+            body.value,
+            confidence=1.0,
+            memory_type=MemoryType.EXPERIENCE,
+        )
+        _sse_manager.broadcast(entry)
+    finally:
+        mem._tagger.agent_id = original_agent
+
+    return {
+        "status": "ok",
+        "entity_path": body.entity_path,
+        "key": body.key,
+        "source": body.source,
+        "agent_id": f"external/{body.source}",
     }
 
 

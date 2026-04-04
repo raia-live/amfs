@@ -88,3 +88,18 @@ class RunPatternDetectionRequest(BaseModel):
     hot_entity_stddev: float = 2.0
     drift_stddev: float = 2.0
     entity_path: str | None = None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Events (Shared Pool Ingestion)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class EventRequest(BaseModel):
+    """Direct shared-pool event ingestion without connector framework."""
+
+    source: str
+    entity_path: str
+    key: str
+    value: Any = None
+    event_type: str = "generic"
