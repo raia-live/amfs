@@ -676,6 +676,23 @@ async def agent_memory_graph(
                 read_entities[ep] = {}
             read_entities[ep][key] = read_entities[ep].get(key, 0) + 1
 
+    entry_authors: dict[str, str] = {}
+    for e in entries:
+        entry_authors[f"{e.entity_path}/{e.key}"] = e.provenance.agent_id
+
+    cross_agent_reads: dict[str, list[dict]] = {}
+    for ep, keys in read_entities.items():
+        for key, count in keys.items():
+            author = entry_authors.get(f"{ep}/{key}")
+            if author and author != agent_id:
+                if author not in cross_agent_reads:
+                    cross_agent_reads[author] = []
+                cross_agent_reads[author].append({
+                    "entityPath": ep,
+                    "key": key,
+                    "readCount": count,
+                })
+
     nodes = []
     for ep in sorted(set(list(entities_written.keys()) + list(read_entities.keys()))):
         nodes.append({
@@ -689,6 +706,7 @@ async def agent_memory_graph(
         "nodes": nodes,
         "traceCount": len(traces),
         "totalWritten": len(written_by_agent),
+        "crossAgentReads": cross_agent_reads,
     }
 
 
