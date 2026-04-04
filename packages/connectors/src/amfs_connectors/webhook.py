@@ -188,19 +188,14 @@ class WebhookIngester:
         if transform:
             results.extend(transform(event))
         else:
-            if self._memory:
-                self._memory.record_context(
-                    label=f"{source}/{event_type}",
-                    summary=json.dumps(data)[:500],
-                    source=source,
-                )
             results.append(IngestionResult(
                 connector_id=self._config.id,
                 event_id=eid,
                 entity_path=self._config.entity_path,
-                key=f"event-{eid[:8]}",
-                action="context",
+                key=f"{event_type}-{eid[:8]}",
+                action="write",
                 success=True,
+                details=data,
             ))
 
         return results
