@@ -756,6 +756,65 @@ async def agent_cross_reads(
     }
 
 
+@app.get("/api/v1/agents/{agent_id}/recall/{entity_path:path}/{key}")
+async def agent_recall(
+    agent_id: str,
+    entity_path: str,
+    key: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Recall an agent's own memory for a key (agent-scoped read).
+
+    Unlike the generic read endpoint, this returns only entries written
+    by the specified agent — what that agent's brain actually knows.
+    """
+    mem = _get_memory()
+    original_agent = mem._tagger.agent_id
+    mem._tagger.agent_id = agent_id
+    try:
+        entry = mem.recall(entity_path, key)
+    finally:
+        mem._tagger.agent_id = original_agent
+    if entry is None:
+        return {"status": "not_found", "agentId": agent_id,
+                "entityPath": entity_path, "key": key}
+    return _entry_to_response(entry)
+
+
+@app.get("/api/v1/agents/{agent_id}/entries")
+async def agent_entries(
+    agent_id: str,
+    entity_path: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """List all entries written by a specific agent."""
+    mem = _get_memory()
+    entries = mem.search(entity_path=entity_path, agent_id=agent_id)
+    return {
+        "agentId": agent_id,
+        "count": len(entries),
+        "entries": [_entry_to_response(e) for e in entries],
+    }
+
+
+@app.get("/api/v1/agents/{agent_id}/read-from/{source_agent_id}/{entity_path:path}/{key}")
+async def agent_read_from(
+    agent_id: str,
+    source_agent_id: str,
+    entity_path: str,
+    key: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Read a specific key from another agent's memory (cross-agent read)."""
+    mem = _get_memory()
+    entries = mem.search(entity_path=entity_path, agent_id=source_agent_id)
+    matching = [e for e in entries if e.key == key]
+    if not matching:
+        return {"status": "not_found", "sourceAgentId": source_agent_id,
+                "entityPath": entity_path, "key": key}
+    return _entry_to_response(matching[0])
+
+
 @app.get("/api/v1/agents/{agent_id}/activity")
 async def agent_activity(
     agent_id: str,
