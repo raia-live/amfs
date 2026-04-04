@@ -1694,8 +1694,10 @@ async def cortex_status(
                     "source": sum(1 for d in all_digests if d.digest_type.value == "source"),
                 },
             }
-    except (ImportError, Exception):
+    except ImportError:
         pass
+    except Exception:
+        logger.exception("Failed to fetch Cortex status")
 
     return {"status": "unavailable", "digest_count": 0}
 

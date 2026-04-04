@@ -855,12 +855,12 @@ class PostgresAdapter(AdapterABC):
     ) -> Digest | None:
         """Read a single digest by type and scope."""
         with self._pool.connection() as conn:
-            row = conn.execute(
-                """SELECT * FROM amfs_digests
-                   WHERE namespace = %s AND digest_type = %s AND scope = %s""",
-                (namespace, digest_type.value, scope),
-                row_factory=dict_row,
-            ).fetchone()
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    """SELECT * FROM amfs_digests
+                       WHERE namespace = %s AND digest_type = %s AND scope = %s""",
+                    (namespace, digest_type.value, scope),
+                ).fetchone()
         return self._row_to_digest(row) if row else None
 
     def list_digests(
@@ -870,21 +870,20 @@ class PostgresAdapter(AdapterABC):
     ) -> list[Digest]:
         """List digests, optionally filtered by type."""
         with self._pool.connection() as conn:
-            if digest_type:
-                rows = conn.execute(
-                    """SELECT * FROM amfs_digests
-                       WHERE namespace = %s AND digest_type = %s
-                       ORDER BY compiled_at DESC""",
-                    (namespace, digest_type.value),
-                    row_factory=dict_row,
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """SELECT * FROM amfs_digests
-                       WHERE namespace = %s ORDER BY compiled_at DESC""",
-                    (namespace,),
-                    row_factory=dict_row,
-                ).fetchall()
+            with conn.cursor(row_factory=dict_row) as cur:
+                if digest_type:
+                    rows = cur.execute(
+                        """SELECT * FROM amfs_digests
+                           WHERE namespace = %s AND digest_type = %s
+                           ORDER BY compiled_at DESC""",
+                        (namespace, digest_type.value),
+                    ).fetchall()
+                else:
+                    rows = cur.execute(
+                        """SELECT * FROM amfs_digests
+                           WHERE namespace = %s ORDER BY compiled_at DESC""",
+                        (namespace,),
+                    ).fetchall()
         return [self._row_to_digest(r) for r in rows]
 
     @staticmethod
