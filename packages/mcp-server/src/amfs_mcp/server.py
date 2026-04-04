@@ -391,6 +391,71 @@ def amfs_record_context(
 
 
 @mcp.tool
+def amfs_recall(entity_path: str, key: str) -> str:
+    """Recall YOUR OWN memory for a key — what do I know about this?
+
+    Unlike amfs_read (which returns the latest version by any agent),
+    amfs_recall returns only entries written by you. Use this to check
+    your own knowledge before acting.
+
+    Args:
+        entity_path: Entity path (e.g. "checkout-service")
+        key: Memory key (e.g. "retry-pattern")
+
+    Example: amfs_recall("checkout-service", "retry-pattern")
+    """
+    mem = _get_memory()
+    entry = mem.recall(entity_path, key)
+    if entry is None:
+        return json.dumps({"status": "not_found", "entity_path": entity_path, "key": key,
+                           "hint": "You have not written this key. Try amfs_read() for shared knowledge."})
+    return json.dumps(_serialize_entry(entry), default=str)
+
+
+@mcp.tool
+def amfs_my_entries(entity_path: str | None = None) -> str:
+    """List all entries written by YOU — what's in my brain?
+
+    Returns only entries authored by this agent. Optionally filter to
+    a specific entity path.
+
+    Args:
+        entity_path: Optional entity path filter
+
+    Example: amfs_my_entries("checkout-service")
+    """
+    mem = _get_memory()
+    entries = mem.my_entries(entity_path)
+    return json.dumps({
+        "agent_id": mem.agent_id,
+        "count": len(entries),
+        "entries": [_serialize_entry(e) for e in entries],
+    }, default=str)
+
+
+@mcp.tool
+def amfs_read_from(agent_id: str, entity_path: str, key: str) -> str:
+    """Read a specific key from ANOTHER agent's memory.
+
+    Use this when you want to explicitly learn from another agent's
+    experience. The read is tracked for causal tracing.
+
+    Args:
+        agent_id: The agent whose memory to read from
+        entity_path: Entity path (e.g. "checkout-service")
+        key: Memory key (e.g. "retry-pattern")
+
+    Example: amfs_read_from("deploy-agent", "checkout-service", "deploy-config")
+    """
+    mem = _get_memory()
+    entry = mem.read_from(agent_id, entity_path, key)
+    if entry is None:
+        return json.dumps({"status": "not_found", "agent_id": agent_id,
+                           "entity_path": entity_path, "key": key})
+    return json.dumps(_serialize_entry(entry), default=str)
+
+
+@mcp.tool
 def amfs_cross_agent_reads() -> str:
     """Show which other agents' memory this agent has read.
 

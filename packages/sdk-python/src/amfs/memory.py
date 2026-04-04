@@ -568,6 +568,61 @@ class AgentMemory:
         }
 
     # ------------------------------------------------------------------
+    # Agent brain — scoped recall & cross-agent reads
+    # ------------------------------------------------------------------
+
+    def recall(
+        self,
+        entity_path: str,
+        key: str,
+        *,
+        min_confidence: float = 0.0,
+    ) -> MemoryEntry | None:
+        """Recall this agent's own memory for a key.
+
+        Unlike ``read()``, which returns the latest version by any agent,
+        ``recall()`` returns only entries written by this agent — what this
+        brain actually knows from direct experience.  Falls back through
+        history to find the most recent version authored by this agent.
+        """
+        entry = self._engine.read(entity_path, key, min_confidence=0.0)
+        if entry is None:
+            return None
+        if entry.provenance.agent_id == self.agent_id:
+            return entry if entry.confidence >= min_confidence else None
+        versions = self._engine.history(entity_path, key)
+        for v in reversed(versions):
+            if v.provenance.agent_id == self.agent_id:
+                return v if v.confidence >= min_confidence else None
+        return None
+
+    def my_entries(
+        self,
+        entity_path: str | None = None,
+    ) -> list[MemoryEntry]:
+        """List entries written by this agent — the contents of this brain."""
+        return self.search(entity_path=entity_path, agent_id=self.agent_id)
+
+    def read_from(
+        self,
+        agent_id: str,
+        entity_path: str,
+        key: str,
+    ) -> MemoryEntry | None:
+        """Read a specific key from another agent's memory.
+
+        Makes cross-agent knowledge transfer explicit and trackable.
+        The read is logged in the causal chain for decision tracing.
+        """
+        entries = self.search(entity_path=entity_path, agent_id=agent_id)
+        matching = [e for e in entries if e.key == key]
+        if not matching:
+            return None
+        entry = matching[0]
+        self._read_tracker.record(entry)
+        return entry
+
+    # ------------------------------------------------------------------
     # Cross-agent relationships
     # ------------------------------------------------------------------
 

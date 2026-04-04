@@ -295,6 +295,56 @@ export class AgentMemory {
     return this.propagator.propagate(record);
   }
 
+  // ------------------------------------------------------------------
+  // Agent brain — scoped recall & cross-agent reads
+  // ------------------------------------------------------------------
+
+  /**
+   * Recall this agent's own memory for a key.
+   * Unlike read(), returns only entries written by this agent.
+   */
+  recall(
+    entityPath: string,
+    key: string,
+    options?: { minConfidence?: number }
+  ): MemoryEntry | null {
+    const entry = this.engine.read(entityPath, key);
+    if (!entry) return null;
+    const minConf = options?.minConfidence ?? 0;
+    if (entry.provenance.agentId === this.agentId) {
+      return entry.confidence >= minConf ? entry : null;
+    }
+    const versions = this.engine.history(entityPath, key);
+    for (let i = versions.length - 1; i >= 0; i--) {
+      const v = versions[i];
+      if (v.provenance.agentId === this.agentId) {
+        return v.confidence >= minConf ? v : null;
+      }
+    }
+    return null;
+  }
+
+  /** List entries written by this agent — the contents of this brain. */
+  myEntries(entityPath?: string): MemoryEntry[] {
+    return this.search({ entityPath, agentId: this.agentId });
+  }
+
+  /**
+   * Read a specific key from another agent's memory.
+   * Makes cross-agent knowledge transfer explicit and trackable.
+   */
+  readFrom(
+    agentId: string,
+    entityPath: string,
+    key: string,
+  ): MemoryEntry | null {
+    const entries = this.search({ entityPath, agentId });
+    const match = entries.find((e) => e.key === key);
+    if (!match) return null;
+    this.readTracker.record(match);
+    return match;
+  }
+
   /** Return a MemoryScope bound to the given entity path. */
   scope(entityPath: string, options?: { readonly?: boolean }): MemoryScope {
     return new MemoryScope(this, entityPath, options?.readonly ?? false);
