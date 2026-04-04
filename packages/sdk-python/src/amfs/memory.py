@@ -731,7 +731,7 @@ class AgentMemory:
 
         service = BriefingService(
             adapter=self._adapter,
-            namespace=self._namespace,
+            namespace=self.namespace,
         )
         return service.briefing(
             entity_path=entity_path,
