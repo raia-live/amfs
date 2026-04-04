@@ -1,31 +1,47 @@
 # AMFS Memory — Agent Instructions
 
-You have access to AMFS (Agent Memory File System) through MCP tools. AMFS is shared memory that persists across sessions, agents, and machines. Use it to build institutional knowledge over time.
+You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives you a **persistent brain** — memory that survives across sessions, agents, and machines. Use it to build institutional knowledge over time.
 
 ## Available MCP Tools
 
-- `amfs_read(entity_path, key)` — read a specific memory entry
-- `amfs_write(entity_path, key, value, confidence?, pattern_refs?, memory_type?)` — write knowledge with automatic provenance. `memory_type` can be `"fact"` (default), `"belief"` (decays faster), or `"experience"` (decays slower)
+### Brain tools (agent-scoped)
+- `amfs_recall(entity_path, key)` — recall YOUR OWN memory for a key (what do I know about this?)
+- `amfs_my_entries(entity_path?)` — list everything YOU have written (what's in my brain?)
+- `amfs_read_from(agent_id, entity_path, key)` — read from ANOTHER agent's memory (learn from a colleague)
+
+### Shared knowledge tools
+- `amfs_read(entity_path, key)` — read the latest version by any agent (shared pool)
+- `amfs_write(entity_path, key, value, confidence?, pattern_refs?, memory_type?)` — form a memory. `memory_type` can be `"fact"` (default), `"belief"` (decays faster), or `"experience"` (decays slower)
 - `amfs_search(query?, entity_path?, min_confidence?, agent_id?, sort_by?, limit?)` — search across all entries
 - `amfs_list(entity_path?)` — list entries for an entity
 - `amfs_stats()` — memory overview
+
+### Tracing and explainability
 - `amfs_commit_outcome(outcome_ref, outcome_type)` — record outcomes, auto-links to read log
-- `amfs_record_context(label, summary, source?)` — capture external tool/API context in the causal chain (appears in `amfs_explain` output)
-- `amfs_history(entity_path, key, since?, until?)` — retrieve version history of an entry, optionally filtered by time range
-- `amfs_explain(outcome_ref?)` — inspect the full decision trace: AMFS reads + external contexts
+- `amfs_record_context(label, summary, source?)` — capture external tool/API context in the causal chain
+- `amfs_history(entity_path, key, since?, until?)` — retrieve version history of an entry
+- `amfs_explain(outcome_ref?)` — inspect the full decision trace: reads + external contexts
+- `amfs_cross_agent_reads()` — see which other agents' memory you've read
 
 ## Workflow
 
 ### Before starting work
-Search AMFS for existing context about the code you're about to modify:
+First check what you already know, then check shared knowledge:
 ```
+amfs_recall("<repo>/<module>", "task-summary-<area>")
 amfs_search(entity_path="<repo>/<service-or-module>")
 ```
 
 ### After completing a task
-Write a structured summary of what was done and key decisions:
+Form a memory of what was done and key decisions:
 ```
 amfs_write("<repo>/<module>", "task-summary-<desc>", "<what and why>")
+```
+
+### When consulting another agent's work
+Explicitly read from their brain so the knowledge transfer is tracked:
+```
+amfs_read_from("<agent_id>", "<repo>/<module>", "<key>")
 ```
 
 ### When discovering patterns
@@ -50,12 +66,6 @@ amfs_write("<repo>/<module>", "action-<desc>", "<what you did>", memory_type="ex
 Record external context so the decision trace is complete:
 ```
 amfs_record_context("pagerduty-incidents", "3 SEV-1 in last 24h", source="PagerDuty API")
-```
-
-### When reviewing history
-Check how a memory evolved over time:
-```
-amfs_history("<entity_path>", "<key>")
 ```
 
 ### When something significant happens
@@ -85,5 +95,7 @@ Use `{repo}/{service-or-module}` paths:
 
 - Only write information that would help a future agent working on the same code
 - Keep values concise but informative — like writing a note to a colleague
+- Use `amfs_recall` before `amfs_search` — check your own brain first
+- Use `amfs_read_from` when you know which agent has the knowledge you need
 - Search before writing to avoid duplicating existing knowledge
 - Confidence decays over time; entries validated by outcomes decay slower

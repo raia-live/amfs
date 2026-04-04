@@ -1,31 +1,42 @@
 ---
-description: Rules for using AMFS (Agent Memory File System) as shared memory across coding sessions
+description: Rules for using AMFS (Agent Memory File System) as a persistent agent brain across coding sessions
 globs:
 alwaysApply: true
 ---
 
 # AMFS Memory — Agent Behavioral Rules
 
-You have access to AMFS (Agent Memory File System) through MCP tools. AMFS is shared memory that persists across sessions, agents, and machines. Use it to build institutional knowledge over time.
+You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives you a **persistent brain** — memory that survives across sessions, agents, and machines. Use it to build institutional knowledge over time.
 
-## When to READ memory
+## When to RECALL memory (check your own brain first)
 
-- **Before starting work**: Search AMFS for context about the entity you're modifying.
+- **Before starting work**: First recall what YOU already know, then search shared knowledge.
   ```
+  amfs_recall("<repo>/<module>", "<relevant-key>")
   amfs_search(entity_path="<repo>/<service-or-module>")
   ```
-- **Before making architectural decisions**: Check if patterns or decisions already exist.
+- **Before making architectural decisions**: Check if you or others already recorded patterns.
   ```
+  amfs_recall("<repo>/<module>", "decision-<topic>")
   amfs_search(query="<topic>", min_confidence=0.5)
   ```
-- **When encountering errors**: Check if another agent already solved similar problems.
+- **When encountering errors**: Check if you or another agent already solved similar problems.
   ```
+  amfs_recall("<repo>/<module>", "risk-<keyword>")
   amfs_search(query="<error-keyword>")
   ```
 
-## When to WRITE memory
+## When to READ FROM another agent
 
-- **After completing a task**: Write a structured summary of what was done and why.
+- **When consulting another agent's work**: Explicitly read from their brain so the knowledge transfer is tracked.
+  ```
+  amfs_read_from("<agent_id>", "<repo>/<module>", "<key>")
+  ```
+- **When you know which agent has the answer**: Direct cross-agent read is faster and more traceable than search.
+
+## When to WRITE memory (form a memory)
+
+- **After completing a task**: Form a memory of what was done and why.
   ```
   amfs_write("<repo>/<module>", "task-summary-<short-desc>", "<what you did and key decisions>")
   ```
@@ -48,10 +59,6 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS is sh
 - **When consulting external tools or APIs**: Record the context so decision traces are complete.
   ```
   amfs_record_context("<label>", "<summary of what was found>", source="<tool name>")
-  ```
-- **When reviewing how a memory changed**: Check the version history of an entry.
-  ```
-  amfs_history("<entity_path>", "<key>")
   ```
 
 ## When to COMMIT OUTCOMES
@@ -78,6 +85,8 @@ Examples:
 
 ## Important
 
-- Don't write trivial information (e.g. "added a comment"). Write things that would help a future agent working on the same code.
+- Use `amfs_recall` before `amfs_search` — check your own brain first, then shared knowledge.
+- Use `amfs_read_from` when you know which agent has the knowledge you need.
+- Don't write trivial information (e.g. "added a comment"). Write things that would help a future agent.
 - Keep values concise but informative — think of it as writing a note to a colleague.
 - Confidence decays over time. Entries validated by outcomes decay slower.
