@@ -131,6 +131,22 @@ class PostgresAdapter(AdapterABC):
             ALTER TABLE amfs_memory_entries
             ADD COLUMN IF NOT EXISTS shared BOOLEAN NOT NULL DEFAULT TRUE
         """)
+        cur.execute("""
+            CREATE OR REPLACE FUNCTION amfs_notify_write() RETURNS TRIGGER AS $$
+            BEGIN
+                IF NEW.superseded_at IS NULL THEN
+                    PERFORM pg_notify('amfs_write', json_build_object(
+                        'namespace', NEW.namespace,
+                        'entity_path', NEW.entity_path,
+                        'key', NEW.key,
+                        'version', NEW.version,
+                        'agent_id', NEW.agent_id
+                    )::TEXT);
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+        """)
 
     def _detect_optional_columns(self) -> None:
         """Check whether optional columns (embedding, search_tsv) exist.

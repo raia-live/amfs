@@ -47,6 +47,7 @@ class CortexWorker:
         self._activity_log: deque[dict[str, Any]] = deque(maxlen=_ACTIVITY_LOG_MAX)
         self._outcome_wiring: Any = None
         self._hot_tracker: Any = None
+        self._pro_forwarder: Any = None
         self._throughput_buckets: deque[dict[str, Any]] = deque(maxlen=60)
         self._current_bucket_ts: float = 0
         self._current_bucket_count: int = 0
@@ -199,6 +200,9 @@ class CortexWorker:
                     "digests_updated": updated,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
+
+        if self._pro_forwarder:
+            self._pro_forwarder.enqueue({"channel": channel, **payload})
 
     def _recompile_loop(self) -> None:
         """Background thread that recompiles debounced pending digests."""

@@ -66,6 +66,8 @@ AMFS supports the following environment variables. They override values set in `
 | `AMFS_CORTEX_DEBOUNCE_MS` | Debounce interval for digest recompilation (milliseconds) | `3000` |
 | `AMFS_CONNECTOR_{NAME}_SECRET` | HMAC secret for webhook connector signature verification (e.g. `AMFS_CONNECTOR_PAGERDUTY_SECRET`) | — |
 | `AMFS_CORTEX_LLM_MODEL` | LLM model for narrative digest compilation (Pro) | `gpt-4o-mini` |
+| `AMFS_PRO_URL` | Pro SaaS API URL — enables hot context, anticipation ranking, and LLM features without local Pro packages | — |
+| `AMFS_PRO_API_KEY` | API key for authenticating with the Pro SaaS API | — |
 
 ---
 

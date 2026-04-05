@@ -11,6 +11,9 @@ services:
       AMFS_NAMESPACE: default
       # Uncomment to enable API key auth:
       # AMFS_API_KEYS: amfs_your_key_here
+      # Pro SaaS connection (enables hot context, anticipation ranking):
+      AMFS_PRO_URL: ${AMFS_PRO_URL:-}
+      AMFS_PRO_API_KEY: ${AMFS_PRO_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

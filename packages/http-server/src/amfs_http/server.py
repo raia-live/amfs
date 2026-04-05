@@ -76,9 +76,10 @@ except ImportError:
 try:
     from amfs_cortex_pro import mount_cortex_pro
     mount_cortex_pro(app)
-    logger.info("Pro Cortex endpoints mounted")
+    logger.info("Pro Cortex endpoints mounted (local)")
 except ImportError:
-    pass
+    from amfs_http.pro_proxy import mount_pro_proxy
+    mount_pro_proxy(app)
 
 def _get_memory() -> AgentMemory:
     """Lazily initialise the shared AgentMemory singleton."""
@@ -1949,6 +1950,11 @@ def main() -> None:
                     logger.info("Hot context tracker attached to embedded Cortex worker")
                 except ImportError:
                     pass
+
+                from amfs_http.pro_proxy import create_forwarder
+                forwarder = create_forwarder()
+                if forwarder:
+                    _cortex_worker._pro_forwarder = forwarder
 
                 t = threading.Thread(target=_cortex_worker.run, daemon=True, name="cortex-embedded")
                 t.start()

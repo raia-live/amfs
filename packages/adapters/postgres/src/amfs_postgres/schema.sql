@@ -254,7 +254,8 @@ BEGIN
             'namespace', NEW.namespace,
             'entity_path', NEW.entity_path,
             'key', NEW.key,
-            'version', NEW.version
+            'version', NEW.version,
+            'agent_id', NEW.agent_id
         )::TEXT);
     END IF;
     RETURN NEW;
