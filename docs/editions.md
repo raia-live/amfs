@@ -292,13 +292,13 @@ recorder.record_llm_call(
 )
 
 # Outcome commits automatically persist the trace
-updated, trace = recorder.commit_outcome("DEP-500", OutcomeType.CLEAN_DEPLOY)
+updated, trace = recorder.commit_outcome("DEP-500", OutcomeType.SUCCESS)
 
 # Months later, explain still works
 result = recorder.explain("DEP-500")
 
 # Search across all decisions
-traces = recorder.search_traces(entity_path="checkout-service", outcome_type="p1_incident")
+traces = recorder.search_traces(entity_path="checkout-service", outcome_type="critical_failure")
 ```
 
 ### Cross-System Ingestion

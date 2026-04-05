@@ -75,10 +75,10 @@ amfs_record_context("pagerduty-incidents", "3 SEV-1 in last 24h", source="PagerD
 ### When something significant happens
 Record outcomes to update confidence of related entries:
 ```
-amfs_commit_outcome("<ref>", "clean_deploy")   # successful deploy
-amfs_commit_outcome("<ref>", "regression")      # bug found
-amfs_commit_outcome("<ref>", "p1_incident")     # major incident
-amfs_commit_outcome("<ref>", "p2_incident")     # minor incident
+amfs_commit_outcome("<ref>", "success")            # successful outcome
+amfs_commit_outcome("<ref>", "minor_failure")      # minor setback
+amfs_commit_outcome("<ref>", "critical_failure")   # severe failure
+amfs_commit_outcome("<ref>", "failure")            # moderate failure
 ```
 
 ## Entity Naming

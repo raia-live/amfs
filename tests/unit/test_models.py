@@ -119,7 +119,7 @@ class TestOutcomeRecord:
     def test_creation(self) -> None:
         record = OutcomeRecord(
             outcome_ref="INC-001",
-            outcome_type=OutcomeType.P1_INCIDENT,
+            outcome_type=OutcomeType.CRITICAL_FAILURE,
             committed_at=_now(),
             causal_entry_keys=["svc/key"],
             agent_id="release-agent",

@@ -148,14 +148,14 @@ def seed_outcomes(cur):
     cur.execute("DELETE FROM amfs_outcomes WHERE namespace = %s", (NS,))
 
     outcomes = [
-        (NS, "DEP-100", "clean_deploy", 1.0, ts_iso(12), ["checkout-service/retry-pattern", "checkout-service/timeout-config"], "deploy-agent"),
-        (NS, "DEP-101", "clean_deploy", 0.95, ts_iso(6), ["checkout-service/circuit-breaker", "checkout-service/deploy-v2.14"], "deploy-agent"),
-        (NS, "REV-200", "regression", 0.85, ts_iso(36), ["auth/session-timeout"], "review-agent"),
-        (NS, "SEC-300", "p2_incident", 0.90, ts_iso(80), ["auth/risk-token-leak", "auth/jwt-rotation"], "security-scanner"),
-        (NS, "MON-400", "p1_incident", 0.95, ts_iso(48), ["payments/risk-double-charge", "payments/stripe-config"], "monitoring-agent"),
-        (NS, "DEP-102", "clean_deploy", 1.0, ts_iso(2), ["api-gateway/rate-limits", "api-gateway/cors-config"], "deploy-agent"),
-        (NS, "OPT-500", "clean_deploy", 0.92, ts_iso(18), ["user-service/cache-strategy", "user-service/db-pool-config"], "perf-optimizer"),
-        (NS, "MON-401", "p2_incident", 0.80, ts_iso(60), ["notification-service/risk-spam-loop"], "monitoring-agent"),
+        (NS, "DEP-100", "success", 1.0, ts_iso(12), ["checkout-service/retry-pattern", "checkout-service/timeout-config"], "deploy-agent"),
+        (NS, "DEP-101", "success", 0.95, ts_iso(6), ["checkout-service/circuit-breaker", "checkout-service/deploy-v2.14"], "deploy-agent"),
+        (NS, "REV-200", "minor_failure", 0.85, ts_iso(36), ["auth/session-timeout"], "review-agent"),
+        (NS, "SEC-300", "failure", 0.90, ts_iso(80), ["auth/risk-token-leak", "auth/jwt-rotation"], "security-scanner"),
+        (NS, "MON-400", "critical_failure", 0.95, ts_iso(48), ["payments/risk-double-charge", "payments/stripe-config"], "monitoring-agent"),
+        (NS, "DEP-102", "success", 1.0, ts_iso(2), ["api-gateway/rate-limits", "api-gateway/cors-config"], "deploy-agent"),
+        (NS, "OPT-500", "success", 0.92, ts_iso(18), ["user-service/cache-strategy", "user-service/db-pool-config"], "perf-optimizer"),
+        (NS, "MON-401", "failure", 0.80, ts_iso(60), ["notification-service/risk-spam-loop"], "monitoring-agent"),
     ]
 
     for o in outcomes:
@@ -176,7 +176,7 @@ def seed_traces(cur):
     traces = [
         {
             "id": TRACE_IDS[0], "agent_id": "deploy-agent", "session_id": SESSIONS["deploy-agent"],
-            "outcome_ref": "DEP-100", "outcome_type": "clean_deploy",
+            "outcome_ref": "DEP-100", "outcome_type": "success",
             "decision_summary": "Deployed checkout-service v2.14 after verifying retry pattern, timeout config, and checking PagerDuty for recent incidents.",
             "causal_entries": [
                 {"entity_path": "checkout-service", "key": "retry-pattern", "version": 2, "confidence": 0.88,
@@ -207,7 +207,7 @@ def seed_traces(cur):
         },
         {
             "id": TRACE_IDS[1], "agent_id": "review-agent", "session_id": SESSIONS["review-agent"],
-            "outcome_ref": "REV-200", "outcome_type": "regression",
+            "outcome_ref": "REV-200", "outcome_type": "minor_failure",
             "decision_summary": "Auth session timeout change caused regression. Users were logged out after 30s instead of 30min due to unit mismatch (ms vs sec).",
             "causal_entries": [
                 {"entity_path": "auth", "key": "session-timeout", "version": 1, "confidence": 0.91,
@@ -232,7 +232,7 @@ def seed_traces(cur):
         },
         {
             "id": TRACE_IDS[2], "agent_id": "security-scanner", "session_id": SESSIONS["security-scanner"],
-            "outcome_ref": "SEC-300", "outcome_type": "p2_incident",
+            "outcome_ref": "SEC-300", "outcome_type": "failure",
             "decision_summary": "Token leak vulnerability detected in localStorage. JWT rotation scheduled. Coordinated with auth team for emergency key rotation.",
             "causal_entries": [
                 {"entity_path": "auth", "key": "risk-token-leak", "version": 1, "confidence": 0.72,
@@ -259,7 +259,7 @@ def seed_traces(cur):
         },
         {
             "id": TRACE_IDS[3], "agent_id": "monitoring-agent", "session_id": SESSIONS["monitoring-agent"],
-            "outcome_ref": "MON-400", "outcome_type": "p1_incident",
+            "outcome_ref": "MON-400", "outcome_type": "critical_failure",
             "decision_summary": "Double charge incident in payments. Root cause: webhook retry overlapping with timeout fallback. 23 affected customers, $4,521 in duplicate charges.",
             "causal_entries": [
                 {"entity_path": "payments", "key": "risk-double-charge", "version": 1, "confidence": 0.58,
@@ -294,7 +294,7 @@ def seed_traces(cur):
         },
         {
             "id": TRACE_IDS[4], "agent_id": "deploy-agent", "session_id": SESSIONS["deploy-agent"],
-            "outcome_ref": "DEP-101", "outcome_type": "clean_deploy",
+            "outcome_ref": "DEP-101", "outcome_type": "success",
             "decision_summary": "Deployed circuit breaker update with canary. All health checks green.",
             "causal_entries": [
                 {"entity_path": "checkout-service", "key": "circuit-breaker", "version": 1, "confidence": 0.90,
@@ -312,7 +312,7 @@ def seed_traces(cur):
         },
         {
             "id": TRACE_IDS[5], "agent_id": "perf-optimizer", "session_id": SESSIONS["perf-optimizer"],
-            "outcome_ref": "OPT-500", "outcome_type": "clean_deploy",
+            "outcome_ref": "OPT-500", "outcome_type": "success",
             "decision_summary": "Optimized user-service cache strategy and DB pool. p99 latency improved from 120ms to 45ms.",
             "causal_entries": [
                 {"entity_path": "user-service", "key": "cache-strategy", "version": 1, "confidence": 0.87,
@@ -339,7 +339,7 @@ def seed_traces(cur):
         },
         {
             "id": TRACE_IDS[6], "agent_id": "monitoring-agent", "session_id": SESSIONS["monitoring-agent"],
-            "outcome_ref": "MON-401", "outcome_type": "p2_incident",
+            "outcome_ref": "MON-401", "outcome_type": "failure",
             "decision_summary": "Notification spam loop detected. 12,000 duplicate emails sent in 15 minutes due to missing dedup in retry queue.",
             "causal_entries": [
                 {"entity_path": "notification-service", "key": "risk-spam-loop", "version": 1, "confidence": 0.62,
@@ -366,7 +366,7 @@ def seed_traces(cur):
         },
         {
             "id": TRACE_IDS[7], "agent_id": "deploy-agent", "session_id": SESSIONS["deploy-agent"],
-            "outcome_ref": "DEP-102", "outcome_type": "clean_deploy",
+            "outcome_ref": "DEP-102", "outcome_type": "success",
             "decision_summary": "API gateway rate limit and CORS config updated. Load tested at 15k RPS with no issues.",
             "causal_entries": [
                 {"entity_path": "api-gateway", "key": "rate-limits", "version": 1, "confidence": 0.95,
@@ -435,7 +435,7 @@ def seed_detected_patterns(cur):
          "auth/session-timeout confidence dropped from 0.95 to 0.65 over 3 outcome events",
          json.dumps({"entity_path": "auth", "key": "session-timeout", "initial_confidence": 0.95,
                       "current_confidence": 0.65, "drift_pct": -31.6, "outcome_count": 3,
-                      "outcomes": ["REV-200 (regression)", "SEC-300 (p2_incident)"],
+                      "outcomes": ["REV-200 (minor_failure)", "SEC-300 (failure)"],
                       "recommendation": "Review and re-validate session timeout configuration"}),
          False, ts_iso(36), None),
         (NS, "recurring_failure", "warning", "api-gateway",
@@ -453,7 +453,7 @@ def seed_detected_patterns(cur):
          "payments/risk-double-charge confidence increased from 0.30 to 0.72 — risk is materializing",
          json.dumps({"entity_path": "payments", "key": "risk-double-charge", "initial_confidence": 0.30,
                       "current_confidence": 0.72, "drift_pct": 140.0, "outcome_count": 2,
-                      "outcomes": ["MON-400 (p1_incident)"],
+                      "outcomes": ["MON-400 (critical_failure)"],
                       "recommendation": "URGENT: Implement idempotency key with longer TTL and clock-skew tolerance"}),
          False, ts_iso(48), None),
     ]
@@ -558,17 +558,17 @@ def seed_audit_log(cur):
         (NS, "agent", "deploy-agent", "write", "checkout-service/retry-pattern",
          "10.0.1.15", json.dumps({"version": 2, "confidence": 0.88}), ts_iso(24)),
         (NS, "agent", "deploy-agent", "commit_outcome", "DEP-100",
-         "10.0.1.15", json.dumps({"outcome_type": "clean_deploy", "affected_entries": 2}), ts_iso(12)),
+         "10.0.1.15", json.dumps({"outcome_type": "success", "affected_entries": 2}), ts_iso(12)),
         (NS, "agent", "security-scanner", "write", "auth/risk-token-leak",
          "10.0.2.30", json.dumps({"memory_type": "belief", "confidence": 0.72}), ts_iso(80)),
         (NS, "agent", "security-scanner", "commit_outcome", "SEC-300",
-         "10.0.2.30", json.dumps({"outcome_type": "p2_incident", "affected_entries": 2}), ts_iso(80)),
+         "10.0.2.30", json.dumps({"outcome_type": "failure", "affected_entries": 2}), ts_iso(80)),
         (NS, "user", "sarah@example.com", "create_team", "platform-engineering",
          "192.168.1.100", json.dumps({"team_name": "Platform Engineering"}), ts_iso(2000)),
         (NS, "user", "alex@example.com", "create_api_key", "Production Agent Key",
          "192.168.1.101", json.dumps({"key_type": "agent", "scopes": ["read", "write", "search"]}), ts_iso(500)),
         (NS, "agent", "monitoring-agent", "commit_outcome", "MON-400",
-         "10.0.3.45", json.dumps({"outcome_type": "p1_incident", "severity": "critical"}), ts_iso(48)),
+         "10.0.3.45", json.dumps({"outcome_type": "critical_failure", "severity": "critical"}), ts_iso(48)),
         (NS, "system", "pattern-detector", "detect_pattern", "payments/recurring_failure",
          None, json.dumps({"pattern_type": "recurring_failure", "severity": "critical"}), ts_iso(48)),
         (NS, "user", "james@example.com", "resolve_pattern", "notification-service/stale_cluster",
@@ -576,15 +576,15 @@ def seed_audit_log(cur):
         (NS, "agent", "perf-optimizer", "write", "user-service/cache-strategy",
          "10.0.4.60", json.dumps({"version": 1, "confidence": 0.87}), ts_iso(150)),
         (NS, "agent", "perf-optimizer", "commit_outcome", "OPT-500",
-         "10.0.4.60", json.dumps({"outcome_type": "clean_deploy", "latency_improvement": "63%"}), ts_iso(18)),
+         "10.0.4.60", json.dumps({"outcome_type": "success", "latency_improvement": "63%"}), ts_iso(18)),
         (NS, "user", "sarah@example.com", "revoke_api_key", "Deprecated Test Key",
          "192.168.1.100", json.dumps({"reason": "Key compromised in test environment"}), ts_iso(168)),
         (NS, "agent", "review-agent", "commit_outcome", "REV-200",
-         "10.0.5.75", json.dumps({"outcome_type": "regression", "impact": "1247 users affected"}), ts_iso(36)),
+         "10.0.5.75", json.dumps({"outcome_type": "minor_failure", "impact": "1247 users affected"}), ts_iso(36)),
         (NS, "system", "pattern-detector", "detect_pattern", "auth/confidence_drift",
          None, json.dumps({"pattern_type": "confidence_drift", "drift_pct": -31.6}), ts_iso(36)),
         (NS, "agent", "deploy-agent", "commit_outcome", "DEP-102",
-         "10.0.1.15", json.dumps({"outcome_type": "clean_deploy", "load_test_rps": 15000}), ts_iso(2)),
+         "10.0.1.15", json.dumps({"outcome_type": "success", "load_test_rps": 15000}), ts_iso(2)),
     ]
 
     for e in events:
@@ -615,7 +615,7 @@ def main():
     print("\nDone! All tables seeded successfully.")
     print("\nSummary:")
     print("  - 22 memory entries across 7 entities, 5 agents")
-    print("  -  8 outcomes (clean_deploy, regression, p1/p2_incident)")
+    print("  -  8 outcomes (success, minor_failure, failure/critical_failure)")
     print("  -  8 decision traces with rich causal chains, external contexts, query/error events")
     print("  -  7 detected patterns (recurring_failure, hot_entity, stale_cluster, confidence_drift)")
     print("  -  3 teams with 12 members (admins, developers, viewers, agents)")

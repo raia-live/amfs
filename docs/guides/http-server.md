@@ -225,7 +225,7 @@ Response:
 ```json
 {
   "outcomes": [
-    {"outcome_ref": "DEP-287", "outcome_type": "clean_deploy", ...},
+    {"outcome_ref": "DEP-287", "outcome_type": "success", ...},
     ...
   ]
 }
@@ -244,7 +244,7 @@ curl -X POST http://localhost:8080/api/v1/outcomes \
   -H "Content-Type: application/json" \
   -d '{
     "outcome_ref": "DEP-287",
-    "outcome_type": "clean_deploy"
+    "outcome_type": "success"
   }'
 ```
 
@@ -261,7 +261,7 @@ event: memory_write
 data: {"entity_path": "checkout-service", "key": "retry-pattern", "version": 2, ...}
 
 event: outcome
-data: {"outcome_ref": "DEP-287", "outcome_type": "clean_deploy", ...}
+data: {"outcome_ref": "DEP-287", "outcome_type": "success", ...}
 ```
 
 ### Get a briefing

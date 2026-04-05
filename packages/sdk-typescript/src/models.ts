@@ -3,13 +3,21 @@
  */
 
 export enum OutcomeType {
-  P1_INCIDENT = "p1_incident",
-  P2_INCIDENT = "p2_incident",
-  REGRESSION = "regression",
-  CLEAN_DEPLOY = "clean_deploy",
+  SUCCESS = "success",
+  MINOR_FAILURE = "minor_failure",
+  FAILURE = "failure",
+  CRITICAL_FAILURE = "critical_failure",
+  /** @deprecated Use SUCCESS */ CLEAN_DEPLOY = "clean_deploy",
+  /** @deprecated Use MINOR_FAILURE */ REGRESSION = "regression",
+  /** @deprecated Use FAILURE */ P2_INCIDENT = "p2_incident",
+  /** @deprecated Use CRITICAL_FAILURE */ P1_INCIDENT = "p1_incident",
 }
 
-export const OUTCOME_MULTIPLIERS: Record<OutcomeType, number> = {
+export const OUTCOME_MULTIPLIERS: Record<string, number> = {
+  [OutcomeType.CRITICAL_FAILURE]: 1.15,
+  [OutcomeType.FAILURE]: 1.1,
+  [OutcomeType.MINOR_FAILURE]: 1.08,
+  [OutcomeType.SUCCESS]: 0.97,
   [OutcomeType.P1_INCIDENT]: 1.15,
   [OutcomeType.P2_INCIDENT]: 1.1,
   [OutcomeType.REGRESSION]: 1.08,

@@ -50,7 +50,7 @@ Agent writes decision:
   incident correlation and high-risk signal from prior agent"
 
 Outcome recorded:
-  DEP-500 → clean_deploy → confidence on causal entries adjusted
+  DEP-500 → success → confidence on causal entries adjusted
 ```
 
 This trace is queryable. The next agent — or a human auditor — can replay exactly what happened and why.
@@ -108,7 +108,7 @@ mem.write(
 Outcomes close the feedback loop. Confidence on causal entries adjusts automatically:
 
 ```python
-mem.commit_outcome("DEP-500", OutcomeType.CLEAN_DEPLOY)
+mem.commit_outcome("DEP-500", OutcomeType.SUCCESS)
 ```
 
 ### 5. Why did we do that?
@@ -149,12 +149,12 @@ checkout-service/retry-pattern
     ├── read by deploy-agent (sess-a1b2)
     │   ├── also consulted: PagerDuty API, git log
     │   ├── wrote: decision-rollback-retry
-    │   └── outcome: DEP-500 (clean_deploy) → confidence adjusted
+    │   └── outcome: DEP-500 (success) → confidence adjusted
     │
     ├── read by review-agent (sess-e5f6)
     │   ├── also consulted: Sentry errors
     │   ├── wrote: risk-timeout-regression
-    │   └── outcome: INC-1042 (p1_incident) → confidence boosted
+    │   └── outcome: INC-1042 (critical_failure) → confidence boosted
     │
     └── read by onboard-agent (sess-g7h8)
         └── wrote: task-summary-retry-review
@@ -203,7 +203,7 @@ mem.search(entity_path="checkout-service", min_confidence=0.5)
 mem.record_context("pagerduty", "No active incidents", source="PagerDuty API")
 mem.write("checkout-service", "deploy-v2.14", {"version": "2.14.0"})
 
-mem.commit_outcome("DEP-500", OutcomeType.CLEAN_DEPLOY,
+mem.commit_outcome("DEP-500", OutcomeType.SUCCESS,
                     decision_summary="Deployed after verifying retry pattern")
 ```
 
@@ -277,7 +277,7 @@ Via the MCP server, AI coding agents can build decision traces automatically:
 2. amfs_read("checkout-service", "pattern")  → read relevant entries (auto-tracked)
 3. amfs_record_context("git-log", "...", "git")  → capture tool inputs
 4. amfs_write("checkout-service", "decision-...", "...")  → record the decision
-5. amfs_commit_outcome("DEP-500", "clean_deploy")  → close the loop
+5. amfs_commit_outcome("DEP-500", "success")  → close the loop
 6. amfs_explain("DEP-500")                   → inspect the full trace
 ```
 

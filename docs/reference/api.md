@@ -332,10 +332,16 @@ class Provenance:
 
 ```python
 class OutcomeType(str, Enum):
-    P1_INCIDENT = "p1_incident"      # × 1.15
-    P2_INCIDENT = "p2_incident"      # × 1.10
-    REGRESSION = "regression"        # × 1.08
-    CLEAN_DEPLOY = "clean_deploy"    # × 0.97
+    CRITICAL_FAILURE = "critical_failure"  # × 1.15
+    FAILURE = "failure"                    # × 1.10
+    MINOR_FAILURE = "minor_failure"        # × 1.08
+    SUCCESS = "success"                    # × 0.97
+
+    # Legacy aliases (deprecated — will be removed in a future version)
+    P1_INCIDENT = "critical_failure"
+    P2_INCIDENT = "failure"
+    REGRESSION = "minor_failure"
+    CLEAN_DEPLOY = "success"
 ```
 
 ---
@@ -474,7 +480,7 @@ amfs_stats() -> str (JSON)
 ```
 amfs_commit_outcome(
     outcome_ref: str,
-    outcome_type: str,  # "p1_incident" | "p2_incident" | "regression" | "clean_deploy"
+    outcome_type: str,  # "critical_failure" | "failure" | "minor_failure" | "success" (legacy: "p1_incident" | "p2_incident" | "regression" | "clean_deploy")
 ) -> str (JSON)
 ```
 

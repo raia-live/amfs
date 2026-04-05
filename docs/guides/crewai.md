@@ -128,7 +128,7 @@ from amfs import OutcomeType
 
 mem.commit_outcome(
     outcome_ref="crew-run-042",
-    outcome_type=OutcomeType.CLEAN_DEPLOY,
+    outcome_type=OutcomeType.SUCCESS,
 )
 ```
 
@@ -230,7 +230,7 @@ crew = Crew(
 result = crew.kickoff()
 
 # Record success so future runs benefit from higher-confidence memories
-backend.memory.commit_outcome("research-run-001", OutcomeType.CLEAN_DEPLOY)
+backend.memory.commit_outcome("research-run-001", OutcomeType.SUCCESS)
 ```
 
 On subsequent runs, the crew starts with all prior research findings — versioned, confidence-scored, and ranked by outcome history.

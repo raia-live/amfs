@@ -109,10 +109,10 @@ AMFS uses fixed outcome multipliers:
 
 | Outcome | Default Multiplier |
 |:--------|:-------------------|
-| P1 Incident | × 1.15 |
-| P2 Incident | × 1.10 |
-| Regression | × 1.08 |
-| Clean Deploy | × 0.97 |
+| Critical Failure | × 1.15 |
+| Failure | × 1.10 |
+| Minor Failure | × 1.08 |
+| Success | × 0.97 |
 
 These are reasonable defaults, but the actual signal strength of each outcome type varies by domain. A P1 incident in a payment service carries different weight than a P1 in a logging service.
 
@@ -138,10 +138,10 @@ Returns calibrated multipliers and analysis:
   "global_multipliers": {
     "entity_path": null,
     "multipliers": {
-      "p1_incident": 1.1845,
-      "p2_incident": 1.123,
-      "regression": 1.1016,
-      "clean_deploy": 0.9797
+      "critical_failure": 1.1845,
+      "failure": 1.123,
+      "minor_failure": 1.1016,
+      "success": 0.9797
     },
     "decay_half_life_days": 21.5,
     "num_outcomes_analyzed": 89
@@ -227,7 +227,7 @@ Returns:
     {
       "entry": {"entity_path": "checkout-service", "key": "retry-pattern", "...": "..."},
       "label": 0.85,
-      "outcome_type": "clean_deploy",
+      "outcome_type": "success",
       "outcome_count": 7
     }
   ],

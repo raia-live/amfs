@@ -102,7 +102,7 @@ class TestOutcomeBackPropagator:
 
         prop = OutcomeBackPropagator(adapter)
         record = prop.make_record(
-            "INC-001", OutcomeType.P1_INCIDENT, ["svc/k"], "release-agent"
+            "INC-001", OutcomeType.CRITICAL_FAILURE, ["svc/k"], "release-agent"
         )
         updated = prop.propagate(record)
 
@@ -116,7 +116,7 @@ class TestOutcomeBackPropagator:
 
         prop = OutcomeBackPropagator(adapter)
         record = prop.make_record(
-            "DEP-001", OutcomeType.CLEAN_DEPLOY, ["svc/k"], "release-agent"
+            "DEP-001", OutcomeType.SUCCESS, ["svc/k"], "release-agent"
         )
         updated = prop.propagate(record)
 
@@ -130,7 +130,7 @@ class TestOutcomeBackPropagator:
         prop = OutcomeBackPropagator(adapter)
         record = prop.make_record(
             "INC-002",
-            OutcomeType.P2_INCIDENT,
+            OutcomeType.FAILURE,
             ["svc/k"],
             "release-agent",
             causal_confidence=0.8,
@@ -148,7 +148,7 @@ class TestOutcomeBackPropagator:
         prop = OutcomeBackPropagator(adapter)
         record = prop.make_record(
             "INC-003",
-            OutcomeType.REGRESSION,
+            OutcomeType.MINOR_FAILURE,
             ["svc-a/k1", "svc-b/k2"],
             "release-agent",
         )
@@ -162,7 +162,7 @@ class TestOutcomeBackPropagator:
         adapter = MockAdapter()
         prop = OutcomeBackPropagator(adapter)
         record = prop.make_record(
-            "INC-004", OutcomeType.P1_INCIDENT, ["nope/nope"], "agent"
+            "INC-004", OutcomeType.CRITICAL_FAILURE, ["nope/nope"], "agent"
         )
         updated = prop.propagate(record)
         assert updated == []
@@ -173,8 +173,8 @@ class TestOutcomeBackPropagator:
 
         prop = OutcomeBackPropagator(adapter)
         records = [
-            prop.make_record("INC-A", OutcomeType.P1_INCIDENT, ["svc/k"], "agent"),
-            prop.make_record("INC-B", OutcomeType.P2_INCIDENT, ["svc/k"], "agent"),
+            prop.make_record("INC-A", OutcomeType.CRITICAL_FAILURE, ["svc/k"], "agent"),
+            prop.make_record("INC-B", OutcomeType.FAILURE, ["svc/k"], "agent"),
         ]
         all_updated = prop.propagate_batch(records)
         assert len(all_updated) == 2
@@ -184,14 +184,14 @@ class TestOutcomeBackPropagator:
 
     def test_compute_new_confidence(self) -> None:
         result = OutcomeBackPropagator.compute_new_confidence(
-            1.0, OutcomeType.P1_INCIDENT, 0.9
+            1.0, OutcomeType.CRITICAL_FAILURE, 0.9
         )
         assert abs(result - (1.0 * 1.15 * 0.9)) < 1e-6
 
     def test_make_record(self) -> None:
         record = OutcomeBackPropagator.make_record(
-            "INC-X", OutcomeType.REGRESSION, ["svc/k"], "agent"
+            "INC-X", OutcomeType.MINOR_FAILURE, ["svc/k"], "agent"
         )
         assert record.outcome_ref == "INC-X"
-        assert record.outcome_type == OutcomeType.REGRESSION
+        assert record.outcome_type == OutcomeType.MINOR_FAILURE
         assert record.causal_confidence == 1.0

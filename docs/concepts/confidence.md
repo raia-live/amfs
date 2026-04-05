@@ -32,10 +32,10 @@ When something significant happens in the real world, you record it as an **outc
 
 | Outcome | Multiplier | Effect |
 |:--------|:-----------|:-------|
-| `P1_INCIDENT` | × 1.15 | Strong confidence increase — pattern is a proven risk |
-| `P2_INCIDENT` | × 1.10 | Moderate confidence increase |
-| `REGRESSION` | × 1.08 | Mild confidence increase — pattern caused a regression |
-| `CLEAN_DEPLOY` | × 0.97 | Confidence decay — pattern is proving safe over time |
+| `CRITICAL_FAILURE` | × 1.15 | Strong confidence increase — knowledge linked to severe failure |
+| `FAILURE` | × 1.10 | Moderate confidence increase |
+| `MINOR_FAILURE` | × 1.08 | Mild confidence increase — knowledge linked to minor setback |
+| `SUCCESS` | × 0.97 | Confidence decay — knowledge proving reliable over time |
 
 ---
 
@@ -49,7 +49,7 @@ from amfs import OutcomeType
 # An incident happened related to the retry pattern
 updated = mem.commit_outcome(
     outcome_ref="INC-1042",         # reference ID (ticket, deploy ID, etc.)
-    outcome_type=OutcomeType.P1_INCIDENT,
+    outcome_type=OutcomeType.CRITICAL_FAILURE,
     causal_entry_keys=["checkout-service/retry-pattern"],
 )
 
@@ -68,16 +68,16 @@ new_confidence = old_confidence × outcome_multiplier
 Imagine an entry written with `confidence=0.85`:
 
 ```
-Write          → 0.85
-P1 incident    → 0.85 × 1.15 = 0.978
-Clean deploy   → 0.978 × 0.97 = 0.948
-Clean deploy   → 0.948 × 0.97 = 0.920
-Clean deploy   → 0.920 × 0.97 = 0.892
-P2 incident    → 0.892 × 1.10 = 0.981
-Clean deploy   → 0.981 × 0.97 = 0.951
+Write              → 0.85
+Critical failure   → 0.85 × 1.15 = 0.978
+Success            → 0.978 × 0.97 = 0.948
+Success            → 0.948 × 0.97 = 0.920
+Success            → 0.920 × 0.97 = 0.892
+Failure            → 0.892 × 1.10 = 0.981
+Success            → 0.981 × 0.97 = 0.951
 ```
 
-Over many clean deploys, confidence trends toward zero — the risk signal fades. A single incident spikes it back up.
+Over many successes, confidence trends toward zero — the risk signal fades. A single failure spikes it back up.
 
 ---
 
@@ -93,7 +93,7 @@ mem.read("svc", "pool-settings")
 
 # Record outcome without specifying keys —
 # it applies to all three entries above
-mem.commit_outcome("DEP-300", OutcomeType.CLEAN_DEPLOY)
+mem.commit_outcome("DEP-300", OutcomeType.SUCCESS)
 ```
 
 This is powered by the **ReadTracker**, which logs every `read()` call during a session.
@@ -144,7 +144,7 @@ results = mem.search(min_confidence=0.7)
 Agent observes pattern → writes entry (confidence: 0.85)
                               │
                               ▼
-                   Incident occurs → commit_outcome("P1_INCIDENT")
+                   Incident occurs → commit_outcome("CRITICAL_FAILURE")
                               │
                               ▼
                    Confidence increases → 0.978
