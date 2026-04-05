@@ -112,7 +112,10 @@ class PatternDetector:
         outcomes: list[OutcomeRecord],
     ) -> list[DetectedPattern]:
         """Find entries that repeatedly appear in incident causal chains."""
-        incident_types = {"p1_incident", "p2_incident", "regression"}
+        incident_types = {
+            "critical_failure", "failure", "minor_failure",
+            "p1_incident", "p2_incident", "regression",
+        }
         incident_outcomes = [o for o in outcomes if o.outcome_type.value in incident_types]
 
         entry_incident_count: dict[str, int] = defaultdict(int)

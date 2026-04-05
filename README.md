@@ -35,7 +35,7 @@ mem.write("checkout-service", "retry-pattern",
 
 entry = mem.read("checkout-service", "retry-pattern")
 
-mem.commit_outcome("INC-1042", OutcomeType.P1_INCIDENT)
+mem.commit_outcome("INC-1042", OutcomeType.CRITICAL_FAILURE)
 ```
 
 **[Full quick start guide →](https://raia-live.github.io/amfs/getting-started/quickstart/)**

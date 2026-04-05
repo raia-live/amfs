@@ -217,7 +217,7 @@ class TestMCPTools:
         amfs_write("svc", "key", "value")
         amfs_read("svc", "key")
 
-        result = json.loads(amfs_commit_outcome("INC-001", "p1_incident"))
+        result = json.loads(amfs_commit_outcome("INC-001", "critical_failure"))
         assert result["outcome_ref"] == "INC-001"
         assert result["affected_entries"] == 1
         assert result["entries"][0]["confidence"] == 1.15
@@ -235,7 +235,7 @@ class TestMCPTools:
         amfs_write("svc", "key", "value")
         amfs_read("svc", "key")
 
-        result = json.loads(amfs_commit_outcome("deploy-v1", "clean_deploy"))
+        result = json.loads(amfs_commit_outcome("deploy-v1", "success"))
         assert result["affected_entries"] == 1
         assert result["entries"][0]["confidence"] == pytest.approx(0.97)
 

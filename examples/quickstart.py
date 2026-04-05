@@ -49,7 +49,7 @@ def main() -> None:
         # ---- Record an outcome — auto-links to what we read ----
         mem.read("checkout-service", "retry-pattern")
         mem.read("checkout-service", "timeout-config")
-        updated = mem.commit_outcome("INC-2047", OutcomeType.P1_INCIDENT)
+        updated = mem.commit_outcome("INC-2047", OutcomeType.CRITICAL_FAILURE)
         print(f"\nOutcome back-propagated to {len(updated)} entries:")
         for e in updated:
             print(f"  {e.entry_key} → confidence={e.confidence:.4f}")

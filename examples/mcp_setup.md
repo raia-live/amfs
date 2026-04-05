@@ -198,7 +198,7 @@ uv run amfs-mcp-server
 Machine A (Cursor/Bruno):
   → Reviews checkout-service PR
   → amfs_write("myapp/checkout", "risk-race-condition", "Race condition in order processing under load")
-  → amfs_commit_outcome("PR-456", "regression")
+  → amfs_commit_outcome("PR-456", "minor_failure")
 
 Machine B (Claude Code/Alice):
   → Starts working on checkout-service

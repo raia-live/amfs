@@ -237,7 +237,7 @@ Override with `AMFS_AGENT_ID`:
 Machine A (Cursor / Bruno):
   → Reviews checkout-service PR
   → amfs_write("myapp/checkout", "risk-race-condition", "...")
-  → amfs_commit_outcome("PR-456", "regression")
+  → amfs_commit_outcome("PR-456", "minor_failure")
 
 Machine B (Claude Code / Alice):
   → Starts working on checkout-service

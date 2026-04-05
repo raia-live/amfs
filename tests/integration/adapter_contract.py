@@ -124,7 +124,7 @@ class AdapterContractTests:
 
         record = OutcomeRecord(
             outcome_ref="INC-001",
-            outcome_type=OutcomeType.P1_INCIDENT,
+            outcome_type=OutcomeType.CRITICAL_FAILURE,
             causal_confidence=1.0,
             committed_at=datetime.now(timezone.utc),
             causal_entry_keys=["checkout-service/retry-pattern"],
@@ -140,7 +140,7 @@ class AdapterContractTests:
 
         record = OutcomeRecord(
             outcome_ref="DEP-001",
-            outcome_type=OutcomeType.CLEAN_DEPLOY,
+            outcome_type=OutcomeType.SUCCESS,
             causal_confidence=1.0,
             committed_at=datetime.now(timezone.utc),
             causal_entry_keys=["checkout-service/retry-pattern"],
@@ -153,7 +153,7 @@ class AdapterContractTests:
     def test_commit_outcome_missing_entry_skipped(self, adapter: AdapterABC) -> None:
         record = OutcomeRecord(
             outcome_ref="INC-002",
-            outcome_type=OutcomeType.P2_INCIDENT,
+            outcome_type=OutcomeType.FAILURE,
             causal_confidence=1.0,
             committed_at=datetime.now(timezone.utc),
             causal_entry_keys=["nonexistent/key"],

@@ -67,9 +67,9 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
 
 ## When to COMMIT OUTCOMES
 
-- After a **successful deployment**: `amfs_commit_outcome("deploy-<version>", "clean_deploy")`
-- After a **bug or regression**: `amfs_commit_outcome("<ticket>", "regression")`
-- After an **incident**: `amfs_commit_outcome("<incident-id>", "p1_incident")` or `"p2_incident"`
+- After a **successful deployment**: `amfs_commit_outcome("deploy-<version>", "success")`
+- After a **bug or minor setback**: `amfs_commit_outcome("<ticket>", "minor_failure")`
+- After a **severe failure**: `amfs_commit_outcome("<incident-id>", "critical_failure")` or `"failure"`
 
 ## Entity naming convention
 

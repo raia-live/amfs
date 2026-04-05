@@ -153,7 +153,7 @@ class TestAgentMemory:
         mem.write("svc", "key", "data")
         updated = mem.commit_outcome(
             "INC-001",
-            OutcomeType.P1_INCIDENT,
+            OutcomeType.CRITICAL_FAILURE,
             ["svc/key"],
         )
         assert len(updated) == 1
@@ -287,7 +287,7 @@ class TestAutoCausalTracking:
         mem.read("svc", "k1")
         mem.read("svc", "k2")
 
-        updated = mem.commit_outcome("INC-100", OutcomeType.P1_INCIDENT)
+        updated = mem.commit_outcome("INC-100", OutcomeType.CRITICAL_FAILURE)
         assert len(updated) == 2
         assert all(e.confidence == 1.15 for e in updated)
 
@@ -299,7 +299,7 @@ class TestAutoCausalTracking:
         mem.read("svc", "k2")
 
         updated = mem.commit_outcome(
-            "INC-101", OutcomeType.P1_INCIDENT, ["svc/k1"]
+            "INC-101", OutcomeType.CRITICAL_FAILURE, ["svc/k1"]
         )
         assert len(updated) == 1
         assert updated[0].key == "k1"
@@ -538,7 +538,7 @@ class TestStats:
 
     def test_stats_with_outcomes(self, mem: AgentMemory) -> None:
         mem.write("svc", "key", "val")
-        mem.commit_outcome("INC-001", OutcomeType.P1_INCIDENT, ["svc/key"])
+        mem.commit_outcome("INC-001", OutcomeType.CRITICAL_FAILURE, ["svc/key"])
         s = mem.stats()
         assert s.outcome_linked_count == 1
 

@@ -81,7 +81,7 @@ def release_agent_session() -> None:
 
         # --- Simulate: deployment causes an incident ---
         print("Deployment goes out... P1 incident occurs!")
-        updated = mem.commit_outcome("INC-2047", OutcomeType.P1_INCIDENT)
+        updated = mem.commit_outcome("INC-2047", OutcomeType.CRITICAL_FAILURE)
         print(f"Outcome auto-linked to {len(updated)} entries the agent read:")
         for e in updated:
             print(f"  {e.entry_key} → confidence {e.confidence:.4f}")

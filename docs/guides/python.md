@@ -144,24 +144,24 @@ from amfs import OutcomeType
 # With explicit causal keys
 updated = mem.commit_outcome(
     outcome_ref="INC-1042",
-    outcome_type=OutcomeType.P1_INCIDENT,
+    outcome_type=OutcomeType.CRITICAL_FAILURE,
     causal_entry_keys=["checkout-service/retry-pattern"],
 )
 
 # With auto-causal linking (uses everything read in this session)
 updated = mem.commit_outcome(
     outcome_ref="DEP-300",
-    outcome_type=OutcomeType.CLEAN_DEPLOY,
+    outcome_type=OutcomeType.SUCCESS,
 )
 ```
 
 ### Outcome Types
 
 ```python
-OutcomeType.P1_INCIDENT    # × 1.15
-OutcomeType.P2_INCIDENT    # × 1.10
-OutcomeType.REGRESSION     # × 1.08
-OutcomeType.CLEAN_DEPLOY   # × 0.97
+OutcomeType.CRITICAL_FAILURE  # × 1.15
+OutcomeType.FAILURE           # × 1.10
+OutcomeType.MINOR_FAILURE     # × 1.08
+OutcomeType.SUCCESS           # × 0.97
 ```
 
 ---
@@ -245,7 +245,7 @@ mem.record_context(
     source="git",
 )
 
-mem.commit_outcome("DEP-500", OutcomeType.CLEAN_DEPLOY)
+mem.commit_outcome("DEP-500", OutcomeType.SUCCESS)
 
 chain = mem.explain()
 print(chain["causal_entries"])     # AMFS entries that were read
@@ -343,7 +343,7 @@ with AgentMemory(agent_id="deploy-agent", adapter=adapter) as mem:
     mem.record_context("ci-pipeline", "All tests passing, deploy ready", source="GitHub Actions")
 
     # Step 4: Commit the outcome
-    mem.commit_outcome("DEP-500", OutcomeType.CLEAN_DEPLOY)
+    mem.commit_outcome("DEP-500", OutcomeType.SUCCESS)
 ```
 
 If the Cortex is not running, `briefing()` returns an empty list — your agent code can safely call it without checking.

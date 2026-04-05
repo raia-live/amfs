@@ -101,7 +101,7 @@ print(entry.provenance.written_at)  # 2026-03-15T14:30:00Z
 When a deploy succeeds or an incident occurs, confidence scores on related entries adjust automatically:
 
 ```python
-mem.commit_outcome("INC-1042", OutcomeType.P1_INCIDENT)
+mem.commit_outcome("INC-1042", OutcomeType.CRITICAL_FAILURE)
 # All entries this agent read get their confidence boosted
 ```
 

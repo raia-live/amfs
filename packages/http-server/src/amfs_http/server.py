@@ -314,10 +314,15 @@ async def get_history(
 # ──────────────────────────────────────────────────────────────────────
 
 _OUTCOME_TYPE_MAP = {
-    "p1_incident": OutcomeType.P1_INCIDENT,
-    "p2_incident": OutcomeType.P2_INCIDENT,
-    "regression": OutcomeType.REGRESSION,
+    "success": OutcomeType.SUCCESS,
+    "minor_failure": OutcomeType.MINOR_FAILURE,
+    "failure": OutcomeType.FAILURE,
+    "critical_failure": OutcomeType.CRITICAL_FAILURE,
+    # Legacy values (backward compatible)
     "clean_deploy": OutcomeType.CLEAN_DEPLOY,
+    "regression": OutcomeType.REGRESSION,
+    "p2_incident": OutcomeType.P2_INCIDENT,
+    "p1_incident": OutcomeType.P1_INCIDENT,
 }
 
 

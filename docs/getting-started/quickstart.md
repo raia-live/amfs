@@ -172,7 +172,7 @@ from amfs import OutcomeType
 # An incident related to the retry pattern — confidence increases
 updated = mem.commit_outcome(
     outcome_ref="INC-1042",
-    outcome_type=OutcomeType.P1_INCIDENT,
+    outcome_type=OutcomeType.CRITICAL_FAILURE,
 )
 ```
 

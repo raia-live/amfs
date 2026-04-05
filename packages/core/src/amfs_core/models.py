@@ -38,14 +38,25 @@ class ProvenanceTier(int, Enum):
 class OutcomeType(str, Enum):
     """Types of outcomes that can affect memory confidence."""
 
-    P1_INCIDENT = "p1_incident"      # confidence *= 1.15
-    P2_INCIDENT = "p2_incident"      # confidence *= 1.10
-    REGRESSION = "regression"        # confidence *= 1.08
-    CLEAN_DEPLOY = "clean_deploy"    # confidence *= 0.97
+    SUCCESS = "success"                      # confidence *= 0.97
+    MINOR_FAILURE = "minor_failure"          # confidence *= 1.08
+    FAILURE = "failure"                      # confidence *= 1.10
+    CRITICAL_FAILURE = "critical_failure"    # confidence *= 1.15
+
+    # Backward-compatible aliases (deprecated)
+    CLEAN_DEPLOY = "clean_deploy"
+    REGRESSION = "regression"
+    P2_INCIDENT = "p2_incident"
+    P1_INCIDENT = "p1_incident"
 
 
 # Multipliers applied to confidence when an outcome is committed.
-OUTCOME_MULTIPLIERS: dict[OutcomeType, float] = {
+OUTCOME_MULTIPLIERS: dict[OutcomeType | str, float] = {
+    OutcomeType.CRITICAL_FAILURE: 1.15,
+    OutcomeType.FAILURE: 1.10,
+    OutcomeType.MINOR_FAILURE: 1.08,
+    OutcomeType.SUCCESS: 0.97,
+    # Legacy values
     OutcomeType.P1_INCIDENT: 1.15,
     OutcomeType.P2_INCIDENT: 1.10,
     OutcomeType.REGRESSION: 1.08,

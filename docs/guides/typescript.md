@@ -57,7 +57,7 @@ const results = mem.search({
 });
 
 // Auto-causal outcome — uses ReadTracker (no explicit keys needed)
-const updated = mem.commitOutcome("DEP-500", OutcomeType.CLEAN_DEPLOY);
+const updated = mem.commitOutcome("DEP-500", OutcomeType.SUCCESS);
 ```
 
 ---
@@ -75,7 +75,7 @@ mem.read("checkout-service", "pool-config");
 mem.recordContext("pagerduty-status", "No active incidents", "PagerDuty API");
 
 // Commit outcome — auto-links to everything read in this session
-const updated = mem.commitOutcome("DEP-500", OutcomeType.CLEAN_DEPLOY);
+const updated = mem.commitOutcome("DEP-500", OutcomeType.SUCCESS);
 
 // Explain the causal chain
 const chain = mem.explain();

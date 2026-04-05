@@ -90,7 +90,7 @@ The adapter auto-creates two tables and associated triggers:
 |:-------|:-----|:------------|
 | `id` | `SERIAL` | Primary key |
 | `outcome_ref` | `TEXT` | External reference (ticket ID, deploy ID) |
-| `outcome_type` | `TEXT` | One of: `p1_incident`, `p2_incident`, `regression`, `clean_deploy` |
+| `outcome_type` | `TEXT` | One of: `critical_failure`, `failure`, `minor_failure`, `success` |
 | `causal_entry_keys` | `TEXT[]` | Array of `entity_path/key` strings |
 
 ---

@@ -301,18 +301,22 @@ def amfs_commit_outcome(
     propagates confidence changes to all entries that influenced the decision.
 
     Args:
-        outcome_ref: Reference identifier (e.g. "INC-2047", "deploy-v1.2.3", "PR-456")
-        outcome_type: One of "p1_incident", "p2_incident", "regression", "clean_deploy"
+        outcome_ref: Reference identifier (e.g. "INC-2047", "task-42", "PR-456")
+        outcome_type: One of "success", "minor_failure", "failure", "critical_failure"
 
-    Example: amfs_commit_outcome("INC-2047", "p1_incident")
+    Example: amfs_commit_outcome("task-42", "success")
     """
     mem = _get_memory()
 
     type_map = {
-        "p1_incident": OutcomeType.P1_INCIDENT,
-        "p2_incident": OutcomeType.P2_INCIDENT,
-        "regression": OutcomeType.REGRESSION,
+        "success": OutcomeType.SUCCESS,
+        "minor_failure": OutcomeType.MINOR_FAILURE,
+        "failure": OutcomeType.FAILURE,
+        "critical_failure": OutcomeType.CRITICAL_FAILURE,
         "clean_deploy": OutcomeType.CLEAN_DEPLOY,
+        "regression": OutcomeType.REGRESSION,
+        "p2_incident": OutcomeType.P2_INCIDENT,
+        "p1_incident": OutcomeType.P1_INCIDENT,
     }
 
     otype = type_map.get(outcome_type.lower())

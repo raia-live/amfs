@@ -158,6 +158,10 @@ class PostgresAdapter(AdapterABC):
                 cur RECORD;
             BEGIN
                 CASE NEW.outcome_type
+                    WHEN 'critical_failure' THEN multiplier := 1.15;
+                    WHEN 'failure' THEN multiplier := 1.10;
+                    WHEN 'minor_failure' THEN multiplier := 1.08;
+                    WHEN 'success' THEN multiplier := 0.97;
                     WHEN 'p1_incident' THEN multiplier := 1.15;
                     WHEN 'p2_incident' THEN multiplier := 1.10;
                     WHEN 'regression' THEN multiplier := 1.08;
