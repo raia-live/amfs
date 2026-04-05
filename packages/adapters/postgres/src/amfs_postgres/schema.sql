@@ -174,6 +174,153 @@ CREATE INDEX IF NOT EXISTS idx_patterns_unresolved
     ON amfs_detected_patterns (namespace)
     WHERE resolved = FALSE;
 
+-- ──────────────────────────────────────────────────────────────────────
+-- Agent Registration (Pro) — auto-created on first write
+-- ──────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS amfs_agents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace TEXT NOT NULL DEFAULT 'default',
+    agent_id TEXT NOT NULL,
+    display_name TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_active_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    entry_count INTEGER DEFAULT 0,
+    CONSTRAINT uq_agent UNIQUE (namespace, agent_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agents_namespace
+    ON amfs_agents (namespace);
+
+-- ──────────────────────────────────────────────────────────────────────
+-- Unified Event / Timeline Log (Pro) — the git commit log
+-- ──────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS amfs_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace TEXT NOT NULL DEFAULT 'default',
+    agent_id TEXT NOT NULL,
+    branch TEXT NOT NULL DEFAULT 'main',
+    event_type TEXT NOT NULL,
+    summary TEXT,
+    details JSONB DEFAULT '{}',
+    actor_agent_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_event_type CHECK (event_type IN (
+        'write', 'outcome', 'webhook', 'brief_compiled', 'cross_agent_read',
+        'branch_created', 'branch_merged', 'branch_closed',
+        'access_granted', 'access_revoked',
+        'rollback', 'tag_created', 'cherry_pick', 'fork'
+    ))
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_agent_timeline
+    ON amfs_events (namespace, agent_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_events_branch
+    ON amfs_events (namespace, agent_id, branch, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_events_type
+    ON amfs_events (namespace, event_type);
+
+-- ──────────────────────────────────────────────────────────────────────
+-- Branches (Pro) — memory branch metadata
+-- ──────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS amfs_branches (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace TEXT NOT NULL DEFAULT 'default',
+    name TEXT NOT NULL,
+    parent_branch TEXT NOT NULL DEFAULT 'main',
+    branched_at TIMESTAMPTZ NOT NULL,
+    created_by TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    merged_at TIMESTAMPTZ,
+    merged_by TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_branch_name UNIQUE (namespace, name),
+    CONSTRAINT chk_branch_status CHECK (status IN ('active', 'merged', 'closed'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_branches_namespace
+    ON amfs_branches (namespace, status);
+
+-- ──────────────────────────────────────────────────────────────────────
+-- Branch Access Control (Pro) — who can read/write a branch
+-- ──────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS amfs_branch_access (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace TEXT NOT NULL DEFAULT 'default',
+    branch_name TEXT NOT NULL,
+    grantee_type TEXT NOT NULL,
+    grantee_id TEXT NOT NULL,
+    permission TEXT NOT NULL DEFAULT 'read',
+    granted_by TEXT NOT NULL,
+    granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_branch_access UNIQUE (namespace, branch_name, grantee_type, grantee_id),
+    CONSTRAINT chk_grantee_type CHECK (grantee_type IN ('user', 'team', 'api_key')),
+    CONSTRAINT chk_permission CHECK (permission IN ('read', 'read_write'))
+);
+
+-- ──────────────────────────────────────────────────────────────────────
+-- Tags / Snapshots (Pro) — named point-in-time markers
+-- ──────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS amfs_tags (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace TEXT NOT NULL DEFAULT 'default',
+    name TEXT NOT NULL,
+    branch TEXT NOT NULL DEFAULT 'main',
+    tagged_at TIMESTAMPTZ NOT NULL,
+    description TEXT,
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_tag_name UNIQUE (namespace, name)
+);
+
+-- ──────────────────────────────────────────────────────────────────────
+-- Pull Requests (Pro) — review workflow for branch merges
+-- ──────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS amfs_pull_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace TEXT NOT NULL DEFAULT 'default',
+    title TEXT NOT NULL,
+    description TEXT,
+    source_branch TEXT NOT NULL,
+    target_branch TEXT NOT NULL DEFAULT 'main',
+    status TEXT NOT NULL DEFAULT 'open',
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    merged_at TIMESTAMPTZ,
+    merged_by TEXT,
+    closed_at TIMESTAMPTZ,
+    closed_by TEXT,
+    merge_strategy TEXT,
+    CONSTRAINT chk_pr_status CHECK (status IN ('open', 'approved', 'merged', 'closed'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_prs_namespace
+    ON amfs_pull_requests (namespace, status);
+
+CREATE TABLE IF NOT EXISTS amfs_pr_reviews (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace TEXT NOT NULL DEFAULT 'default',
+    pr_id UUID NOT NULL REFERENCES amfs_pull_requests(id) ON DELETE CASCADE,
+    reviewer TEXT NOT NULL,
+    status TEXT NOT NULL,
+    comment TEXT,
+    entry_path TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_review_status CHECK (status IN ('approved', 'changes_requested', 'commented'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pr_reviews_pr
+    ON amfs_pr_reviews (pr_id);
+
 -- Back-propagation trigger: when an outcome is inserted,
 -- for each causal_entry_key: supersede current entry and insert
 -- a new version with confidence *= multiplier * causal_confidence.
