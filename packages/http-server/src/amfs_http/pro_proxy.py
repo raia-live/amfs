@@ -110,7 +110,72 @@ def mount_pro_proxy(app) -> None:
             logger.debug("Pro API unreachable for anticipation", exc_info=True)
             return {"digests": [], "message": "Pro API unavailable"}
 
-    logger.info("Pro proxy routes mounted: hot-context, anticipation")
+    # --- Trace Pro actions (verify, replay, diff) ---
+
+    @app.post("/api/v1/pro/traces/{trace_id}/verify")
+    async def proxy_verify_trace(
+        trace_id: str,
+        _auth: str | None = Depends(verify_api_key),
+    ) -> dict[str, Any]:
+        """Proxy trace verification to Pro SaaS API."""
+        try:
+            resp = await _client.post(
+                f"{PRO_URL}/api/v1/pro/traces/{trace_id}/verify",
+                headers=_pro_headers(),
+            )
+            if resp.status_code == 404:
+                from fastapi import HTTPException
+                raise HTTPException(status_code=404, detail="Trace not found")
+            return resp.json()
+        except Exception as exc:
+            if hasattr(exc, "status_code"):
+                raise
+            logger.debug("Pro API unreachable for trace verify", exc_info=True)
+            return {"error": "Pro API unavailable"}
+
+    @app.post("/api/v1/pro/traces/{trace_id}/replay")
+    async def proxy_replay_trace(
+        trace_id: str,
+        _auth: str | None = Depends(verify_api_key),
+    ) -> dict[str, Any]:
+        """Proxy trace replay to Pro SaaS API."""
+        try:
+            resp = await _client.post(
+                f"{PRO_URL}/api/v1/pro/traces/{trace_id}/replay",
+                headers=_pro_headers(),
+            )
+            if resp.status_code == 404:
+                from fastapi import HTTPException
+                raise HTTPException(status_code=404, detail="Trace not found")
+            return resp.json()
+        except Exception as exc:
+            if hasattr(exc, "status_code"):
+                raise
+            logger.debug("Pro API unreachable for trace replay", exc_info=True)
+            return {"error": "Pro API unavailable"}
+
+    @app.post("/api/v1/pro/traces/{trace_id}/diff")
+    async def proxy_diff_trace(
+        trace_id: str,
+        _auth: str | None = Depends(verify_api_key),
+    ) -> dict[str, Any]:
+        """Proxy trace diff to Pro SaaS API."""
+        try:
+            resp = await _client.post(
+                f"{PRO_URL}/api/v1/pro/traces/{trace_id}/diff",
+                headers=_pro_headers(),
+            )
+            if resp.status_code == 404:
+                from fastapi import HTTPException
+                raise HTTPException(status_code=404, detail="Trace not found")
+            return resp.json()
+        except Exception as exc:
+            if hasattr(exc, "status_code"):
+                raise
+            logger.debug("Pro API unreachable for trace diff", exc_info=True)
+            return {"error": "Pro API unavailable"}
+
+    logger.info("Pro proxy routes mounted: hot-context, anticipation, trace-verify, trace-replay, trace-diff")
 
 
 # ─────────────────────────────────────────────────────────────────────

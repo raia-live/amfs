@@ -636,6 +636,7 @@ def seed_immutable_traces(cur):
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_imm_traces_created ON amfs_immutable_traces (namespace, created_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_imm_traces_agent ON amfs_immutable_traces (namespace, agent_id)")
+    cur.execute("DELETE FROM amfs_immutable_traces WHERE namespace = %s", (NS,))
 
     signing_key = "test-signing-key-for-dev"
 
@@ -714,23 +715,23 @@ def seed_immutable_traces(cur):
         ]
 
         write_events_data = [
-            [{"entity_path": "checkout-service", "key": "deploy-v2.14", "version": 1, "confidence": 0.97, "written_at": ts_iso(12.1)}],
+            [{"entity_path": "checkout-service", "key": "deploy-v2.14", "version": 1, "confidence": 0.97, "written_at": ts_iso(12.1), "written_by": "deploy-agent"}],
             [],
-            [{"entity_path": "auth", "key": "risk-token-leak", "version": 1, "confidence": 0.72, "written_at": ts_iso(80.2)}],
+            [{"entity_path": "auth", "key": "risk-token-leak", "version": 1, "confidence": 0.72, "written_at": ts_iso(80.2), "written_by": "security-scanner"}],
             [],
             [],
-            [{"entity_path": "user-service", "key": "cache-strategy", "version": 1, "confidence": 0.87, "written_at": ts_iso(18.1)}],
+            [{"entity_path": "user-service", "key": "cache-strategy", "version": 1, "confidence": 0.87, "written_at": ts_iso(18.1), "written_by": "perf-optimizer"}],
         ]
 
         tool_calls_data = [
-            [{"tool": "amfs_read", "args": {"entity_path": "checkout-service", "key": "retry-pattern"}, "result": "success", "duration_ms": 2.3}],
-            [{"tool": "amfs_search", "args": {"entity_path": "auth"}, "result": "success", "duration_ms": 15.2}],
-            [{"tool": "amfs_search", "args": {"pattern_ref": "security"}, "result": "success", "duration_ms": 18.5},
-             {"tool": "amfs_write", "args": {"entity_path": "auth", "key": "risk-token-leak"}, "result": "success", "duration_ms": 5.1}],
-            [{"tool": "amfs_search", "args": {"entity_path": "payments"}, "result": "success", "duration_ms": 9.8}],
-            [{"tool": "amfs_read", "args": {"entity_path": "checkout-service", "key": "circuit-breaker"}, "result": "success", "duration_ms": 1.4}],
-            [{"tool": "amfs_read", "args": {"entity_path": "user-service", "key": "cache-strategy"}, "result": "success", "duration_ms": 2.8},
-             {"tool": "amfs_write", "args": {"entity_path": "user-service", "key": "cache-strategy"}, "result": "success", "duration_ms": 4.2}],
+            [{"tool_name": "amfs_read", "arguments": {"entity_path": "checkout-service", "key": "retry-pattern"}, "result_summary": "success", "duration_ms": 2, "started_at": ts_iso(12.6)}],
+            [{"tool_name": "amfs_search", "arguments": {"entity_path": "auth"}, "result_summary": "success", "duration_ms": 15, "started_at": ts_iso(37)}],
+            [{"tool_name": "amfs_search", "arguments": {"pattern_ref": "security"}, "result_summary": "success", "duration_ms": 18, "started_at": ts_iso(81)},
+             {"tool_name": "amfs_write", "arguments": {"entity_path": "auth", "key": "risk-token-leak"}, "result_summary": "success", "duration_ms": 5, "started_at": ts_iso(80.5)}],
+            [{"tool_name": "amfs_search", "arguments": {"entity_path": "payments"}, "result_summary": "success", "duration_ms": 10, "started_at": ts_iso(49)}],
+            [{"tool_name": "amfs_read", "arguments": {"entity_path": "checkout-service", "key": "circuit-breaker"}, "result_summary": "success", "duration_ms": 1, "started_at": ts_iso(6.5)}],
+            [{"tool_name": "amfs_read", "arguments": {"entity_path": "user-service", "key": "cache-strategy"}, "result_summary": "success", "duration_ms": 3, "started_at": ts_iso(19)},
+             {"tool_name": "amfs_write", "arguments": {"entity_path": "user-service", "key": "cache-strategy"}, "result_summary": "success", "duration_ms": 4, "started_at": ts_iso(18.5)}],
         ]
 
         calls = llm_calls[i]
@@ -758,19 +759,19 @@ def seed_immutable_traces(cur):
         ))
         parent_hash = content_hash
 
-    for t in imm_traces:
+    for i, t in enumerate(imm_traces):
         cur.execute("""
             INSERT INTO amfs_immutable_traces
-                (namespace, account_id, agent_id, session_id, sequence_number,
+                (id, namespace, account_id, agent_id, session_id, sequence_number,
                  outcome_ref, outcome_type, decision_key, decision_summary,
                  causal_entries, write_events, tool_calls, external_contexts,
                  agent_interactions, llm_calls,
                  total_llm_calls, total_tokens, total_cost_usd,
                  memory_snapshot_hash, content_hash, parent_hash,
                  signature, signing_key_id, schema_version, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, t)
+        """, (TRACE_IDS[i], *t))
 
     print(f"    Inserted {len(imm_traces)} immutable traces")
 
