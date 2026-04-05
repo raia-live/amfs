@@ -147,6 +147,71 @@ class PostgresAdapter(AdapterABC):
             END;
             $$ LANGUAGE plpgsql
         """)
+        cur.execute("""
+            CREATE OR REPLACE FUNCTION amfs_propagate_outcome() RETURNS TRIGGER AS $$
+            DECLARE
+                multiplier NUMERIC;
+                entry_key TEXT;
+                parts TEXT[];
+                ep TEXT;
+                k TEXT;
+                cur RECORD;
+            BEGIN
+                CASE NEW.outcome_type
+                    WHEN 'p1_incident' THEN multiplier := 1.15;
+                    WHEN 'p2_incident' THEN multiplier := 1.10;
+                    WHEN 'regression' THEN multiplier := 1.08;
+                    WHEN 'clean_deploy' THEN multiplier := 0.97;
+                    ELSE multiplier := 1.0;
+                END CASE;
+
+                FOREACH entry_key IN ARRAY NEW.causal_entry_keys
+                LOOP
+                    IF position('/' in entry_key) = 0 THEN
+                        CONTINUE;
+                    END IF;
+                    k := substring(entry_key from '([^/]+)$');
+                    ep := left(entry_key, length(entry_key) - length(k) - 1);
+
+                    SELECT * INTO cur FROM amfs_memory_entries
+                    WHERE namespace = NEW.namespace
+                      AND entity_path = ep
+                      AND key = k
+                      AND superseded_at IS NULL
+                    ORDER BY version DESC LIMIT 1;
+
+                    IF FOUND THEN
+                        UPDATE amfs_memory_entries
+                        SET superseded_at = NOW()
+                        WHERE id = cur.id;
+
+                        INSERT INTO amfs_memory_entries (
+                            namespace, entity_path, key, version, value,
+                            agent_id, session_id, written_at, pattern_refs,
+                            confidence, outcome_count, ttl_at, memory_type,
+                            shared, artifact_refs
+                        ) VALUES (
+                            cur.namespace, cur.entity_path, cur.key, cur.version + 1, cur.value,
+                            cur.agent_id, cur.session_id, cur.written_at, cur.pattern_refs,
+                            cur.confidence * multiplier * NEW.causal_confidence,
+                            cur.outcome_count + 1, cur.ttl_at, cur.memory_type,
+                            cur.shared, cur.artifact_refs
+                        );
+                    END IF;
+                END LOOP;
+
+                PERFORM pg_notify('amfs_outcome', json_build_object(
+                    'namespace', NEW.namespace,
+                    'outcome_ref', NEW.outcome_ref,
+                    'outcome_type', NEW.outcome_type,
+                    'agent_id', NEW.agent_id,
+                    'causal_confidence', NEW.causal_confidence
+                )::TEXT);
+
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+        """)
 
     def _detect_optional_columns(self) -> None:
         """Check whether optional columns (embedding, search_tsv) exist.
