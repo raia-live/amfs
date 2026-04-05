@@ -162,14 +162,15 @@ AMFS is available in two editions. The open-source layer provides the full memor
 ## How Agents Use AMFS
 
 ```
-1. Search before working    →  amfs_search("checkout-service")
-2. Read relevant entries    →  amfs_read("checkout-service", "retry-pattern")
-3. Do the work              →  (agent performs its task)
-4. Write findings           →  amfs_write("checkout-service", "new-pattern", ...)
-5. Record outcomes          →  amfs_commit_outcome("DEP-287", "clean_deploy")
+1. Get a briefing           →  amfs_briefing(entity_path="checkout-service")
+2. Search for specifics     →  amfs_search("checkout-service")
+3. Read relevant entries    →  amfs_read("checkout-service", "retry-pattern")
+4. Do the work              →  (agent performs its task)
+5. Write findings           →  amfs_write("checkout-service", "new-pattern", ...)
+6. Record outcomes          →  amfs_commit_outcome("DEP-287", "clean_deploy")
 ```
 
-Knowledge compounds over time. The next agent — on any machine — starts with the context that previous agents built, instead of starting from scratch.
+Knowledge compounds over time. The Memory Cortex compiles raw entries into ranked digests, so the next agent — on any machine — starts with a pre-compiled briefing of what matters, instead of searching from scratch.
 
 ---
 

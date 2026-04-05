@@ -288,6 +288,68 @@ handle.cancel()
 
 ---
 
+## Briefing (Memory Cortex)
+
+When the Memory Cortex is running, agents can retrieve pre-compiled knowledge digests ranked by relevance. This is how agents consume the "brain brief" — compiled summaries of entities, other agents, and external sources — without having to search through raw memory entries.
+
+### Basic Usage
+
+```python
+mem = AgentMemory(agent_id="deploy-agent", adapter=adapter)
+
+# Get a ranked briefing of compiled knowledge
+briefs = mem.briefing(entity_path="myapp/checkout-service", limit=5)
+
+for digest in briefs:
+    print(digest.digest_type)   # "entity", "agent_brief", "source", or "connection_map"
+    print(digest.scope)         # the entity path, agent ID, or source ID
+    print(digest.summary)       # structured summary (varies by digest type)
+    print(digest.entry_count)   # number of source entries compiled
+    print(digest.compiled_at)   # when the digest was last compiled
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|:----------|:-----|:------------|
+| `entity_path` | `str \| None` | Focus on digests relevant to this entity |
+| `agent_id` | `str \| None` | Focus on digests relevant to this agent |
+| `limit` | `int` | Maximum number of digests to return (default: 10) |
+
+### Digest Types
+
+| Type | Scope | What It Contains |
+|:-----|:------|:-----------------|
+| `entity` | Entity path (e.g. `myapp/checkout-service`) | Summary of all knowledge about an entity — key count, average confidence, top keys, narrative |
+| `agent_brief` | Agent ID (e.g. `deploy-agent`) | Summary of an agent's knowledge and activity — entries written, entities touched, outcomes |
+| `source` | Source ID (e.g. `github`) | Summary of external data from a connector — events ingested, entities touched |
+| `connection_map` | Cross-entity scope | Cross-entity relationships (Pro) |
+
+### Workflow Integration
+
+Call `briefing()` at the start of a task to get context before making decisions:
+
+```python
+with AgentMemory(agent_id="deploy-agent", adapter=adapter) as mem:
+    # Step 1: Get a briefing on what you need to know
+    briefs = mem.briefing(entity_path="myapp/checkout-service", limit=5)
+    for digest in briefs:
+        print(f"[{digest.digest_type}] {digest.scope}: {digest.summary.get('narrative', '')}")
+
+    # Step 2: Read specific entries based on the briefing
+    entry = mem.read("myapp/checkout-service", "retry-pattern")
+
+    # Step 3: Do your work, record context
+    mem.record_context("ci-pipeline", "All tests passing, deploy ready", source="GitHub Actions")
+
+    # Step 4: Commit the outcome
+    mem.commit_outcome("DEP-500", OutcomeType.CLEAN_DEPLOY)
+```
+
+If the Cortex is not running, `briefing()` returns an empty list — your agent code can safely call it without checking.
+
+---
+
 ## Snapshots
 
 Export and import the full state of your memory:
