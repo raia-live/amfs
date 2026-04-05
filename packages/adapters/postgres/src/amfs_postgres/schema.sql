@@ -236,6 +236,14 @@ BEGIN
         END IF;
     END LOOP;
 
+    PERFORM pg_notify('amfs_outcome', json_build_object(
+        'namespace', NEW.namespace,
+        'outcome_ref', NEW.outcome_ref,
+        'outcome_type', NEW.outcome_type,
+        'agent_id', NEW.agent_id,
+        'causal_confidence', NEW.causal_confidence
+    )::TEXT);
+
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
