@@ -1,0 +1,56 @@
+@import "tailwindcss";
+
+@theme {
+  --color-sacred-gold: #c8a84e;
+  --color-sacred-amber: #d4a843;
+  --color-branch-blue: #4a9eff;
+  --color-branch-green: #4ade80;
+  --color-branch-purple: #a78bfa;
+  --color-branch-pink: #f472b6;
+  --color-branch-orange: #fb923c;
+  --color-void-black: #0a0a0f;
+  --color-void-dark: #12121a;
+  --color-void-gray: #1e1e2e;
+  --color-void-light: #2a2a3e;
+  --color-text-primary: #e8e6e3;
+  --color-text-secondary: #9ca3af;
+  --color-text-muted: #6b7280;
+  --color-danger: #ef4444;
+  --color-success: #22c55e;
+  --color-warning: #eab308;
+}
+
+body {
+  background: var(--color-void-black);
+  color: var(--color-text-primary);
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-void-dark);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-void-light);
+  border-radius: 3px;
+}
+
+.glow-gold {
+  box-shadow: 0 0 20px rgba(200, 168, 78, 0.3), 0 0 60px rgba(200, 168, 78, 0.1);
+}
+
+.glow-blue {
+  box-shadow: 0 0 20px rgba(74, 158, 255, 0.3), 0 0 60px rgba(74, 158, 255, 0.1);
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}

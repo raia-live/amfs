@@ -1,0 +1,32 @@
+{
+  "name": "@amfs/dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack --port 3741",
+    "build": "next build",
+    "start": "next start --port 3741",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@react-three/fiber": "^9.1.0",
+    "@react-three/drei": "^10.0.0",
+    "three": "^0.175.0",
+    "next": "^15.3.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "lucide-react": "^0.475.0",
+    "clsx": "^2.1.1",
+    "swr": "^2.3.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@types/three": "^0.175.0",
+    "typescript": "^5.8.0",
+    "tailwindcss": "^4.1.0",
+    "@tailwindcss/postcss": "^4.1.0",
+    "postcss": "^8.5.0"
+  }
+}
