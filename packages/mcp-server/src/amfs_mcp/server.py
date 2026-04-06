@@ -762,6 +762,58 @@ def amfs_cherry_pick(branch_name: str, entries: list[dict[str, str]]) -> str:
     return json.dumps({"picked": picked, "source_branch": branch_name})
 
 
+@mcp.tool()
+def amfs_fork(target_agent_id: str) -> str:
+    """Fork this agent's current branch memory into a new agent's main branch.
+
+    All live entries on the current branch are copied to the target agent.
+    """
+    mem = _get_memory()
+    count = mem.fork(target_agent_id)
+    return json.dumps({
+        "source_agent": mem.agent_id,
+        "target_agent": target_agent_id,
+        "entries_copied": count,
+    })
+
+
+@mcp.tool()
+def amfs_create_pull_request(
+    title: str,
+    source_branch: str,
+    target_branch: str = "main",
+    description: str = "",
+) -> str:
+    """Create a pull request to merge a branch into another."""
+    mem = _get_memory()
+    pr = mem.create_pull_request(
+        title, source_branch, target_branch=target_branch,
+        description=description or None,
+    )
+    return json.dumps(pr.model_dump(mode="json"), default=str)
+
+
+@mcp.tool()
+def amfs_list_pull_requests(status: str = "") -> str:
+    """List pull requests, optionally filtered by status (open/merged/closed)."""
+    mem = _get_memory()
+    prs = mem.list_pull_requests(status=status or None)
+    return json.dumps([p.model_dump(mode="json") for p in prs], default=str)
+
+
+@mcp.tool()
+def amfs_rollback(timestamp: str = "", tag_name: str = "") -> str:
+    """Rollback memory to a point in time or a named tag.
+
+    Provide either timestamp (ISO 8601) or tag_name.
+    """
+    mem = _get_memory()
+    from datetime import datetime as dt
+    ts = dt.fromisoformat(timestamp) if timestamp else None
+    count = mem.rollback(timestamp=ts, tag_name=tag_name or None)
+    return json.dumps({"entries_restored": count, "rolled_back_to": timestamp or tag_name})
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────────────────────────────

@@ -348,6 +348,7 @@ class Digest(BaseModel):
     staleness_ms: int = 0
     anticipation_score: float = 0.0
     namespace: str = "default"
+    branch: str = "main"
 
 
 # ── Git-like memory models (Pro) ──────────────────────────────────────

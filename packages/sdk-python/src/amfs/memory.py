@@ -729,6 +729,7 @@ class AgentMemory:
         entity_path: str | None = None,
         agent_id: str | None = None,
         limit: int = 10,
+        branch: str | None = None,
     ) -> list:
         """Get a ranked briefing of compiled knowledge digests.
 
@@ -740,6 +741,7 @@ class AgentMemory:
             entity_path: Focus on digests relevant to this entity.
             agent_id: Focus on digests relevant to this agent.
             limit: Maximum number of digests to return.
+            branch: Branch to read digests from (defaults to active branch).
 
         Returns:
             List of Digest objects ranked by relevance.
@@ -757,6 +759,7 @@ class AgentMemory:
             entity_path=entity_path,
             agent_id=agent_id or self.agent_id,
             limit=limit,
+            branch=branch or self._branch,
         )
 
     # ------------------------------------------------------------------
@@ -1060,6 +1063,36 @@ class AgentMemory:
             since=since,
             limit=limit,
         )
+
+    # ------------------------------------------------------------------
+    # Fork (Pro)
+    # ------------------------------------------------------------------
+
+    def fork(self, target_agent_id: str) -> int:
+        """Fork this agent's current branch memory into a new agent's main.
+
+        All live entries on the current branch are copied to ``target_agent_id``'s
+        ``main`` branch.  Returns the number of entries copied.
+        """
+        count = self._adapter.fork_agent(
+            self.agent_id,
+            target_agent_id,
+            namespace=self.namespace,
+            branch=self._branch,
+        )
+        self._adapter.log_event(Event(
+            namespace=self.namespace,
+            agent_id=self.agent_id,
+            branch=self._branch,
+            event_type=EventType.FORK,
+            summary=f"Forked {count} entries to agent '{target_agent_id}'",
+            details={
+                "target_agent_id": target_agent_id,
+                "source_branch": self._branch,
+                "entries_copied": count,
+            },
+        ))
+        return count
 
     # ------------------------------------------------------------------
     # Scoped access

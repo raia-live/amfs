@@ -164,6 +164,13 @@ class PostgresAdapter(AdapterABC):
             ADD COLUMN IF NOT EXISTS branch TEXT NOT NULL DEFAULT 'main'
         """)
         cur.execute("""
+            ALTER TABLE amfs_digests DROP CONSTRAINT IF EXISTS uq_digest
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_digests
+            ADD CONSTRAINT uq_digest UNIQUE (namespace, branch, digest_type, scope)
+        """)
+        cur.execute("""
             ALTER TABLE amfs_api_keys
             ADD COLUMN IF NOT EXISTS default_branch TEXT
         """)
@@ -176,7 +183,8 @@ class PostgresAdapter(AdapterABC):
                         'entity_path', NEW.entity_path,
                         'key', NEW.key,
                         'version', NEW.version,
-                        'agent_id', NEW.agent_id
+                        'agent_id', NEW.agent_id,
+                        'branch', NEW.branch
                     )::TEXT);
                 END IF;
                 RETURN NEW;
@@ -974,12 +982,13 @@ class PostgresAdapter(AdapterABC):
 
     def upsert_digest(self, digest: Digest) -> None:
         """Insert or update a compiled digest."""
+        branch = digest.branch or "main"
         with self._pool.connection() as conn:
             conn.execute(
                 """INSERT INTO amfs_digests
-                   (namespace, digest_type, scope, summary, entry_count,
+                   (namespace, branch, digest_type, scope, summary, entry_count,
                     source_agents, anticipation_score, compiled_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT ON CONSTRAINT uq_digest
                    DO UPDATE SET summary = EXCLUDED.summary,
                                  entry_count = EXCLUDED.entry_count,
@@ -988,6 +997,7 @@ class PostgresAdapter(AdapterABC):
                                  compiled_at = EXCLUDED.compiled_at""",
                 (
                     digest.namespace,
+                    branch,
                     digest.digest_type.value,
                     digest.scope,
                     json.dumps(digest.summary),
@@ -1003,14 +1013,16 @@ class PostgresAdapter(AdapterABC):
         digest_type: DigestType,
         scope: str,
         namespace: str = "default",
+        branch: str = "main",
     ) -> Digest | None:
         """Read a single digest by type and scope."""
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 row = cur.execute(
                     """SELECT * FROM amfs_digests
-                       WHERE namespace = %s AND digest_type = %s AND scope = %s""",
-                    (namespace, digest_type.value, scope),
+                       WHERE namespace = %s AND branch = %s
+                         AND digest_type = %s AND scope = %s""",
+                    (namespace, branch, digest_type.value, scope),
                 ).fetchone()
         return self._row_to_digest(row) if row else None
 
@@ -1018,22 +1030,24 @@ class PostgresAdapter(AdapterABC):
         self,
         digest_type: DigestType | None = None,
         namespace: str = "default",
+        branch: str = "main",
     ) -> list[Digest]:
-        """List digests, optionally filtered by type."""
+        """List digests, optionally filtered by type and branch."""
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 if digest_type:
                     rows = cur.execute(
                         """SELECT * FROM amfs_digests
-                           WHERE namespace = %s AND digest_type = %s
+                           WHERE namespace = %s AND branch = %s AND digest_type = %s
                            ORDER BY compiled_at DESC""",
-                        (namespace, digest_type.value),
+                        (namespace, branch, digest_type.value),
                     ).fetchall()
                 else:
                     rows = cur.execute(
                         """SELECT * FROM amfs_digests
-                           WHERE namespace = %s ORDER BY compiled_at DESC""",
-                        (namespace,),
+                           WHERE namespace = %s AND branch = %s
+                           ORDER BY compiled_at DESC""",
+                        (namespace, branch),
                     ).fetchall()
         return [self._row_to_digest(r) for r in rows]
 
@@ -1050,6 +1064,7 @@ class PostgresAdapter(AdapterABC):
             source_agents=row.get("source_agents") or [],
             compiled_at=row["compiled_at"],
             anticipation_score=float(row.get("anticipation_score", 0.0)),
+            branch=row.get("branch", "main"),
             namespace=row.get("namespace", "default"),
         )
 
@@ -1897,6 +1912,69 @@ class PostgresAdapter(AdapterABC):
                             )
                             restored += 1
         return restored
+
+    # ── Fork (Pro) ────────────────────────────────────────────────────
+
+    def fork_agent(
+        self,
+        source_agent_id: str,
+        target_agent_id: str,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> int:
+        """Copy all live entries from source agent's branch into target agent's main."""
+        self.ensure_agent(target_agent_id, namespace)
+        copied = 0
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT * FROM amfs_memory_entries
+                        WHERE namespace = %s AND branch = %s
+                          AND superseded_at IS NULL
+                        """,
+                        (namespace, branch),
+                    )
+                    rows = cur.fetchall()
+
+                    for row in rows:
+                        cur.execute(
+                            """
+                            INSERT INTO amfs_memory_entries
+                            (namespace, entity_path, key, version, value,
+                             agent_id, session_id, tool_context, pattern_refs,
+                             written_at, confidence, outcome_count,
+                             ttl_at, artifact_refs, memory_type, shared,
+                             branch, embedding)
+                            VALUES
+                            (%s, %s, %s, 1, %s,
+                             %s, %s, %s, %s,
+                             NOW(), %s, 0,
+                             %s, %s, %s, %s,
+                             'main', %s)
+                            ON CONFLICT ON CONSTRAINT uq_entry_version DO NOTHING
+                            """,
+                            (
+                                namespace,
+                                row["entity_path"],
+                                row["key"],
+                                json.dumps(row["value"]) if not isinstance(row["value"], str) else row["value"],
+                                target_agent_id,
+                                row.get("session_id", ""),
+                                row.get("tool_context", ""),
+                                row.get("pattern_refs", []),
+                                row["confidence"],
+                                row.get("ttl_at"),
+                                row.get("artifact_refs", []),
+                                row.get("memory_type", "fact"),
+                                row.get("shared", False),
+                                row.get("embedding"),
+                            ),
+                        )
+                        copied += cur.rowcount
+        return copied
 
     def close(self) -> None:
         """Stop listener and close connection pool."""

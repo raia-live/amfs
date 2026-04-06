@@ -414,7 +414,8 @@ BEGIN
             'entity_path', NEW.entity_path,
             'key', NEW.key,
             'version', NEW.version,
-            'agent_id', NEW.agent_id
+            'agent_id', NEW.agent_id,
+            'branch', NEW.branch
         )::TEXT);
     END IF;
     RETURN NEW;
@@ -438,7 +439,8 @@ CREATE TABLE IF NOT EXISTS amfs_digests (
     source_agents TEXT[] DEFAULT '{}',
     anticipation_score NUMERIC(6,4) DEFAULT 0.0,
     compiled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_digest UNIQUE (namespace, digest_type, scope)
+    branch TEXT NOT NULL DEFAULT 'main',
+    CONSTRAINT uq_digest UNIQUE (namespace, branch, digest_type, scope)
 );
 
 CREATE INDEX IF NOT EXISTS idx_digests_type ON amfs_digests(digest_type);

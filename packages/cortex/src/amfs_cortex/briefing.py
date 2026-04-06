@@ -23,6 +23,7 @@ class BriefingService:
         entity_path: str | None = None,
         agent_id: str | None = None,
         limit: int = 10,
+        branch: str = "main",
     ) -> list[Digest]:
         """Get a ranked list of relevant digests for the given context.
 
@@ -33,7 +34,7 @@ class BriefingService:
         4. Recency-weighted
         5. Entry count weighted
         """
-        all_digests = self._adapter.list_digests(namespace=self._namespace)
+        all_digests = self._adapter.list_digests(namespace=self._namespace, branch=branch)
         if not all_digests:
             return []
 

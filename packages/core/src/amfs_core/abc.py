@@ -390,6 +390,22 @@ class AdapterABC(ABC):
         """Rollback memory to a point in time. Returns count of restored entries."""
         raise NotImplementedError("Rollback requires the Postgres adapter")
 
+    # ── Fork (Pro) ────────────────────────────────────────────────────
+
+    def fork_agent(
+        self,
+        source_agent_id: str,
+        target_agent_id: str,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> int:
+        """Copy all entries from source_agent's branch into target_agent's main.
+
+        Returns the number of entries copied.
+        """
+        raise NotImplementedError("Fork requires the Postgres adapter")
+
     def semantic_search(
         self, query: SemanticQuery, embedder: EmbedderABC
     ) -> list[tuple[MemoryEntry, float]]:

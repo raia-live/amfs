@@ -1226,6 +1226,25 @@ async def rollback_to_tag(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Fork (Pro)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/v1/fork")
+async def fork_agent(
+    target_agent_id: str = Query(...),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    count = mem.fork(target_agent_id)
+    return {
+        "source_agent": mem.agent_id,
+        "target_agent": target_agent_id,
+        "entries_copied": count,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Admin — API Keys
 # ──────────────────────────────────────────────────────────────────────
 
@@ -2021,6 +2040,7 @@ async def list_connectors(
 async def get_briefing(
     entity_path: str | None = Query(None),
     agent_id: str | None = Query(None),
+    branch: str = Query("main"),
     limit: int = Query(10, ge=1, le=100),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -2030,6 +2050,7 @@ async def get_briefing(
         entity_path=entity_path,
         agent_id=agent_id,
         limit=limit,
+        branch=branch,
     )
     return {
         "digests": [d.model_dump(mode="json") for d in digests],
