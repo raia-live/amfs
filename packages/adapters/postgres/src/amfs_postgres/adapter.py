@@ -42,6 +42,10 @@ from amfs_core.models import (
     MergeStrategy,
     OutcomeRecord,
     OutcomeType,
+    PRReview,
+    PRReviewStatus,
+    PullRequest,
+    PullRequestStatus,
     Provenance,
     QueryEvent,
     SearchQuery,
@@ -1686,6 +1690,213 @@ class PostgresAdapter(AdapterABC):
             created_by=row["created_by"],
             created_at=row.get("created_at"),
         )
+
+    # ── Pull Requests (Pro) ─────────────────────────────────────────────
+
+    def create_pull_request(self, pr: PullRequest) -> PullRequest:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_pull_requests
+                        (namespace, title, description, source_branch,
+                         target_branch, status, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id, created_at, updated_at
+                    """,
+                    (pr.namespace, pr.title, pr.description, pr.source_branch,
+                     pr.target_branch, pr.status.value if isinstance(pr.status, PullRequestStatus) else pr.status,
+                     pr.created_by),
+                )
+                row = cur.fetchone()
+        return pr.model_copy(update={
+            "id": str(row["id"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        })
+
+    def get_pull_request(self, pr_id: str, namespace: str = "default") -> PullRequest | None:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM amfs_pull_requests WHERE id = %s::uuid AND namespace = %s",
+                    (pr_id, namespace),
+                )
+                row = cur.fetchone()
+        return self._row_to_pr(row) if row else None
+
+    def list_pull_requests(
+        self, namespace: str = "default", *, status: str | None = None
+    ) -> list[PullRequest]:
+        conditions = ["namespace = %s"]
+        params: list[Any] = [namespace]
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
+        where = " AND ".join(conditions)
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT * FROM amfs_pull_requests WHERE {where} ORDER BY created_at DESC",
+                    params,
+                )
+                rows = cur.fetchall()
+        return [self._row_to_pr(r) for r in rows]
+
+    def update_pull_request_status(
+        self, pr_id: str, status: str, *, by: str = "", namespace: str = "default"
+    ) -> PullRequest:
+        updates = ["status = %s", "updated_at = NOW()"]
+        params: list[Any] = [status]
+
+        if status == "merged":
+            updates.extend(["merged_at = NOW()", "merged_by = %s"])
+            params.append(by)
+        elif status == "closed":
+            updates.extend(["closed_at = NOW()", "closed_by = %s"])
+            params.append(by)
+
+        params.extend([pr_id, namespace])
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""UPDATE amfs_pull_requests SET {', '.join(updates)}
+                        WHERE id = %s::uuid AND namespace = %s RETURNING *""",
+                    params,
+                )
+                row = cur.fetchone()
+        if row is None:
+            raise AdapterError(f"PR '{pr_id}' not found")
+        return self._row_to_pr(row)
+
+    def add_pr_review(self, review: PRReview) -> PRReview:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_pr_reviews
+                        (namespace, pr_id, reviewer, status, comment, entry_path)
+                    VALUES (%s, %s::uuid, %s, %s, %s, %s)
+                    RETURNING id, created_at
+                    """,
+                    (review.namespace, review.pr_id, review.reviewer,
+                     review.status.value if isinstance(review.status, PRReviewStatus) else review.status,
+                     review.comment, review.entry_path),
+                )
+                row = cur.fetchone()
+        return review.model_copy(update={
+            "id": str(row["id"]),
+            "created_at": row["created_at"],
+        })
+
+    def list_pr_reviews(self, pr_id: str, namespace: str = "default") -> list[PRReview]:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM amfs_pr_reviews WHERE pr_id = %s::uuid AND namespace = %s ORDER BY created_at",
+                    (pr_id, namespace),
+                )
+                rows = cur.fetchall()
+        results: list[PRReview] = []
+        for r in rows:
+            try:
+                st = PRReviewStatus(r["status"])
+            except ValueError:
+                st = PRReviewStatus.COMMENTED
+            results.append(PRReview(
+                id=str(r["id"]),
+                namespace=r["namespace"],
+                pr_id=str(r["pr_id"]),
+                reviewer=r["reviewer"],
+                status=st,
+                comment=r.get("comment"),
+                entry_path=r.get("entry_path"),
+                created_at=r.get("created_at"),
+            ))
+        return results
+
+    @staticmethod
+    def _row_to_pr(row: dict[str, Any]) -> PullRequest:
+        try:
+            st = PullRequestStatus(row["status"])
+        except ValueError:
+            st = PullRequestStatus.OPEN
+        return PullRequest(
+            id=str(row["id"]),
+            namespace=row["namespace"],
+            title=row["title"],
+            description=row.get("description"),
+            source_branch=row["source_branch"],
+            target_branch=row["target_branch"],
+            status=st,
+            created_by=row["created_by"],
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
+            merged_at=row.get("merged_at"),
+            merged_by=row.get("merged_by"),
+            closed_at=row.get("closed_at"),
+            closed_by=row.get("closed_by"),
+            merge_strategy=row.get("merge_strategy"),
+        )
+
+    # ── Rollback (Pro) ────────────────────────────────────────────────
+
+    def rollback_to_timestamp(
+        self,
+        agent_id: str,
+        branch: str,
+        timestamp: datetime,
+        namespace: str = "default",
+    ) -> int:
+        """Supersede all entries written after timestamp and restore state."""
+        restored = 0
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT entity_path, key FROM amfs_memory_entries
+                        WHERE namespace = %s AND branch = %s
+                          AND written_at > %s AND superseded_at IS NULL
+                        """,
+                        (namespace, branch, timestamp),
+                    )
+                    to_revert = cur.fetchall()
+
+                    for row in to_revert:
+                        ep, key = row["entity_path"], row["key"]
+                        cur.execute(
+                            """
+                            UPDATE amfs_memory_entries
+                            SET superseded_at = NOW()
+                            WHERE namespace = %s AND branch = %s
+                              AND entity_path = %s AND key = %s
+                              AND superseded_at IS NULL
+                            """,
+                            (namespace, branch, ep, key),
+                        )
+                        cur.execute(
+                            """
+                            SELECT * FROM amfs_memory_entries
+                            WHERE namespace = %s AND branch = %s
+                              AND entity_path = %s AND key = %s
+                              AND written_at <= %s
+                            ORDER BY version DESC LIMIT 1
+                            """,
+                            (namespace, branch, ep, key, timestamp),
+                        )
+                        old = cur.fetchone()
+                        if old:
+                            cur.execute(
+                                """
+                                UPDATE amfs_memory_entries
+                                SET superseded_at = NULL
+                                WHERE id = %s
+                                """,
+                                (old["id"],),
+                            )
+                            restored += 1
+        return restored
 
     def close(self) -> None:
         """Stop listener and close connection pool."""

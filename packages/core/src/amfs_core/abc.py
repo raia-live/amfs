@@ -19,6 +19,8 @@ from amfs_core.models import (
     MergeResult,
     MergeStrategy,
     OutcomeRecord,
+    PRReview,
+    PullRequest,
     SearchQuery,
     SemanticQuery,
     Tag,
@@ -350,6 +352,43 @@ class AdapterABC(ABC):
     def delete_tag(self, name: str, namespace: str = "default") -> None:
         """Delete a tag."""
         raise NotImplementedError("Tags require the Postgres adapter")
+
+    # ── Pull Requests (Pro) ───────────────────────────────────────────
+
+    def create_pull_request(self, pr: PullRequest) -> PullRequest:
+        """Create a pull request for branch merge review."""
+        raise NotImplementedError("PRs require the Postgres adapter")
+
+    def get_pull_request(self, pr_id: str, namespace: str = "default") -> PullRequest | None:
+        return None
+
+    def list_pull_requests(
+        self, namespace: str = "default", *, status: str | None = None
+    ) -> list[PullRequest]:
+        return []
+
+    def update_pull_request_status(
+        self, pr_id: str, status: str, *, by: str = "", namespace: str = "default"
+    ) -> PullRequest:
+        raise NotImplementedError("PRs require the Postgres adapter")
+
+    def add_pr_review(self, review: PRReview) -> PRReview:
+        raise NotImplementedError("PRs require the Postgres adapter")
+
+    def list_pr_reviews(self, pr_id: str, namespace: str = "default") -> list[PRReview]:
+        return []
+
+    # ── Rollback (Pro) ────────────────────────────────────────────────
+
+    def rollback_to_timestamp(
+        self,
+        agent_id: str,
+        branch: str,
+        timestamp: datetime,
+        namespace: str = "default",
+    ) -> int:
+        """Rollback memory to a point in time. Returns count of restored entries."""
+        raise NotImplementedError("Rollback requires the Postgres adapter")
 
     def semantic_search(
         self, query: SemanticQuery, embedder: EmbedderABC

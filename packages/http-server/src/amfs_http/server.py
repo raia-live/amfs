@@ -1105,6 +1105,127 @@ async def cherry_pick(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Pull Requests (Pro)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/v1/pull-requests")
+async def create_pull_request(
+    title: str = Query(...),
+    source_branch: str = Query(...),
+    target_branch: str = Query("main"),
+    description: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    pr = mem.create_pull_request(
+        title, source_branch, target_branch=target_branch, description=description,
+    )
+    return pr.model_dump(mode="json")
+
+
+@app.get("/api/v1/pull-requests")
+async def list_pull_requests(
+    status: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    prs = mem.list_pull_requests(status=status)
+    return {"pull_requests": [p.model_dump(mode="json") for p in prs]}
+
+
+@app.get("/api/v1/pull-requests/{pr_id}")
+async def get_pull_request(
+    pr_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    pr = mem.get_pull_request(pr_id)
+    if pr is None:
+        raise HTTPException(status_code=404, detail="PR not found")
+    reviews = mem._adapter.list_pr_reviews(pr_id, mem.namespace)
+    data = pr.model_dump(mode="json")
+    data["reviews"] = [r.model_dump(mode="json") for r in reviews]
+    return data
+
+
+@app.post("/api/v1/pull-requests/{pr_id}/reviews")
+async def add_pr_review(
+    pr_id: str,
+    status: str = Query(...),
+    comment: str | None = Query(None),
+    entry_path: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    review = mem.review_pull_request(pr_id, status, comment=comment, entry_path=entry_path)
+    return review.model_dump(mode="json")
+
+
+@app.post("/api/v1/pull-requests/{pr_id}/merge")
+async def merge_pull_request(
+    pr_id: str,
+    strategy: str = Query("fast_forward"),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    from amfs_core.models import MergeStrategy
+    mem = _get_memory()
+    try:
+        ms = MergeStrategy(strategy)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid strategy: {strategy}")
+    result = mem.merge_pull_request(pr_id, strategy=ms)
+    return result.model_dump(mode="json")
+
+
+@app.post("/api/v1/pull-requests/{pr_id}/close")
+async def close_pull_request(
+    pr_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    pr = mem.close_pull_request(pr_id)
+    return {"closed": True, "pr_id": pr.id, "status": pr.status.value}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Rollback (Pro)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/v1/rollback")
+async def rollback(
+    req: RollbackRequest,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    timestamp = None
+    if req.target_timestamp:
+        timestamp = datetime.fromisoformat(req.target_timestamp)
+    elif req.target_event_id:
+        events = mem._adapter.list_events(mem.agent_id, mem.namespace, limit=10000)
+        for e in events:
+            if e.id == req.target_event_id:
+                timestamp = e.created_at
+                break
+        if timestamp is None:
+            raise HTTPException(status_code=404, detail="Event not found")
+
+    count = mem.rollback(timestamp=timestamp)
+    return {"entries_restored": count, "rolled_back_to": timestamp.isoformat() if timestamp else None}
+
+
+@app.post("/api/v1/rollback/tag/{tag_name}")
+async def rollback_to_tag(
+    tag_name: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    count = mem.rollback(tag_name=tag_name)
+    return {"entries_restored": count, "tag": tag_name}
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Admin — API Keys
 # ──────────────────────────────────────────────────────────────────────
 

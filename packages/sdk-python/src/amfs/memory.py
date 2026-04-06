@@ -33,6 +33,9 @@ from amfs_core.models import (
     MergeResult,
     MergeStrategy,
     OutcomeType,
+    PRReview,
+    PRReviewStatus,
+    PullRequest,
     QueryEvent,
     RecallConfig,
     ScopeInfo,
@@ -932,6 +935,109 @@ class AgentMemory:
 
     def delete_tag(self, name: str) -> None:
         self._adapter.delete_tag(name, self.namespace)
+
+    # ------------------------------------------------------------------
+    # Pull Requests (Pro)
+    # ------------------------------------------------------------------
+
+    def create_pull_request(
+        self,
+        title: str,
+        source_branch: str,
+        *,
+        target_branch: str = "main",
+        description: str | None = None,
+    ) -> PullRequest:
+        pr = PullRequest(
+            namespace=self.namespace,
+            title=title,
+            description=description,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            created_by=self.agent_id,
+        )
+        return self._adapter.create_pull_request(pr)
+
+    def list_pull_requests(self, *, status: str | None = None) -> list[PullRequest]:
+        return self._adapter.list_pull_requests(self.namespace, status=status)
+
+    def get_pull_request(self, pr_id: str) -> PullRequest | None:
+        return self._adapter.get_pull_request(pr_id, self.namespace)
+
+    def review_pull_request(
+        self,
+        pr_id: str,
+        status: str,
+        *,
+        comment: str | None = None,
+        entry_path: str | None = None,
+    ) -> PRReview:
+        review = PRReview(
+            namespace=self.namespace,
+            pr_id=pr_id,
+            reviewer=self.agent_id,
+            status=PRReviewStatus(status),
+            comment=comment,
+            entry_path=entry_path,
+        )
+        return self._adapter.add_pr_review(review)
+
+    def merge_pull_request(
+        self,
+        pr_id: str,
+        *,
+        strategy: MergeStrategy = MergeStrategy.FAST_FORWARD,
+    ) -> MergeResult:
+        pr = self._adapter.get_pull_request(pr_id, self.namespace)
+        if pr is None:
+            raise ValueError(f"PR '{pr_id}' not found")
+        result = self.merge_branch(pr.source_branch, strategy=strategy)
+        if result.status == "merged":
+            self._adapter.update_pull_request_status(
+                pr_id, "merged", by=self.agent_id, namespace=self.namespace,
+            )
+        return result
+
+    def close_pull_request(self, pr_id: str) -> PullRequest:
+        return self._adapter.update_pull_request_status(
+            pr_id, "closed", by=self.agent_id, namespace=self.namespace,
+        )
+
+    # ------------------------------------------------------------------
+    # Rollback (Pro)
+    # ------------------------------------------------------------------
+
+    def rollback(
+        self,
+        *,
+        timestamp: datetime | None = None,
+        tag_name: str | None = None,
+    ) -> int:
+        """Rollback memory to a point in time or a named tag."""
+        if tag_name:
+            tag = self._adapter.get_tag(tag_name, self.namespace)
+            if tag is None:
+                raise ValueError(f"Tag '{tag_name}' not found")
+            timestamp = tag.tagged_at
+        if timestamp is None:
+            raise ValueError("Must provide either timestamp or tag_name")
+
+        count = self._adapter.rollback_to_timestamp(
+            self.agent_id, self._branch, timestamp, self.namespace,
+        )
+        self._adapter.log_event(Event(
+            namespace=self.namespace,
+            agent_id=self.agent_id,
+            branch=self._branch,
+            event_type=EventType.ROLLBACK,
+            summary=f"Rolled back to {timestamp.isoformat()} ({count} entries restored)",
+            details={
+                "timestamp": timestamp.isoformat(),
+                "tag_name": tag_name,
+                "entries_restored": count,
+            },
+        ))
+        return count
 
     # ------------------------------------------------------------------
     # Timeline (Pro)

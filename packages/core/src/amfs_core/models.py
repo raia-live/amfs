@@ -498,6 +498,56 @@ class Tag(BaseModel):
     created_at: datetime | None = None
 
 
+class PullRequestStatus(str, Enum):
+    """Lifecycle state of a pull request."""
+
+    OPEN = "open"
+    APPROVED = "approved"
+    MERGED = "merged"
+    CLOSED = "closed"
+
+
+class PullRequest(BaseModel):
+    """A pull request for merging a branch."""
+
+    id: str = ""
+    namespace: str = "default"
+    title: str
+    description: str | None = None
+    source_branch: str
+    target_branch: str = "main"
+    status: PullRequestStatus = PullRequestStatus.OPEN
+    created_by: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    merged_at: datetime | None = None
+    merged_by: str | None = None
+    closed_at: datetime | None = None
+    closed_by: str | None = None
+    merge_strategy: str | None = None
+
+
+class PRReviewStatus(str, Enum):
+    """Status of a PR review."""
+
+    APPROVED = "approved"
+    CHANGES_REQUESTED = "changes_requested"
+    COMMENTED = "commented"
+
+
+class PRReview(BaseModel):
+    """A review on a pull request."""
+
+    id: str = ""
+    namespace: str = "default"
+    pr_id: str
+    reviewer: str
+    status: PRReviewStatus
+    comment: str | None = None
+    entry_path: str | None = None
+    created_at: datetime | None = None
+
+
 # ── Config models ──────────────────────────────────────────────────────
 
 
