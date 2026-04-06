@@ -351,11 +351,17 @@ class Digest(BaseModel):
     branch: str = "main"
 
 
-# ── Git-like memory models (Pro) ──────────────────────────────────────
+# ── Git-like timeline (OSS) ────────────────────────────────────────────
 
 
 class EventType(str, Enum):
-    """Types of events on the agent timeline (git commit log)."""
+    """Types of events on the agent timeline (git commit log).
+
+    Core event types (OSS): WRITE, OUTCOME, WEBHOOK, BRIEF_COMPILED,
+    CROSS_AGENT_READ. Branching event types (Pro): BRANCH_CREATED,
+    BRANCH_MERGED, BRANCH_CLOSED, ACCESS_GRANTED, ACCESS_REVOKED,
+    ROLLBACK, TAG_CREATED, CHERRY_PICK, FORK.
+    """
 
     WRITE = "write"
     OUTCOME = "outcome"
@@ -397,6 +403,9 @@ class Event(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
     actor_agent_id: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ── Branching models (Pro — used by amfs_branching) ──────────────────
 
 
 class BranchStatus(str, Enum):

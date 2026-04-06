@@ -236,7 +236,7 @@ class AdapterABC(ABC):
             newest_entry_at=newest,
         )
 
-    # ── Agent registration (Pro) ────────────────────────────────────────
+    # ── Agent registration ─────────────────────────────────────────────
 
     def ensure_agent(self, agent_id: str, namespace: str = "default") -> Agent:
         """Auto-register an agent on first write. Returns the Agent record.
@@ -254,7 +254,7 @@ class AdapterABC(ABC):
         """Return all registered agents in a namespace."""
         return []
 
-    # ── Event log / timeline (Pro) ────────────────────────────────────
+    # ── Event log / timeline ───────────────────────────────────────────
 
     def log_event(self, event: Event) -> Event:
         """Persist a timeline event. Default is a no-op."""

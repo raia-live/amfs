@@ -18,6 +18,8 @@ from amfs_core.models import (
     ConflictPolicy,
     DecisionTrace,
     ErrorEvent,
+    Event,
+    EventType,
     ExternalContext,
     MemoryEntry,
     MemoryStateDiff,
@@ -96,6 +98,8 @@ class AgentMemory:
         if ttl_sweep_interval is not None:
             self._lifecycle = LifecycleManager(self._adapter, interval=ttl_sweep_interval)
             self._lifecycle.start()
+
+        self._adapter.ensure_agent(self.agent_id, self._config.namespace)
 
     # ------------------------------------------------------------------
     # Properties
@@ -234,6 +238,25 @@ class AgentMemory:
             embedding = self._embedder.embed_value(value)
             entry = entry.model_copy(update={"embedding": embedding, "version": 1})
             entry = self._adapter.write(entry)
+
+        try:
+            self._adapter.log_event(Event(
+                namespace=self.namespace,
+                agent_id=self.agent_id,
+                branch=self._branch,
+                event_type=EventType.WRITE,
+                summary=f"Wrote {entity_path}/{key} v{entry.version}",
+                details={
+                    "entity_path": entity_path,
+                    "key": key,
+                    "version": entry.version,
+                    "confidence": entry.confidence,
+                    "memory_type": entry.memory_type.value if hasattr(entry.memory_type, "value") else str(entry.memory_type),
+                    "shared": entry.shared,
+                },
+            ))
+        except Exception:
+            logger.debug("Failed to log write event", exc_info=True)
 
         return entry
 
@@ -509,6 +532,23 @@ class AgentMemory:
         except Exception:
             logger.debug("Failed to persist decision trace", exc_info=True)
 
+        try:
+            self._adapter.log_event(Event(
+                namespace=self.namespace,
+                agent_id=self.agent_id,
+                branch=self._branch,
+                event_type=EventType.OUTCOME,
+                summary=f"Committed outcome '{outcome_ref}' ({outcome_type.value})",
+                details={
+                    "outcome_ref": outcome_ref,
+                    "outcome_type": outcome_type.value,
+                    "causal_entries": len(causal_entry_keys),
+                    "entries_updated": len(updated),
+                },
+            ))
+        except Exception:
+            logger.debug("Failed to log outcome event", exc_info=True)
+
         return updated
 
     # ------------------------------------------------------------------
@@ -639,6 +679,24 @@ class AgentMemory:
             return None
         entry = matching[0]
         self._read_tracker.record(entry)
+
+        try:
+            self._adapter.log_event(Event(
+                namespace=self.namespace,
+                agent_id=self.agent_id,
+                branch=self._branch,
+                event_type=EventType.CROSS_AGENT_READ,
+                summary=f"Read {entity_path}/{key} from agent '{agent_id}'",
+                details={
+                    "source_agent_id": agent_id,
+                    "entity_path": entity_path,
+                    "key": key,
+                    "version": entry.version,
+                },
+            ))
+        except Exception:
+            logger.debug("Failed to log cross-agent read event", exc_info=True)
+
         return entry
 
     # ------------------------------------------------------------------
@@ -701,6 +759,31 @@ class AgentMemory:
         just the agent IDs.
         """
         return list(self.cross_agent_reads().keys())
+
+    # ------------------------------------------------------------------
+    # Timeline (git log)
+    # ------------------------------------------------------------------
+
+    def timeline(
+        self,
+        *,
+        event_type: str | None = None,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[Event]:
+        """Return this agent's event timeline (git commit log).
+
+        Every write, outcome, and cross-agent read is automatically
+        recorded as an event. Use this to see the history of what
+        happened to this agent's memory.
+        """
+        return self._adapter.list_events(
+            self.agent_id,
+            self.namespace,
+            event_type=event_type,
+            since=since,
+            limit=limit,
+        )
 
     # ------------------------------------------------------------------
     # Briefing (Memory Cortex)

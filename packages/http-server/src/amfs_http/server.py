@@ -869,6 +869,30 @@ async def agent_activity(
     return {"agentId": agent_id, "timeline": timeline}
 
 
+@app.get("/api/v1/agents/{agent_id}/timeline")
+async def agent_timeline(
+    agent_id: str,
+    event_type: str | None = Query(None),
+    since: str | None = Query(None),
+    limit: int = Query(100),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Git-like event log for an agent — every write, outcome, and
+    cross-agent read is recorded as an event on the agent's timeline."""
+    mem = _get_memory()
+    since_dt = datetime.fromisoformat(since) if since else None
+    events = mem._adapter.list_events(
+        agent_id, mem.namespace,
+        event_type=event_type,
+        since=since_dt, limit=limit,
+    )
+    return {
+        "agentId": agent_id,
+        "events": [e.model_dump(mode="json") for e in events],
+        "count": len(events),
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Pro Branching Plugin (amfs_branching — proprietary)
 # ──────────────────────────────────────────────────────────────────────
