@@ -720,6 +720,11 @@ def seed_events(cur):
         (NS, "deploy-agent", "experiment/retry-v3", "outcome", "Committed outcome EXP-001 (minor_failure) on experiment/retry-v3",
          json.dumps({"outcome_ref": "EXP-001", "outcome_type": "minor_failure", "causal_confidence": 0.70, "affected_entries": 2}),
          None, ts_iso(14)),
+
+        # Branch merged back into main
+        (NS, "deploy-agent", "main", "branch_merged", "Merged branch 'experiment/retry-v3' (2 entries)",
+         json.dumps({"branch_name": "experiment/retry-v3", "strategy": "fast_forward", "merged_entries": 2}),
+         None, ts_iso(10)),
     ]
 
     for e in events:
@@ -791,6 +796,28 @@ def clear_branching_tables(cur):
     print("    Cleared branching tables")
 
 
+def seed_branches(cur):
+    """Seed amfs_branches with demo branch data."""
+    print("  Seeding branches...")
+
+    branches = [
+        (NS, "experiment/retry-v3", "main", "merged",
+         "Testing aggressive retry strategy",
+         "amfs-server", ts_iso(20), ts_iso(10)),
+    ]
+
+    for b in branches:
+        cur.execute("""
+            INSERT INTO amfs_branches
+                (namespace, name, parent_branch, status, description, created_by, branched_at, merged_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (namespace, name) DO UPDATE
+                SET status = EXCLUDED.status, merged_at = EXCLUDED.merged_at
+        """, b)
+
+    print(f"    Inserted {len(branches)} branches")
+
+
 def main():
     print(f"Connecting to: {DSN}")
     with psycopg.connect(DSN) as conn:
@@ -806,6 +833,7 @@ def main():
             seed_events(cur)
             seed_audit_log(cur)
             clear_branching_tables(cur)
+            seed_branches(cur)
 
         conn.commit()
 
@@ -818,8 +846,9 @@ def main():
     print("  -  3 teams with 12 members (admins, developers, viewers, agents)")
     print("  -  5 API keys (active, inactive, various scopes)")
     print("  -  6 agents registered with timeline data")
-    print("  - 33 timeline events (writes, outcomes, cross-agent reads)")
+    print("  - 34 timeline events (writes, outcomes, cross-agent reads, branch merge)")
     print("  - 15 audit log entries")
+    print("  -  1 branch (experiment/retry-v3, merged)")
 
 
 if __name__ == "__main__":
