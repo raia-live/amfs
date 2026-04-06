@@ -46,6 +46,8 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.uv.sources]
 amfs-core = { workspace = true }
 amfs-adapter-filesystem = { workspace = true }
+amfs-adapter-postgres = { workspace = true }
+amfs-adapter-s3 = { workspace = true }
 amfs = { workspace = true }
 amfs-cli = { workspace = true }
 amfs-mcp-server = { workspace = true }

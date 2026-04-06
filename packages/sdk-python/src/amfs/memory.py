@@ -136,6 +136,7 @@ class AgentMemory:
         key: str,
         *,
         min_confidence: float = 0.0,
+        branch: str | None = None,
     ) -> MemoryEntry | None:
         """Read the current version of a key.
 
@@ -146,10 +147,11 @@ class AgentMemory:
         """
         import time
 
+        effective_branch = branch or self._branch
         start = time.monotonic()
         try:
             if self._decay_half_life_days is not None:
-                entry = self._engine.read(entity_path, key, min_confidence=0.0, branch=self._branch)
+                entry = self._engine.read(entity_path, key, min_confidence=0.0, branch=effective_branch)
                 if entry is None:
                     return None
                 if not entry.shared and entry.provenance.agent_id != self.agent_id:
@@ -160,7 +162,7 @@ class AgentMemory:
                 if effective < min_confidence:
                     return None
                 return entry
-            entry = self._engine.read(entity_path, key, min_confidence=min_confidence, branch=self._branch)
+            entry = self._engine.read(entity_path, key, min_confidence=min_confidence, branch=effective_branch)
             if entry is not None and not entry.shared and entry.provenance.agent_id != self.agent_id:
                 return None
             return entry
@@ -182,6 +184,7 @@ class AgentMemory:
         memory_type: MemoryType = MemoryType.FACT,
         artifact_refs: list | None = None,
         shared: bool = True,
+        branch: str | None = None,
     ) -> MemoryEntry:
         """Write a new version of a key with automatic provenance.
 
@@ -191,6 +194,7 @@ class AgentMemory:
         it is called with ``(our_last_read, current_entry, new_value)``
         and should return the merged value to write.
         """
+        effective_branch = branch or self._branch
         entry_key = f"{entity_path}/{key}"
         read_version = self._read_tracker.read_version(entry_key)
 
@@ -230,7 +234,7 @@ class AgentMemory:
             memory_type=memory_type,
             artifact_refs=artifact_refs,
             shared=shared,
-            branch=self._branch,
+            branch=effective_branch,
         )
         self._read_tracker.record_write(entity_path, key, entry.version, entry.version == 1)
 
@@ -243,7 +247,7 @@ class AgentMemory:
             self._adapter.log_event(Event(
                 namespace=self.namespace,
                 agent_id=self.agent_id,
-                branch=self._branch,
+                branch=effective_branch,
                 event_type=EventType.WRITE,
                 summary=f"Wrote {entity_path}/{key} v{entry.version}",
                 details={
@@ -265,14 +269,16 @@ class AgentMemory:
         entity_path: str | None = None,
         *,
         include_superseded: bool = False,
+        branch: str | None = None,
     ) -> list[MemoryEntry]:
         """List current entries, optionally filtered to an entity path.
 
         Private entries from other agents are excluded.
         """
         import time
+        effective_branch = branch or self._branch
         start = time.monotonic()
-        results = self._engine.list(entity_path, include_superseded=include_superseded, branch=self._branch)
+        results = self._engine.list(entity_path, include_superseded=include_superseded, branch=effective_branch)
         results = [
             e for e in results
             if e.shared or e.provenance.agent_id == self.agent_id
