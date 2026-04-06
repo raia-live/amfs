@@ -54,12 +54,14 @@ def _get_memory() -> AgentMemory:
     ttl_interval_str = os.environ.get("AMFS_TTL_SWEEP_INTERVAL")
     ttl_sweep_interval = float(ttl_interval_str) if ttl_interval_str else 300.0
 
-    logger.info("AMFS MCP server starting — agent_id=%s", agent_id)
+    branch = os.environ.get("AMFS_BRANCH", "main")
+    logger.info("AMFS MCP server starting — agent_id=%s branch=%s", agent_id, branch)
     _memory = AgentMemory(
         agent_id=agent_id,
         config_path=None,
         adapter=None,
         ttl_sweep_interval=ttl_sweep_interval,
+        branch=branch,
     )
 
     _memory._config = config
@@ -548,6 +550,216 @@ def amfs_briefing(
         [d.model_dump(mode="json") for d in digests],
         default=str,
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Branch management (Pro)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@mcp.tool
+def amfs_create_branch(
+    name: str,
+    description: str = "",
+    parent_branch: str = "main",
+) -> str:
+    """Create a new memory branch from the current or specified parent.
+
+    Branches are overlays -- no data is copied. Reads fall through to
+    the parent for entries not yet modified on the branch. Use branches
+    to experiment without affecting main memory.
+
+    Args:
+        name: Branch name (e.g. "experiment/retry-tuning")
+        description: Optional description of the branch's purpose
+        parent_branch: Branch to fork from (default "main")
+
+    Example: amfs_create_branch("experiment/retry-tuning", "Testing new retry params")
+    """
+    mem = _get_memory()
+    branch = mem.create_branch(name, description=description or None, parent_branch=parent_branch)
+    return json.dumps(branch.model_dump(mode="json"), default=str)
+
+
+@mcp.tool
+def amfs_list_branches(status: str | None = None) -> str:
+    """List all memory branches.
+
+    Args:
+        status: Optional filter -- "active", "merged", or "closed"
+
+    Example: amfs_list_branches("active")
+    """
+    mem = _get_memory()
+    branches = mem.list_branches(status=status)
+    return json.dumps({"branches": [b.model_dump(mode="json") for b in branches]}, default=str)
+
+
+@mcp.tool
+def amfs_switch_branch(name: str) -> str:
+    """Switch to a different branch for all subsequent reads and writes.
+
+    All memory operations after this call will target the specified branch.
+    Switch to "main" to go back to the primary memory.
+
+    Args:
+        name: Branch to switch to (e.g. "experiment/retry-tuning" or "main")
+
+    Example: amfs_switch_branch("experiment/retry-tuning")
+    """
+    mem = _get_memory()
+    mem.switch_branch(name)
+    return json.dumps({"switched_to": name, "agent_id": mem.agent_id})
+
+
+@mcp.tool
+def amfs_diff_branch(name: str | None = None) -> str:
+    """Show what's different on a branch compared to its parent.
+
+    Returns added, modified, and deleted entries. Use this to review
+    changes before merging.
+
+    Args:
+        name: Branch to diff (defaults to current branch)
+
+    Example: amfs_diff_branch("experiment/retry-tuning")
+    """
+    mem = _get_memory()
+    diffs = mem.diff_branch(name)
+    return json.dumps({
+        "entries": [d.model_dump(mode="json") for d in diffs],
+        "added": sum(1 for d in diffs if d.diff_type == "added"),
+        "modified": sum(1 for d in diffs if d.diff_type == "modified"),
+        "deleted": sum(1 for d in diffs if d.diff_type == "deleted"),
+    }, default=str)
+
+
+@mcp.tool
+def amfs_merge_branch(name: str | None = None, strategy: str = "fast_forward") -> str:
+    """Merge a branch into its parent (usually main).
+
+    Strategies: fast_forward (default), branch_wins, main_wins.
+    If there are conflicts and strategy is fast_forward, returns the
+    conflict list for manual resolution.
+
+    Args:
+        name: Branch to merge (defaults to current branch)
+        strategy: Merge strategy -- "fast_forward", "branch_wins", or "main_wins"
+
+    Example: amfs_merge_branch("experiment/retry-tuning", "branch_wins")
+    """
+    from amfs_core.models import MergeStrategy
+    mem = _get_memory()
+    try:
+        ms = MergeStrategy(strategy)
+    except ValueError:
+        return json.dumps({"error": f"Invalid strategy: {strategy}. Use fast_forward, branch_wins, or main_wins."})
+    result = mem.merge_branch(name, strategy=ms)
+    return json.dumps(result.model_dump(mode="json"), default=str)
+
+
+@mcp.tool
+def amfs_close_branch(name: str) -> str:
+    """Close a branch without merging. The branch data is preserved but
+    no longer active.
+
+    Args:
+        name: Branch to close
+
+    Example: amfs_close_branch("experiment/failed-approach")
+    """
+    mem = _get_memory()
+    branch = mem.close_branch(name)
+    return json.dumps({"closed": branch.name, "status": branch.status.value})
+
+
+@mcp.tool
+def amfs_timeline(
+    limit: int = 50,
+    event_type: str | None = None,
+    since: str | None = None,
+) -> str:
+    """View recent events on the agent's timeline (git commit log).
+
+    Shows writes, outcomes, webhook ingestions, cross-agent reads,
+    branch operations, and rollbacks -- all in chronological order.
+
+    Args:
+        limit: Max events to return (default 50)
+        event_type: Filter by type (write, outcome, webhook, etc.)
+        since: ISO timestamp to get events after
+
+    Example: amfs_timeline(limit=20, event_type="write")
+    """
+    from datetime import datetime as dt
+    mem = _get_memory()
+    since_dt = dt.fromisoformat(since) if since else None
+    events = mem.timeline(event_type=event_type, since=since_dt, limit=limit)
+    return json.dumps({
+        "events": [e.model_dump(mode="json") for e in events],
+        "count": len(events),
+    }, default=str)
+
+
+@mcp.tool
+def amfs_create_tag(name: str, description: str = "", branch: str | None = None) -> str:
+    """Tag the current memory state (like a git tag).
+
+    Creates a named point-in-time marker that can be used for rollback
+    or point-in-time reads later.
+
+    Args:
+        name: Tag name (e.g. "v2.0-launch", "pre-migration")
+        description: Optional description
+        branch: Branch to tag (defaults to current branch)
+
+    Example: amfs_create_tag("pre-migration", "Before schema change")
+    """
+    mem = _get_memory()
+    tag = mem.create_tag(name, description=description or None, branch=branch)
+    return json.dumps(tag.model_dump(mode="json"), default=str)
+
+
+@mcp.tool
+def amfs_list_tags(branch: str | None = None) -> str:
+    """List all tags, optionally filtered by branch.
+
+    Args:
+        branch: Filter to tags on this branch
+
+    Example: amfs_list_tags("main")
+    """
+    mem = _get_memory()
+    tags = mem.list_tags(branch=branch)
+    return json.dumps({"tags": [t.model_dump(mode="json") for t in tags]}, default=str)
+
+
+@mcp.tool
+def amfs_cherry_pick(branch_name: str, entries: list[dict[str, str]]) -> str:
+    """Cherry-pick specific entries from a branch into main.
+
+    Selectively promotes entries without merging the entire branch.
+
+    Args:
+        branch_name: Source branch
+        entries: List of {"entity_path": "...", "key": "..."} to pick
+
+    Example: amfs_cherry_pick("experiment", [{"entity_path": "app", "key": "config"}])
+    """
+    mem = _get_memory()
+    picked = 0
+    for entry_spec in entries:
+        ep = entry_spec.get("entity_path", "")
+        key = entry_spec.get("key", "")
+        if not ep or not key:
+            continue
+        source = mem._adapter.read(ep, key, branch=branch_name)
+        if source is None:
+            continue
+        source_copy = source.model_copy(update={"branch": "main", "version": 1})
+        mem._adapter.write(source_copy)
+        picked += 1
+    return json.dumps({"picked": picked, "source_branch": branch_name})
 
 
 # ──────────────────────────────────────────────────────────────────────

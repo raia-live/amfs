@@ -31,16 +31,23 @@ from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
 from amfs_core.models import AMFSConfig, LayerConfig, MemoryEntry
 
-from amfs_http.auth import verify_api_key
+from amfs_http.auth import BranchContext, resolve_branch_context, verify_api_key
 from amfs_http.models import (
     AddTeamMemberRequest,
+    CherryPickRequest,
     ContextRequest,
     CreateAPIKeyRequest,
+    CreateBranchRequest,
+    CreateTagRequest,
     CreateTeamRequest,
     EventRequest,
+    GrantBranchAccessRequest,
+    MergeBranchRequest,
     OutcomeRequest,
+    RollbackRequest,
     RunPatternDetectionRequest,
     SearchRequest,
+    UpdateAPIKeyBranchRequest,
     UpdateTeamMemberRequest,
     UpdateTeamRequest,
     WriteRequest,
@@ -867,6 +874,234 @@ async def agent_activity(
 
     timeline = sorted(writes + outcomes, key=lambda x: x["timestamp"], reverse=True)[:limit]
     return {"agentId": agent_id, "timeline": timeline}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Timeline (Pro)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/agents/{agent_id}/timeline")
+async def agent_timeline(
+    agent_id: str,
+    branch: str | None = Query(None),
+    event_type: str | None = Query(None),
+    since: str | None = Query(None),
+    limit: int = Query(100),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Git-like timeline of all events for an agent."""
+    mem = _get_memory()
+    since_dt = datetime.fromisoformat(since) if since else None
+    events = mem._adapter.list_events(
+        agent_id, mem.namespace,
+        branch=branch, event_type=event_type,
+        since=since_dt, limit=limit,
+    )
+    return {
+        "agentId": agent_id,
+        "events": [e.model_dump(mode="json") for e in events],
+        "count": len(events),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Branches (Pro)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/v1/branches")
+async def create_branch(
+    req: CreateBranchRequest,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    branch = mem.create_branch(
+        req.name,
+        description=req.description,
+        parent_branch=req.parent_branch,
+    )
+    return branch.model_dump(mode="json")
+
+
+@app.get("/api/v1/branches")
+async def list_branches(
+    status: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    branches = mem.list_branches(status=status)
+    return {"branches": [b.model_dump(mode="json") for b in branches]}
+
+
+@app.get("/api/v1/branches/{name}")
+async def get_branch(
+    name: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    branch = mem.get_branch(name)
+    if branch is None:
+        raise HTTPException(status_code=404, detail=f"Branch '{name}' not found")
+    return branch.model_dump(mode="json")
+
+
+@app.delete("/api/v1/branches/{name}")
+async def close_branch(
+    name: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    branch = mem.close_branch(name)
+    return {"closed": branch.name, "status": branch.status.value}
+
+
+@app.get("/api/v1/branches/{name}/diff")
+async def diff_branch(
+    name: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    diffs = mem.diff_branch(name)
+    return {
+        "branch": name,
+        "entries": [d.model_dump(mode="json") for d in diffs],
+        "added": sum(1 for d in diffs if d.diff_type == "added"),
+        "modified": sum(1 for d in diffs if d.diff_type == "modified"),
+        "deleted": sum(1 for d in diffs if d.diff_type == "deleted"),
+    }
+
+
+@app.post("/api/v1/branches/{name}/merge")
+async def merge_branch(
+    name: str,
+    req: MergeBranchRequest,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    from amfs_core.models import MergeStrategy
+    mem = _get_memory()
+    try:
+        strategy = MergeStrategy(req.strategy)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid strategy: {req.strategy}")
+    result = mem.merge_branch(
+        name,
+        strategy=strategy,
+        resolve_conflicts=req.resolve_conflicts,
+    )
+    return result.model_dump(mode="json")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Branch Access Control (Pro)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/v1/branches/{name}/access")
+async def grant_access(
+    name: str,
+    req: GrantBranchAccessRequest,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    access = mem.grant_branch_access(
+        name, req.grantee_type, req.grantee_id, req.permission,
+    )
+    return access.model_dump(mode="json")
+
+
+@app.get("/api/v1/branches/{name}/access")
+async def list_access(
+    name: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    grants = mem.list_branch_access(name)
+    return {"grants": [g.model_dump(mode="json") for g in grants]}
+
+
+@app.delete("/api/v1/branches/{name}/access/{grantee_type}/{grantee_id}")
+async def revoke_access(
+    name: str,
+    grantee_type: str,
+    grantee_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    mem.revoke_branch_access(name, grantee_type, grantee_id)
+    return {"revoked": True, "branch": name, "grantee": f"{grantee_type}:{grantee_id}"}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Tags (Pro)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/v1/tags")
+async def create_tag(
+    req: CreateTagRequest,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    tag = mem.create_tag(req.name, description=req.description, branch=req.branch)
+    return tag.model_dump(mode="json")
+
+
+@app.get("/api/v1/tags")
+async def list_tags(
+    branch: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    tags = mem.list_tags(branch=branch)
+    return {"tags": [t.model_dump(mode="json") for t in tags]}
+
+
+@app.delete("/api/v1/tags/{name}")
+async def delete_tag(
+    name: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    mem.delete_tag(name)
+    return {"deleted": name}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Cherry-pick (Pro)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/v1/branches/{name}/cherry-pick")
+async def cherry_pick(
+    name: str,
+    req: CherryPickRequest,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    picked = 0
+    for entry_spec in req.entries:
+        ep = entry_spec.get("entity_path", "")
+        key = entry_spec.get("key", "")
+        if not ep or not key:
+            continue
+        source = mem._adapter.read(ep, key, branch=name)
+        if source is None:
+            continue
+        source_copy = source.model_copy(update={"branch": "main", "version": 1})
+        mem._adapter.write(source_copy)
+        picked += 1
+
+    from amfs_core.models import Event, EventType
+    mem._adapter.log_event(Event(
+        namespace=mem.namespace,
+        agent_id=mem.agent_id,
+        branch="main",
+        event_type=EventType.CHERRY_PICK,
+        summary=f"Cherry-picked {picked} entries from '{name}'",
+        details={"source_branch": name, "entries": req.entries, "picked": picked},
+    ))
+    return {"picked": picked, "source_branch": name}
 
 
 # ──────────────────────────────────────────────────────────────────────

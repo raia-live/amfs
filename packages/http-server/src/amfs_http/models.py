@@ -103,3 +103,44 @@ class EventRequest(BaseModel):
     key: str
     value: Any = None
     event_type: str = "generic"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Branching (Pro)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class CreateBranchRequest(BaseModel):
+    name: str
+    parent_branch: str = "main"
+    description: str | None = None
+
+
+class MergeBranchRequest(BaseModel):
+    strategy: str = "fast_forward"
+    resolve_conflicts: dict[str, str] | None = None
+
+
+class GrantBranchAccessRequest(BaseModel):
+    grantee_type: str  # "api_key" or "team"
+    grantee_id: str
+    permission: str = "read"
+
+
+class UpdateAPIKeyBranchRequest(BaseModel):
+    default_branch: str | None = None
+
+
+class CreateTagRequest(BaseModel):
+    name: str
+    branch: str = "main"
+    description: str | None = None
+
+
+class CherryPickRequest(BaseModel):
+    entries: list[dict[str, str]]  # [{"entity_path": "...", "key": "..."}]
+
+
+class RollbackRequest(BaseModel):
+    target_event_id: str | None = None
+    target_timestamp: str | None = None
