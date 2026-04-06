@@ -168,16 +168,17 @@ class CortexWorker:
         if channel == "amfs_write":
             entity_path = payload.get("entity_path", "")
             agent_id = payload.get("agent_id", "")
+            branch = payload.get("branch", "main")
             if entity_path:
                 with self._lock:
-                    self._pending[f"entity:{entity_path}"] = time.monotonic()
+                    self._pending[f"entity:{entity_path}@{branch}"] = time.monotonic()
             if agent_id:
                 with self._lock:
                     if agent_id.startswith(("webhook/", "external/")):
                         source = agent_id.split("/", 1)[1]
-                        self._pending[f"source:{source}"] = time.monotonic()
+                        self._pending[f"source:{source}@{branch}"] = time.monotonic()
                     else:
-                        self._pending[f"agent:{agent_id}"] = time.monotonic()
+                        self._pending[f"agent:{agent_id}@{branch}"] = time.monotonic()
 
                 if self._hot_tracker:
                     self._hot_tracker.record_activity(agent_id, entity_path, "write")
@@ -187,6 +188,7 @@ class CortexWorker:
                 "channel": channel,
                 "entity_path": entity_path,
                 "agent_id": agent_id,
+                "branch": branch,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
 
@@ -222,26 +224,32 @@ class CortexWorker:
             for scope in ready:
                 del self._pending[scope]
 
-        for scope in ready:
+        for scope_with_branch in ready:
+            if "@" in scope_with_branch:
+                scope, branch = scope_with_branch.rsplit("@", 1)
+            else:
+                scope, branch = scope_with_branch, "main"
             try:
                 t0 = time.monotonic()
-                result = self._compiler.compile(scope)
+                result = self._compiler.compile(scope, branch=branch)
                 elapsed_ms = round((time.monotonic() - t0) * 1000)
                 if result:
                     self._digests_compiled += 1
                     self._activity_log.append({
                         "type": "digest_compiled",
                         "scope": scope,
+                        "branch": branch,
                         "digest_type": result.digest_type.value,
                         "entry_count": result.entry_count,
                         "elapsed_ms": elapsed_ms,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     })
             except Exception:
-                logger.exception("Failed to compile digest for %s", scope)
+                logger.exception("Failed to compile digest for %s (branch=%s)", scope, branch)
                 self._activity_log.append({
                     "type": "compilation_error",
                     "scope": scope,
+                    "branch": branch,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
 

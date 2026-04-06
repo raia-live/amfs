@@ -39,7 +39,7 @@ class RuleBasedStrategy:
     """Compiles digests from structured aggregation of memory entries."""
 
     def compile_entity(
-        self, entity_path: str, adapter: PostgresAdapter, namespace: str
+        self, entity_path: str, adapter: PostgresAdapter, namespace: str, branch: str = "main",
     ) -> Digest | None:
         from amfs_core.models import SearchQuery
 
@@ -47,7 +47,7 @@ class RuleBasedStrategy:
             entity_path=entity_path,
             limit=1000,
             sort_by="confidence",
-        ))
+        ), branch=branch)
         if not entries:
             return None
 
@@ -151,7 +151,7 @@ class RuleBasedStrategy:
         return " ".join(parts)
 
     def compile_agent_brief(
-        self, agent_id: str, adapter: PostgresAdapter, namespace: str
+        self, agent_id: str, adapter: PostgresAdapter, namespace: str, branch: str = "main",
     ) -> Digest | None:
         from amfs_core.models import SearchQuery
 
@@ -159,7 +159,7 @@ class RuleBasedStrategy:
             agent_id=agent_id,
             limit=1000,
             sort_by="recency",
-        ))
+        ), branch=branch)
         if not entries:
             return None
 
@@ -243,7 +243,7 @@ class RuleBasedStrategy:
         return " ".join(parts)
 
     def compile_source(
-        self, source_id: str, adapter: PostgresAdapter, namespace: str
+        self, source_id: str, adapter: PostgresAdapter, namespace: str, branch: str = "main",
     ) -> Digest | None:
         from amfs_core.models import SearchQuery
 
@@ -251,12 +251,12 @@ class RuleBasedStrategy:
             agent_id=f"webhook/{source_id}",
             limit=1000,
             sort_by="recency",
-        ))
+        ), branch=branch)
         external_entries = adapter.search(SearchQuery(
             agent_id=f"external/{source_id}",
             limit=1000,
             sort_by="recency",
-        ))
+        ), branch=branch)
         entries = webhook_entries + external_entries
         if not entries:
             return None

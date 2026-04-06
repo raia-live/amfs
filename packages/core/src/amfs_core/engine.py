@@ -227,13 +227,14 @@ class CoWEngine:
         key: str,
         *,
         min_confidence: float = 0.0,
+        branch: str = "main",
     ) -> MemoryEntry | None:
         """Read the current version of a key from the adapter.
 
         If a ReadTracker is attached, the read is automatically logged
         for causal linking.
         """
-        entry = self._adapter.read(entity_path, key, min_confidence=min_confidence)
+        entry = self._adapter.read(entity_path, key, min_confidence=min_confidence, branch=branch)
         if entry is not None and self._read_tracker is not None:
             self._read_tracker.record(entry)
         return entry
@@ -250,6 +251,7 @@ class CoWEngine:
         memory_type: MemoryType = MemoryType.FACT,
         artifact_refs: list[ArtifactRef] | None = None,
         shared: bool = True,
+        branch: str = "main",
     ) -> MemoryEntry:
         """Write a new version of a key with CoW semantics.
 
@@ -257,7 +259,7 @@ class CoWEngine:
         - Stamps provenance via the CausalTagger.
         - Delegates the actual write to the adapter.
         """
-        current = self._adapter.read(entity_path, key)
+        current = self._adapter.read(entity_path, key, branch=branch)
         next_version = (current.version + 1) if current else 1
 
         entry = MemoryEntry(
@@ -272,6 +274,7 @@ class CoWEngine:
             artifact_refs=artifact_refs or [],
             memory_type=memory_type,
             shared=shared,
+            branch=branch,
         )
 
         return self._adapter.write(entry)
@@ -281,9 +284,10 @@ class CoWEngine:
         entity_path: str | None = None,
         *,
         include_superseded: bool = False,
+        branch: str = "main",
     ) -> list[MemoryEntry]:
         """List entries from the adapter."""
-        return self._adapter.list(entity_path, include_superseded=include_superseded)
+        return self._adapter.list(entity_path, include_superseded=include_superseded, branch=branch)
 
     def history(
         self,
@@ -292,13 +296,14 @@ class CoWEngine:
         *,
         since: datetime | None = None,
         until: datetime | None = None,
+        branch: str = "main",
     ) -> list[MemoryEntry]:
         """Return all versions of a key ordered by version ascending.
 
         Enables temporal queries like "how did this memory change over time?"
         Optionally filter to a time window using *since* and *until*.
         """
-        all_versions = self._adapter.list(entity_path, include_superseded=True)
+        all_versions = self._adapter.list(entity_path, include_superseded=True, branch=branch)
         versions = [e for e in all_versions if e.key == key]
         versions.sort(key=lambda e: e.version)
 

@@ -106,6 +106,7 @@ class MemoryEntry(BaseModel):
     artifact_refs: list[ArtifactRef] = Field(default_factory=list)
     memory_type: MemoryType = MemoryType.FACT
     shared: bool = True
+    branch: str = "main"
 
     def effective_confidence(self, *, decay_half_life_days: float | None = None) -> float:
         """Confidence adjusted for time-based decay and memory type.
@@ -347,6 +348,217 @@ class Digest(BaseModel):
     staleness_ms: int = 0
     anticipation_score: float = 0.0
     namespace: str = "default"
+    branch: str = "main"
+
+
+# ── Git-like timeline (OSS) ────────────────────────────────────────────
+
+
+class EventType(str, Enum):
+    """Types of events on the agent timeline (git commit log).
+
+    Core event types (OSS): WRITE, OUTCOME, WEBHOOK, BRIEF_COMPILED,
+    CROSS_AGENT_READ. Branching event types (Pro): BRANCH_CREATED,
+    BRANCH_MERGED, BRANCH_CLOSED, ACCESS_GRANTED, ACCESS_REVOKED,
+    ROLLBACK, TAG_CREATED, CHERRY_PICK, FORK.
+    """
+
+    WRITE = "write"
+    OUTCOME = "outcome"
+    WEBHOOK = "webhook"
+    BRIEF_COMPILED = "brief_compiled"
+    CROSS_AGENT_READ = "cross_agent_read"
+    BRANCH_CREATED = "branch_created"
+    BRANCH_MERGED = "branch_merged"
+    BRANCH_CLOSED = "branch_closed"
+    ACCESS_GRANTED = "access_granted"
+    ACCESS_REVOKED = "access_revoked"
+    ROLLBACK = "rollback"
+    TAG_CREATED = "tag_created"
+    CHERRY_PICK = "cherry_pick"
+    FORK = "fork"
+
+
+class Agent(BaseModel):
+    """Registered agent — auto-created on first write."""
+
+    id: str = ""
+    namespace: str = "default"
+    agent_id: str
+    display_name: str | None = None
+    created_at: datetime | None = None
+    last_active_at: datetime | None = None
+    entry_count: int = 0
+
+
+class Event(BaseModel):
+    """A single event on the agent timeline (the git commit log)."""
+
+    id: str = ""
+    namespace: str = "default"
+    agent_id: str
+    branch: str = "main"
+    event_type: EventType
+    summary: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+    actor_agent_id: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ── Branching models (Pro — used by amfs_branching) ──────────────────
+
+
+class BranchStatus(str, Enum):
+    """Lifecycle state of a memory branch."""
+
+    ACTIVE = "active"
+    MERGED = "merged"
+    CLOSED = "closed"
+
+
+class Branch(BaseModel):
+    """A named branch of agent memory."""
+
+    id: str = ""
+    namespace: str = "default"
+    name: str
+    parent_branch: str = "main"
+    branched_at: datetime
+    created_by: str
+    description: str | None = None
+    status: BranchStatus = BranchStatus.ACTIVE
+    merged_at: datetime | None = None
+    merged_by: str | None = None
+    created_at: datetime | None = None
+
+
+class BranchAccessPermission(str, Enum):
+    """Permission level for external agents on a branch."""
+
+    READ = "read"
+    READ_WRITE = "read_write"
+
+
+class BranchAccess(BaseModel):
+    """Grant giving an external agent/team access to a branch."""
+
+    id: str = ""
+    namespace: str = "default"
+    branch_name: str
+    grantee_type: str  # "user", "team", "api_key"
+    grantee_id: str
+    permission: BranchAccessPermission = BranchAccessPermission.READ
+    granted_by: str
+    granted_at: datetime | None = None
+
+
+class DiffEntry(BaseModel):
+    """One entry's difference between a branch and its parent."""
+
+    entity_path: str
+    key: str
+    diff_type: str  # "added", "modified", "deleted"
+    branch_value: Any = None
+    parent_value: Any = None
+    branch_confidence: float | None = None
+    parent_confidence: float | None = None
+    branch_shared: bool | None = None
+
+
+class MergeConflict(BaseModel):
+    """A conflict detected during branch merge."""
+
+    entity_path: str
+    key: str
+    branch_value: Any
+    main_value: Any
+    branch_version: int = 0
+    main_version: int = 0
+    reason: str = "both_modified"
+
+
+class MergeStrategy(str, Enum):
+    """How to resolve merge conflicts."""
+
+    FAST_FORWARD = "fast_forward"
+    BRANCH_WINS = "branch_wins"
+    MAIN_WINS = "main_wins"
+    MANUAL = "manual"
+
+
+class MergeResult(BaseModel):
+    """Result of merging a branch into its parent."""
+
+    branch_name: str
+    status: str  # "merged", "conflicts"
+    merged_entries: int = 0
+    conflicts: list[MergeConflict] = Field(default_factory=list)
+
+
+class Tag(BaseModel):
+    """A named point-in-time marker on a branch (like a git tag)."""
+
+    id: str = ""
+    namespace: str = "default"
+    name: str
+    branch: str = "main"
+    tagged_at: datetime
+    description: str | None = None
+    created_by: str
+    created_at: datetime | None = None
+
+
+class PullRequestStatus(str, Enum):
+    """Lifecycle state of a pull request."""
+
+    OPEN = "open"
+    APPROVED = "approved"
+    MERGED = "merged"
+    CLOSED = "closed"
+
+
+class PullRequest(BaseModel):
+    """A pull request for merging a branch."""
+
+    id: str = ""
+    namespace: str = "default"
+    title: str
+    description: str | None = None
+    source_branch: str
+    target_branch: str = "main"
+    status: PullRequestStatus = PullRequestStatus.OPEN
+    created_by: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    merged_at: datetime | None = None
+    merged_by: str | None = None
+    closed_at: datetime | None = None
+    closed_by: str | None = None
+    merge_strategy: str | None = None
+
+
+class PRReviewStatus(str, Enum):
+    """Status of a PR review."""
+
+    APPROVED = "approved"
+    CHANGES_REQUESTED = "changes_requested"
+    COMMENTED = "commented"
+
+
+class PRReview(BaseModel):
+    """A review on a pull request."""
+
+    id: str = ""
+    namespace: str = "default"
+    pr_id: str
+    reviewer: str
+    status: PRReviewStatus
+    comment: str | None = None
+    entry_path: str | None = None
+    created_at: datetime | None = None
+
+
+# ── Config models ──────────────────────────────────────────────────────
 
 
 class LayerConfig(BaseModel):

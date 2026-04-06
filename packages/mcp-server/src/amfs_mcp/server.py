@@ -551,6 +551,45 @@ def amfs_briefing(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Timeline (git log)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@mcp.tool
+def amfs_timeline(
+    limit: int = 50,
+    event_type: str | None = None,
+    since: str | None = None,
+) -> str:
+    """View recent events on this agent's timeline (git commit log).
+
+    Every write, outcome, and cross-agent read is recorded as an event.
+    Use this to see the history of what happened to your agent's memory.
+
+    Args:
+        limit: Max events to return (default 50)
+        event_type: Filter by type (write, outcome, cross_agent_read, etc.)
+        since: ISO timestamp to get events after
+
+    Example: amfs_timeline(limit=20, event_type="write")
+    """
+    from datetime import datetime as dt
+    mem = _get_memory()
+    since_dt = dt.fromisoformat(since) if since else None
+    events = mem._adapter.list_events(
+        mem.agent_id,
+        mem._config.namespace,
+        event_type=event_type,
+        since=since_dt,
+        limit=limit,
+    )
+    return json.dumps({
+        "events": [e.model_dump(mode="json") for e in events],
+        "count": len(events),
+    }, default=str)
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────────────────────────────
 

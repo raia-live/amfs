@@ -8,12 +8,22 @@ from typing import Callable
 
 from amfs_core.embedder import EmbedderABC, cosine_similarity
 from amfs_core.models import (
+    Agent,
+    Branch,
+    BranchAccess,
     DecisionTrace,
+    DiffEntry,
+    Event,
     MemoryEntry,
     MemoryStats,
+    MergeResult,
+    MergeStrategy,
     OutcomeRecord,
+    PRReview,
+    PullRequest,
     SearchQuery,
     SemanticQuery,
+    Tag,
 )
 
 
@@ -225,6 +235,176 @@ class AdapterABC(ABC):
             oldest_entry_at=oldest,
             newest_entry_at=newest,
         )
+
+    # ── Agent registration ─────────────────────────────────────────────
+
+    def ensure_agent(self, agent_id: str, namespace: str = "default") -> Agent:
+        """Auto-register an agent on first write. Returns the Agent record.
+
+        Default is a no-op returning a stub. Postgres adapter implements
+        INSERT ... ON CONFLICT DO UPDATE.
+        """
+        return Agent(agent_id=agent_id, namespace=namespace)
+
+    def get_agent(self, agent_id: str, namespace: str = "default") -> Agent | None:
+        """Return a registered agent or None."""
+        return None
+
+    def list_agents(self, namespace: str = "default") -> list[Agent]:
+        """Return all registered agents in a namespace."""
+        return []
+
+    # ── Event log / timeline ───────────────────────────────────────────
+
+    def log_event(self, event: Event) -> Event:
+        """Persist a timeline event. Default is a no-op."""
+        return event
+
+    def list_events(
+        self,
+        agent_id: str,
+        namespace: str = "default",
+        *,
+        branch: str | None = None,
+        event_type: str | None = None,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[Event]:
+        """Return events on an agent's timeline. Default returns empty list."""
+        return []
+
+    # ── Branch management (Pro) ───────────────────────────────────────
+
+    def create_branch(self, branch: Branch) -> Branch:
+        """Create a new memory branch. Default raises NotImplementedError."""
+        raise NotImplementedError("Branching requires the Postgres adapter")
+
+    def get_branch(self, name: str, namespace: str = "default") -> Branch | None:
+        """Return a branch by name, or None."""
+        return None
+
+    def list_branches(
+        self, namespace: str = "default", *, status: str | None = None
+    ) -> list[Branch]:
+        """List all branches in a namespace."""
+        return []
+
+    def close_branch(self, name: str, namespace: str = "default") -> Branch:
+        """Mark a branch as closed."""
+        raise NotImplementedError("Branching requires the Postgres adapter")
+
+    def diff_branch(self, name: str, namespace: str = "default") -> list[DiffEntry]:
+        """Diff a branch against its parent."""
+        return []
+
+    def merge_branch(
+        self,
+        name: str,
+        namespace: str = "default",
+        *,
+        strategy: MergeStrategy = MergeStrategy.FAST_FORWARD,
+        resolve_conflicts: dict[str, str] | None = None,
+    ) -> MergeResult:
+        """Merge a branch into its parent."""
+        raise NotImplementedError("Branching requires the Postgres adapter")
+
+    # ── Branch access control (Pro) ───────────────────────────────────
+
+    def grant_branch_access(self, access: BranchAccess) -> BranchAccess:
+        """Grant external access to a branch."""
+        raise NotImplementedError("Branch access requires the Postgres adapter")
+
+    def revoke_branch_access(
+        self, branch_name: str, grantee_type: str, grantee_id: str,
+        namespace: str = "default",
+    ) -> None:
+        """Revoke access from a branch."""
+        raise NotImplementedError("Branch access requires the Postgres adapter")
+
+    def list_branch_access(
+        self, branch_name: str, namespace: str = "default"
+    ) -> list[BranchAccess]:
+        """List access grants for a branch."""
+        return []
+
+    def check_branch_access(
+        self, branch_name: str, api_key_id: str, namespace: str = "default"
+    ) -> str | None:
+        """Check if an API key has access to a branch. Returns permission or None."""
+        return None
+
+    # ── Tags / Snapshots (Pro) ────────────────────────────────────────
+
+    def create_tag(self, tag: Tag) -> Tag:
+        """Create a named point-in-time tag."""
+        raise NotImplementedError("Tags require the Postgres adapter")
+
+    def get_tag(self, name: str, namespace: str = "default") -> Tag | None:
+        """Return a tag by name, or None."""
+        return None
+
+    def list_tags(
+        self, namespace: str = "default", *, branch: str | None = None
+    ) -> list[Tag]:
+        """List tags, optionally filtered by branch."""
+        return []
+
+    def delete_tag(self, name: str, namespace: str = "default") -> None:
+        """Delete a tag."""
+        raise NotImplementedError("Tags require the Postgres adapter")
+
+    # ── Pull Requests (Pro) ───────────────────────────────────────────
+
+    def create_pull_request(self, pr: PullRequest) -> PullRequest:
+        """Create a pull request for branch merge review."""
+        raise NotImplementedError("PRs require the Postgres adapter")
+
+    def get_pull_request(self, pr_id: str, namespace: str = "default") -> PullRequest | None:
+        return None
+
+    def list_pull_requests(
+        self, namespace: str = "default", *, status: str | None = None
+    ) -> list[PullRequest]:
+        return []
+
+    def update_pull_request_status(
+        self, pr_id: str, status: str, *, by: str = "", namespace: str = "default"
+    ) -> PullRequest:
+        raise NotImplementedError("PRs require the Postgres adapter")
+
+    def add_pr_review(self, review: PRReview) -> PRReview:
+        raise NotImplementedError("PRs require the Postgres adapter")
+
+    def list_pr_reviews(self, pr_id: str, namespace: str = "default") -> list[PRReview]:
+        return []
+
+    # ── Rollback (Pro) ────────────────────────────────────────────────
+
+    def rollback_to_timestamp(
+        self,
+        agent_id: str,
+        branch: str,
+        timestamp: datetime,
+        namespace: str = "default",
+    ) -> int:
+        """Rollback memory to a point in time. Returns count of restored entries."""
+        raise NotImplementedError("Rollback requires the Postgres adapter")
+
+    # ── Fork (Pro) ────────────────────────────────────────────────────
+
+    def fork_agent(
+        self,
+        source_agent_id: str,
+        target_agent_id: str,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> int:
+        """Copy all entries from source_agent's branch into target_agent's main.
+
+        Returns the number of entries copied.
+        """
+        raise NotImplementedError("Fork requires the Postgres adapter")
 
     def semantic_search(
         self, query: SemanticQuery, embedder: EmbedderABC

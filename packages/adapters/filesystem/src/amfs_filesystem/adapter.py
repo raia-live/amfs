@@ -50,6 +50,7 @@ class FilesystemAdapter(AdapterABC):
         key: str,
         *,
         min_confidence: float = 0.0,
+        branch: str = "main",
     ) -> MemoryEntry | None:
         current_file = self._layout.current_version_file(entity_path, key)
         if current_file is None:
@@ -108,6 +109,7 @@ class FilesystemAdapter(AdapterABC):
         entity_path: str | None = None,
         *,
         include_superseded: bool = False,
+        branch: str = "main",
     ) -> list[MemoryEntry]:
         layout = self._layout
         entity_paths = (

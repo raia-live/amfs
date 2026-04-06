@@ -19,22 +19,38 @@ from amfs_core.embedder import EmbedderABC
 from amfs_core.exceptions import AdapterError, VersionConflictError
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
+    Agent,
     ArtifactRef,
+    Branch,
+    BranchAccess,
+    BranchAccessPermission,
+    BranchStatus,
     DecisionTrace,
+    DiffEntry,
     Digest,
     DigestType,
     ErrorEvent,
+    Event,
+    EventType,
     ExternalContext,
     MemoryEntry,
     MemoryStateDiff,
     MemoryStats,
     MemoryType,
+    MergeConflict,
+    MergeResult,
+    MergeStrategy,
     OutcomeRecord,
     OutcomeType,
+    PRReview,
+    PRReviewStatus,
+    PullRequest,
+    PullRequestStatus,
     Provenance,
     QueryEvent,
     SearchQuery,
     SemanticQuery,
+    Tag,
     TraceEntry,
 )
 
@@ -132,6 +148,33 @@ class PostgresAdapter(AdapterABC):
             ADD COLUMN IF NOT EXISTS shared BOOLEAN NOT NULL DEFAULT TRUE
         """)
         cur.execute("""
+            ALTER TABLE amfs_memory_entries
+            ADD COLUMN IF NOT EXISTS branch TEXT NOT NULL DEFAULT 'main'
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_outcomes
+            ADD COLUMN IF NOT EXISTS branch TEXT NOT NULL DEFAULT 'main'
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_decision_traces
+            ADD COLUMN IF NOT EXISTS branch TEXT NOT NULL DEFAULT 'main'
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_digests
+            ADD COLUMN IF NOT EXISTS branch TEXT NOT NULL DEFAULT 'main'
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_digests DROP CONSTRAINT IF EXISTS uq_digest
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_digests
+            ADD CONSTRAINT uq_digest UNIQUE (namespace, branch, digest_type, scope)
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_api_keys
+            ADD COLUMN IF NOT EXISTS default_branch TEXT
+        """)
+        cur.execute("""
             CREATE OR REPLACE FUNCTION amfs_notify_write() RETURNS TRIGGER AS $$
             BEGIN
                 IF NEW.superseded_at IS NULL THEN
@@ -140,7 +183,8 @@ class PostgresAdapter(AdapterABC):
                         'entity_path', NEW.entity_path,
                         'key', NEW.key,
                         'version', NEW.version,
-                        'agent_id', NEW.agent_id
+                        'agent_id', NEW.agent_id,
+                        'branch', NEW.branch
                     )::TEXT);
                 END IF;
                 RETURN NEW;
@@ -244,19 +288,42 @@ class PostgresAdapter(AdapterABC):
         key: str,
         *,
         min_confidence: float = 0.0,
+        branch: str = "main",
     ) -> MemoryEntry | None:
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT * FROM amfs_memory_entries
-                    WHERE namespace = %s AND entity_path = %s AND key = %s
+                    WHERE namespace = %s AND branch = %s
+                      AND entity_path = %s AND key = %s
                       AND superseded_at IS NULL
                     ORDER BY version DESC LIMIT 1
                     """,
-                    (self._namespace, entity_path, key),
+                    (self._namespace, branch, entity_path, key),
                 )
                 row = cur.fetchone()
+
+                if row is None and branch != "main":
+                    branch_info = cur.execute(
+                        "SELECT parent_branch, branched_at FROM amfs_branches WHERE namespace = %s AND name = %s",
+                        (self._namespace, branch),
+                    ).fetchone()
+                    if branch_info:
+                        cur.execute(
+                            """
+                            SELECT * FROM amfs_memory_entries
+                            WHERE namespace = %s AND branch = %s
+                              AND entity_path = %s AND key = %s
+                              AND superseded_at IS NULL
+                              AND written_at <= %s
+                            ORDER BY version DESC LIMIT 1
+                            """,
+                            (self._namespace, branch_info["parent_branch"],
+                             entity_path, key, branch_info["branched_at"]),
+                        )
+                        row = cur.fetchone()
+
         if row is None:
             return None
         entry = self._row_to_entry(row)
@@ -294,18 +361,20 @@ class PostgresAdapter(AdapterABC):
     # ------------------------------------------------------------------
 
     def write(self, entry: MemoryEntry) -> MemoryEntry:
+        branch = entry.branch or "main"
         with self._pool.connection() as conn:
             with conn.transaction():
                 with conn.cursor() as cur:
                     cur.execute(
                         """
                         SELECT version FROM amfs_memory_entries
-                        WHERE namespace = %s AND entity_path = %s AND key = %s
+                        WHERE namespace = %s AND branch = %s
+                          AND entity_path = %s AND key = %s
                           AND superseded_at IS NULL
                         ORDER BY version DESC LIMIT 1
                         FOR UPDATE
                         """,
-                        (self._namespace, entry.entity_path, entry.key),
+                        (self._namespace, branch, entry.entity_path, entry.key),
                     )
                     row = cur.fetchone()
                     current_version = row["version"] if row else 0
@@ -324,10 +393,11 @@ class PostgresAdapter(AdapterABC):
                             """
                             UPDATE amfs_memory_entries
                             SET superseded_at = NOW()
-                            WHERE namespace = %s AND entity_path = %s AND key = %s
+                            WHERE namespace = %s AND branch = %s
+                              AND entity_path = %s AND key = %s
                               AND superseded_at IS NULL
                             """,
-                            (self._namespace, entry.entity_path, entry.key),
+                            (self._namespace, branch, entry.entity_path, entry.key),
                         )
 
                     entry_id = uuid.uuid4()
@@ -337,6 +407,7 @@ class PostgresAdapter(AdapterABC):
                         "value", "agent_id", "session_id", "written_at",
                         "pattern_refs", "confidence", "outcome_count",
                         "ttl_at", "memory_type", "shared", "artifact_refs",
+                        "branch",
                     ]
                     params: list[Any] = [
                         str(entry_id),
@@ -358,6 +429,7 @@ class PostgresAdapter(AdapterABC):
                             [ref.model_dump(mode="json") for ref in entry.artifact_refs],
                             default=str,
                         ),
+                        branch,
                     ]
 
                     if self._has_embedding_col and entry.embedding:
@@ -387,9 +459,10 @@ class PostgresAdapter(AdapterABC):
         entity_path: str | None = None,
         *,
         include_superseded: bool = False,
+        branch: str = "main",
     ) -> list[MemoryEntry]:
-        conditions = ["namespace = %s"]
-        params: list[Any] = [self._namespace]
+        conditions = ["namespace = %s", "branch = %s"]
+        params: list[Any] = [self._namespace, branch]
 
         if entity_path is not None:
             conditions.append("entity_path = %s")
@@ -412,10 +485,10 @@ class PostgresAdapter(AdapterABC):
     # search (full-text via tsvector when available, SQL filter otherwise)
     # ------------------------------------------------------------------
 
-    def search(self, query: SearchQuery) -> list[MemoryEntry]:
+    def search(self, query: SearchQuery, *, branch: str = "main") -> list[MemoryEntry]:
         """Search using PostgreSQL full-text search when a text query is available."""
-        conditions = ["namespace = %s", "superseded_at IS NULL"]
-        params: list[Any] = [self._namespace]
+        conditions = ["namespace = %s", "branch = %s", "superseded_at IS NULL"]
+        params: list[Any] = [self._namespace, branch]
 
         if query.entity_path is not None:
             conditions.append("entity_path = %s")
@@ -902,18 +975,20 @@ class PostgresAdapter(AdapterABC):
             artifact_refs=[ArtifactRef.model_validate(r) for r in (row.get("artifact_refs") or [])],
             memory_type=memory_type,
             shared=row.get("shared", True),
+            branch=row.get("branch", "main"),
         )
 
     # ── Digest storage (Memory Cortex) ──────────────────────────────
 
     def upsert_digest(self, digest: Digest) -> None:
         """Insert or update a compiled digest."""
+        branch = digest.branch or "main"
         with self._pool.connection() as conn:
             conn.execute(
                 """INSERT INTO amfs_digests
-                   (namespace, digest_type, scope, summary, entry_count,
+                   (namespace, branch, digest_type, scope, summary, entry_count,
                     source_agents, anticipation_score, compiled_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT ON CONSTRAINT uq_digest
                    DO UPDATE SET summary = EXCLUDED.summary,
                                  entry_count = EXCLUDED.entry_count,
@@ -922,6 +997,7 @@ class PostgresAdapter(AdapterABC):
                                  compiled_at = EXCLUDED.compiled_at""",
                 (
                     digest.namespace,
+                    branch,
                     digest.digest_type.value,
                     digest.scope,
                     json.dumps(digest.summary),
@@ -937,14 +1013,16 @@ class PostgresAdapter(AdapterABC):
         digest_type: DigestType,
         scope: str,
         namespace: str = "default",
+        branch: str = "main",
     ) -> Digest | None:
         """Read a single digest by type and scope."""
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 row = cur.execute(
                     """SELECT * FROM amfs_digests
-                       WHERE namespace = %s AND digest_type = %s AND scope = %s""",
-                    (namespace, digest_type.value, scope),
+                       WHERE namespace = %s AND branch = %s
+                         AND digest_type = %s AND scope = %s""",
+                    (namespace, branch, digest_type.value, scope),
                 ).fetchone()
         return self._row_to_digest(row) if row else None
 
@@ -952,22 +1030,24 @@ class PostgresAdapter(AdapterABC):
         self,
         digest_type: DigestType | None = None,
         namespace: str = "default",
+        branch: str = "main",
     ) -> list[Digest]:
-        """List digests, optionally filtered by type."""
+        """List digests, optionally filtered by type and branch."""
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 if digest_type:
                     rows = cur.execute(
                         """SELECT * FROM amfs_digests
-                           WHERE namespace = %s AND digest_type = %s
+                           WHERE namespace = %s AND branch = %s AND digest_type = %s
                            ORDER BY compiled_at DESC""",
-                        (namespace, digest_type.value),
+                        (namespace, branch, digest_type.value),
                     ).fetchall()
                 else:
                     rows = cur.execute(
                         """SELECT * FROM amfs_digests
-                           WHERE namespace = %s ORDER BY compiled_at DESC""",
-                        (namespace,),
+                           WHERE namespace = %s AND branch = %s
+                           ORDER BY compiled_at DESC""",
+                        (namespace, branch),
                     ).fetchall()
         return [self._row_to_digest(r) for r in rows]
 
@@ -984,8 +1064,917 @@ class PostgresAdapter(AdapterABC):
             source_agents=row.get("source_agents") or [],
             compiled_at=row["compiled_at"],
             anticipation_score=float(row.get("anticipation_score", 0.0)),
+            branch=row.get("branch", "main"),
             namespace=row.get("namespace", "default"),
         )
+
+    # ── Agent registration (Pro) ────────────────────────────────────────
+
+    def ensure_agent(self, agent_id: str, namespace: str = "default") -> Agent:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_agents (namespace, agent_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT ON CONSTRAINT uq_agent DO UPDATE
+                        SET last_active_at = NOW(),
+                            entry_count = amfs_agents.entry_count + 1
+                    RETURNING id, namespace, agent_id, display_name,
+                              created_at, last_active_at, entry_count
+                    """,
+                    (namespace, agent_id),
+                )
+                row = cur.fetchone()
+        return self._row_to_agent(row)
+
+    def get_agent(self, agent_id: str, namespace: str = "default") -> Agent | None:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, namespace, agent_id, display_name,
+                           created_at, last_active_at, entry_count
+                    FROM amfs_agents
+                    WHERE namespace = %s AND agent_id = %s
+                    """,
+                    (namespace, agent_id),
+                )
+                row = cur.fetchone()
+        return self._row_to_agent(row) if row else None
+
+    def list_agents(self, namespace: str = "default") -> list[Agent]:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, namespace, agent_id, display_name,
+                           created_at, last_active_at, entry_count
+                    FROM amfs_agents
+                    WHERE namespace = %s
+                    ORDER BY last_active_at DESC
+                    """,
+                    (namespace,),
+                )
+                rows = cur.fetchall()
+        return [self._row_to_agent(r) for r in rows]
+
+    @staticmethod
+    def _row_to_agent(row: dict[str, Any]) -> Agent:
+        return Agent(
+            id=str(row["id"]),
+            namespace=row["namespace"],
+            agent_id=row["agent_id"],
+            display_name=row.get("display_name"),
+            created_at=row["created_at"],
+            last_active_at=row["last_active_at"],
+            entry_count=row.get("entry_count", 0),
+        )
+
+    # ── Event log / timeline (Pro) ────────────────────────────────────
+
+    def log_event(self, event: Event) -> Event:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_events
+                        (namespace, agent_id, branch, event_type,
+                         summary, details, actor_agent_id, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                    RETURNING id, created_at
+                    """,
+                    (
+                        event.namespace,
+                        event.agent_id,
+                        event.branch,
+                        event.event_type.value if isinstance(event.event_type, EventType) else event.event_type,
+                        event.summary,
+                        json.dumps(event.details, default=str),
+                        event.actor_agent_id,
+                        event.created_at,
+                    ),
+                )
+                row = cur.fetchone()
+        return event.model_copy(update={"id": str(row["id"]), "created_at": row["created_at"]})
+
+    def list_events(
+        self,
+        agent_id: str,
+        namespace: str = "default",
+        *,
+        branch: str | None = None,
+        event_type: str | None = None,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[Event]:
+        conditions = ["namespace = %s", "agent_id = %s"]
+        params: list[Any] = [namespace, agent_id]
+
+        if branch is not None:
+            conditions.append("branch = %s")
+            params.append(branch)
+        if event_type is not None:
+            conditions.append("event_type = %s")
+            params.append(event_type)
+        if since is not None:
+            conditions.append("created_at >= %s")
+            params.append(since)
+
+        where = " AND ".join(conditions)
+        sql = f"""
+            SELECT id, namespace, agent_id, branch, event_type,
+                   summary, details, actor_agent_id, created_at
+            FROM amfs_events
+            WHERE {where}
+            ORDER BY created_at DESC
+            LIMIT %s
+        """
+        params.append(limit)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        return [self._row_to_event(r) for r in rows]
+
+    @staticmethod
+    def _row_to_event(row: dict[str, Any]) -> Event:
+        details = row.get("details") or {}
+        if isinstance(details, str):
+            details = json.loads(details)
+        try:
+            etype = EventType(row["event_type"])
+        except ValueError:
+            etype = EventType.WRITE
+        return Event(
+            id=str(row["id"]),
+            namespace=row["namespace"],
+            agent_id=row["agent_id"],
+            branch=row.get("branch", "main"),
+            event_type=etype,
+            summary=row.get("summary"),
+            details=details,
+            actor_agent_id=row.get("actor_agent_id"),
+            created_at=row["created_at"],
+        )
+
+    # ── Branch management (Pro) ───────────────────────────────────────
+
+    def create_branch(self, branch: Branch) -> Branch:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_branches
+                        (namespace, name, parent_branch, branched_at,
+                         created_by, description, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id, created_at
+                    """,
+                    (
+                        branch.namespace,
+                        branch.name,
+                        branch.parent_branch,
+                        branch.branched_at,
+                        branch.created_by,
+                        branch.description,
+                        branch.status.value if isinstance(branch.status, BranchStatus) else branch.status,
+                    ),
+                )
+                row = cur.fetchone()
+        return branch.model_copy(update={
+            "id": str(row["id"]),
+            "created_at": row["created_at"],
+        })
+
+    def get_branch(self, name: str, namespace: str = "default") -> Branch | None:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM amfs_branches
+                    WHERE namespace = %s AND name = %s
+                    """,
+                    (namespace, name),
+                )
+                row = cur.fetchone()
+        return self._row_to_branch(row) if row else None
+
+    def list_branches(
+        self, namespace: str = "default", *, status: str | None = None
+    ) -> list[Branch]:
+        conditions = ["namespace = %s"]
+        params: list[Any] = [namespace]
+        if status is not None:
+            conditions.append("status = %s")
+            params.append(status)
+
+        where = " AND ".join(conditions)
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT * FROM amfs_branches
+                    WHERE {where}
+                    ORDER BY created_at DESC
+                    """,
+                    params,
+                )
+                rows = cur.fetchall()
+        return [self._row_to_branch(r) for r in rows]
+
+    def close_branch(self, name: str, namespace: str = "default") -> Branch:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE amfs_branches
+                    SET status = 'closed'
+                    WHERE namespace = %s AND name = %s
+                    RETURNING *
+                    """,
+                    (namespace, name),
+                )
+                row = cur.fetchone()
+        if row is None:
+            raise AdapterError(f"Branch '{name}' not found")
+        return self._row_to_branch(row)
+
+    def diff_branch(self, name: str, namespace: str = "default") -> list[DiffEntry]:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT parent_branch, branched_at FROM amfs_branches WHERE namespace = %s AND name = %s",
+                    (namespace, name),
+                )
+                branch_row = cur.fetchone()
+                if branch_row is None:
+                    return []
+
+                parent = branch_row["parent_branch"]
+                branched_at = branch_row["branched_at"]
+
+                cur.execute(
+                    """
+                    SELECT be.entity_path, be.key, be.value AS branch_value,
+                           be.confidence AS branch_confidence, be.shared AS branch_shared,
+                           pe.value AS parent_value, pe.confidence AS parent_confidence,
+                           CASE WHEN pe.id IS NULL THEN 'added' ELSE 'modified' END AS diff_type
+                    FROM amfs_memory_entries be
+                    LEFT JOIN amfs_memory_entries pe
+                        ON pe.namespace = be.namespace
+                       AND pe.entity_path = be.entity_path
+                       AND pe.key = be.key
+                       AND pe.branch = %s
+                       AND pe.superseded_at IS NULL
+                    WHERE be.namespace = %s AND be.branch = %s
+                      AND be.superseded_at IS NULL
+                    """,
+                    (parent, namespace, name),
+                )
+                rows = cur.fetchall()
+
+        results: list[DiffEntry] = []
+        for r in rows:
+            bv = r["branch_value"]
+            if isinstance(bv, str):
+                try:
+                    bv = json.loads(bv)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            pv = r.get("parent_value")
+            if isinstance(pv, str):
+                try:
+                    pv = json.loads(pv)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            results.append(DiffEntry(
+                entity_path=r["entity_path"],
+                key=r["key"],
+                diff_type=r["diff_type"],
+                branch_value=bv,
+                parent_value=pv,
+                branch_confidence=float(r["branch_confidence"]) if r.get("branch_confidence") is not None else None,
+                parent_confidence=float(r["parent_confidence"]) if r.get("parent_confidence") is not None else None,
+                branch_shared=r.get("branch_shared"),
+            ))
+        return results
+
+    def merge_branch(
+        self,
+        name: str,
+        namespace: str = "default",
+        *,
+        strategy: MergeStrategy = MergeStrategy.FAST_FORWARD,
+        resolve_conflicts: dict[str, str] | None = None,
+    ) -> MergeResult:
+        resolve_conflicts = resolve_conflicts or {}
+
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT * FROM amfs_branches WHERE namespace = %s AND name = %s FOR UPDATE",
+                        (namespace, name),
+                    )
+                    branch_row = cur.fetchone()
+                    if branch_row is None:
+                        raise AdapterError(f"Branch '{name}' not found")
+                    if branch_row["status"] != "active":
+                        raise AdapterError(f"Branch '{name}' is not active (status: {branch_row['status']})")
+
+                    parent = branch_row["parent_branch"]
+                    branched_at = branch_row["branched_at"]
+
+                    cur.execute(
+                        """
+                        SELECT be.*, pe.value AS parent_value, pe.version AS parent_version,
+                               pe.id AS parent_id,
+                               CASE WHEN pe.id IS NULL THEN 'added' ELSE 'modified' END AS diff_type
+                        FROM amfs_memory_entries be
+                        LEFT JOIN amfs_memory_entries pe
+                            ON pe.namespace = be.namespace
+                           AND pe.entity_path = be.entity_path
+                           AND pe.key = be.key
+                           AND pe.branch = %s
+                           AND pe.superseded_at IS NULL
+                        WHERE be.namespace = %s AND be.branch = %s
+                          AND be.superseded_at IS NULL
+                        """,
+                        (parent, namespace, name),
+                    )
+                    branch_entries = cur.fetchall()
+
+                    conflicts: list[MergeConflict] = []
+                    merged = 0
+
+                    for be in branch_entries:
+                        entry_spec = f"{be['entity_path']}/{be['key']}"
+
+                        if be["diff_type"] == "modified":
+                            cur.execute(
+                                """
+                                SELECT version FROM amfs_memory_entries
+                                WHERE namespace = %s AND branch = %s
+                                  AND entity_path = %s AND key = %s
+                                  AND written_at > %s AND superseded_at IS NULL
+                                ORDER BY version DESC LIMIT 1
+                                """,
+                                (namespace, parent, be["entity_path"], be["key"], branched_at),
+                            )
+                            main_changed = cur.fetchone()
+                            if main_changed:
+                                if strategy == MergeStrategy.BRANCH_WINS or resolve_conflicts.get(entry_spec) == "branch":
+                                    pass  # proceed with merge
+                                elif strategy == MergeStrategy.MAIN_WINS or resolve_conflicts.get(entry_spec) == "main":
+                                    continue
+                                else:
+                                    pv = be.get("parent_value")
+                                    if isinstance(pv, str):
+                                        try:
+                                            pv = json.loads(pv)
+                                        except (json.JSONDecodeError, ValueError):
+                                            pass
+                                    bv = be["value"]
+                                    if isinstance(bv, str):
+                                        try:
+                                            bv = json.loads(bv)
+                                        except (json.JSONDecodeError, ValueError):
+                                            pass
+                                    conflicts.append(MergeConflict(
+                                        entity_path=be["entity_path"],
+                                        key=be["key"],
+                                        branch_value=bv,
+                                        main_value=pv,
+                                        branch_version=be["version"],
+                                        main_version=main_changed["version"],
+                                    ))
+                                    continue
+
+                        if be.get("parent_id"):
+                            cur.execute(
+                                "UPDATE amfs_memory_entries SET superseded_at = NOW() WHERE id = %s",
+                                (be["parent_id"],),
+                            )
+
+                        cur.execute(
+                            """
+                            SELECT COALESCE(MAX(version), 0) + 1 AS next_ver
+                            FROM amfs_memory_entries
+                            WHERE namespace = %s AND branch = %s
+                              AND entity_path = %s AND key = %s
+                            """,
+                            (namespace, parent, be["entity_path"], be["key"]),
+                        )
+                        next_ver = cur.fetchone()["next_ver"]
+
+                        columns = [
+                            "namespace", "entity_path", "key", "version", "value",
+                            "agent_id", "session_id", "written_at", "pattern_refs",
+                            "confidence", "outcome_count", "ttl_at", "memory_type",
+                            "shared", "artifact_refs", "branch",
+                        ]
+                        params_list: list[Any] = [
+                            namespace, be["entity_path"], be["key"], next_ver,
+                            json.dumps(be["value"], default=str) if not isinstance(be["value"], str) else be["value"],
+                            be["agent_id"], be["session_id"], be["written_at"],
+                            be.get("pattern_refs") or [],
+                            be["confidence"], be["outcome_count"],
+                            be.get("ttl_at"), be.get("memory_type", "fact"),
+                            be.get("shared", True), json.dumps(be.get("artifact_refs") or [], default=str),
+                            parent,
+                        ]
+                        cols_sql = ", ".join(columns)
+                        placeholders = ", ".join(["%s"] * len(params_list))
+                        cur.execute(
+                            f"INSERT INTO amfs_memory_entries ({cols_sql}) VALUES ({placeholders})",
+                            params_list,
+                        )
+                        merged += 1
+
+                    if conflicts:
+                        return MergeResult(
+                            branch_name=name,
+                            status="conflicts",
+                            merged_entries=merged,
+                            conflicts=conflicts,
+                        )
+
+                    cur.execute(
+                        """
+                        UPDATE amfs_branches
+                        SET status = 'merged', merged_at = NOW(), merged_by = %s
+                        WHERE namespace = %s AND name = %s
+                        """,
+                        (branch_row["created_by"], namespace, name),
+                    )
+
+        return MergeResult(branch_name=name, status="merged", merged_entries=merged)
+
+    @staticmethod
+    def _row_to_branch(row: dict[str, Any]) -> Branch:
+        try:
+            status = BranchStatus(row["status"])
+        except ValueError:
+            status = BranchStatus.ACTIVE
+        return Branch(
+            id=str(row["id"]),
+            namespace=row["namespace"],
+            name=row["name"],
+            parent_branch=row["parent_branch"],
+            branched_at=row["branched_at"],
+            created_by=row["created_by"],
+            description=row.get("description"),
+            status=status,
+            merged_at=row.get("merged_at"),
+            merged_by=row.get("merged_by"),
+            created_at=row.get("created_at"),
+        )
+
+    # ── Branch access control (Pro) ───────────────────────────────────
+
+    def grant_branch_access(self, access: BranchAccess) -> BranchAccess:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_branch_access
+                        (namespace, branch_name, grantee_type, grantee_id,
+                         permission, granted_by)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT ON CONSTRAINT uq_branch_access DO UPDATE
+                        SET permission = EXCLUDED.permission,
+                            granted_by = EXCLUDED.granted_by,
+                            granted_at = NOW()
+                    RETURNING id, granted_at
+                    """,
+                    (
+                        access.namespace,
+                        access.branch_name,
+                        access.grantee_type,
+                        access.grantee_id,
+                        access.permission.value if isinstance(access.permission, BranchAccessPermission) else access.permission,
+                        access.granted_by,
+                    ),
+                )
+                row = cur.fetchone()
+        return access.model_copy(update={
+            "id": str(row["id"]),
+            "granted_at": row["granted_at"],
+        })
+
+    def revoke_branch_access(
+        self, branch_name: str, grantee_type: str, grantee_id: str,
+        namespace: str = "default",
+    ) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                DELETE FROM amfs_branch_access
+                WHERE namespace = %s AND branch_name = %s
+                  AND grantee_type = %s AND grantee_id = %s
+                """,
+                (namespace, branch_name, grantee_type, grantee_id),
+            )
+
+    def list_branch_access(
+        self, branch_name: str, namespace: str = "default"
+    ) -> list[BranchAccess]:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM amfs_branch_access
+                    WHERE namespace = %s AND branch_name = %s
+                    ORDER BY granted_at DESC
+                    """,
+                    (namespace, branch_name),
+                )
+                rows = cur.fetchall()
+        return [self._row_to_branch_access(r) for r in rows]
+
+    def check_branch_access(
+        self, branch_name: str, api_key_id: str, namespace: str = "default"
+    ) -> str | None:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ba.permission FROM amfs_branch_access ba
+                    WHERE ba.namespace = %s AND ba.branch_name = %s
+                      AND (
+                        (ba.grantee_type = 'api_key' AND ba.grantee_id = %s)
+                        OR (ba.grantee_type = 'team' AND ba.grantee_id IN (
+                            SELECT t.slug FROM amfs_teams t
+                            JOIN amfs_team_members tm ON tm.team_id = t.id
+                            JOIN amfs_api_keys ak ON ak.id::text = %s
+                            WHERE tm.email = ak.name AND tm.namespace = %s
+                        ))
+                      )
+                    LIMIT 1
+                    """,
+                    (namespace, branch_name, api_key_id, api_key_id, namespace),
+                )
+                row = cur.fetchone()
+        return row["permission"] if row else None
+
+    @staticmethod
+    def _row_to_branch_access(row: dict[str, Any]) -> BranchAccess:
+        try:
+            perm = BranchAccessPermission(row["permission"])
+        except ValueError:
+            perm = BranchAccessPermission.READ
+        return BranchAccess(
+            id=str(row["id"]),
+            namespace=row["namespace"],
+            branch_name=row["branch_name"],
+            grantee_type=row["grantee_type"],
+            grantee_id=row["grantee_id"],
+            permission=perm,
+            granted_by=row["granted_by"],
+            granted_at=row.get("granted_at"),
+        )
+
+    # ── Tags / Snapshots (Pro) ────────────────────────────────────────
+
+    def create_tag(self, tag: Tag) -> Tag:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_tags
+                        (namespace, name, branch, tagged_at, description, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id, created_at
+                    """,
+                    (tag.namespace, tag.name, tag.branch, tag.tagged_at,
+                     tag.description, tag.created_by),
+                )
+                row = cur.fetchone()
+        return tag.model_copy(update={
+            "id": str(row["id"]),
+            "created_at": row["created_at"],
+        })
+
+    def get_tag(self, name: str, namespace: str = "default") -> Tag | None:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM amfs_tags WHERE namespace = %s AND name = %s",
+                    (namespace, name),
+                )
+                row = cur.fetchone()
+        return self._row_to_tag(row) if row else None
+
+    def list_tags(
+        self, namespace: str = "default", *, branch: str | None = None
+    ) -> list[Tag]:
+        conditions = ["namespace = %s"]
+        params: list[Any] = [namespace]
+        if branch is not None:
+            conditions.append("branch = %s")
+            params.append(branch)
+        where = " AND ".join(conditions)
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT * FROM amfs_tags WHERE {where} ORDER BY tagged_at DESC",
+                    params,
+                )
+                rows = cur.fetchall()
+        return [self._row_to_tag(r) for r in rows]
+
+    def delete_tag(self, name: str, namespace: str = "default") -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM amfs_tags WHERE namespace = %s AND name = %s",
+                (namespace, name),
+            )
+
+    @staticmethod
+    def _row_to_tag(row: dict[str, Any]) -> Tag:
+        return Tag(
+            id=str(row["id"]),
+            namespace=row["namespace"],
+            name=row["name"],
+            branch=row.get("branch", "main"),
+            tagged_at=row["tagged_at"],
+            description=row.get("description"),
+            created_by=row["created_by"],
+            created_at=row.get("created_at"),
+        )
+
+    # ── Pull Requests (Pro) ─────────────────────────────────────────────
+
+    def create_pull_request(self, pr: PullRequest) -> PullRequest:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_pull_requests
+                        (namespace, title, description, source_branch,
+                         target_branch, status, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id, created_at, updated_at
+                    """,
+                    (pr.namespace, pr.title, pr.description, pr.source_branch,
+                     pr.target_branch, pr.status.value if isinstance(pr.status, PullRequestStatus) else pr.status,
+                     pr.created_by),
+                )
+                row = cur.fetchone()
+        return pr.model_copy(update={
+            "id": str(row["id"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        })
+
+    def get_pull_request(self, pr_id: str, namespace: str = "default") -> PullRequest | None:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM amfs_pull_requests WHERE id = %s::uuid AND namespace = %s",
+                    (pr_id, namespace),
+                )
+                row = cur.fetchone()
+        return self._row_to_pr(row) if row else None
+
+    def list_pull_requests(
+        self, namespace: str = "default", *, status: str | None = None
+    ) -> list[PullRequest]:
+        conditions = ["namespace = %s"]
+        params: list[Any] = [namespace]
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
+        where = " AND ".join(conditions)
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT * FROM amfs_pull_requests WHERE {where} ORDER BY created_at DESC",
+                    params,
+                )
+                rows = cur.fetchall()
+        return [self._row_to_pr(r) for r in rows]
+
+    def update_pull_request_status(
+        self, pr_id: str, status: str, *, by: str = "", namespace: str = "default"
+    ) -> PullRequest:
+        updates = ["status = %s", "updated_at = NOW()"]
+        params: list[Any] = [status]
+
+        if status == "merged":
+            updates.extend(["merged_at = NOW()", "merged_by = %s"])
+            params.append(by)
+        elif status == "closed":
+            updates.extend(["closed_at = NOW()", "closed_by = %s"])
+            params.append(by)
+
+        params.extend([pr_id, namespace])
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""UPDATE amfs_pull_requests SET {', '.join(updates)}
+                        WHERE id = %s::uuid AND namespace = %s RETURNING *""",
+                    params,
+                )
+                row = cur.fetchone()
+        if row is None:
+            raise AdapterError(f"PR '{pr_id}' not found")
+        return self._row_to_pr(row)
+
+    def add_pr_review(self, review: PRReview) -> PRReview:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_pr_reviews
+                        (namespace, pr_id, reviewer, status, comment, entry_path)
+                    VALUES (%s, %s::uuid, %s, %s, %s, %s)
+                    RETURNING id, created_at
+                    """,
+                    (review.namespace, review.pr_id, review.reviewer,
+                     review.status.value if isinstance(review.status, PRReviewStatus) else review.status,
+                     review.comment, review.entry_path),
+                )
+                row = cur.fetchone()
+        return review.model_copy(update={
+            "id": str(row["id"]),
+            "created_at": row["created_at"],
+        })
+
+    def list_pr_reviews(self, pr_id: str, namespace: str = "default") -> list[PRReview]:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM amfs_pr_reviews WHERE pr_id = %s::uuid AND namespace = %s ORDER BY created_at",
+                    (pr_id, namespace),
+                )
+                rows = cur.fetchall()
+        results: list[PRReview] = []
+        for r in rows:
+            try:
+                st = PRReviewStatus(r["status"])
+            except ValueError:
+                st = PRReviewStatus.COMMENTED
+            results.append(PRReview(
+                id=str(r["id"]),
+                namespace=r["namespace"],
+                pr_id=str(r["pr_id"]),
+                reviewer=r["reviewer"],
+                status=st,
+                comment=r.get("comment"),
+                entry_path=r.get("entry_path"),
+                created_at=r.get("created_at"),
+            ))
+        return results
+
+    @staticmethod
+    def _row_to_pr(row: dict[str, Any]) -> PullRequest:
+        try:
+            st = PullRequestStatus(row["status"])
+        except ValueError:
+            st = PullRequestStatus.OPEN
+        return PullRequest(
+            id=str(row["id"]),
+            namespace=row["namespace"],
+            title=row["title"],
+            description=row.get("description"),
+            source_branch=row["source_branch"],
+            target_branch=row["target_branch"],
+            status=st,
+            created_by=row["created_by"],
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
+            merged_at=row.get("merged_at"),
+            merged_by=row.get("merged_by"),
+            closed_at=row.get("closed_at"),
+            closed_by=row.get("closed_by"),
+            merge_strategy=row.get("merge_strategy"),
+        )
+
+    # ── Rollback (Pro) ────────────────────────────────────────────────
+
+    def rollback_to_timestamp(
+        self,
+        agent_id: str,
+        branch: str,
+        timestamp: datetime,
+        namespace: str = "default",
+    ) -> int:
+        """Supersede all entries written after timestamp and restore state."""
+        restored = 0
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT entity_path, key FROM amfs_memory_entries
+                        WHERE namespace = %s AND branch = %s
+                          AND written_at > %s AND superseded_at IS NULL
+                        """,
+                        (namespace, branch, timestamp),
+                    )
+                    to_revert = cur.fetchall()
+
+                    for row in to_revert:
+                        ep, key = row["entity_path"], row["key"]
+                        cur.execute(
+                            """
+                            UPDATE amfs_memory_entries
+                            SET superseded_at = NOW()
+                            WHERE namespace = %s AND branch = %s
+                              AND entity_path = %s AND key = %s
+                              AND superseded_at IS NULL
+                            """,
+                            (namespace, branch, ep, key),
+                        )
+                        cur.execute(
+                            """
+                            SELECT * FROM amfs_memory_entries
+                            WHERE namespace = %s AND branch = %s
+                              AND entity_path = %s AND key = %s
+                              AND written_at <= %s
+                            ORDER BY version DESC LIMIT 1
+                            """,
+                            (namespace, branch, ep, key, timestamp),
+                        )
+                        old = cur.fetchone()
+                        if old:
+                            cur.execute(
+                                """
+                                UPDATE amfs_memory_entries
+                                SET superseded_at = NULL
+                                WHERE id = %s
+                                """,
+                                (old["id"],),
+                            )
+                            restored += 1
+        return restored
+
+    # ── Fork (Pro) ────────────────────────────────────────────────────
+
+    def fork_agent(
+        self,
+        source_agent_id: str,
+        target_agent_id: str,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> int:
+        """Copy all live entries from source agent's branch into target agent's main."""
+        self.ensure_agent(target_agent_id, namespace)
+        copied = 0
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT * FROM amfs_memory_entries
+                        WHERE namespace = %s AND branch = %s
+                          AND superseded_at IS NULL
+                        """,
+                        (namespace, branch),
+                    )
+                    rows = cur.fetchall()
+
+                    for row in rows:
+                        cur.execute(
+                            """
+                            INSERT INTO amfs_memory_entries
+                            (namespace, entity_path, key, version, value,
+                             agent_id, session_id, tool_context, pattern_refs,
+                             written_at, confidence, outcome_count,
+                             ttl_at, artifact_refs, memory_type, shared,
+                             branch, embedding)
+                            VALUES
+                            (%s, %s, %s, 1, %s,
+                             %s, %s, %s, %s,
+                             NOW(), %s, 0,
+                             %s, %s, %s, %s,
+                             'main', %s)
+                            ON CONFLICT ON CONSTRAINT uq_entry_version DO NOTHING
+                            """,
+                            (
+                                namespace,
+                                row["entity_path"],
+                                row["key"],
+                                json.dumps(row["value"]) if not isinstance(row["value"], str) else row["value"],
+                                target_agent_id,
+                                row.get("session_id", ""),
+                                row.get("tool_context", ""),
+                                row.get("pattern_refs", []),
+                                row["confidence"],
+                                row.get("ttl_at"),
+                                row.get("artifact_refs", []),
+                                row.get("memory_type", "fact"),
+                                row.get("shared", False),
+                                row.get("embedding"),
+                            ),
+                        )
+                        copied += cur.rowcount
+        return copied
 
     def close(self) -> None:
         """Stop listener and close connection pool."""

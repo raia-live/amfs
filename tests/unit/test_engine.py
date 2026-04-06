@@ -22,7 +22,7 @@ class MockAdapter(AdapterABC):
         self._store: dict[tuple[str, str], list[MemoryEntry]] = {}
 
     def read(
-        self, entity_path: str, key: str, *, min_confidence: float = 0.0
+        self, entity_path: str, key: str, *, min_confidence: float = 0.0, branch: str = "main",
     ) -> MemoryEntry | None:
         versions = self._store.get((entity_path, key))
         if not versions:
@@ -40,7 +40,7 @@ class MockAdapter(AdapterABC):
         return entry
 
     def list(
-        self, entity_path: str | None = None, *, include_superseded: bool = False
+        self, entity_path: str | None = None, *, include_superseded: bool = False, branch: str = "main",
     ) -> list[MemoryEntry]:
         result: list[MemoryEntry] = []
         for (ep, _key), versions in self._store.items():
