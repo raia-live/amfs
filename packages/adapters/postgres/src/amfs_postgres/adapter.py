@@ -83,6 +83,42 @@ class _SingleConnectionPool:
         self._conn.close()
 
 
+class _TenantRLSConnection:
+    """Applies ``amfs.current_account_id`` when a request-scoped tenant is set."""
+
+    def __init__(self, inner_ctx: Any) -> None:
+        self._inner_ctx = inner_ctx
+
+    def __enter__(self) -> Any:
+        from amfs_postgres.tenant_context import get_request_tenant_account_id
+
+        conn = self._inner_ctx.__enter__()
+        tid = get_request_tenant_account_id()
+        if tid:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT set_config('amfs.current_account_id', %s, false)",
+                    (tid,),
+                )
+        return conn
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
+        return self._inner_ctx.__exit__(exc_type, exc, tb)
+
+
+class _TenantRLSPoolWrapper:
+    """Wraps a psycopg pool so each checkout applies RLS session vars."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def connection(self) -> _TenantRLSConnection:
+        return _TenantRLSConnection(self._inner.connection())
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class PostgresAdapter(AdapterABC):
     """Store AMFS entries in PostgreSQL.
 
@@ -127,6 +163,7 @@ class PostgresAdapter(AdapterABC):
                 "psycopg_pool not installed — falling back to single connection"
             )
             self._pool = _SingleConnectionPool(dsn, **pool_kwargs)
+        self._pool = _TenantRLSPoolWrapper(self._pool)
         if auto_schema:
             self._apply_schema()
         self._detect_optional_columns()
