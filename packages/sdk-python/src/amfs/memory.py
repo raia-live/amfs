@@ -15,14 +15,23 @@ from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker
 from amfs_core.exceptions import StaleWriteError
 from amfs_core.lifecycle import LifecycleManager
 from amfs_core.models import (
+    Agent,
+    Branch,
+    BranchAccess,
+    BranchAccessPermission,
     ConflictPolicy,
     DecisionTrace,
+    DiffEntry,
     ErrorEvent,
+    Event,
+    EventType,
     ExternalContext,
     MemoryEntry,
     MemoryStateDiff,
     MemoryStats,
     MemoryType,
+    MergeResult,
+    MergeStrategy,
     OutcomeType,
     QueryEvent,
     RecallConfig,
@@ -30,6 +39,7 @@ from amfs_core.models import (
     ScoredEntry,
     SearchQuery,
     SemanticQuery,
+    Tag,
     TraceEntry,
 )
 from amfs_core.outcome import OutcomeBackPropagator
@@ -74,6 +84,7 @@ class AgentMemory:
         embedder: EmbedderABC | None = None,
         conflict_policy: ConflictPolicy = ConflictPolicy.LAST_WRITE_WINS,
         on_conflict: Callable[[MemoryEntry, MemoryEntry, Any], Any] | None = None,
+        branch: str = "main",
     ) -> None:
         self._config = load_config_or_default(config_path)
 
@@ -90,6 +101,7 @@ class AgentMemory:
         self._embedder = embedder
         self._conflict_policy = conflict_policy
         self._on_conflict = on_conflict
+        self._branch = branch
 
         self._lifecycle: LifecycleManager | None = None
         if ttl_sweep_interval is not None:
@@ -111,6 +123,10 @@ class AgentMemory:
     @property
     def namespace(self) -> str:
         return self._config.namespace
+
+    @property
+    def branch(self) -> str:
+        return self._branch
 
     @property
     def adapter(self) -> AdapterABC:
@@ -144,7 +160,7 @@ class AgentMemory:
         start = time.monotonic()
         try:
             if self._decay_half_life_days is not None:
-                entry = self._engine.read(entity_path, key, min_confidence=0.0)
+                entry = self._engine.read(entity_path, key, min_confidence=0.0, branch=self._branch)
                 if entry is None:
                     return None
                 if not entry.shared and entry.provenance.agent_id != self.agent_id:
@@ -155,7 +171,7 @@ class AgentMemory:
                 if effective < min_confidence:
                     return None
                 return entry
-            entry = self._engine.read(entity_path, key, min_confidence=min_confidence)
+            entry = self._engine.read(entity_path, key, min_confidence=min_confidence, branch=self._branch)
             if entry is not None and not entry.shared and entry.provenance.agent_id != self.agent_id:
                 return None
             return entry
@@ -225,6 +241,7 @@ class AgentMemory:
             memory_type=memory_type,
             artifact_refs=artifact_refs,
             shared=shared,
+            branch=self._branch,
         )
         self._read_tracker.record_write(entity_path, key, entry.version, entry.version == 1)
 
@@ -247,7 +264,7 @@ class AgentMemory:
         """
         import time
         start = time.monotonic()
-        results = self._engine.list(entity_path, include_superseded=include_superseded)
+        results = self._engine.list(entity_path, include_superseded=include_superseded, branch=self._branch)
         results = [
             e for e in results
             if e.shared or e.provenance.agent_id == self.agent_id
@@ -527,7 +544,7 @@ class AgentMemory:
         Each entry in the returned list is a CoW snapshot with its confidence
         and provenance at the time it was written.
         """
-        return self._engine.history(entity_path, key, since=since, until=until)
+        return self._engine.history(entity_path, key, since=since, until=until, branch=self._branch)
 
     def record_context(
         self,
@@ -736,6 +753,205 @@ class AgentMemory:
         return service.briefing(
             entity_path=entity_path,
             agent_id=agent_id or self.agent_id,
+            limit=limit,
+        )
+
+    # ------------------------------------------------------------------
+    # Branch management (Pro)
+    # ------------------------------------------------------------------
+
+    def switch_branch(self, name: str) -> None:
+        """Switch the active branch for all subsequent operations."""
+        self._branch = name
+
+    def create_branch(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        parent_branch: str | None = None,
+    ) -> Branch:
+        """Create a new memory branch from the current or specified parent."""
+        branch = Branch(
+            namespace=self.namespace,
+            name=name,
+            parent_branch=parent_branch or self._branch,
+            branched_at=datetime.now(timezone.utc),
+            created_by=self.agent_id,
+            description=description,
+        )
+        created = self._adapter.create_branch(branch)
+        self._adapter.log_event(Event(
+            namespace=self.namespace,
+            agent_id=self.agent_id,
+            branch=self._branch,
+            event_type=EventType.BRANCH_CREATED,
+            summary=f"Created branch '{name}' from '{branch.parent_branch}'",
+            details={"branch_name": name, "parent_branch": branch.parent_branch},
+        ))
+        return created
+
+    def get_branch(self, name: str) -> Branch | None:
+        return self._adapter.get_branch(name, self.namespace)
+
+    def list_branches(self, *, status: str | None = None) -> list[Branch]:
+        return self._adapter.list_branches(self.namespace, status=status)
+
+    def close_branch(self, name: str) -> Branch:
+        closed = self._adapter.close_branch(name, self.namespace)
+        self._adapter.log_event(Event(
+            namespace=self.namespace,
+            agent_id=self.agent_id,
+            branch=name,
+            event_type=EventType.BRANCH_CLOSED,
+            summary=f"Closed branch '{name}'",
+            details={"branch_name": name},
+        ))
+        return closed
+
+    def diff_branch(self, name: str | None = None) -> list[DiffEntry]:
+        return self._adapter.diff_branch(name or self._branch, self.namespace)
+
+    def merge_branch(
+        self,
+        name: str | None = None,
+        *,
+        strategy: MergeStrategy = MergeStrategy.FAST_FORWARD,
+        resolve_conflicts: dict[str, str] | None = None,
+    ) -> MergeResult:
+        branch_name = name or self._branch
+        result = self._adapter.merge_branch(
+            branch_name, self.namespace,
+            strategy=strategy,
+            resolve_conflicts=resolve_conflicts,
+        )
+        if result.status == "merged":
+            self._adapter.log_event(Event(
+                namespace=self.namespace,
+                agent_id=self.agent_id,
+                branch="main",
+                event_type=EventType.BRANCH_MERGED,
+                summary=f"Merged branch '{branch_name}' ({result.merged_entries} entries)",
+                details={
+                    "branch_name": branch_name,
+                    "strategy": strategy.value if isinstance(strategy, MergeStrategy) else strategy,
+                    "merged_entries": result.merged_entries,
+                },
+            ))
+        return result
+
+    # ------------------------------------------------------------------
+    # Branch access control (Pro)
+    # ------------------------------------------------------------------
+
+    def grant_branch_access(
+        self,
+        branch_name: str,
+        grantee_type: str,
+        grantee_id: str,
+        permission: str = "read",
+    ) -> BranchAccess:
+        access = BranchAccess(
+            namespace=self.namespace,
+            branch_name=branch_name,
+            grantee_type=grantee_type,
+            grantee_id=grantee_id,
+            permission=BranchAccessPermission(permission),
+            granted_by=self.agent_id,
+        )
+        result = self._adapter.grant_branch_access(access)
+        self._adapter.log_event(Event(
+            namespace=self.namespace,
+            agent_id=self.agent_id,
+            branch=branch_name,
+            event_type=EventType.ACCESS_GRANTED,
+            summary=f"Granted {permission} access to {grantee_type}:{grantee_id} on '{branch_name}'",
+            details={
+                "branch_name": branch_name,
+                "grantee_type": grantee_type,
+                "grantee_id": grantee_id,
+                "permission": permission,
+            },
+        ))
+        return result
+
+    def revoke_branch_access(
+        self, branch_name: str, grantee_type: str, grantee_id: str
+    ) -> None:
+        self._adapter.revoke_branch_access(
+            branch_name, grantee_type, grantee_id, self.namespace,
+        )
+        self._adapter.log_event(Event(
+            namespace=self.namespace,
+            agent_id=self.agent_id,
+            branch=branch_name,
+            event_type=EventType.ACCESS_REVOKED,
+            summary=f"Revoked access from {grantee_type}:{grantee_id} on '{branch_name}'",
+            details={
+                "branch_name": branch_name,
+                "grantee_type": grantee_type,
+                "grantee_id": grantee_id,
+            },
+        ))
+
+    def list_branch_access(self, branch_name: str) -> list[BranchAccess]:
+        return self._adapter.list_branch_access(branch_name, self.namespace)
+
+    # ------------------------------------------------------------------
+    # Tags (Pro)
+    # ------------------------------------------------------------------
+
+    def create_tag(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        branch: str | None = None,
+    ) -> Tag:
+        tag = Tag(
+            namespace=self.namespace,
+            name=name,
+            branch=branch or self._branch,
+            tagged_at=datetime.now(timezone.utc),
+            description=description,
+            created_by=self.agent_id,
+        )
+        created = self._adapter.create_tag(tag)
+        self._adapter.log_event(Event(
+            namespace=self.namespace,
+            agent_id=self.agent_id,
+            branch=tag.branch,
+            event_type=EventType.TAG_CREATED,
+            summary=f"Tagged '{name}' on branch '{tag.branch}'",
+            details={"tag_name": name, "branch": tag.branch},
+        ))
+        return created
+
+    def list_tags(self, *, branch: str | None = None) -> list[Tag]:
+        return self._adapter.list_tags(self.namespace, branch=branch)
+
+    def delete_tag(self, name: str) -> None:
+        self._adapter.delete_tag(name, self.namespace)
+
+    # ------------------------------------------------------------------
+    # Timeline (Pro)
+    # ------------------------------------------------------------------
+
+    def timeline(
+        self,
+        *,
+        branch: str | None = None,
+        event_type: str | None = None,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[Event]:
+        """Return events on this agent's timeline."""
+        return self._adapter.list_events(
+            self.agent_id,
+            self.namespace,
+            branch=branch,
+            event_type=event_type,
+            since=since,
             limit=limit,
         )
 
