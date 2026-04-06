@@ -16,6 +16,7 @@ members = [
     "amfs-cli",
     "amfs-connectors",
     "amfs-core",
+    "amfs-cortex",
     "amfs-crewai",
     "amfs-http-server",
     "amfs-mcp-server",
@@ -280,6 +281,23 @@ dependencies = [
 requires-dist = [{ name = "pydantic", specifier = ">=2.0,<3" }]
 
 [[package]]
+name = "amfs-cortex"
+version = "0.1.0"
+source = { editable = "packages/cortex" }
+dependencies = [
+    { name = "amfs" },
+    { name = "amfs-adapter-postgres" },
+    { name = "amfs-core" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "amfs", editable = "packages/sdk-python" },
+    { name = "amfs-adapter-postgres", editable = "packages/adapters/postgres" },
+    { name = "amfs-core", editable = "packages/core" },
+]
+
+[[package]]
 name = "amfs-crewai"
 version = "0.1.0"
 source = { editable = "packages/integrations/crewai" }
@@ -309,6 +327,7 @@ dependencies = [
     { name = "amfs" },
     { name = "amfs-core" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "sse-starlette" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -324,6 +343,7 @@ requires-dist = [
     { name = "amfs-core", editable = "packages/core" },
     { name = "amfs-patterns", marker = "extra == 'pro'", editable = "packages/patterns" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "sse-starlette", specifier = ">=2.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
