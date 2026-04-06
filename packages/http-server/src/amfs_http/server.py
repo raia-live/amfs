@@ -29,7 +29,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
-from amfs_core.models import AMFSConfig, LayerConfig, MemoryEntry
+from amfs_core.models import AMFSConfig, LayerConfig, MemoryEntry, SearchQuery
 
 from amfs_http.auth import verify_api_key
 from amfs_http.models import (
@@ -182,10 +182,11 @@ async def health() -> dict[str, str]:
 async def read_entry(
     entity_path: str,
     key: str,
+    branch: str = Query("main"),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     mem = _get_memory()
-    entry = mem.read(entity_path, key)
+    entry = mem.read(entity_path, key, branch=branch)
     if entry is None:
         return {"status": "not_found", "entity_path": entity_path, "key": key}
     return _entry_to_response(entry)
@@ -214,6 +215,7 @@ async def write_entry(
         pattern_refs=req.pattern_refs or None,
         memory_type=mt,
         shared=req.shared,
+        branch=req.branch,
     )
     _sse_manager.broadcast(entry)
     _audit_log(
@@ -227,10 +229,11 @@ async def write_entry(
 @app.get("/api/v1/entries")
 async def list_entries(
     entity_path: str | None = Query(None),
+    branch: str = Query("main"),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     mem = _get_memory()
-    entries = mem.list(entity_path)
+    entries = mem.list(entity_path, branch=branch)
     return {"entries": [_entry_to_response(e) for e in entries]}
 
 
@@ -245,15 +248,19 @@ async def search_entries(
     _auth: str | None = Depends(verify_api_key),
 ) -> list[dict[str, Any]]:
     mem = _get_memory()
-    results = mem.search(
-        entity_path=req.entity_path,
-        min_confidence=req.min_confidence,
-        max_confidence=req.max_confidence,
-        agent_id=req.agent_id,
-        since=req.since,
-        pattern_ref=req.pattern_ref,
-        sort_by=req.sort_by,
-        limit=req.limit,
+    branch = getattr(req, "branch", "main") or "main"
+    results = mem._adapter.search(
+        SearchQuery(
+            entity_path=req.entity_path,
+            min_confidence=req.min_confidence,
+            max_confidence=req.max_confidence,
+            agent_id=req.agent_id,
+            since=req.since,
+            pattern_ref=req.pattern_ref,
+            sort_by=req.sort_by,
+            limit=req.limit,
+        ),
+        branch=branch,
     )
 
     if req.query:

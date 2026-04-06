@@ -60,10 +60,11 @@ read(
     key: str,
     *,
     min_confidence: float = 0.0,
+    branch: str = "main",
 ) -> MemoryEntry | None
 ```
 
-Returns the current version of the entry, or `None` if not found or below confidence threshold.
+Returns the current version of the entry, or `None` if not found or below confidence threshold. The `branch` parameter selects which branch to read from (defaults to `main`).
 
 ---
 
@@ -80,10 +81,14 @@ write(
     pattern_refs: list[str] | None = None,
     memory_type: MemoryType = MemoryType.FACT,
     artifact_refs: list[ArtifactRef] | None = None,
+    shared: bool = True,
+    branch: str = "main",
 ) -> MemoryEntry
 ```
 
 Creates a new version of the entry. If the key already exists, the previous version is superseded (CoW). The `memory_type` parameter controls decay behavior — `belief` decays 2× faster, `experience` decays 1.5× slower.
+
+The `branch` parameter determines which branch the entry is written to (defaults to `main`). Every write is also logged as an event on the agent's [git-like timeline](/amfs/concepts/git-timeline/).
 
 The optional `artifact_refs` parameter links external blobs (S3 objects, files, URLs) to this entry. See [ArtifactRef](#artifactref) below.
 
@@ -96,10 +101,11 @@ list(
     entity_path: str | None = None,
     *,
     include_superseded: bool = False,
+    branch: str = "main",
 ) -> list[MemoryEntry]
 ```
 
-Returns all current entries, optionally filtered by entity. Set `include_superseded=True` for full version history.
+Returns all current entries, optionally filtered by entity. Set `include_superseded=True` for full version history. The `branch` parameter selects which branch to list from.
 
 ---
 
@@ -117,6 +123,22 @@ search(
 ```
 
 Search across all entries with filters.
+
+---
+
+### timeline
+
+```python
+timeline(
+    *,
+    branch: str | None = None,
+    event_type: str | None = None,
+    since: datetime | None = None,
+    limit: int = 100,
+) -> list[Event]
+```
+
+Returns the git-like event log for this agent. Every write, outcome, cross-agent read, and brain brief is recorded as an event. See [Git-like Timeline](/amfs/concepts/git-timeline/) for details.
 
 ---
 
@@ -266,6 +288,8 @@ class MemoryEntry:
     confidence: float               # Trust score
     outcome_count: int              # Outcomes applied
     memory_type: MemoryType         # fact, belief, or experience
+    branch: str                     # Branch name ("main" by default)
+    shared: bool                    # Visible to other agents
     ttl_at: datetime | None         # Expiration timestamp
     embedding: list[float] | None   # Vector embedding
     artifact_refs: list[ArtifactRef]  # Linked external blobs
@@ -519,6 +543,20 @@ amfs_explain(
 
 Returns the causal read chain for the current session: which entries were read and their details.
 
+### amfs_timeline
+
+```
+amfs_timeline(
+    agent_id: str | None = None,
+    branch: str | None = None,
+    event_type: str | None = None,
+    since: str | None = None,
+    limit: int = 100,
+) -> str (JSON)
+```
+
+Returns the git-like event log for an agent. Every write, outcome, cross-agent read, and brain brief is recorded as an event. See [Git-like Timeline](/amfs/concepts/git-timeline/).
+
 ---
 
 ## HTTP REST API
@@ -529,11 +567,22 @@ When using the [HTTP API server](/amfs/guides/http-server/), the following REST 
 
 | Method | Path | Description |
 |:-------|:-----|:------------|
-| `GET` | `/api/v1/entries/{entity_path}/{key}` | Read current version |
-| `POST` | `/api/v1/entries` | Write new entry (CoW) |
-| `GET` | `/api/v1/entries` | List entries |
+| `GET` | `/api/v1/entries/{entity_path}/{key}?branch=main` | Read current version (branch-aware) |
+| `POST` | `/api/v1/entries` | Write new entry (CoW, supports `branch` in body) |
+| `GET` | `/api/v1/entries?branch=main` | List entries (branch-aware) |
 | `GET` | `/api/v1/entries/{entity_path}/{key}/history` | Version history |
-| `GET` | `/api/v1/search` | Search with filters |
+| `POST` | `/api/v1/search` | Search with filters (supports `branch` in body) |
+
+All entry endpoints accept a `branch` parameter (query param for GET, body field for POST). Defaults to `main`. When targeting a non-main branch with the Pro branching module installed, the caller's API key is checked against the branch access grants.
+
+### Agents & Timeline
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/agents` | List agents with entry counts, entities touched, and last active time |
+| `GET` | `/api/v1/agents/{agent_id}/memory-graph` | Get agent's memory graph (entities and entries touched) |
+| `GET` | `/api/v1/agents/{agent_id}/activity` | Get agent's activity timeline (writes, outcomes, traces) |
+| `GET` | `/api/v1/agents/{agent_id}/timeline` | Git-like event log (every write, outcome, read, brief) |
 
 ### Outcomes
 
@@ -548,14 +597,6 @@ When using the [HTTP API server](/amfs/guides/http-server/), the following REST 
 |:-------|:-----|:------------|
 | `GET` | `/api/v1/traces` | List decision traces (supports `?outcome_type=`, `?agent_id=`, `?limit=`) |
 | `GET` | `/api/v1/traces/{trace_id}` | Get full trace detail with causal entries, external contexts, query/error events, state diff |
-
-### Agents
-
-| Method | Path | Description |
-|:-------|:-----|:------------|
-| `GET` | `/api/v1/agents` | List agents with entry counts, entities touched, and last active time |
-| `GET` | `/api/v1/agents/{agent_id}/memory-graph` | Get agent's memory graph (entities and entries touched) |
-| `GET` | `/api/v1/agents/{agent_id}/activity` | Get agent's activity timeline (writes, outcomes, traces) |
 
 ### Observability
 
@@ -581,6 +622,35 @@ When using the [HTTP API server](/amfs/guides/http-server/), the following REST 
 | Method | Path | Description |
 |:-------|:-----|:------------|
 | `GET` | `/api/v1/admin/audit` | List audit log entries |
+
+### Branching (Pro)
+
+These endpoints are available when the `amfs-branching` module is installed:
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `POST` | `/api/v1/branches` | Create a branch |
+| `GET` | `/api/v1/branches` | List branches |
+| `GET` | `/api/v1/branches/{name}` | Get branch details |
+| `DELETE` | `/api/v1/branches/{name}` | Close a branch |
+| `GET` | `/api/v1/branches/{name}/diff` | Diff branch vs. main |
+| `POST` | `/api/v1/branches/{name}/merge` | Merge branch into main |
+| `POST` | `/api/v1/branches/{name}/access` | Grant access to a branch |
+| `GET` | `/api/v1/branches/{name}/access` | List access grants |
+| `DELETE` | `/api/v1/branches/{name}/access/{type}/{id}` | Revoke access |
+| `POST` | `/api/v1/branches/{name}/cherry-pick` | Cherry-pick entries |
+| `POST` | `/api/v1/pull-requests` | Create a pull request |
+| `GET` | `/api/v1/pull-requests` | List pull requests |
+| `GET` | `/api/v1/pull-requests/{id}` | Get PR with reviews |
+| `POST` | `/api/v1/pull-requests/{id}/reviews` | Add a review |
+| `POST` | `/api/v1/pull-requests/{id}/merge` | Merge a PR |
+| `POST` | `/api/v1/pull-requests/{id}/close` | Close a PR |
+| `POST` | `/api/v1/tags` | Create a snapshot tag |
+| `GET` | `/api/v1/tags` | List tags |
+| `DELETE` | `/api/v1/tags/{name}` | Delete a tag |
+| `POST` | `/api/v1/rollback` | Rollback to timestamp or event |
+| `POST` | `/api/v1/rollback/tag/{name}` | Rollback to a tag |
+| `POST` | `/api/v1/fork` | Fork agent memory to a new agent |
 
 Authentication is via the `X-AMFS-API-Key` header. Set `AMFS_API_KEYS` to enable. Interactive API docs are available at `/docs` (Swagger UI).
 

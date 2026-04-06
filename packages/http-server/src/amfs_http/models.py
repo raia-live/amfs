@@ -15,6 +15,7 @@ class WriteRequest(BaseModel):
     pattern_refs: list[str] = Field(default_factory=list)
     memory_type: str = "fact"
     shared: bool = True
+    branch: str = "main"
 
 
 class OutcomeRequest(BaseModel):
@@ -34,6 +35,7 @@ class SearchRequest(BaseModel):
     pattern_ref: str | None = None
     limit: int = 100
     sort_by: str = "confidence"
+    branch: str = "main"
 
 
 class ContextRequest(BaseModel):

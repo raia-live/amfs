@@ -26,6 +26,13 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 ┌──────────────────────────────────────────────────────────┐
 │                    AMFS Pro (Proprietary)                  │
 │                                                          │
+│  ┌─ Memory Branching (Git for Agent Memory) ───────────┐ │
+│  │  Branches · Merge · PRs · Diff · Access Control      │ │
+│  │  Tags/Snapshots · Rollback · Cherry-pick · Fork      │ │
+│  │  Branch-Level Permissions (user/team/API key)        │ │
+│  │  Sacred Timeline (3D visualization)                   │ │
+│  └──────────────────────────────────────────────────────┘ │
+│                                                          │
 │  ┌─ Multi-Tenant SaaS ─────────────────────────────────┐ │
 │  │  Accounts · RBAC · Scoped API Keys · Audit · Quotas │ │
 │  │  Row-Level Security · OAuth/OIDC · Rate Limiting     │ │
@@ -57,6 +64,7 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │  ┌─ Dashboard ──────────────────────────────────────────┐ │
 │  │  Memory Explorer · Interactive Causal Graph           │ │
 │  │  Trace Detail with Enriched Context · Agent Graph     │ │
+│  │  Sacred Timeline (3D) · Branch Manager · PR Viewer   │ │
 │  │  API Key Console · Audit Viewer · Usage Analytics    │ │
 │  │  Pattern Detection · Team Management · Snapshots     │ │
 │  └──────────────────────────────────────────────────────┘ │
@@ -65,6 +73,8 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │                    AMFS OSS (Apache 2.0)                  │
 │                                                          │
 │  CoW Engine · Memory Types · Provenance Tiers             │
+│  Git-like Timeline (event logging on main branch)        │
+│  Branch-Aware Read/Write/List/Search (main default)      │
 │  Temporal Queries · Session-Level Causal Explainability   │
 │  Enriched Decision Traces · Query/Error Event Tracking    │
 │  Composite Recall Scoring · Multi-Scope Search            │
@@ -95,6 +105,23 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | Per-agent memory graph and activity timeline | Yes | Yes |
 | Composite recall scoring | Yes | Yes |
 | Multi-scope search | Yes | Yes |
+| **Git-like Timeline** | | |
+| Event logging (writes, outcomes, reads, briefs) on main | Yes | Yes |
+| Branch-aware read/write/list/search (`branch` parameter) | Yes | Yes |
+| Timeline API endpoint per agent | Yes | Yes |
+| MCP `amfs_timeline` tool | Yes | Yes |
+| **Memory Branching (Pro)** | | |
+| Create / close / list branches | — | Yes |
+| Diff branch vs. main | — | Yes |
+| Merge branches (fast-forward, ours, theirs) | — | Yes |
+| Branch access control (grant/revoke per user/team/API key) | — | Yes |
+| Access enforcement on non-main read/write | — | Yes |
+| Pull Requests with review workflow | — | Yes |
+| Tags / named snapshots | — | Yes |
+| Rollback to tag or timestamp | — | Yes |
+| Cherry-pick entries across branches | — | Yes |
+| Fork agent memory to a new agent | — | Yes |
+| Sacred Timeline (3D interactive visualization) | — | Yes |
 | **Connectors** | | |
 | Connector framework (`ConnectorABC`) | Yes | Yes |
 | Connector CLI (`amfs connector install/list/remove`) | Yes | Yes |
@@ -169,19 +196,19 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 
 ## OSS Layer — What's Included
 
-The open-source layer ([github.com/raia-live/amfs](https://github.com/raia-live/amfs)) provides the full memory primitive: read, write, version, search, and learn from outcomes. It also includes a connector framework for ingesting events from external systems, composite recall scoring, and multi-scope search.
+The open-source layer ([github.com/raia-live/amfs](https://github.com/raia-live/amfs)) provides the full memory primitive: read, write, version, search, and learn from outcomes. It includes a **git-like timeline engine** that logs every operation as an event, branch-aware read/write operations, a connector framework for ingesting events from external systems, composite recall scoring, and multi-scope search.
 
 ### Packages
 
 | Package | Description |
 |:--------|:------------|
-| `amfs-core` | CoW engine, models (`MemoryEntry`, `MemoryType`, `ProvenanceTier`), read tracking, causal tagging, default embedder |
-| `amfs` (SDK) | `AgentMemory` class — `read`, `write`, `list`, `search`, `history`, `explain`, `commit_outcome`, `record_context` |
+| `amfs-core` | CoW engine, models (`MemoryEntry`, `MemoryType`, `ProvenanceTier`, `Event`), read tracking, causal tagging, default embedder |
+| `amfs` (SDK) | `AgentMemory` class — `read`, `write`, `list`, `search`, `history`, `timeline`, `explain`, `commit_outcome`, `record_context` |
 | `amfs-adapter-filesystem` | JSON-file-based adapter for local development |
 | `amfs-adapter-postgres` | PostgreSQL adapter with PL/pgSQL triggers for outcome propagation and `LISTEN/NOTIFY` for watch |
 | `amfs-adapter-s3` | Amazon S3 / S3-compatible adapter for cloud-native storage |
-| `amfs-http-server` | REST API server (FastAPI/Uvicorn) for remote access |
-| `amfs-mcp-server` | MCP server exposing 9 tools: `amfs_read`, `amfs_write`, `amfs_search`, `amfs_list`, `amfs_stats`, `amfs_commit_outcome`, `amfs_record_context`, `amfs_history`, `amfs_explain` |
+| `amfs-http-server` | REST API server (FastAPI/Uvicorn) for remote access, branch-aware endpoints |
+| `amfs-mcp-server` | MCP server exposing 10 tools: `amfs_read`, `amfs_write`, `amfs_search`, `amfs_list`, `amfs_stats`, `amfs_commit_outcome`, `amfs_record_context`, `amfs_history`, `amfs_explain`, `amfs_timeline` |
 | `amfs-cli` | Terminal tools for inspecting, diffing, snapshotting, and restoring memory |
 | `@amfs/sdk` | TypeScript SDK (full parity with Python: ReadTracker, search, stats, history, explain, recordContext) |
 
@@ -226,6 +253,39 @@ chain = mem.explain()
 ## Pro Layer — What's Added
 
 The Pro layer wraps the OSS layer — it never replaces it. All Pro features read from and write to the same memory store using the same adapters and SDK.
+
+### Memory Branching — Git for Agent Memory
+
+The defining Pro feature. While OSS provides the git-like timeline engine (event logging on `main`), Pro adds the full branching model — branches, merge, pull requests, access control, tags, rollback, cherry-pick, and fork. Install with `pip install amfs-branching`.
+
+**Branches** — Create branches from an agent's main memory. Write to a branch without affecting main. Diff changes, then merge or discard.
+
+**Access Control** — Grant read or read/write access to specific users, teams, or API keys per branch. Access is enforced at the HTTP layer — requests targeting a non-main branch are automatically checked against the branch's access grants.
+
+**Pull Requests** — Create PRs for team review before merging branch changes into main. Includes review workflow with approve/reject/comment.
+
+**Tags & Rollback** — Create named snapshots and roll back memory to any point in time or tagged state.
+
+**Cherry-pick & Fork** — Selectively move entries between branches, or clone an entire agent's memory to a new agent.
+
+**Sacred Timeline** — Interactive 3D visualization (React Three Fiber) showing how an agent's memory evolved over time, with branch forks, event nodes, and contextual detail panels.
+
+```python
+from amfs import AgentMemory
+from amfs_branching.sdk import extend_with_branching
+
+mem = AgentMemory(agent_id="deploy-agent")
+extend_with_branching(mem)
+
+mem.create_branch("experiment/retry-v3")
+mem.switch_branch("experiment/retry-v3")
+mem.write("checkout-service", "retry-pattern", {"max_retries": 5})
+
+mem.grant_branch_access("experiment/retry-v3", "api_key", "amfs_sk_bob", "read")
+
+diffs = mem.diff_branch("experiment/retry-v3")
+result = mem.merge_branch("experiment/retry-v3")
+```
 
 ### Multi-Tenant SaaS Foundation
 
@@ -393,7 +453,7 @@ A web dashboard (Next.js 15 + React 19) for exploring memory, visualizing decisi
 | **Entities** | Browse entities, view entries with confidence badges, version history, provenance details |
 | **Traces** | Enriched trace cards with causal entries (full values), external contexts, query/error events, session timing, outcome badges, and search/filter |
 | **Trace Detail** | Full trace view with interactive causal graph (D3), timeline, entry snapshots, and state diff |
-| **Agents** | Per-agent overview with memory graph visualization (entity relationships, read/write activity) and activity timeline |
+| **Agents** | Per-agent overview with memory graph, activity, and **Git Repository** section (see below) |
 | **Incidents** | Incident timeline with causal chain drill-down |
 | **Patterns** | Detected pattern dashboard (recurring failures, hot entities, stale clusters, confidence drift) with severity indicators and resolution tracking |
 | **Teams** | Team CRUD with member management (admin, developer, viewer roles) |
@@ -402,6 +462,16 @@ A web dashboard (Next.js 15 + React 19) for exploring memory, visualizing decisi
 | **Audit Log** | Searchable, filterable log of all state-changing operations |
 | **Usage & Quotas** | Quota progress bars, request metrics, top agents/entities breakdown |
 | **Pro Tools** | Retrieval playground, critic panel, distiller view, calibration dashboard, training data export |
+
+**Agent Git Repository** — Each agent's detail page includes a "Git Repository" section with:
+
+| Tab | Description |
+|:----|:------------|
+| **Sacred Timeline** | Interactive 3D visualization of the agent's memory history (React Three Fiber). Shows event nodes, branch forks, date markers, and contextual detail panels when clicking events. |
+| **Event Log** | Chronological 2D list of all events (writes, outcomes, reads, briefs, webhooks) with icons, details, and date grouping. |
+| **Branches** | Branch management — create, close, merge, view diffs, and manage access grants per branch. |
+| **Pull Requests** | PR workflow — create, review, merge, and close pull requests for branch changes. |
+| **Tags & Rollback** | Create named snapshots, roll back to tags or specific timestamps. |
 
 ### OpenTelemetry Export
 
@@ -417,7 +487,7 @@ exporter.export_trace(trace)  # sends spans to your OTel collector
 
 ### Pro MCP Server
 
-Extends the OSS MCP server with 8 additional tools:
+Extends the OSS MCP server with additional tools:
 
 | Tool | Description |
 |:-----|:------------|
@@ -443,8 +513,13 @@ Extends the OSS MCP server with 8 additional tools:
               ▼                             ▼
    ┌─────────────────┐          ┌───────────────────────────┐
    │  MCP Server OSS │          │  MCP Server Pro            │
-   │  (9 tools)      │          │  (9 + 7 tools)             │
+   │  (10 tools)     │          │  (10 + 7 tools)            │
    └────────┬────────┘          │                           │
+            │                   │  Branching Layer:         │
+            │                   │  Branches · Merge · PRs   │
+            │                   │  Access Control · Tags    │
+            │                   │  Rollback · Fork          │
+            │                   │                           │
             │                   │  Multi-Tenant Layer:      │
             │                   │  Auth · RBAC · RLS        │
             │                   │  Scopes · Audit · Quotas  │
@@ -474,6 +549,7 @@ Extends the OSS MCP server with 8 additional tools:
             ┌─────────────────┐
             │   AgentMemory   │  ← Python / TypeScript SDK
             │   (CoW Engine)  │
+            │   + Timeline    │  ← Git-like event log
             └────────┬────────┘
                      │
            ┌─────────┼─────────┐
@@ -495,6 +571,15 @@ The Pro API layer wraps `AgentMemory` and `CoWEngine` with authentication, tenan
 | CI/CD outcome tracking | OSS |
 | Remote HTTP API access | OSS |
 | S3-based cloud storage | OSS |
+| Git-like timeline (event logging on main branch) | OSS |
+| Branch-aware read/write (main branch only) | OSS |
+| Create branches and share memory selectively | **Pro** (branching) |
+| Branch access control per user/team/API key | **Pro** (branching) |
+| Merge branches, resolve conflicts | **Pro** (branching) |
+| Pull request workflow for memory changes | **Pro** (branching) |
+| Rollback memory to a point in time or tag | **Pro** (branching) |
+| Fork agent memory to new agents | **Pro** (branching) |
+| Sacred Timeline 3D visualization | **Pro** (dashboard) |
 | Multi-tenant SaaS with account isolation | **Pro** |
 | Scoped API keys per agent/tool | **Pro** |
 | Compliance audit logging | **Pro** |
