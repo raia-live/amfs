@@ -549,6 +549,194 @@ def seed_api_keys(cur):
     print(f"    Inserted {len(keys)} API keys")
 
 
+def seed_agents(cur):
+    """Seed amfs_agents — register each agent so the timeline page works."""
+    print("  Seeding agents...")
+    cur.execute("DELETE FROM amfs_agents WHERE namespace = %s", (NS,))
+
+    for agent in AGENTS:
+        cur.execute("""
+            INSERT INTO amfs_agents (namespace, agent_id, display_name, created_at, last_active_at, entry_count)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (NS, agent, agent.replace("-", " ").title(), ts_iso(2000), ts_iso(2), 5))
+
+    cur.execute("""
+        INSERT INTO amfs_agents (namespace, agent_id, display_name, created_at, last_active_at, entry_count)
+        VALUES (%s, %s, %s, %s, %s, %s)
+    """, (NS, "amfs-server", "AMFS Server", ts_iso(2000), ts_iso(0), 1))
+
+    print(f"    Inserted {len(AGENTS) + 1} agents")
+
+
+def seed_events(cur):
+    """Seed amfs_events — the git-like timeline log for each agent."""
+    print("  Seeding timeline events...")
+    cur.execute("DELETE FROM amfs_events WHERE namespace = %s", (NS,))
+
+    events = [
+        # deploy-agent writes
+        (NS, "deploy-agent", "main", "write", "Wrote checkout-service/retry-pattern v1",
+         json.dumps({"entity_path": "checkout-service", "key": "retry-pattern", "version": 1, "confidence": 0.92, "memory_type": "fact", "shared": True}),
+         None, ts_iso(72)),
+        (NS, "deploy-agent", "main", "write", "Wrote checkout-service/timeout-config v1",
+         json.dumps({"entity_path": "checkout-service", "key": "timeout-config", "version": 1, "confidence": 0.95, "memory_type": "fact", "shared": True}),
+         None, ts_iso(48)),
+        (NS, "deploy-agent", "main", "write", "Wrote checkout-service/circuit-breaker v1",
+         json.dumps({"entity_path": "checkout-service", "key": "circuit-breaker", "version": 1, "confidence": 0.90, "memory_type": "fact", "shared": True}),
+         None, ts_iso(60)),
+        (NS, "deploy-agent", "main", "write", "Wrote checkout-service/retry-pattern v2",
+         json.dumps({"entity_path": "checkout-service", "key": "retry-pattern", "version": 2, "confidence": 0.88, "memory_type": "fact", "shared": True}),
+         None, ts_iso(24)),
+        (NS, "deploy-agent", "main", "write", "Wrote checkout-service/deploy-v2.14 v1",
+         json.dumps({"entity_path": "checkout-service", "key": "deploy-v2.14", "version": 1, "confidence": 0.97, "memory_type": "experience", "shared": True}),
+         None, ts_iso(12)),
+        (NS, "deploy-agent", "main", "write", "Wrote notification-service/email-provider v1",
+         json.dumps({"entity_path": "notification-service", "key": "email-provider", "version": 1, "confidence": 0.89, "memory_type": "fact", "shared": True}),
+         None, ts_iso(250)),
+        (NS, "deploy-agent", "main", "write", "Wrote inventory/stock-sync v1",
+         json.dumps({"entity_path": "inventory", "key": "stock-sync", "version": 1, "confidence": 0.88, "memory_type": "fact", "shared": True}),
+         None, ts_iso(180)),
+
+        # deploy-agent outcomes
+        (NS, "deploy-agent", "main", "outcome", "Committed outcome DEP-100 (success)",
+         json.dumps({"outcome_ref": "DEP-100", "outcome_type": "success", "causal_confidence": 1.0, "affected_entries": 2}),
+         None, ts_iso(12)),
+        (NS, "deploy-agent", "main", "outcome", "Committed outcome DEP-101 (success)",
+         json.dumps({"outcome_ref": "DEP-101", "outcome_type": "success", "causal_confidence": 0.95, "affected_entries": 2}),
+         None, ts_iso(6)),
+        (NS, "deploy-agent", "main", "outcome", "Committed outcome DEP-102 (success)",
+         json.dumps({"outcome_ref": "DEP-102", "outcome_type": "success", "causal_confidence": 1.0, "affected_entries": 2}),
+         None, ts_iso(2)),
+
+        # review-agent writes
+        (NS, "review-agent", "main", "write", "Wrote checkout-service/risk-race-condition v1",
+         json.dumps({"entity_path": "checkout-service", "key": "risk-race-condition", "version": 1, "confidence": 0.65, "memory_type": "belief", "shared": True}),
+         None, ts_iso(36)),
+        (NS, "review-agent", "main", "write", "Wrote auth/session-timeout v1",
+         json.dumps({"entity_path": "auth", "key": "session-timeout", "version": 1, "confidence": 0.91, "memory_type": "fact", "shared": True}),
+         None, ts_iso(96)),
+        (NS, "review-agent", "main", "write", "Wrote payments/idempotency-pattern v1",
+         json.dumps({"entity_path": "payments", "key": "idempotency-pattern", "version": 1, "confidence": 0.93, "memory_type": "fact", "shared": True}),
+         None, ts_iso(168)),
+        (NS, "review-agent", "main", "outcome", "Committed outcome REV-200 (minor_failure)",
+         json.dumps({"outcome_ref": "REV-200", "outcome_type": "minor_failure", "causal_confidence": 0.85, "affected_entries": 1}),
+         None, ts_iso(36)),
+
+        # security-scanner writes
+        (NS, "security-scanner", "main", "write", "Wrote auth/jwt-rotation v1",
+         json.dumps({"entity_path": "auth", "key": "jwt-rotation", "version": 1, "confidence": 0.98, "memory_type": "fact", "shared": True}),
+         None, ts_iso(120)),
+        (NS, "security-scanner", "main", "write", "Wrote auth/risk-token-leak v1",
+         json.dumps({"entity_path": "auth", "key": "risk-token-leak", "version": 1, "confidence": 0.72, "memory_type": "belief", "shared": True}),
+         None, ts_iso(80)),
+        (NS, "security-scanner", "main", "write", "Wrote auth/rate-limiter v1",
+         json.dumps({"entity_path": "auth", "key": "rate-limiter", "version": 1, "confidence": 0.94, "memory_type": "fact", "shared": True}),
+         None, ts_iso(100)),
+        (NS, "security-scanner", "main", "write", "Wrote payments/pci-compliance v1",
+         json.dumps({"entity_path": "payments", "key": "pci-compliance", "version": 1, "confidence": 0.99, "memory_type": "fact", "shared": True}),
+         None, ts_iso(720)),
+        (NS, "security-scanner", "main", "write", "Wrote api-gateway/cors-config v1",
+         json.dumps({"entity_path": "api-gateway", "key": "cors-config", "version": 1, "confidence": 0.97, "memory_type": "fact", "shared": True}),
+         None, ts_iso(300)),
+        (NS, "security-scanner", "main", "outcome", "Committed outcome SEC-300 (failure)",
+         json.dumps({"outcome_ref": "SEC-300", "outcome_type": "failure", "causal_confidence": 0.90, "affected_entries": 2}),
+         None, ts_iso(80)),
+
+        # monitoring-agent writes
+        (NS, "monitoring-agent", "main", "write", "Wrote payments/risk-double-charge v1",
+         json.dumps({"entity_path": "payments", "key": "risk-double-charge", "version": 1, "confidence": 0.58, "memory_type": "belief", "shared": True}),
+         None, ts_iso(48)),
+        (NS, "monitoring-agent", "main", "write", "Wrote notification-service/risk-spam-loop v1",
+         json.dumps({"entity_path": "notification-service", "key": "risk-spam-loop", "version": 1, "confidence": 0.62, "memory_type": "belief", "shared": True}),
+         None, ts_iso(60)),
+        (NS, "monitoring-agent", "main", "write", "Wrote inventory/low-stock-threshold v1",
+         json.dumps({"entity_path": "inventory", "key": "low-stock-threshold", "version": 1, "confidence": 0.93, "memory_type": "fact", "shared": True}),
+         None, ts_iso(160)),
+        (NS, "monitoring-agent", "main", "outcome", "Committed outcome MON-400 (critical_failure)",
+         json.dumps({"outcome_ref": "MON-400", "outcome_type": "critical_failure", "causal_confidence": 0.95, "affected_entries": 3}),
+         None, ts_iso(48)),
+        (NS, "monitoring-agent", "main", "outcome", "Committed outcome MON-401 (failure)",
+         json.dumps({"outcome_ref": "MON-401", "outcome_type": "failure", "causal_confidence": 0.80, "affected_entries": 1}),
+         None, ts_iso(60)),
+
+        # perf-optimizer writes
+        (NS, "perf-optimizer", "main", "write", "Wrote user-service/cache-strategy v1",
+         json.dumps({"entity_path": "user-service", "key": "cache-strategy", "version": 1, "confidence": 0.87, "memory_type": "fact", "shared": True}),
+         None, ts_iso(150)),
+        (NS, "perf-optimizer", "main", "write", "Wrote user-service/db-pool-config v1",
+         json.dumps({"entity_path": "user-service", "key": "db-pool-config", "version": 1, "confidence": 0.91, "memory_type": "fact", "shared": True}),
+         None, ts_iso(140)),
+        (NS, "perf-optimizer", "main", "write", "Wrote api-gateway/rate-limits v1",
+         json.dumps({"entity_path": "api-gateway", "key": "rate-limits", "version": 1, "confidence": 0.95, "memory_type": "fact", "shared": True}),
+         None, ts_iso(200)),
+        (NS, "perf-optimizer", "main", "outcome", "Committed outcome OPT-500 (success)",
+         json.dumps({"outcome_ref": "OPT-500", "outcome_type": "success", "causal_confidence": 0.92, "affected_entries": 2}),
+         None, ts_iso(18)),
+
+        # Cross-agent reads (other agents reading from deploy-agent's memory)
+        (NS, "deploy-agent", "main", "cross_agent_read", "review-agent read checkout-service/retry-pattern",
+         json.dumps({"reader_agent": "review-agent", "entity_path": "checkout-service", "key": "retry-pattern", "version": 2}),
+         "review-agent", ts_iso(30)),
+        (NS, "deploy-agent", "main", "cross_agent_read", "monitoring-agent read checkout-service/circuit-breaker",
+         json.dumps({"reader_agent": "monitoring-agent", "entity_path": "checkout-service", "key": "circuit-breaker", "version": 1}),
+         "monitoring-agent", ts_iso(45)),
+        (NS, "deploy-agent", "main", "cross_agent_read", "security-scanner read checkout-service/timeout-config",
+         json.dumps({"reader_agent": "security-scanner", "entity_path": "checkout-service", "key": "timeout-config", "version": 1}),
+         "security-scanner", ts_iso(40)),
+        (NS, "security-scanner", "main", "cross_agent_read", "deploy-agent read auth/jwt-rotation",
+         json.dumps({"reader_agent": "deploy-agent", "entity_path": "auth", "key": "jwt-rotation", "version": 1}),
+         "deploy-agent", ts_iso(15)),
+        (NS, "review-agent", "main", "cross_agent_read", "monitoring-agent read payments/idempotency-pattern",
+         json.dumps({"reader_agent": "monitoring-agent", "entity_path": "payments", "key": "idempotency-pattern", "version": 1}),
+         "monitoring-agent", ts_iso(46)),
+
+        # Brain brief compilations
+        (NS, "deploy-agent", "main", "brief_compiled", "Brain brief compiled for deploy-agent",
+         json.dumps({"digest_type": "agent_brief", "entry_count": 7, "entities_written": ["checkout-service", "notification-service", "inventory"]}),
+         None, ts_iso(1)),
+        (NS, "review-agent", "main", "brief_compiled", "Brain brief compiled for review-agent",
+         json.dumps({"digest_type": "agent_brief", "entry_count": 4, "entities_written": ["checkout-service", "auth", "payments"]}),
+         None, ts_iso(1)),
+        (NS, "security-scanner", "main", "brief_compiled", "Brain brief compiled for security-scanner",
+         json.dumps({"digest_type": "agent_brief", "entry_count": 5, "entities_written": ["auth", "payments", "api-gateway"]}),
+         None, ts_iso(1)),
+        (NS, "monitoring-agent", "main", "brief_compiled", "Brain brief compiled for monitoring-agent",
+         json.dumps({"digest_type": "agent_brief", "entry_count": 3, "entities_written": ["payments", "notification-service", "inventory"]}),
+         None, ts_iso(1)),
+        (NS, "perf-optimizer", "main", "brief_compiled", "Brain brief compiled for perf-optimizer",
+         json.dumps({"digest_type": "agent_brief", "entry_count": 3, "entities_written": ["user-service", "api-gateway"]}),
+         None, ts_iso(1)),
+
+        # Branch activity on deploy-agent
+        (NS, "deploy-agent", "main", "branch_created", "Branch experiment/retry-v3 created from main",
+         json.dumps({"branch_name": "experiment/retry-v3", "parent_branch": "main", "description": "Testing aggressive retry strategy"}),
+         None, ts_iso(20)),
+        (NS, "deploy-agent", "experiment/retry-v3", "write", "Wrote checkout-service/retry-pattern v3 on experiment/retry-v3",
+         json.dumps({"entity_path": "checkout-service", "key": "retry-pattern", "version": 3, "confidence": 0.75, "memory_type": "belief", "shared": False}),
+         None, ts_iso(18)),
+        (NS, "deploy-agent", "experiment/retry-v3", "write", "Wrote checkout-service/retry-backoff v1 on experiment/retry-v3",
+         json.dumps({"entity_path": "checkout-service", "key": "retry-backoff", "version": 1, "confidence": 0.82, "memory_type": "fact", "shared": False}),
+         None, ts_iso(16)),
+        (NS, "deploy-agent", "experiment/retry-v3", "outcome", "Committed outcome EXP-001 (minor_failure) on experiment/retry-v3",
+         json.dumps({"outcome_ref": "EXP-001", "outcome_type": "minor_failure", "causal_confidence": 0.70, "affected_entries": 2}),
+         None, ts_iso(14)),
+
+        # Branch merged back into main
+        (NS, "deploy-agent", "main", "branch_merged", "Merged branch 'experiment/retry-v3' (2 entries)",
+         json.dumps({"branch_name": "experiment/retry-v3", "strategy": "fast_forward", "merged_entries": 2}),
+         None, ts_iso(10)),
+    ]
+
+    for e in events:
+        cur.execute("""
+            INSERT INTO amfs_events
+                (namespace, agent_id, branch, event_type, summary, details, actor_agent_id, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+        """, e)
+
+    print(f"    Inserted {len(events)} timeline events")
+
+
 def seed_audit_log(cur):
     """Seed amfs_audit_log with realistic audit events."""
     print("  Seeding audit log...")
@@ -597,6 +785,39 @@ def seed_audit_log(cur):
     print(f"    Inserted {len(events)} audit log entries")
 
 
+def clear_branching_tables(cur):
+    """Clear all branching tables (Pro) so we start fresh."""
+    print("  Clearing branching tables...")
+    for table in [
+        "amfs_pr_reviews", "amfs_pull_requests", "amfs_tags",
+        "amfs_branch_access", "amfs_branches",
+    ]:
+        cur.execute(f"DELETE FROM {table} WHERE namespace = %s", (NS,))
+    print("    Cleared branching tables")
+
+
+def seed_branches(cur):
+    """Seed amfs_branches with demo branch data."""
+    print("  Seeding branches...")
+
+    branches = [
+        (NS, "experiment/retry-v3", "main", "merged",
+         "Testing aggressive retry strategy",
+         "amfs-server", ts_iso(20), ts_iso(10)),
+    ]
+
+    for b in branches:
+        cur.execute("""
+            INSERT INTO amfs_branches
+                (namespace, name, parent_branch, status, description, created_by, branched_at, merged_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (namespace, name) DO UPDATE
+                SET status = EXCLUDED.status, merged_at = EXCLUDED.merged_at
+        """, b)
+
+    print(f"    Inserted {len(branches)} branches")
+
+
 def main():
     print(f"Connecting to: {DSN}")
     with psycopg.connect(DSN) as conn:
@@ -608,7 +829,11 @@ def main():
             seed_detected_patterns(cur)
             seed_teams(cur)
             seed_api_keys(cur)
+            seed_agents(cur)
+            seed_events(cur)
             seed_audit_log(cur)
+            clear_branching_tables(cur)
+            seed_branches(cur)
 
         conn.commit()
 
@@ -620,7 +845,10 @@ def main():
     print("  -  7 detected patterns (recurring_failure, hot_entity, stale_cluster, confidence_drift)")
     print("  -  3 teams with 12 members (admins, developers, viewers, agents)")
     print("  -  5 API keys (active, inactive, various scopes)")
+    print("  -  6 agents registered with timeline data")
+    print("  - 34 timeline events (writes, outcomes, cross-agent reads, branch merge)")
     print("  - 15 audit log entries")
+    print("  -  1 branch (experiment/retry-v3, merged)")
 
 
 if __name__ == "__main__":

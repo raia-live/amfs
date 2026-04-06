@@ -8,7 +8,7 @@ description: "Give your agent a persistent brain in 5 minutes."
 
 # Quick Start
 
-AMFS gives each agent a **persistent brain**. When an agent writes, it's forming a memory. When it recalls, it's accessing its own experience. When it reads shared knowledge, it benefits from what other agents have learned. Every interaction is tracked so you can always answer: *what did I know, when did I know it, and who told me?*
+AMFS gives each agent a **persistent brain** that works like a Git repository. When an agent writes, it's forming a memory — logged as an event on the agent's timeline. When it recalls, it's accessing its own experience. When it reads shared knowledge, it benefits from what other agents have learned. Every interaction is tracked so you can always answer: *what did I know, when did I know it, and who told me?*
 
 ---
 
@@ -236,6 +236,21 @@ with AgentMemory(agent_id="review-agent") as mem:
 | Learn from a specific agent  | `read_from(agent_id)`   | No                     | That specific agent |
 | See all your memories        | `my_entries()`          | Yes (yours only)       | Only you            |
 | Know who taught you          | `cross_agent_reads()`   | —                      | Other agents        |
+| See your memory timeline     | `timeline()`            | —                      | You (events log)    |
+
+---
+
+## 12. View Your Timeline
+
+Every operation is recorded on your agent's git-like timeline — like commits in a repo:
+
+```python
+events = mem.timeline(limit=10)
+for event in events:
+    print(f"[{event.event_type}] {event.summary}")
+```
+
+With AMFS Pro, you can create branches, merge changes, and share memory selectively. See [Git-like Timeline](/amfs/concepts/git-timeline/) for details.
 
 ---
 
@@ -243,4 +258,5 @@ with AgentMemory(agent_id="review-agent") as mem:
 
 - [Configuration](/amfs/getting-started/configuration/) — YAML config, adapters, and environment variables
 - [Core Concepts](/amfs/concepts/) — understand CoW, confidence, and outcome propagation
+- [Git-like Timeline](/amfs/concepts/git-timeline/) — how agent memory works like Git
 - [Python SDK Guide](/amfs/guides/python/) — full SDK reference with advanced features

@@ -66,11 +66,13 @@ The server is available at `http://localhost:8080` with interactive API docs at 
 
 | Method | Path | Description |
 |:-------|:-----|:------------|
-| `GET` | `/api/v1/entries/{entity_path}/{key}` | Read the current version of an entry |
-| `POST` | `/api/v1/entries` | Write a new entry (CoW) |
-| `GET` | `/api/v1/entries` | List entries, optionally filtered by entity |
+| `GET` | `/api/v1/entries/{entity_path}/{key}?branch=main` | Read the current version of an entry |
+| `POST` | `/api/v1/entries` | Write a new entry (CoW, supports `branch` in body) |
+| `GET` | `/api/v1/entries?branch=main` | List entries, optionally filtered by entity and branch |
 | `GET` | `/api/v1/entries/{entity_path}/{key}/history` | Get version history |
-| `GET` | `/api/v1/search` | Search entries with filters |
+| `POST` | `/api/v1/search` | Search entries with filters (supports `branch` in body) |
+
+All entry endpoints accept a `branch` parameter (defaults to `main`). See [Git-like Timeline](/amfs/concepts/git-timeline/).
 
 ### Outcomes
 
@@ -92,13 +94,14 @@ The server is available at `http://localhost:8080` with interactive API docs at 
 | `GET` | `/api/v1/traces` | List decision traces with enriched data (query events, error events, state diff, session timing) |
 | `GET` | `/api/v1/traces/{trace_id}` | Get full trace detail |
 
-### Agents
+### Agents & Timeline
 
 | Method | Path | Description |
 |:-------|:-----|:------------|
 | `GET` | `/api/v1/agents` | List agents with entry counts and last activity |
 | `GET` | `/api/v1/agents/{agent_id}/memory-graph` | Get agent's entity relationship graph |
 | `GET` | `/api/v1/agents/{agent_id}/activity` | Get agent's activity timeline |
+| `GET` | `/api/v1/agents/{agent_id}/timeline` | Git-like event log (writes, outcomes, reads, briefs) |
 
 ### Memory Cortex
 
@@ -155,6 +158,30 @@ The server is available at `http://localhost:8080` with interactive API docs at 
 | `POST` | `/api/v1/admin/patterns/scan` | Run pattern detection scan |
 | `PATCH` | `/api/v1/admin/patterns/{id}/resolve` | Mark a pattern as resolved |
 
+### Branching (Pro)
+
+Available when the `amfs-branching` module is installed (`pip install amfs-branching`):
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `POST` | `/api/v1/branches` | Create a branch |
+| `GET` | `/api/v1/branches` | List branches |
+| `GET` | `/api/v1/branches/{name}` | Get branch details |
+| `DELETE` | `/api/v1/branches/{name}` | Close a branch |
+| `GET` | `/api/v1/branches/{name}/diff` | Diff branch vs. main |
+| `POST` | `/api/v1/branches/{name}/merge` | Merge branch into main |
+| `POST` | `/api/v1/branches/{name}/access` | Grant branch access |
+| `GET` | `/api/v1/branches/{name}/access` | List access grants |
+| `DELETE` | `/api/v1/branches/{name}/access/{type}/{id}` | Revoke access |
+| `POST` | `/api/v1/pull-requests` | Create a pull request |
+| `GET` | `/api/v1/pull-requests` | List pull requests |
+| `POST` | `/api/v1/tags` | Create a snapshot tag |
+| `GET` | `/api/v1/tags` | List tags |
+| `POST` | `/api/v1/rollback` | Rollback memory to a point in time |
+| `POST` | `/api/v1/fork` | Fork agent memory to a new agent |
+
+Branch access is enforced automatically — requests targeting a non-`main` branch are checked against the branch's access grants. See [Git-like Timeline](/amfs/concepts/git-timeline/) for details.
+
 ---
 
 ## Authentication
@@ -191,10 +218,30 @@ curl -X POST http://localhost:8080/api/v1/entries \
   }'
 ```
 
+### Write to a branch
+
+```bash
+curl -X POST http://localhost:8080/api/v1/entries \
+  -H "Content-Type: application/json" \
+  -d '{
+    "entity_path": "checkout-service",
+    "key": "retry-pattern",
+    "value": {"max_retries": 5, "backoff": "linear"},
+    "confidence": 0.7,
+    "branch": "experiment/retry-v3"
+  }'
+```
+
 ### Read an entry
 
 ```bash
 curl http://localhost:8080/api/v1/entries/checkout-service/retry-pattern
+```
+
+### Read from a branch
+
+```bash
+curl "http://localhost:8080/api/v1/entries/checkout-service/retry-pattern?branch=experiment/retry-v3"
 ```
 
 ### List entries
@@ -203,15 +250,27 @@ curl http://localhost:8080/api/v1/entries/checkout-service/retry-pattern
 curl http://localhost:8080/api/v1/entries
 ```
 
+### List entries on a branch
+
+```bash
+curl "http://localhost:8080/api/v1/entries?branch=experiment/retry-v3"
+```
+
 Response:
 
 ```json
 {
   "entries": [
-    {"entity_path": "checkout-service", "key": "retry-pattern", "version": 1, ...},
+    {"entity_path": "checkout-service", "key": "retry-pattern", "version": 1, "branch": "main", ...},
     ...
   ]
 }
+```
+
+### View agent timeline
+
+```bash
+curl "http://localhost:8080/api/v1/agents/deploy-agent/timeline?limit=20"
 ```
 
 ### List outcomes
