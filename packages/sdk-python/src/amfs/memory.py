@@ -240,7 +240,7 @@ class AgentMemory:
 
         if self._embedder is not None:
             embedding = self._embedder.embed_value(value)
-            entry = entry.model_copy(update={"embedding": embedding, "version": 1})
+            entry = entry.model_copy(update={"embedding": embedding})
             entry = self._adapter.write(entry)
 
         try:
@@ -307,6 +307,7 @@ class AgentMemory:
     def search(
         self,
         *,
+        query: str | None = None,
         entity_path: str | None = None,
         entity_paths: list[str] | None = None,
         min_confidence: float = 0.0,
@@ -320,6 +321,10 @@ class AgentMemory:
     ) -> list[MemoryEntry] | list[ScoredEntry]:
         """Search across all entities with rich filters.
 
+        When *query* is provided the text is forwarded to the adapter for
+        full-text search (Postgres tsvector) and, when *recall_config* is
+        also set, used for cosine-similarity scoring against entry embeddings.
+
         When *entity_paths* is provided, runs a search for each path and merges
         the results.  *entity_path* (singular) is still supported for backwards
         compatibility; if both are given, *entity_paths* takes precedence.
@@ -327,12 +332,15 @@ class AgentMemory:
         When *recall_config* is provided, returns ``ScoredEntry`` objects
         sorted by composite recall score instead.
         """
+        from amfs_core.embedder import cosine_similarity
+
         paths = entity_paths or ([entity_path] if entity_path else [None])
 
         seen_keys: set[str] = set()
         merged: list[MemoryEntry] = []
         for ep in paths:
-            query = SearchQuery(
+            sq = SearchQuery(
+                query=query,
                 entity_path=ep,
                 min_confidence=min_confidence,
                 max_confidence=max_confidence,
@@ -343,7 +351,7 @@ class AgentMemory:
                 sort_by=sort_by,
                 recall_config=recall_config,
             )
-            for entry in self._adapter.search(query):
+            for entry in self._adapter.search(sq):
                 if entry.entry_key not in seen_keys:
                     if not entry.shared and entry.provenance.agent_id != self.agent_id:
                         continue
@@ -369,6 +377,10 @@ class AgentMemory:
         if recall_config is None:
             return entries
 
+        query_vec: list[float] | None = None
+        if query and self._embedder is not None:
+            query_vec = self._embedder.embed(query)
+
         now = datetime.now(timezone.utc)
         scored: list[ScoredEntry] = []
         for entry in entries:
@@ -379,8 +391,12 @@ class AgentMemory:
             recency_score = math.exp(-math.log(2) * age_days / half_life) if half_life > 0 else 0.0
             confidence_score = max(0.0, min(1.0, entry.confidence))
 
+            semantic_score = 0.0
+            if query_vec is not None and entry.embedding is not None:
+                semantic_score = max(0.0, cosine_similarity(query_vec, entry.embedding))
+
             composite = (
-                recall_config.semantic_weight * 1.0
+                recall_config.semantic_weight * semantic_score
                 + recall_config.recency_weight * recency_score
                 + recall_config.confidence_weight * confidence_score
             )
@@ -388,7 +404,7 @@ class AgentMemory:
                 entry=entry,
                 score=composite,
                 breakdown={
-                    "semantic": recall_config.semantic_weight * 1.0,
+                    "semantic": recall_config.semantic_weight * semantic_score,
                     "recency": recall_config.recency_weight * recency_score,
                     "confidence": recall_config.confidence_weight * confidence_score,
                 },

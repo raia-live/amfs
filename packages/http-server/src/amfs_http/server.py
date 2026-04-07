@@ -264,6 +264,7 @@ async def search_entries(
     branch = getattr(req, "branch", "main") or "main"
     results = mem._adapter.search(
         SearchQuery(
+            query=req.query,
             entity_path=req.entity_path,
             min_confidence=req.min_confidence,
             max_confidence=req.max_confidence,
@@ -276,7 +277,7 @@ async def search_entries(
         branch=branch,
     )
 
-    if req.query:
+    if req.query and not getattr(mem._adapter, "_has_search_tsv", False):
         query_lower = req.query.lower()
         results = [
             e

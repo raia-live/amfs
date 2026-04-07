@@ -218,8 +218,12 @@ def amfs_search(
     Use this before starting work to find context about the entity you're
     modifying, or to check if another agent already solved a similar problem.
 
+    When a Postgres adapter with tsvector support is configured, the query
+    text is used for full-text search.  Otherwise falls back to Python
+    substring matching on keys/values.
+
     Args:
-        query: Optional text to match in keys/values (basic substring match)
+        query: Optional text to search for (full-text when available, substring fallback)
         entity_path: Filter to a specific entity path
         min_confidence: Minimum confidence threshold (0.0-1.0)
         max_confidence: Maximum confidence threshold (0.0-1.0)
@@ -237,6 +241,7 @@ def amfs_search(
     since_dt = dt.fromisoformat(since) if since else None
 
     results = mem.search(
+        query=query,
         entity_path=entity_path,
         min_confidence=min_confidence,
         max_confidence=max_confidence,
@@ -247,7 +252,7 @@ def amfs_search(
         limit=limit,
     )
 
-    if query:
+    if query and not _adapter_supports_fts(mem):
         query_lower = query.lower()
         results = [
             e
@@ -258,6 +263,67 @@ def amfs_search(
         ]
 
     return json.dumps([_serialize_entry(e) for e in results], default=str)
+
+
+def _adapter_supports_fts(mem) -> bool:
+    """Check if the adapter handles full-text search natively."""
+    adapter = getattr(mem, "_adapter", None) or getattr(mem, "adapter", None)
+    return getattr(adapter, "_has_search_tsv", False)
+
+
+@mcp.tool
+def amfs_retrieve(
+    query: str,
+    entity_path: str | None = None,
+    min_confidence: float = 0.0,
+    limit: int = 10,
+    semantic_weight: float = 0.5,
+    recency_weight: float = 0.3,
+    confidence_weight: float = 0.2,
+) -> str:
+    """Find the most relevant memories for a natural language query.
+
+    Blends semantic similarity, recency, and confidence into a single
+    ranked list.  Use this when you need to find memories by meaning,
+    not exact key/value match.  Use amfs_search for structured filtering.
+
+    Args:
+        query: Natural language query describing what you're looking for
+        entity_path: Optional entity path filter
+        min_confidence: Minimum confidence threshold (0.0-1.0)
+        limit: Maximum results to return
+        semantic_weight: Weight for semantic similarity (0.0-1.0)
+        recency_weight: Weight for recency (0.0-1.0)
+        confidence_weight: Weight for confidence (0.0-1.0)
+
+    Returns ranked results with score breakdowns showing how each
+    signal contributed to the final ranking.
+    """
+    from amfs_core.models import RecallConfig
+
+    mem = _get_memory()
+    recall_config = RecallConfig(
+        semantic_weight=semantic_weight,
+        recency_weight=recency_weight,
+        confidence_weight=confidence_weight,
+    )
+
+    results = mem.search(
+        query=query,
+        entity_path=entity_path,
+        min_confidence=min_confidence,
+        limit=limit,
+        recall_config=recall_config,
+    )
+
+    serialized = []
+    for scored in results:
+        data = _serialize_entry(scored.entry)
+        data["_score"] = round(scored.score, 4)
+        data["_breakdown"] = {k: round(v, 4) for k, v in scored.breakdown.items()}
+        serialized.append(data)
+
+    return json.dumps(serialized, default=str)
 
 
 @mcp.tool

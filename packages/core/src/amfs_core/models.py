@@ -252,7 +252,12 @@ class DecisionTrace(BaseModel):
 
 
 class RecallConfig(BaseModel):
-    """Weights for composite recall scoring."""
+    """Weights for composite recall scoring.
+
+    When no embedder is configured or an entry lacks an embedding vector,
+    the semantic component scores 0.0 and the remaining weights (recency,
+    confidence) dominate the composite score.
+    """
 
     semantic_weight: float = 0.5
     recency_weight: float = 0.3
@@ -269,8 +274,14 @@ class ScoredEntry(BaseModel):
 
 
 class SearchQuery(BaseModel):
-    """Filters for searching across memory entries."""
+    """Filters for searching across memory entries.
 
+    When *query* is set the adapter may use full-text search (e.g. Postgres
+    tsvector) to filter/rank results.  Adapters that do not support FTS
+    ignore the field — the SDK falls back to Python substring matching.
+    """
+
+    query: str | None = None
     entity_path: str | None = None
     entity_paths: list[str] | None = None
     min_confidence: float = 0.0

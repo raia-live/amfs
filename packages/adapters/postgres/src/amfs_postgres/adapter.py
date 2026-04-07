@@ -148,6 +148,7 @@ class PostgresAdapter(AdapterABC):
         self._dsn = dsn
         self._namespace = namespace
         self._has_embedding_col = False
+        self._has_search_tsv = False
         pool_kwargs: dict[str, Any] = {
             "kwargs": {"row_factory": dict_row, "autocommit": True},
         }
@@ -301,7 +302,7 @@ class PostgresAdapter(AdapterABC):
     def _detect_optional_columns(self) -> None:
         """Check whether optional columns (embedding, search_tsv) exist.
 
-        These are added by migration 002_search_indexes.sql and require
+        These are added by migration 002_search_indexes.sql and may require
         the pgvector extension.  The adapter works without them.
         """
         with self._pool.connection() as conn:
@@ -310,10 +311,12 @@ class PostgresAdapter(AdapterABC):
                     """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'amfs_memory_entries'
-                      AND column_name = 'embedding'
+                      AND column_name IN ('embedding', 'search_tsv')
                     """,
                 )
-                self._has_embedding_col = cur.fetchone() is not None
+                found = {row["column_name"] for row in cur.fetchall()}
+                self._has_embedding_col = "embedding" in found
+                self._has_search_tsv = "search_tsv" in found
 
     # ------------------------------------------------------------------
     # read
@@ -523,7 +526,16 @@ class PostgresAdapter(AdapterABC):
     # ------------------------------------------------------------------
 
     def search(self, query: SearchQuery, *, branch: str = "main") -> list[MemoryEntry]:
-        """Search using PostgreSQL full-text search when a text query is available."""
+        """Search using PostgreSQL full-text search when a text query is available.
+
+        When ``SearchQuery.query`` is set and the ``search_tsv`` column exists
+        the adapter adds a ``search_tsv @@ plainto_tsquery(...)`` filter and,
+        when ``sort_by`` is the default ``"confidence"``, orders by ts_rank so
+        keyword relevance is factored in.  Explicit ``sort_by`` values
+        (``"recency"``, ``"version"``) are respected as-is.
+        """
+        use_fts = bool(query.query and getattr(self, "_has_search_tsv", False))
+
         conditions = ["namespace = %s", "branch = %s", "superseded_at IS NULL"]
         params: list[Any] = [self._namespace, branch]
 
@@ -546,12 +558,21 @@ class PostgresAdapter(AdapterABC):
             conditions.append("%s = ANY(pattern_refs)")
             params.append(query.pattern_ref)
 
+        if use_fts:
+            conditions.append("search_tsv @@ plainto_tsquery('english', %s)")
+            params.append(query.query)
+
         order_map = {
             "confidence": "confidence DESC",
             "recency": "written_at DESC",
             "version": "version DESC",
         }
-        order = order_map.get(query.sort_by, "confidence DESC")
+
+        if use_fts and query.sort_by == "confidence":
+            order = "ts_rank(search_tsv, plainto_tsquery('english', %s)) DESC, confidence DESC"
+            params.append(query.query)
+        else:
+            order = order_map.get(query.sort_by, "confidence DESC")
 
         where = " AND ".join(conditions)
         sql = f"""
