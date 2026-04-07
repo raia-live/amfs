@@ -231,6 +231,37 @@ class PostgresAdapter(AdapterABC):
             END;
             $$ LANGUAGE plpgsql
         """)
+        # HMO feature columns (frequency decay, tiered memory, importance)
+        cur.execute("""
+            ALTER TABLE amfs_memory_entries
+            ADD COLUMN IF NOT EXISTS recall_count INTEGER DEFAULT 0
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_memory_entries
+            ADD COLUMN IF NOT EXISTS priority_score NUMERIC(10,6)
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_memory_entries
+            ADD COLUMN IF NOT EXISTS tier SMALLINT DEFAULT 3
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_memory_entries
+            ADD COLUMN IF NOT EXISTS importance_score NUMERIC(6,4)
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_memory_entries
+            ADD COLUMN IF NOT EXISTS importance_dimensions JSONB
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_hot
+            ON amfs_memory_entries (namespace, entity_path)
+            WHERE tier = 1 AND superseded_at IS NULL
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_warm
+            ON amfs_memory_entries (namespace, entity_path)
+            WHERE tier <= 2 AND superseded_at IS NULL
+        """)
         cur.execute("""
             CREATE OR REPLACE FUNCTION amfs_propagate_outcome() RETURNS TRIGGER AS $$
             DECLARE
@@ -276,13 +307,14 @@ class PostgresAdapter(AdapterABC):
                         INSERT INTO amfs_memory_entries (
                             namespace, entity_path, key, version, value,
                             agent_id, session_id, written_at, pattern_refs,
-                            confidence, outcome_count, ttl_at, memory_type,
-                            shared, artifact_refs
+                            confidence, outcome_count, recall_count,
+                            ttl_at, memory_type, shared, artifact_refs
                         ) VALUES (
                             cur.namespace, cur.entity_path, cur.key, cur.version + 1, cur.value,
                             cur.agent_id, cur.session_id, cur.written_at, cur.pattern_refs,
                             cur.confidence * multiplier * NEW.causal_confidence,
-                            cur.outcome_count + 1, cur.ttl_at, cur.memory_type,
+                            cur.outcome_count + 1, cur.recall_count,
+                            cur.ttl_at, cur.memory_type,
                             cur.shared, cur.artifact_refs
                         );
                     END IF;
