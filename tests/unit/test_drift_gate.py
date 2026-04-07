@@ -6,6 +6,10 @@ import hashlib
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+pytest.importorskip("amfs_cortex", reason="amfs_cortex not installed")
+
 from amfs_core.models import Digest, DigestType, MemoryEntry, Provenance
 
 
