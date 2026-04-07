@@ -23,6 +23,7 @@ class CompilationStrategy(Protocol):
     def compile_entity(self, entity_path: str, adapter: PostgresAdapter, namespace: str, branch: str = "main") -> Digest | None: ...
     def compile_agent_brief(self, agent_id: str, adapter: PostgresAdapter, namespace: str, branch: str = "main") -> Digest | None: ...
     def compile_source(self, source_id: str, adapter: PostgresAdapter, namespace: str, branch: str = "main") -> Digest | None: ...
+    def compile_connection_map(self, entity_path: str, adapter: PostgresAdapter, namespace: str, branch: str = "main") -> Digest | None: ...
 
 
 class DigestCompiler:
@@ -69,6 +70,8 @@ class DigestCompiler:
             digest = self._strategy.compile_agent_brief(scope, self._adapter, self._namespace, b)
         elif kind == "source":
             digest = self._strategy.compile_source(scope, self._adapter, self._namespace, b)
+        elif kind == "connection":
+            digest = self._strategy.compile_connection_map(scope, self._adapter, self._namespace, b)
         else:
             logger.warning("Unknown scope kind: %s", kind)
             return None
@@ -101,6 +104,8 @@ class DigestCompiler:
         count = 0
         for ep in entity_paths:
             if self.compile(f"entity:{ep}", branch=b):
+                count += 1
+            if self.compile(f"connection:{ep}", branch=b):
                 count += 1
         for aid in agent_ids:
             if self.compile(f"agent:{aid}", branch=b):

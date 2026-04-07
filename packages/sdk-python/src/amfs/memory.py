@@ -21,6 +21,8 @@ from amfs_core.models import (
     Event,
     EventType,
     ExternalContext,
+    GraphEdge,
+    GraphNeighborQuery,
     MemoryEntry,
     MemoryStateDiff,
     MemoryStats,
@@ -262,7 +264,37 @@ class AgentMemory:
         except Exception:
             logger.debug("Failed to log write event", exc_info=True)
 
+        if pattern_refs:
+            self._materialize_pattern_ref_edges(
+                entity_path, key, pattern_refs, effective_branch,
+            )
+
         return entry
+
+    def _materialize_pattern_ref_edges(
+        self,
+        entity_path: str,
+        key: str,
+        pattern_refs: list[str],
+        branch: str,
+    ) -> None:
+        """Best-effort: create graph edges from pattern_refs."""
+        for ref in pattern_refs:
+            try:
+                self._adapter.upsert_graph_edge(
+                    GraphEdge(
+                        source_entity=f"{entity_path}/{key}",
+                        source_type="entry",
+                        relation="references",
+                        target_entity=ref,
+                        target_type="entry",
+                        provenance={"agent_id": self.agent_id, "trigger": "write"},
+                    ),
+                    namespace=self.namespace,
+                    branch=branch,
+                )
+            except Exception:
+                logger.debug("Failed to materialize pattern_ref edge for %s", ref, exc_info=True)
 
     def list(
         self,
@@ -445,6 +477,35 @@ class AgentMemory:
         return self._adapter.stats()
 
     # ------------------------------------------------------------------
+    # Knowledge graph
+    # ------------------------------------------------------------------
+
+    def graph_neighbors(
+        self,
+        entity: str,
+        *,
+        relation: str | None = None,
+        direction: str = "both",
+        min_confidence: float = 0.0,
+        depth: int = 1,
+        limit: int = 50,
+    ) -> list[GraphEdge]:
+        """Traverse the knowledge graph from an entity."""
+        query = GraphNeighborQuery(
+            entity=entity,
+            relation=relation,
+            direction=direction,
+            min_confidence=min_confidence,
+            depth=depth,
+            limit=limit,
+        )
+        return self._adapter.graph_neighbors(
+            query,
+            namespace=self.namespace,
+            branch=self._branch,
+        )
+
+    # ------------------------------------------------------------------
     # Outcomes
     # ------------------------------------------------------------------
 
@@ -571,7 +632,68 @@ class AgentMemory:
         except Exception:
             logger.debug("Failed to log outcome event", exc_info=True)
 
+        self._materialize_causal_edges(outcome_ref, outcome_type, causal_entry_keys)
+
         return updated
+
+    def _materialize_causal_edges(
+        self,
+        outcome_ref: str,
+        outcome_type: OutcomeType,
+        causal_entry_keys: list[str],
+    ) -> None:
+        """Best-effort: create graph edges from the causal chain."""
+        edge_conf = 1.0 if outcome_type in (OutcomeType.SUCCESS,) else 0.7
+        branch = self._branch
+        for ek in causal_entry_keys:
+            try:
+                self._adapter.upsert_graph_edge(
+                    GraphEdge(
+                        source_entity=ek,
+                        source_type="entry",
+                        relation="informed",
+                        target_entity=outcome_ref,
+                        target_type="outcome",
+                        confidence=edge_conf,
+                        provenance={"agent_id": self.agent_id, "trigger": "commit_outcome"},
+                    ),
+                    namespace=self.namespace,
+                    branch=branch,
+                )
+                self._adapter.upsert_graph_edge(
+                    GraphEdge(
+                        source_entity=self.agent_id,
+                        source_type="agent",
+                        relation="read",
+                        target_entity=ek,
+                        target_type="entry",
+                        confidence=edge_conf,
+                        provenance={"agent_id": self.agent_id, "trigger": "commit_outcome"},
+                    ),
+                    namespace=self.namespace,
+                    branch=branch,
+                )
+            except Exception:
+                logger.debug("Failed to materialize causal edge for %s", ek, exc_info=True)
+
+        for i, a in enumerate(causal_entry_keys):
+            for b in causal_entry_keys[i + 1:]:
+                try:
+                    self._adapter.upsert_graph_edge(
+                        GraphEdge(
+                            source_entity=a,
+                            source_type="entry",
+                            relation="co_occurs_with",
+                            target_entity=b,
+                            target_type="entry",
+                            confidence=edge_conf,
+                            provenance={"agent_id": self.agent_id, "trigger": "commit_outcome"},
+                        ),
+                        namespace=self.namespace,
+                        branch=branch,
+                    )
+                except Exception:
+                    logger.debug("Failed to materialize co-occurrence edge", exc_info=True)
 
     # ------------------------------------------------------------------
     # Temporal & Explainability
@@ -718,6 +840,26 @@ class AgentMemory:
             ))
         except Exception:
             logger.debug("Failed to log cross-agent read event", exc_info=True)
+
+        try:
+            self._adapter.upsert_graph_edge(
+                GraphEdge(
+                    source_entity=self.agent_id,
+                    source_type="agent",
+                    relation="learned_from",
+                    target_entity=agent_id,
+                    target_type="agent",
+                    provenance={
+                        "entity_path": entity_path,
+                        "key": key,
+                        "trigger": "read_from",
+                    },
+                ),
+                namespace=self.namespace,
+                branch=self._branch,
+            )
+        except Exception:
+            logger.debug("Failed to materialize cross-agent graph edge", exc_info=True)
 
         return entry
 

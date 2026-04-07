@@ -62,6 +62,8 @@ class BriefingService:
         if entity_path:
             if digest.digest_type == DigestType.ENTITY and digest.scope == entity_path:
                 score += 100.0
+            elif digest.digest_type == DigestType.CONNECTION_MAP and digest.scope == entity_path:
+                score += 80.0
             elif digest.digest_type == DigestType.SOURCE:
                 touched = digest.summary.get("entities_touched", [])
                 if entity_path in touched:
@@ -70,6 +72,10 @@ class BriefingService:
                 entities = digest.summary.get("entities_written", [])
                 if entity_path in entities:
                     score += 40.0
+            elif digest.digest_type == DigestType.CONNECTION_MAP:
+                connected = digest.summary.get("connected_entities", [])
+                if entity_path in connected:
+                    score += 30.0
 
         if agent_id:
             if digest.digest_type == DigestType.AGENT_BRIEF and digest.scope == agent_id:

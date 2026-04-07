@@ -338,6 +338,35 @@ class SemanticQuery(BaseModel):
     min_similarity: float = 0.0
 
 
+# ── Knowledge graph models ────────────────────────────────────────────
+
+
+class GraphEdge(BaseModel):
+    """A directed edge in the knowledge graph."""
+
+    source_entity: str
+    source_type: str
+    relation: str
+    target_entity: str
+    target_type: str
+    confidence: float = 1.0
+    evidence_count: int = 1
+    first_seen: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    provenance: dict[str, Any] | None = None
+
+
+class GraphNeighborQuery(BaseModel):
+    """Parameters for a knowledge graph neighbor traversal."""
+
+    entity: str
+    relation: str | None = None
+    direction: str = "both"  # "outgoing", "incoming", "both"
+    min_confidence: float = 0.0
+    depth: int = 1
+    limit: int = 50
+
+
 class DigestType(str, Enum):
     """Types of compiled knowledge digests produced by the Cortex."""
 

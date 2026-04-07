@@ -47,6 +47,8 @@ from amfs_core.models import (
     PullRequest,
     PullRequestStatus,
     Provenance,
+    GraphEdge,
+    GraphNeighborQuery,
     QueryEvent,
     SearchQuery,
     SemanticQuery,
@@ -640,6 +642,251 @@ class PostgresAdapter(AdapterABC):
             if sim >= query.min_similarity:
                 results.append((self._row_to_entry(row), sim))
         return results
+
+    # ------------------------------------------------------------------
+    # Knowledge graph (Postgres implementation)
+    # ------------------------------------------------------------------
+
+    def upsert_graph_edge(
+        self,
+        edge: GraphEdge,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> GraphEdge:
+        provenance_json = json.dumps(edge.provenance) if edge.provenance else None
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_knowledge_graph
+                        (namespace, branch, source_entity, source_type, relation,
+                         target_entity, target_type, confidence, evidence_count,
+                         first_seen, last_seen, provenance)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (namespace, branch, source_entity, relation, target_entity)
+                    DO UPDATE SET
+                        evidence_count = amfs_knowledge_graph.evidence_count + 1,
+                        last_seen = NOW(),
+                        confidence = GREATEST(amfs_knowledge_graph.confidence, EXCLUDED.confidence),
+                        provenance = EXCLUDED.provenance,
+                        target_type = EXCLUDED.target_type,
+                        source_type = EXCLUDED.source_type
+                    RETURNING *
+                    """,
+                    (
+                        namespace, branch,
+                        edge.source_entity, edge.source_type, edge.relation,
+                        edge.target_entity, edge.target_type,
+                        edge.confidence, edge.evidence_count,
+                        edge.first_seen, edge.last_seen,
+                        provenance_json,
+                    ),
+                )
+                row = cur.fetchone()
+
+        if row is None:
+            return edge
+        return GraphEdge(
+            source_entity=row["source_entity"],
+            source_type=row["source_type"],
+            relation=row["relation"],
+            target_entity=row["target_entity"],
+            target_type=row["target_type"],
+            confidence=row["confidence"],
+            evidence_count=row["evidence_count"],
+            first_seen=row["first_seen"],
+            last_seen=row["last_seen"],
+            provenance=row["provenance"],
+        )
+
+    def graph_neighbors(
+        self,
+        query: GraphNeighborQuery,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> list[GraphEdge]:
+        if query.depth <= 1:
+            return self._graph_neighbors_single(query, namespace=namespace, branch=branch)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                direction_clause = self._graph_direction_seed(query.direction)
+                cur.execute(
+                    f"""
+                    WITH RECURSIVE graph_walk AS (
+                        SELECT *, 1 AS depth FROM amfs_knowledge_graph
+                        WHERE namespace = %s AND branch = %s
+                          AND confidence >= %s
+                          AND ({direction_clause})
+                        UNION ALL
+                        SELECT g.*, gw.depth + 1
+                        FROM amfs_knowledge_graph g
+                        JOIN graph_walk gw ON g.source_entity = gw.target_entity
+                        WHERE gw.depth < %s
+                          AND g.namespace = %s AND g.branch = %s
+                          AND g.confidence >= %s
+                    )
+                    SELECT * FROM graph_walk
+                    ORDER BY depth, confidence DESC
+                    LIMIT %s
+                    """,
+                    (
+                        namespace, branch, query.min_confidence,
+                        query.depth, namespace, branch, query.min_confidence,
+                        query.limit,
+                    ),
+                )
+                rows = cur.fetchall()
+
+        return [self._row_to_graph_edge(r) for r in rows]
+
+    def _graph_neighbors_single(
+        self,
+        query: GraphNeighborQuery,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> list[GraphEdge]:
+        conditions = ["namespace = %s", "branch = %s", "confidence >= %s"]
+        params: list[Any] = [namespace, branch, query.min_confidence]
+
+        direction_clause = self._graph_direction_seed(query.direction)
+        conditions.append(f"({direction_clause})")
+
+        if query.direction in ("outgoing", "both"):
+            params.append(query.entity)
+        if query.direction in ("incoming", "both"):
+            params.append(query.entity)
+        if query.direction not in ("outgoing", "incoming", "both"):
+            params.append(query.entity)
+            params.append(query.entity)
+
+        if query.relation:
+            conditions.append("relation = %s")
+            params.append(query.relation)
+
+        where = " AND ".join(conditions)
+        sql = f"""
+            SELECT * FROM amfs_knowledge_graph
+            WHERE {where}
+            ORDER BY confidence DESC
+            LIMIT %s
+        """
+        params.append(query.limit)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        return [self._row_to_graph_edge(r) for r in rows]
+
+    @staticmethod
+    def _graph_direction_seed(direction: str) -> str:
+        if direction == "outgoing":
+            return "source_entity = %s"
+        elif direction == "incoming":
+            return "target_entity = %s"
+        return "source_entity = %s OR target_entity = %s"
+
+    def list_graph_edges(
+        self,
+        *,
+        entity: str | None = None,
+        relation: str | None = None,
+        min_confidence: float = 0.0,
+        namespace: str = "default",
+        branch: str = "main",
+        limit: int = 500,
+    ) -> list[GraphEdge]:
+        conditions = ["namespace = %s", "branch = %s"]
+        params: list[Any] = [namespace, branch]
+
+        if entity is not None:
+            conditions.append("(source_entity = %s OR target_entity = %s)")
+            params.extend([entity, entity])
+        if relation is not None:
+            conditions.append("relation = %s")
+            params.append(relation)
+        if min_confidence > 0:
+            conditions.append("confidence >= %s")
+            params.append(min_confidence)
+
+        where = " AND ".join(conditions)
+        sql = f"""
+            SELECT * FROM amfs_knowledge_graph
+            WHERE {where}
+            ORDER BY evidence_count DESC, confidence DESC
+            LIMIT %s
+        """
+        params.append(limit)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        return [self._row_to_graph_edge(r) for r in rows]
+
+    def graph_stats(
+        self,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> dict:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) as total_edges,
+                        COUNT(DISTINCT source_entity) + COUNT(DISTINCT target_entity) as approx_nodes,
+                        AVG(confidence) as avg_confidence,
+                        AVG(evidence_count) as avg_evidence
+                    FROM amfs_knowledge_graph
+                    WHERE namespace = %s AND branch = %s
+                    """,
+                    (namespace, branch),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {}
+
+                cur.execute(
+                    """
+                    SELECT relation, COUNT(*) as cnt
+                    FROM amfs_knowledge_graph
+                    WHERE namespace = %s AND branch = %s
+                    GROUP BY relation ORDER BY cnt DESC
+                    """,
+                    (namespace, branch),
+                )
+                relation_counts = {r["relation"]: r["cnt"] for r in cur.fetchall()}
+
+        return {
+            "total_edges": row["total_edges"],
+            "approx_nodes": row["approx_nodes"],
+            "avg_confidence": float(row["avg_confidence"] or 0),
+            "avg_evidence": float(row["avg_evidence"] or 0),
+            "relations": relation_counts,
+        }
+
+    @staticmethod
+    def _row_to_graph_edge(row: dict) -> GraphEdge:
+        return GraphEdge(
+            source_entity=row["source_entity"],
+            source_type=row["source_type"],
+            relation=row["relation"],
+            target_entity=row["target_entity"],
+            target_type=row["target_type"],
+            confidence=row["confidence"],
+            evidence_count=row["evidence_count"],
+            first_seen=row["first_seen"],
+            last_seen=row["last_seen"],
+            provenance=row.get("provenance"),
+        )
 
     # ------------------------------------------------------------------
     # stats (SQL aggregates)

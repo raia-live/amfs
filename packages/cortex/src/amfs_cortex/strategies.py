@@ -302,3 +302,63 @@ class RuleBasedStrategy:
             compiled_at=datetime.now(timezone.utc),
             namespace=namespace,
         )
+
+    def compile_connection_map(
+        self, entity_path: str, adapter: "PostgresAdapter", namespace: str, branch: str = "main",
+    ) -> Digest | None:
+        """Compile a CONNECTION_MAP digest from the knowledge graph for an entity."""
+        edges = adapter.list_graph_edges(
+            entity=entity_path,
+            namespace=namespace,
+            branch=branch,
+            limit=500,
+        )
+        if not edges:
+            return None
+
+        by_relation: dict[str, list] = {}
+        connected_entities: set[str] = set()
+        for edge in edges:
+            by_relation.setdefault(edge.relation, []).append(edge)
+            if edge.source_entity != entity_path:
+                connected_entities.add(edge.source_entity)
+            if edge.target_entity != entity_path:
+                connected_entities.add(edge.target_entity)
+
+        relation_summary: dict[str, Any] = {}
+        for rel, rel_edges in by_relation.items():
+            targets = set()
+            for e in rel_edges:
+                targets.add(e.target_entity if e.source_entity == entity_path else e.source_entity)
+            relation_summary[rel] = {
+                "count": len(rel_edges),
+                "entities": sorted(targets)[:10],
+                "avg_confidence": round(sum(e.confidence for e in rel_edges) / len(rel_edges), 3),
+            }
+
+        parts: list[str] = []
+        parts.append(
+            f"{entity_path} has {_pluralize(len(edges), 'graph edge')} "
+            f"connecting to {_pluralize(len(connected_entities), 'entity')}."
+        )
+        for rel, info in relation_summary.items():
+            parts.append(
+                f"  {rel}: {_pluralize(info['count'], 'edge')} "
+                f"to {', '.join(info['entities'][:5])}."
+            )
+
+        return Digest(
+            digest_type=DigestType.CONNECTION_MAP,
+            scope=entity_path,
+            summary={
+                "narrative": " ".join(parts),
+                "total_edges": len(edges),
+                "connected_entities": sorted(connected_entities),
+                "relations": relation_summary,
+            },
+            entry_count=len(edges),
+            source_agents=[],
+            compiled_at=datetime.now(timezone.utc),
+            namespace=namespace,
+            branch=branch,
+        )

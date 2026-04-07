@@ -14,6 +14,8 @@ from amfs_core.models import (
     DecisionTrace,
     DiffEntry,
     Event,
+    GraphEdge,
+    GraphNeighborQuery,
     MemoryEntry,
     MemoryStats,
     MergeResult,
@@ -405,6 +407,58 @@ class AdapterABC(ABC):
         Returns the number of entries copied.
         """
         raise NotImplementedError("Fork requires the Postgres adapter")
+
+    # ── Knowledge graph ─────────────────────────────────────────────
+
+    def upsert_graph_edge(
+        self,
+        edge: GraphEdge,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> GraphEdge:
+        """Insert or update a knowledge graph edge.
+
+        On conflict (same source, relation, target within namespace+branch)
+        bumps evidence_count, updates last_seen and takes max confidence.
+        Default is a no-op returning the edge unchanged.
+        """
+        return edge
+
+    def graph_neighbors(
+        self,
+        query: GraphNeighborQuery,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> list[GraphEdge]:
+        """Traverse the knowledge graph from an entity.
+
+        Supports multi-hop via *query.depth*. Default returns empty list.
+        """
+        return []
+
+    def list_graph_edges(
+        self,
+        *,
+        entity: str | None = None,
+        relation: str | None = None,
+        min_confidence: float = 0.0,
+        namespace: str = "default",
+        branch: str = "main",
+        limit: int = 500,
+    ) -> list[GraphEdge]:
+        """List graph edges with optional filters. Default returns empty list."""
+        return []
+
+    def graph_stats(
+        self,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> dict:
+        """Return aggregate graph statistics. Default returns empty dict."""
+        return {}
 
     def semantic_search(
         self, query: SemanticQuery, embedder: EmbedderABC
