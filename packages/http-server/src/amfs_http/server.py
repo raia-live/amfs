@@ -1643,7 +1643,7 @@ async def resolve_pattern(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Pro — Expertise Graph
+# Pro — Expertise Heatmap
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -1653,140 +1653,140 @@ async def expertise_graph(
     limit_entities: int = Query(30, ge=1, le=200),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    """Build an expertise graph mapping agents to entities they know about.
+    """Build an agent×entity expertise heatmap.
 
-    Nodes are agents and entities; edges represent write relationships
-    weighted by entry count. The result powers the dashboard Expertise Map.
+    Returns a list of agents, entities, and cells with scores derived
+    from write counts. The dashboard renders this as a heatmap table.
     """
     mem = _get_memory()
     entries = mem.list()
 
     agent_entity_weights: dict[str, dict[str, int]] = {}
-    agent_entry_counts: dict[str, int] = {}
-    entity_entry_counts: dict[str, int] = {}
+    agent_totals: dict[str, int] = {}
+    entity_totals: dict[str, int] = {}
 
     for e in entries:
         aid = e.provenance.agent_id
         ep = e.entity_path
-
-        agent_entry_counts[aid] = agent_entry_counts.get(aid, 0) + 1
-        entity_entry_counts[ep] = entity_entry_counts.get(ep, 0) + 1
-
+        agent_totals[aid] = agent_totals.get(aid, 0) + 1
+        entity_totals[ep] = entity_totals.get(ep, 0) + 1
         if aid not in agent_entity_weights:
             agent_entity_weights[aid] = {}
         agent_entity_weights[aid][ep] = agent_entity_weights[aid].get(ep, 0) + 1
 
-    top_agents = sorted(agent_entry_counts.items(), key=lambda x: x[1], reverse=True)[:limit_agents]
-    top_agent_ids = {a[0] for a in top_agents}
+    top_agents = [
+        a for a, _ in sorted(agent_totals.items(), key=lambda x: x[1], reverse=True)
+    ][:limit_agents]
+    top_agent_set = set(top_agents)
 
     relevant_entities: set[str] = set()
-    for aid in top_agent_ids:
-        for ep in agent_entity_weights.get(aid, {}):
-            relevant_entities.add(ep)
-    top_entities = sorted(
-        [(ep, entity_entry_counts.get(ep, 0)) for ep in relevant_entities],
-        key=lambda x: x[1],
-        reverse=True,
-    )[:limit_entities]
-    top_entity_paths = {ep[0] for ep in top_entities}
+    for aid in top_agent_set:
+        relevant_entities.update(agent_entity_weights.get(aid, {}).keys())
+    top_entities = [
+        ep
+        for ep, _ in sorted(
+            [(ep, entity_totals.get(ep, 0)) for ep in relevant_entities],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+    ][:limit_entities]
+    top_entity_set = set(top_entities)
 
-    nodes: list[dict[str, Any]] = []
-    for aid, count in top_agents:
-        nodes.append({
-            "id": f"agent/{aid}",
-            "type": "agent",
-            "label": aid,
-            "entryCount": count,
-        })
-    for ep, count in top_entities:
-        nodes.append({
-            "id": f"entity/{ep}",
-            "type": "entity",
-            "label": ep,
-            "entryCount": count,
-        })
-
-    edges: list[dict[str, Any]] = []
-    for aid in top_agent_ids:
+    cells: list[dict[str, Any]] = []
+    for aid in top_agents:
         for ep, weight in agent_entity_weights.get(aid, {}).items():
-            if ep in top_entity_paths:
-                edges.append({
-                    "source": f"agent/{aid}",
-                    "target": f"entity/{ep}",
-                    "weight": weight,
-                    "type": "writes",
+            if ep in top_entity_set:
+                cells.append({
+                    "agent": aid,
+                    "entity": ep,
+                    "score": weight,
+                    "relations": ["writes"],
                 })
 
     return {
-        "nodes": nodes,
-        "edges": edges,
-        "stats": {
-            "totalAgents": len(agent_entry_counts),
-            "totalEntities": len(entity_entry_counts),
-            "totalEdges": len(edges),
-        },
+        "agents": top_agents,
+        "entities": top_entities,
+        "cells": cells,
     }
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Pro — Memory Tiers
+# Pro — HMO Memory Tiers
 # ──────────────────────────────────────────────────────────────────────
 
-_TIER_LABELS: dict[int, str] = {
-    1: "Production Validated",
-    2: "Production Observed",
-    3: "Development",
-    4: "Manual",
-}
+
+def _compute_tiers(entries: list) -> tuple[dict[str, int], dict[str, float]]:
+    """Score entries and assign HMO tiers (Hot/Warm/Archive)."""
+    from amfs_core.tiering import PriorityScorer, TierAssigner
+
+    scorer = PriorityScorer()
+    assigner = TierAssigner()
+    return assigner.assign_with_scores(entries, scorer)
 
 
 @app.get("/api/v1/pro/tiers/distribution")
 async def tiers_distribution(
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    """Return the distribution of memory entries across provenance tiers."""
+    """Return HMO tier distribution (Hot / Warm / Archive)."""
     mem = _get_memory()
     entries = mem.list()
 
-    tier_counts: dict[int, int] = {1: 0, 2: 0, 3: 0, 4: 0}
-    for e in entries:
-        tier = e.provenance_tier.value
-        tier_counts[tier] = tier_counts.get(tier, 0) + 1
+    tiers, scores = _compute_tiers(entries)
 
-    total = sum(tier_counts.values())
-    distribution = []
-    for tier_val in sorted(tier_counts):
-        count = tier_counts[tier_val]
-        distribution.append({
-            "tier": tier_val,
-            "label": _TIER_LABELS.get(tier_val, f"Tier {tier_val}"),
-            "count": count,
-            "percentage": round((count / total * 100) if total > 0 else 0, 1),
-        })
+    hot = warm = archive = scored_count = 0
+    score_sum = 0.0
+    for key, tier in tiers.items():
+        if tier == 1:
+            hot += 1
+        elif tier == 2:
+            warm += 1
+        else:
+            archive += 1
+        s = scores.get(key)
+        if s is not None:
+            scored_count += 1
+            score_sum += s
 
-    return {"distribution": distribution, "total": total}
+    return {
+        "total": len(entries),
+        "hot": hot,
+        "warm": warm,
+        "archive": archive,
+        "scored": scored_count,
+        "avg_priority_score": round(score_sum / scored_count, 6) if scored_count else None,
+    }
 
 
 @app.get("/api/v1/pro/tiers/entries")
 async def tiers_entries(
-    tier: int = Query(..., ge=1, le=4),
+    tier: int = Query(..., ge=1, le=3),
     limit: int = Query(50, ge=1, le=500),
     _auth: str | None = Depends(verify_api_key),
-) -> dict[str, Any]:
-    """Return memory entries filtered by provenance tier."""
+) -> list[dict[str, Any]]:
+    """Return entries for a given HMO tier as a flat array."""
     mem = _get_memory()
     entries = mem.list()
 
-    filtered = [e for e in entries if e.provenance_tier.value == tier]
-    filtered.sort(key=lambda e: e.provenance.written_at, reverse=True)
+    tier_map, score_map = _compute_tiers(entries)
 
-    return {
-        "tier": tier,
-        "label": _TIER_LABELS.get(tier, f"Tier {tier}"),
-        "entries": [_entry_to_response(e) for e in filtered[:limit]],
-        "count": len(filtered[:limit]),
-        "total": len(filtered),
-    }
+    filtered = [e for e in entries if tier_map.get(e.entry_key) == tier]
+    filtered.sort(key=lambda e: score_map.get(e.entry_key, 0.0), reverse=True)
+
+    return [
+        {
+            "entity_path": e.entity_path,
+            "key": e.key,
+            "confidence": e.confidence,
+            "tier": tier,
+            "priority_score": round(score_map.get(e.entry_key, 0.0), 6),
+            "recall_count": getattr(e, "recall_count", 0),
+            "importance_score": getattr(e, "importance_score", None),
+            "written_at": e.provenance.written_at.isoformat(),
+            "agent_id": e.provenance.agent_id,
+        }
+        for e in filtered[:limit]
+    ]
 
 
 # ──────────────────────────────────────────────────────────────────────
