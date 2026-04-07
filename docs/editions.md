@@ -78,6 +78,8 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │  Temporal Queries · Session-Level Causal Explainability   │
 │  Enriched Decision Traces · Query/Error Event Tracking    │
 │  Composite Recall Scoring · Multi-Scope Search            │
+│  Knowledge Graph (auto-materialized edges)               │
+│  Hybrid Search (full-text + semantic + composite)         │
 │  Per-Agent Memory Graph · Agent Activity Timeline         │
 │  Connector Framework · CLI · Built-in Connectors          │
 │  Webhook Receiver · Adapters (FS, Postgres, S3)           │
@@ -105,6 +107,8 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | Per-agent memory graph and activity timeline | Yes | Yes |
 | Composite recall scoring | Yes | Yes |
 | Multi-scope search | Yes | Yes |
+| Knowledge graph (auto-materialized from writes/outcomes) | Yes | Yes |
+| Hybrid search (full-text + semantic + composite scoring) | Yes | Yes |
 | **Git-like Timeline** | | |
 | Event logging (writes, outcomes, reads, briefs) on main | Yes | Yes |
 | Branch-aware read/write/list/search (`branch` parameter) | Yes | Yes |
@@ -133,7 +137,9 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | S3 adapter | Yes | Yes |
 | HTTP/REST API server | Yes | Yes |
 | Docker + Docker Compose + Helm charts | Yes | Yes |
-| MCP server (9 tools) | Yes | Yes |
+| Knowledge graph (auto-materialized from writes, outcomes, cross-agent reads) | Yes | Yes |
+| Hybrid search (full-text + semantic + composite scoring) | Yes | Yes |
+| MCP server (12 tools) | Yes | Yes |
 | **SDKs & Clients** | | |
 | Python SDK (full parity) | Yes | Yes |
 | TypeScript SDK (full parity) | Yes | Yes |
@@ -176,7 +182,7 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | Automated memory critic | — | Yes |
 | Memory distillation & bootstrap sets | — | Yes |
 | Memory safety validation | — | Yes |
-| Multi-strategy retrieval (semantic + BM25 + temporal) | — | Yes |
+| Multi-strategy retrieval with learned ranking (RRF + ML) | — | Yes |
 | Learned retrieval ranking from outcome data | — | Yes |
 | Adaptive confidence calibration | — | Yes |
 | Training data export (SFT, DPO, reward model) | — | Yes |
@@ -196,7 +202,7 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 
 ## OSS Layer — What's Included
 
-The open-source layer ([github.com/raia-live/amfs](https://github.com/raia-live/amfs)) provides the full memory primitive: read, write, version, search, and learn from outcomes. It includes a **git-like timeline engine** that logs every operation as an event, branch-aware read/write operations, a connector framework for ingesting events from external systems, composite recall scoring, and multi-scope search.
+The open-source layer ([github.com/raia-live/amfs](https://github.com/raia-live/amfs)) provides the full memory primitive: read, write, version, search, and learn from outcomes. It includes a **git-like timeline engine** that logs every operation as an event, branch-aware read/write operations, a connector framework for ingesting events from external systems, composite recall scoring, multi-scope search, a **knowledge graph** that auto-materializes edges from writes, outcomes, and cross-agent reads, and **hybrid search** combining full-text (tsvector), semantic (cosine similarity), and composite scoring.
 
 ### Packages
 
@@ -208,7 +214,7 @@ The open-source layer ([github.com/raia-live/amfs](https://github.com/raia-live/
 | `amfs-adapter-postgres` | PostgreSQL adapter with PL/pgSQL triggers for outcome propagation and `LISTEN/NOTIFY` for watch |
 | `amfs-adapter-s3` | Amazon S3 / S3-compatible adapter for cloud-native storage |
 | `amfs-http-server` | REST API server (FastAPI/Uvicorn) for remote access, branch-aware endpoints |
-| `amfs-mcp-server` | MCP server exposing 10 tools: `amfs_read`, `amfs_write`, `amfs_search`, `amfs_list`, `amfs_stats`, `amfs_commit_outcome`, `amfs_record_context`, `amfs_history`, `amfs_explain`, `amfs_timeline` |
+| `amfs-mcp-server` | MCP server exposing 12 tools: `amfs_read`, `amfs_write`, `amfs_search`, `amfs_retrieve`, `amfs_list`, `amfs_stats`, `amfs_commit_outcome`, `amfs_record_context`, `amfs_history`, `amfs_explain`, `amfs_graph_neighbors`, `amfs_timeline` |
 | `amfs-cli` | Terminal tools for inspecting, diffing, snapshotting, and restoring memory |
 | `@amfs/sdk` | TypeScript SDK (full parity with Python: ReadTracker, search, stats, history, explain, recordContext) |
 
@@ -494,11 +500,12 @@ Extends the OSS MCP server with additional tools:
 | `amfs_critique` | Run the Memory Critic and get a quality report |
 | `amfs_distill` | Trigger distillation (prune, consolidate, or generate bootstrap set) |
 | `amfs_validate` | Validate a candidate memory before writing |
-| `amfs_retrieve` | Multi-strategy retrieval with RRF-merged results (+ learned ranking) |
 | `amfs_retrain` | Train the learned ranking model from outcome data |
 | `amfs_calibrate` | Learn optimal confidence multipliers from outcome history |
 | `amfs_export_training_data` | Export decision traces as SFT/DPO/reward model datasets |
 | `amfs_record_llm_call` | Record an LLM call with model, tokens, cost, and latency |
+| `amfs_graph_path` | Find shortest trust-weighted path between two entities in the knowledge graph |
+| `amfs_graph_query` | Flexible graph edge search by relation, entity type, or confidence range |
 
 ---
 
@@ -513,7 +520,7 @@ Extends the OSS MCP server with additional tools:
               ▼                             ▼
    ┌─────────────────┐          ┌───────────────────────────┐
    │  MCP Server OSS │          │  MCP Server Pro            │
-   │  (10 tools)     │          │  (10 + 7 tools)            │
+   │  (12 tools)     │          │  (12 + 8 tools)            │
    └────────┬────────┘          │                           │
             │                   │  Branching Layer:         │
             │                   │  Branches · Merge · PRs   │

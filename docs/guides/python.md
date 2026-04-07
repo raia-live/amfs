@@ -124,6 +124,32 @@ results = mem.search(
 )
 ```
 
+Search with a free-text query — uses Postgres tsvector when available, otherwise falls back to substring matching:
+
+```python
+results = mem.search(query="retry backoff strategy", limit=10)
+```
+
+Search with composite recall scoring (blends semantic similarity, recency, and confidence):
+
+```python
+from amfs_core.models import RecallConfig
+
+scored = mem.search(
+    query="how do we handle retries?",
+    recall_config=RecallConfig(
+        semantic_weight=0.5,
+        recency_weight=0.3,
+        confidence_weight=0.2,
+    ),
+)
+for item in scored:
+    print(f"{item.entry.key} — score={item.score:.3f} — {item.breakdown}")
+```
+
+{: .note }
+Semantic scoring requires an `embedder` to be configured. Without one, the semantic component is 0.0 and ranking relies on recency and confidence.
+
 ### Stats
 
 ```python
@@ -367,6 +393,33 @@ target = FilesystemAdapter(root=Path("/new/.amfs"), namespace="restored")
 importer = SnapshotImporter(target)
 importer.restore("backup.json")
 ```
+
+---
+
+## Knowledge Graph
+
+The knowledge graph builds automatically as agents write, commit outcomes, and learn from each other. You can also traverse it directly:
+
+```python
+edges = mem.graph_neighbors(
+    "checkout-service/retry-pattern",
+    direction="both",
+    depth=2,
+    min_confidence=0.5,
+)
+for edge in edges:
+    print(f"{edge.source_entity} --{edge.relation}--> {edge.target_entity}")
+```
+
+| Parameter | Description |
+|:----------|:------------|
+| `entity` | Starting entity to explore |
+| `relation` | Filter by relation type (e.g. `"references"`, `"informed"`) |
+| `direction` | `"outgoing"`, `"incoming"`, or `"both"` |
+| `depth` | Traversal depth (1 = direct neighbors, >1 for multi-hop) |
+
+{: .note }
+Multi-hop traversal (`depth > 1`) requires the Postgres adapter. The Filesystem and S3 adapters return an empty list for graph methods.
 
 ---
 

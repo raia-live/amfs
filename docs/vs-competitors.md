@@ -40,7 +40,7 @@ The AI memory space is evolving fast. Here's how AMFS compares to the leading al
 | Cross-system ingestion (webhooks) | Yes | No | No | No | No | No |
 | Connector ecosystem | Yes | No | No | No | No | No |
 | Automated pattern detection | Pro | No | No | No | No | No |
-| Knowledge graph | Via pattern_refs | No | Yes | Yes | No | No |
+| Knowledge graph | Yes (auto-materialized) | No | Yes | Yes | No | No |
 | Semantic search | Yes | Yes | Yes | Yes | Yes | Yes |
 | Multi-agent support | Native | Partial | No | No | No | Native |
 | Conflict detection | Yes | No | No | No | No | No |
@@ -76,6 +76,7 @@ The AI memory space is evolving fast. Here's how AMFS compares to the leading al
 - **Decision traces** — AMFS's `explain()` API and `record_context()` capture the full causal chain. Pro persists these traces durably, enabling historical queries months later. Mem0 doesn't track why decisions were made.
 - **Cross-system ingestion** — AMFS Pro ingests events from PagerDuty, Slack, GitHub, and Jira via webhooks with HMAC verification and deduplication. Mem0 only ingests from LLM conversations.
 - **Pattern detection** — AMFS Pro automatically surfaces recurring failures, stale clusters, and confidence drift across your memory store. Mem0 provides no automated analysis.
+- **Knowledge graph** — AMFS auto-materializes a knowledge graph from normal operations (writes with `pattern_refs`, outcomes, cross-agent reads). The graph captures entity relationships, causal links, and agent expertise — queryable via `graph_neighbors()` and visualized in the Pro dashboard. Mem0's optional graph requires explicit LLM extraction.
 - **Self-hosted control** — AMFS runs on your infrastructure with pluggable backends (filesystem, Postgres, S3). Mem0's advanced features require their cloud service.
 
 ---

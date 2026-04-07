@@ -148,7 +148,7 @@ AMFS and vector databases are complementary. A common architecture:
 3. **AMFS for recording** — After completing its task, the agent writes findings, decisions, and risks to AMFS with provenance and confidence.
 4. **AMFS for learning** — Outcomes (deploys, incidents) back-propagate through AMFS, adjusting confidence scores so future agents see which patterns are trustworthy.
 
-AMFS even supports semantic search via pluggable embedders — so for small-to-medium memory stores, you can search by meaning without a separate vector database. For large-scale RAG over millions of documents, a dedicated vector database is the right choice.
+AMFS supports hybrid search — combining full-text (Postgres tsvector), semantic (cosine similarity via pluggable embedders), recency, and confidence into a single ranked result set. For small-to-medium memory stores, this eliminates the need for a separate vector database. AMFS also auto-materializes a knowledge graph from normal operations, capturing entity relationships and causal links that pure similarity search cannot surface. For large-scale RAG over millions of documents, a dedicated vector database is the right choice.
 
 ---
 

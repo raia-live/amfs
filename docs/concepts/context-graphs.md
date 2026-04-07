@@ -168,6 +168,57 @@ Over time, this graph captures institutional knowledge that no single agent or p
 
 ---
 
+## The Knowledge Graph
+
+AMFS now has a **persisted knowledge graph** that complements the session-scoped decision trace. The two layers serve different purposes:
+
+| Layer | Scope | Storage | Purpose |
+|:------|:------|:--------|:--------|
+| Decision traces | Single session | In-memory (OSS), Postgres (Pro) | "What happened in this session and why?" |
+| Knowledge graph | Cross-session, cross-agent | `amfs_knowledge_graph` table (Postgres) | "How are entities, agents, and outcomes related globally?" |
+
+### How Edges Are Created
+
+The knowledge graph is populated automatically — no manual graph construction needed:
+
+| Trigger | Edge created | Example |
+|:--------|:-------------|:--------|
+| `write(pattern_refs=["x"])` | `entry → references → x` | `checkout-service/retry-pattern → references → shared/backoff-strategy` |
+| `commit_outcome()` | `entry → informed → outcome` | `checkout-service/retry-pattern → informed → DEP-500` |
+| `commit_outcome()` | Co-occurrence edges between causal entries | `retry-pattern → co_occurs_with → risk-race-condition` |
+| `read_from(agent_id)` | `this_agent → learned_from → other_agent` | `deploy-agent → learned_from → review-agent` |
+
+Each edge carries `confidence`, `evidence_count`, `first_seen`, and `last_seen`. Repeated materializations increment the evidence count rather than creating duplicate edges.
+
+### Querying the Graph
+
+Agents can explore the knowledge graph via the SDK or MCP:
+
+```python
+edges = mem.graph_neighbors(
+    "checkout-service/retry-pattern",
+    direction="outgoing",
+    depth=2,
+)
+for edge in edges:
+    print(f"{edge.source_entity} --{edge.relation}--> {edge.target_entity} "
+          f"(confidence={edge.confidence}, evidence={edge.evidence_count})")
+```
+
+Via MCP:
+
+```
+amfs_graph_neighbors(
+    entity="checkout-service/retry-pattern",
+    direction="both",
+    depth=2,
+)
+```
+
+The Memory Cortex also compiles `CONNECTION_MAP` digests from graph edges, surfacing the most important relationships for an entity during `amfs_briefing()`.
+
+---
+
 ## The Feedback Loop
 
 Decision traces compound through AMFS's outcome system:
