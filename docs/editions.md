@@ -58,6 +58,7 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │  ┌─ Intelligence Layer ─────────────────────────────────┐ │
 │  │  Extraction · Critic · Distiller · Safety · Retrieval │ │
 │  │  Learned Ranking · Confidence Calibration · ML Export │ │
+│  │  LLM Importance Scoring · TierWorker (background)    │ │
 │  │  Auto Entity/Relationship Extraction from Traces     │ │
 │  └──────────────────────────────────────────────────────┘ │
 │                                                          │
@@ -66,7 +67,8 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │  │  Trace Detail with Enriched Context · Agent Graph     │ │
 │  │  Sacred Timeline (3D) · Branch Manager · PR Viewer   │ │
 │  │  API Key Console · Audit Viewer · Usage Analytics    │ │
-│  │  Pattern Detection · Team Management · Snapshots     │ │
+│  │  Pattern Detection · Memory Tiers · Snapshots        │ │
+│  │  Team Management                                    │ │
 │  └──────────────────────────────────────────────────────┘ │
 │                                                          │
 ├──────────────────────────────────────────────────────────┤
@@ -80,6 +82,9 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │  Composite Recall Scoring · Multi-Scope Search            │
 │  Knowledge Graph (auto-materialized edges)               │
 │  Hybrid Search (full-text + semantic + composite)         │
+│  Tiered Memory (Hot/Warm/Archive) · Priority Scoring      │
+│  Frequency-Modulated Decay · Cortex Drift Gate            │
+│  ImportanceEvaluator ABC · Progressive Retrieval          │
 │  Per-Agent Memory Graph · Agent Activity Timeline         │
 │  Connector Framework · CLI · Built-in Connectors          │
 │  Webhook Receiver · Adapters (FS, Postgres, S3)           │
@@ -109,6 +114,13 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | Multi-scope search | Yes | Yes |
 | Knowledge graph (auto-materialized from writes/outcomes) | Yes | Yes |
 | Hybrid search (full-text + semantic + composite scoring) | Yes | Yes |
+| Frequency-modulated decay (4-signal model) | Yes | Yes |
+| Tiered memory (Hot / Warm / Archive) | Yes | Yes |
+| Progressive retrieval (`depth`) | Yes | Yes |
+| Importance evaluator hook (`ImportanceEvaluator` ABC) | Yes | Yes |
+| Cortex drift gate (skip-redundant recompilations) | Yes | Yes |
+| LLM importance scoring (3-dimension) | — | Yes |
+| Background tier recomputation (`TierWorker`) | — | Yes |
 | **Git-like Timeline** | | |
 | Event logging (writes, outcomes, reads, briefs) on main | Yes | Yes |
 | Branch-aware read/write/list/search (`branch` parameter) | Yes | Yes |
@@ -137,8 +149,6 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | S3 adapter | Yes | Yes |
 | HTTP/REST API server | Yes | Yes |
 | Docker + Docker Compose + Helm charts | Yes | Yes |
-| Knowledge graph (auto-materialized from writes, outcomes, cross-agent reads) | Yes | Yes |
-| Hybrid search (full-text + semantic + composite scoring) | Yes | Yes |
 | MCP server (12 tools) | Yes | Yes |
 | **SDKs & Clients** | | |
 | Python SDK (full parity) | Yes | Yes |
@@ -196,19 +206,20 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | Audit log viewer with search/filter | — | Yes |
 | Usage analytics & quota monitoring | — | Yes |
 | Snapshot capture, compare, and export | — | Yes |
+| Memory Tiers dashboard (distribution, entry browser) | — | Yes |
 | Extended MCP server (Pro tools) | — | Yes |
 
 ---
 
 ## OSS Layer — What's Included
 
-The open-source layer ([github.com/raia-live/amfs](https://github.com/raia-live/amfs)) provides the full memory primitive: read, write, version, search, and learn from outcomes. It includes a **git-like timeline engine** that logs every operation as an event, branch-aware read/write operations, a connector framework for ingesting events from external systems, composite recall scoring, multi-scope search, a **knowledge graph** that auto-materializes edges from writes, outcomes, and cross-agent reads, and **hybrid search** combining full-text (tsvector), semantic (cosine similarity), and composite scoring.
+The open-source layer ([github.com/raia-live/amfs](https://github.com/raia-live/amfs)) provides the full memory primitive: read, write, version, search, and learn from outcomes. It includes a **git-like timeline engine**, branch-aware operations, a connector framework, composite recall scoring, multi-scope search, a **knowledge graph** auto-materialized from writes and outcomes, **hybrid search** (full-text + semantic + composite scoring), **tiered memory** (Hot/Warm/Archive with progressive retrieval), **frequency-modulated decay** (4-signal model), and a **Cortex drift gate** that avoids redundant digest recompilations.
 
 ### Packages
 
 | Package | Description |
 |:--------|:------------|
-| `amfs-core` | CoW engine, models (`MemoryEntry`, `MemoryType`, `ProvenanceTier`, `Event`), read tracking, causal tagging, default embedder |
+| `amfs-core` | CoW engine, models, read tracking, causal tagging, default embedder, `tiering` (PriorityScorer, TierAssigner), `importance` (ImportanceEvaluator ABC) |
 | `amfs` (SDK) | `AgentMemory` class — `read`, `write`, `list`, `search`, `history`, `timeline`, `explain`, `commit_outcome`, `record_context` |
 | `amfs-adapter-filesystem` | JSON-file-based adapter for local development |
 | `amfs-adapter-postgres` | PostgreSQL adapter with PL/pgSQL triggers for outcome propagation and `LISTEN/NOTIFY` for watch |
