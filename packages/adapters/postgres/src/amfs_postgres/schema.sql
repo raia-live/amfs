@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS amfs_memory_entries (
     confidence NUMERIC(6,4) DEFAULT 1.0,
     outcome_count INTEGER DEFAULT 0,
     recall_count INTEGER DEFAULT 0,
+    priority_score NUMERIC(10,6),
+    tier SMALLINT DEFAULT 3,
     ttl_at TIMESTAMPTZ,
     memory_type TEXT DEFAULT 'fact',
     shared BOOLEAN NOT NULL DEFAULT TRUE,
@@ -29,6 +31,14 @@ CREATE INDEX IF NOT EXISTS idx_entries_current
 
 CREATE INDEX IF NOT EXISTS idx_entries_entity
     ON amfs_memory_entries (namespace, entity_path);
+
+CREATE INDEX IF NOT EXISTS idx_entries_hot
+    ON amfs_memory_entries (namespace, entity_path)
+    WHERE tier = 1 AND superseded_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_entries_warm
+    ON amfs_memory_entries (namespace)
+    WHERE tier <= 2 AND superseded_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS amfs_outcomes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

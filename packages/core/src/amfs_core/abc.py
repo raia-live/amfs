@@ -254,6 +254,24 @@ class AdapterABC(ABC):
         leave the default no-op.
         """
 
+    # ── Tiered memory ─────────────────────────────────────────────────
+
+    def update_tiers(
+        self,
+        tier_assignments: dict[str, int],
+        scores: dict[str, float],
+        *,
+        branch: str = "main",
+    ) -> int:
+        """Batch-update tier and priority_score for entries in place.
+
+        *tier_assignments* maps ``entry_key`` -> tier (1/2/3).
+        *scores* maps ``entry_key`` -> priority_score.
+        Returns count of entries updated.  Default no-op returns 0.
+        """
+        return 0
+
+
     # ── Agent registration ─────────────────────────────────────────────
 
     def ensure_agent(self, agent_id: str, namespace: str = "default") -> Agent:

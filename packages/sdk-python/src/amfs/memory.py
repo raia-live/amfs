@@ -350,6 +350,7 @@ class AgentMemory:
         limit: int = 100,
         sort_by: str = "confidence",
         recall_config: RecallConfig | None = None,
+        depth: int = 3,
     ) -> list[MemoryEntry] | list[ScoredEntry]:
         """Search across all entities with rich filters.
 
@@ -363,6 +364,9 @@ class AgentMemory:
 
         When *recall_config* is provided, returns ``ScoredEntry`` objects
         sorted by composite recall score instead.
+
+        *depth* controls progressive retrieval across memory tiers:
+          1 = HOT only, 2 = HOT + WARM, 3 = all tiers (default).
         """
         from amfs_core.embedder import cosine_similarity
 
@@ -382,6 +386,7 @@ class AgentMemory:
                 limit=limit,
                 sort_by=sort_by,
                 recall_config=recall_config,
+                depth=depth,
             )
             for entry in self._adapter.search(sq):
                 if entry.entry_key not in seen_keys:
