@@ -3,6 +3,9 @@
 Listens to Postgres NOTIFY events for new writes and triggers debounced
 digest recompilation. Designed to run as a standalone process or embedded
 in the HTTP server.
+
+Supports a drift gate: only recompiles a scope when its fingerprint
+has changed beyond a configurable threshold since the last compilation.
 """
 
 from __future__ import annotations
@@ -32,16 +35,19 @@ class CortexWorker:
         compiler: DigestCompiler,
         debounce_ms: int = 3000,
         use_advisory_lock: bool = True,
+        drift_threshold: float = 0.0,
     ) -> None:
         self._dsn = dsn
         self._compiler = compiler
         self._debounce_ms = debounce_ms
         self._use_advisory_lock = use_advisory_lock
+        self._drift_threshold = drift_threshold
         self._pending: dict[str, float] = {}
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._events_processed = 0
         self._digests_compiled = 0
+        self._drift_skipped = 0
         self._started_at: float | None = None
         self._last_event_at: float | None = None
         self._activity_log: deque[dict[str, Any]] = deque(maxlen=_ACTIVITY_LOG_MAX)
@@ -51,6 +57,7 @@ class CortexWorker:
         self._throughput_buckets: deque[dict[str, Any]] = deque(maxlen=60)
         self._current_bucket_ts: float = 0
         self._current_bucket_count: int = 0
+        self._anchor_fingerprints: dict[str, str] = {}
 
     @property
     def activity_log(self) -> list[dict[str, Any]]:
@@ -68,9 +75,12 @@ class CortexWorker:
         return {
             "events_processed": self._events_processed,
             "digests_compiled": self._digests_compiled,
+            "drift_skipped": self._drift_skipped,
             "pending_scopes": len(self._pending),
             "uptime_seconds": round(time.monotonic() - self._started_at, 1) if self._started_at else 0,
             "last_event_ago_ms": round((time.monotonic() - self._last_event_at) * 1000) if self._last_event_at else None,
+            "drift_threshold": self._drift_threshold,
+            "anchored_scopes": len(self._anchor_fingerprints),
         }
 
     def run(self) -> None:
@@ -229,12 +239,19 @@ class CortexWorker:
                 scope, branch = scope_with_branch.rsplit("@", 1)
             else:
                 scope, branch = scope_with_branch, "main"
+
+            if self._drift_threshold > 0 and not self._should_recompile(scope_with_branch, scope, branch):
+                continue
+
             try:
                 t0 = time.monotonic()
                 result = self._compiler.compile(scope, branch=branch)
                 elapsed_ms = round((time.monotonic() - t0) * 1000)
                 if result:
                     self._digests_compiled += 1
+                    fp = self._compiler.compute_scope_fingerprint(scope, branch=branch)
+                    if fp:
+                        self._anchor_fingerprints[scope_with_branch] = fp
                     self._activity_log.append({
                         "type": "digest_compiled",
                         "scope": scope,
@@ -252,6 +269,28 @@ class CortexWorker:
                     "branch": branch,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
+
+    def _should_recompile(self, scope_with_branch: str, scope: str, branch: str) -> bool:
+        """Check whether the scope has drifted enough to warrant recompilation."""
+        anchor = self._anchor_fingerprints.get(scope_with_branch)
+        if anchor is None:
+            return True
+
+        current = self._compiler.compute_scope_fingerprint(scope, branch=branch)
+        if current is None:
+            return True
+        if current == anchor:
+            self._drift_skipped += 1
+            logger.debug("Drift gate: skipping %s (fingerprint unchanged)", scope)
+            self._activity_log.append({
+                "type": "drift_skipped",
+                "scope": scope,
+                "branch": branch,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            return False
+
+        return True
 
     def _record_throughput(self) -> None:
         """Track per-minute event throughput."""

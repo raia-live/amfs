@@ -541,6 +541,10 @@ class PostgresAdapter(AdapterABC):
         conditions = ["namespace = %s", "branch = %s", "superseded_at IS NULL"]
         params: list[Any] = [self._namespace, branch]
 
+        if query.depth < 3:
+            conditions.append("tier <= %s")
+            params.append(query.depth)
+
         if query.entity_path is not None:
             conditions.append("entity_path = %s")
             params.append(query.entity_path)
@@ -644,7 +648,7 @@ class PostgresAdapter(AdapterABC):
         return results
 
     # ------------------------------------------------------------------
-    # Recall tracking (mutable in-place update, no CoW version)
+    # Recall tracking + tiered memory (mutable in-place updates)
     # ------------------------------------------------------------------
 
     def increment_recall_count(
@@ -663,6 +667,35 @@ class PostgresAdapter(AdapterABC):
                      AND superseded_at IS NULL""",
                 (self._namespace, branch, entity_path, key),
             )
+
+    def update_tiers(
+        self,
+        tier_assignments: dict[str, int],
+        scores: dict[str, float],
+        *,
+        branch: str = "main",
+    ) -> int:
+        if not tier_assignments:
+            return 0
+        updated = 0
+        with self._pool.connection() as conn:
+            for entry_key, tier_val in tier_assignments.items():
+                if "/" not in entry_key:
+                    continue
+                k = entry_key.rsplit("/", 1)[-1]
+                ep = entry_key[: len(entry_key) - len(k) - 1]
+                score = scores.get(entry_key)
+                result = conn.execute(
+                    """UPDATE amfs_memory_entries
+                       SET tier = %s, priority_score = %s
+                       WHERE namespace = %s AND branch = %s
+                         AND entity_path = %s AND key = %s
+                         AND superseded_at IS NULL""",
+                    (tier_val, score, self._namespace, branch, ep, k),
+                )
+                if result.rowcount:
+                    updated += result.rowcount
+        return updated
 
     # ------------------------------------------------------------------
     # Knowledge graph (Postgres implementation)
@@ -1298,6 +1331,10 @@ class PostgresAdapter(AdapterABC):
             confidence=float(row["confidence"]),
             outcome_count=row["outcome_count"],
             recall_count=row.get("recall_count", 0),
+            priority_score=float(row["priority_score"]) if row.get("priority_score") is not None else None,
+            tier=row.get("tier", 3),
+            importance_score=float(row["importance_score"]) if row.get("importance_score") is not None else None,
+            importance_dimensions=row.get("importance_dimensions"),
             ttl_at=row.get("ttl_at"),
             artifact_refs=[ArtifactRef.model_validate(r) for r in (row.get("artifact_refs") or [])],
             memory_type=memory_type,
