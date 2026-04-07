@@ -27,8 +27,8 @@ After setup, your AI agents have 12 memory tools:
 |:-----|:------------|
 | `amfs_read` | Read a memory entry by entity path and key |
 | `amfs_write` | Write knowledge with automatic provenance tracking |
-| `amfs_search` | Search across all entries with filters (full-text when Postgres tsvector available) |
-| `amfs_retrieve` | Natural language retrieval blending semantic similarity, recency, and confidence |
+| `amfs_search` | Search entries with filters and progressive retrieval (`depth`: 1=Hot, 2=+Warm, 3=all) |
+| `amfs_retrieve` | Natural language retrieval with semantic + recency + confidence scoring (`depth` supported) |
 | `amfs_list` | List entries for an entity |
 | `amfs_stats` | Get a memory overview (entry counts, outcome counts) |
 | `amfs_commit_outcome` | Record outcomes with auto-causal linking |

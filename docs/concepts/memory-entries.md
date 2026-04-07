@@ -25,8 +25,13 @@ Every memory entry has these fields:
 | `confidence` | `float` | Trust score, modified by outcomes (default: `1.0`) |
 | `provenance` | `Provenance` | Who wrote it, when, and from which session |
 | `outcome_count` | `int` | Number of outcomes that have affected this entry |
+| `recall_count` | `int` | How many times this entry has been read (in-place update, no new version) |
 | `ttl_at` | `datetime?` | Optional expiration timestamp |
 | `memory_type` | `MemoryType` | Classification: `fact` (default), `belief`, or `experience` |
+| `tier` | `int` | Memory tier: `1`=Hot, `2`=Warm, `3`=Archive (default) |
+| `priority_score` | `float?` | Composite priority used for tier assignment |
+| `importance_score` | `float?` | Multi-dimensional importance (0.0–1.0), set by `ImportanceEvaluator` |
+| `importance_dimensions` | `dict?` | Per-dimension breakdown (e.g. `{"behavioral_alignment": 0.8}`) |
 | `embedding` | `list[float]?` | Optional vector embedding for semantic search |
 | `amfs_version` | `str` | Protocol version (currently `"0.2.0"`) |
 
@@ -140,6 +145,26 @@ mem.write("svc", "analysis", {
     "impact": "high",
     "suggested_fix": "Add prefetch_related('items')",
 })
+```
+
+---
+
+## Tiered Memory
+
+Entries are assigned to tiers based on a composite priority score (recency, confidence, recall frequency, importance):
+
+| Tier | Value | Description |
+|:-----|:------|:------------|
+| Hot | `1` | High-priority entries — searched first with `depth=1` |
+| Warm | `2` | Mid-priority — included with `depth=2` |
+| Archive | `3` | Low-priority (default) — included with `depth=3` |
+
+Tiers are recomputed periodically by `TierAssigner` (OSS) or `TierWorker` (Pro, background). Use progressive retrieval to control search scope:
+
+```python
+results = mem.search(depth=1)  # hot-tier only — fast, high-signal
+results = mem.search(depth=2)  # hot + warm
+results = mem.search()         # all tiers (default depth=3)
 ```
 
 ---

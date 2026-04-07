@@ -78,6 +78,11 @@ The adapter auto-creates three tables and associated triggers:
 | `provenance` | `JSONB` | Agent, session, timestamp, pattern_refs |
 | `confidence` | `FLOAT` | Trust score |
 | `outcome_count` | `INT` | Outcomes applied |
+| `recall_count` | `INT` | Times read (in-place update, default: `0`) |
+| `priority_score` | `NUMERIC(10,6)` | Composite priority for tier assignment |
+| `tier` | `SMALLINT` | Memory tier: `1`=Hot, `2`=Warm, `3`=Archive (default: `3`) |
+| `importance_score` | `NUMERIC(6,4)` | Multi-dimensional importance (0.0–1.0) |
+| `importance_dimensions` | `JSONB` | Per-dimension breakdown |
 | `memory_type` | `TEXT` | Memory type: `fact`, `belief`, or `experience` (default: `fact`) |
 | `artifact_refs` | `JSONB` | Linked external blobs (default: `[]`) |
 | `search_tsv` | `TSVECTOR` | Auto-generated full-text search vector (GIN-indexed) |
@@ -181,6 +186,15 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 {: .tip }
 The `pgvector/pgvector:pg16` Docker image ships with pgvector pre-installed. The `docker-compose.yml` in the repo uses this image.
+
+### Tier Indexes
+
+Two partial indexes accelerate progressive retrieval queries:
+
+- `idx_entries_hot` — `WHERE tier = 1 AND superseded_at IS NULL`
+- `idx_entries_warm` — `WHERE tier <= 2 AND superseded_at IS NULL`
+
+When `depth=1`, the query uses the hot index; `depth=2` uses the warm index.
 
 ### Connection Pooling
 
