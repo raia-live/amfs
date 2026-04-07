@@ -644,6 +644,27 @@ class PostgresAdapter(AdapterABC):
         return results
 
     # ------------------------------------------------------------------
+    # Recall tracking (mutable in-place update, no CoW version)
+    # ------------------------------------------------------------------
+
+    def increment_recall_count(
+        self,
+        entity_path: str,
+        key: str,
+        *,
+        branch: str = "main",
+    ) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                """UPDATE amfs_memory_entries
+                   SET recall_count = recall_count + 1
+                   WHERE namespace = %s AND branch = %s
+                     AND entity_path = %s AND key = %s
+                     AND superseded_at IS NULL""",
+                (self._namespace, branch, entity_path, key),
+            )
+
+    # ------------------------------------------------------------------
     # Knowledge graph (Postgres implementation)
     # ------------------------------------------------------------------
 
@@ -1276,6 +1297,7 @@ class PostgresAdapter(AdapterABC):
             ),
             confidence=float(row["confidence"]),
             outcome_count=row["outcome_count"],
+            recall_count=row.get("recall_count", 0),
             ttl_at=row.get("ttl_at"),
             artifact_refs=[ArtifactRef.model_validate(r) for r in (row.get("artifact_refs") or [])],
             memory_type=memory_type,
