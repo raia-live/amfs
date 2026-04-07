@@ -35,6 +35,18 @@ class ProvenanceTier(int, Enum):
     MANUAL = 4
 
 
+class MemoryTier(int, Enum):
+    """Hierarchical memory tier for prioritized retrieval.
+
+    Hot entries are searched first; archive is only accessed when active
+    tiers don't satisfy the query.
+    """
+
+    HOT = 1
+    WARM = 2
+    ARCHIVE = 3
+
+
 class OutcomeType(str, Enum):
     """Types of outcomes that can affect memory confidence."""
 
@@ -101,6 +113,9 @@ class MemoryEntry(BaseModel):
     provenance: Provenance
     confidence: float = 1.0
     outcome_count: int = 0
+    recall_count: int = 0
+    priority_score: float | None = None
+    tier: int = 3
     ttl_at: datetime | None = None
     embedding: list[float] | None = None
     artifact_refs: list[ArtifactRef] = Field(default_factory=list)
@@ -292,6 +307,21 @@ class SearchQuery(BaseModel):
     limit: int = 100
     sort_by: str = "confidence"  # "confidence", "recency", "version"
     recall_config: RecallConfig | None = None
+    depth: int = 3
+
+
+class TierConfig(BaseModel):
+    """Configuration for tiered memory hierarchy.
+
+    Controls the capacity of each tier and the weights used in the
+    HMO-inspired priority scoring formula.
+    """
+
+    hot_capacity: int = 50
+    warm_capacity: int = 200
+    alpha: float = 1.0
+    beta: float = 1.0
+    decay_lambda: float = 0.1
 
 
 class MemoryStats(BaseModel):
