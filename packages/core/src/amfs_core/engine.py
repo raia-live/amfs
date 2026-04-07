@@ -253,6 +253,8 @@ class CoWEngine:
         shared: bool = True,
         branch: str = "main",
         embedding: list[float] | None = None,
+        importance_score: float | None = None,
+        importance_dimensions: dict[str, float] | None = None,
     ) -> MemoryEntry:
         """Write a new version of a key with CoW semantics.
 
@@ -271,6 +273,8 @@ class CoWEngine:
             provenance=self._tagger.tag(pattern_refs=pattern_refs),
             confidence=confidence,
             outcome_count=current.outcome_count if current else 0,
+            importance_score=importance_score,
+            importance_dimensions=importance_dimensions,
             ttl_at=ttl_at,
             artifact_refs=artifact_refs or [],
             memory_type=memory_type,

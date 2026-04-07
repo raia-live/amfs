@@ -1276,6 +1276,8 @@ class PostgresAdapter(AdapterABC):
             ),
             confidence=float(row["confidence"]),
             outcome_count=row["outcome_count"],
+            importance_score=float(row["importance_score"]) if row.get("importance_score") is not None else None,
+            importance_dimensions=row.get("importance_dimensions"),
             ttl_at=row.get("ttl_at"),
             artifact_refs=[ArtifactRef.model_validate(r) for r in (row.get("artifact_refs") or [])],
             memory_type=memory_type,

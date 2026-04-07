@@ -101,6 +101,8 @@ class MemoryEntry(BaseModel):
     provenance: Provenance
     confidence: float = 1.0
     outcome_count: int = 0
+    importance_score: float | None = None
+    importance_dimensions: dict[str, float] | None = None
     ttl_at: datetime | None = None
     embedding: list[float] | None = None
     artifact_refs: list[ArtifactRef] = Field(default_factory=list)

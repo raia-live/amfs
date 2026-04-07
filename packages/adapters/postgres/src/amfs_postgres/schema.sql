@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS amfs_memory_entries (
     pattern_refs TEXT[] DEFAULT '{}',
     confidence NUMERIC(6,4) DEFAULT 1.0,
     outcome_count INTEGER DEFAULT 0,
+    importance_score NUMERIC(6,4),
+    importance_dimensions JSONB,
     ttl_at TIMESTAMPTZ,
     memory_type TEXT DEFAULT 'fact',
     shared BOOLEAN NOT NULL DEFAULT TRUE,
