@@ -238,6 +238,22 @@ class AdapterABC(ABC):
             newest_entry_at=newest,
         )
 
+    # ── Recall tracking ─────────────────────────────────────────────────
+
+    def increment_recall_count(
+        self,
+        entity_path: str,
+        key: str,
+        *,
+        branch: str = "main",
+    ) -> None:
+        """Increment the recall_count of the current entry version in place.
+
+        This is a mutable metadata update that does NOT create a new CoW
+        version.  Adapters that do not support in-place updates can safely
+        leave the default no-op.
+        """
+
     # ── Agent registration ─────────────────────────────────────────────
 
     def ensure_agent(self, agent_id: str, namespace: str = "default") -> Agent:
