@@ -116,6 +116,8 @@ class MemoryEntry(BaseModel):
     recall_count: int = 0
     priority_score: float | None = None
     tier: int = 3
+    importance_score: float | None = None
+    importance_dimensions: dict[str, float] | None = None
     ttl_at: datetime | None = None
     embedding: list[float] | None = None
     artifact_refs: list[ArtifactRef] = Field(default_factory=list)

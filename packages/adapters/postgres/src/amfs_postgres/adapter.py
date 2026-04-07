@@ -1333,6 +1333,8 @@ class PostgresAdapter(AdapterABC):
             recall_count=row.get("recall_count", 0),
             priority_score=float(row["priority_score"]) if row.get("priority_score") is not None else None,
             tier=row.get("tier", 3),
+            importance_score=float(row["importance_score"]) if row.get("importance_score") is not None else None,
+            importance_dimensions=row.get("importance_dimensions"),
             ttl_at=row.get("ttl_at"),
             artifact_refs=[ArtifactRef.model_validate(r) for r in (row.get("artifact_refs") or [])],
             memory_type=memory_type,

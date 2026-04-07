@@ -78,6 +78,7 @@ class AgentMemory:
         embedder: EmbedderABC | None = None,
         conflict_policy: ConflictPolicy = ConflictPolicy.LAST_WRITE_WINS,
         on_conflict: Callable[[MemoryEntry, MemoryEntry, Any], Any] | None = None,
+        importance_evaluator: Any | None = None,
     ) -> None:
         self._config = load_config_or_default(config_path)
 
@@ -94,6 +95,7 @@ class AgentMemory:
         self._embedder = embedder
         self._conflict_policy = conflict_policy
         self._on_conflict = on_conflict
+        self._importance_evaluator = importance_evaluator
         self._branch = "main"
 
         self._lifecycle: LifecycleManager | None = None
@@ -230,6 +232,18 @@ class AgentMemory:
         if self._embedder is not None:
             embedding = self._embedder.embed_value(value)
 
+        importance_score = None
+        importance_dimensions = None
+        if self._importance_evaluator is not None:
+            try:
+                importance_score, importance_dimensions = self._importance_evaluator.evaluate(
+                    value,
+                    entity_path=entity_path,
+                    key=key,
+                )
+            except Exception:
+                logger.debug("Importance evaluation failed, skipping", exc_info=True)
+
         entry = self._engine.write(
             entity_path,
             key,
@@ -242,6 +256,8 @@ class AgentMemory:
             shared=shared,
             branch=effective_branch,
             embedding=embedding,
+            importance_score=importance_score,
+            importance_dimensions=importance_dimensions or None,
         )
         self._read_tracker.record_write(entity_path, key, entry.version, entry.version == 1)
 

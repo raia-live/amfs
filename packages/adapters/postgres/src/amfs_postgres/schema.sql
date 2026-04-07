@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS amfs_memory_entries (
     recall_count INTEGER DEFAULT 0,
     priority_score NUMERIC(10,6),
     tier SMALLINT DEFAULT 3,
+    importance_score NUMERIC(6,4),
+    importance_dimensions JSONB,
     ttl_at TIMESTAMPTZ,
     memory_type TEXT DEFAULT 'fact',
     shared BOOLEAN NOT NULL DEFAULT TRUE,
