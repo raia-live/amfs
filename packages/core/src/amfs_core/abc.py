@@ -271,6 +271,7 @@ class AdapterABC(ABC):
         """
         return 0
 
+
     # ── Agent registration ─────────────────────────────────────────────
 
     def ensure_agent(self, agent_id: str, namespace: str = "default") -> Agent:
