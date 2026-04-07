@@ -35,6 +35,18 @@ class ProvenanceTier(int, Enum):
     MANUAL = 4
 
 
+class MemoryTier(int, Enum):
+    """Hierarchical memory tier for prioritized retrieval.
+
+    Hot entries are searched first; archive is only accessed when active
+    tiers don't satisfy the query.
+    """
+
+    HOT = 1
+    WARM = 2
+    ARCHIVE = 3
+
+
 class OutcomeType(str, Enum):
     """Types of outcomes that can affect memory confidence."""
 
@@ -101,6 +113,9 @@ class MemoryEntry(BaseModel):
     provenance: Provenance
     confidence: float = 1.0
     outcome_count: int = 0
+    recall_count: int = 0
+    priority_score: float | None = None
+    tier: int = 3
     importance_score: float | None = None
     importance_dimensions: dict[str, float] | None = None
     ttl_at: datetime | None = None
@@ -111,11 +126,13 @@ class MemoryEntry(BaseModel):
     branch: str = "main"
 
     def effective_confidence(self, *, decay_half_life_days: float | None = None) -> float:
-        """Confidence adjusted for time-based decay and memory type.
+        """Confidence adjusted for four-signal decay: time, memory type, outcomes, and access frequency.
 
         Uses exponential decay: effective = stored * 0.5^(age_days / half_life).
-        Entries validated by outcomes (outcome_count > 0) decay at half the rate.
-        Beliefs decay faster (half_life * 0.5), experiences slower (half_life * 1.5).
+        The effective half-life is modulated by:
+          - memory_type: beliefs decay faster (0.5x), experiences slower (1.5x)
+          - recall_count: frequently accessed entries decay slower via log1p
+          - outcome_count: outcome-validated entries get 2x half-life boost
         Returns stored confidence unchanged when decay is disabled.
         """
         if decay_half_life_days is None or decay_half_life_days <= 0:
@@ -125,7 +142,11 @@ class MemoryEntry(BaseModel):
 
         type_mult = MEMORY_TYPE_DECAY_MULTIPLIERS.get(self.memory_type, 1.0)
         base_half_life = decay_half_life_days * type_mult
-        effective_half_life = base_half_life * 2 if self.outcome_count > 0 else base_half_life
+
+        # Frequency-modulated decay: higher recall_count flattens the decay curve
+        effective_half_life = base_half_life * (1 + math.log1p(self.recall_count))
+        if self.outcome_count > 0:
+            effective_half_life *= 2
 
         decay_factor = math.pow(0.5, age_days / effective_half_life)
         return self.confidence * decay_factor
@@ -294,6 +315,21 @@ class SearchQuery(BaseModel):
     limit: int = 100
     sort_by: str = "confidence"  # "confidence", "recency", "version"
     recall_config: RecallConfig | None = None
+    depth: int = 3
+
+
+class TierConfig(BaseModel):
+    """Configuration for tiered memory hierarchy.
+
+    Controls the capacity of each tier and the weights used in the
+    HMO-inspired priority scoring formula.
+    """
+
+    hot_capacity: int = 50
+    warm_capacity: int = 200
+    alpha: float = 1.0
+    beta: float = 1.0
+    decay_lambda: float = 0.1
 
 
 class MemoryStats(BaseModel):

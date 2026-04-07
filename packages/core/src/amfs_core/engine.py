@@ -235,8 +235,10 @@ class CoWEngine:
         for causal linking.
         """
         entry = self._adapter.read(entity_path, key, min_confidence=min_confidence, branch=branch)
-        if entry is not None and self._read_tracker is not None:
-            self._read_tracker.record(entry)
+        if entry is not None:
+            self._adapter.increment_recall_count(entity_path, key, branch=branch)
+            if self._read_tracker is not None:
+                self._read_tracker.record(entry)
         return entry
 
     def write(
@@ -273,6 +275,7 @@ class CoWEngine:
             provenance=self._tagger.tag(pattern_refs=pattern_refs),
             confidence=confidence,
             outcome_count=current.outcome_count if current else 0,
+            recall_count=current.recall_count if current else 0,
             importance_score=importance_score,
             importance_dimensions=importance_dimensions,
             ttl_at=ttl_at,
