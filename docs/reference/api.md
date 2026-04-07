@@ -33,6 +33,7 @@ AgentMemory(
     ttl_sweep_interval: float | None = None,
     decay_half_life_days: float | None = None,
     embedder: EmbedderABC | None = None,
+    importance_evaluator: ImportanceEvaluator | None = None,
     conflict_policy: ConflictPolicy = ConflictPolicy.LAST_WRITE_WINS,
     on_conflict: Callable | None = None,
 )
@@ -47,6 +48,7 @@ AgentMemory(
 | `ttl_sweep_interval` | `float?` | `None` | Seconds between TTL sweeps |
 | `decay_half_life_days` | `float?` | `None` | Confidence decay half-life |
 | `embedder` | `EmbedderABC?` | `None` | Embedder for semantic search |
+| `importance_evaluator` | `ImportanceEvaluator?` | `None` | Scores entries on write (sets `importance_score` and `importance_dimensions`) |
 | `conflict_policy` | `ConflictPolicy` | `LAST_WRITE_WINS` | Concurrent write strategy |
 | `on_conflict` | `Callable?` | `None` | Custom conflict resolver |
 
@@ -124,13 +126,14 @@ search(
     pattern_ref: str | None = None,
     sort_by: str = "confidence",
     limit: int = 100,
+    depth: int = 3,
     recall_config: RecallConfig | None = None,
 ) -> list[MemoryEntry] | list[ScoredEntry]
 ```
 
-Search across all entries with rich filters. When `query` is provided, the text is forwarded to the adapter for full-text search (Postgres tsvector) and, when `recall_config` is also set, used for cosine-similarity scoring against entry embeddings.
+Search across all entries with rich filters. `depth` controls progressive retrieval: `1` = Hot tier only, `2` = Hot + Warm, `3` = all tiers (default).
 
-When `recall_config` is provided, returns `ScoredEntry` objects sorted by composite recall score. Each `ScoredEntry` includes a `breakdown` dict showing how semantic, recency, and confidence signals contributed.
+When `query` is provided, the text is forwarded to the adapter for full-text search (Postgres tsvector). When `recall_config` is also set, returns `ScoredEntry` objects sorted by composite recall score with a `breakdown` dict.
 
 | Behavior | `query` set | `query` not set |
 |:---------|:-----------|:----------------|
@@ -326,7 +329,12 @@ class MemoryEntry:
     provenance: Provenance          # Authorship metadata
     confidence: float               # Trust score
     outcome_count: int              # Outcomes applied
+    recall_count: int               # Times read (in-place, no new version)
     memory_type: MemoryType         # fact, belief, or experience
+    tier: int                       # 1=Hot, 2=Warm, 3=Archive
+    priority_score: float | None    # Composite score for tier assignment
+    importance_score: float | None  # Multi-dimensional importance (0.0–1.0)
+    importance_dimensions: dict[str, float] | None  # Per-dimension breakdown
     branch: str                     # Branch name ("main" by default)
     shared: bool                    # Visible to other agents
     ttl_at: datetime | None         # Expiration timestamp
@@ -467,6 +475,85 @@ class ScoredEntry:
 
 ---
 
+## MemoryTier
+
+```python
+class MemoryTier(IntEnum):
+    HOT = 1
+    WARM = 2
+    ARCHIVE = 3
+```
+
+---
+
+## TierConfig
+
+```python
+class TierConfig:
+    hot_capacity: int = 50        # Max entries in Hot tier
+    warm_capacity: int = 200      # Max entries in Warm tier
+    recency_weight: float = 0.4   # Weight for recency in priority score
+    confidence_weight: float = 0.3
+    importance_weight: float = 0.3
+```
+
+---
+
+## PriorityScorer
+
+```python
+from amfs_core.tiering import PriorityScorer
+
+scorer = PriorityScorer(config=TierConfig())
+score = scorer.score(entry)  # Returns float
+```
+
+Computes `S = (alpha * importance + beta * recency) * freq_boost * time_decay`.
+
+---
+
+## TierAssigner
+
+```python
+from amfs_core.tiering import TierAssigner
+
+assigner = TierAssigner(config=TierConfig())
+assignments = assigner.assign(entries)  # Returns list[(entry_key, tier, score)]
+```
+
+Sorts entries by priority score and assigns them to Hot, Warm, or Archive based on configured capacities.
+
+---
+
+## ImportanceEvaluator
+
+```python
+from amfs_core.importance import ImportanceEvaluator, NoOpEvaluator
+
+class ImportanceEvaluator(ABC):
+    def evaluate(self, entity_path: str, key: str, value: Any) -> tuple[float | None, dict[str, float]]:
+        """Returns (overall_score, dimension_breakdown)."""
+
+class NoOpEvaluator(ImportanceEvaluator):
+    """Returns (None, {}) — zero overhead. Used by default."""
+```
+
+Pass a custom evaluator to `AgentMemory(importance_evaluator=...)` to score entries on write. The Pro edition provides `LLMImportanceEvaluator` with 3-dimension scoring.
+
+---
+
+## AdapterABC (new methods)
+
+```python
+def increment_recall_count(self, entity_path: str, key: str, *, branch: str = "main") -> None:
+    """In-place update — does NOT create a new CoW version."""
+
+def update_tiers(self, updates: list[tuple[str, str, int, float]], *, branch: str = "main") -> None:
+    """Batch update (entity_path, key, tier, priority_score) tuples."""
+```
+
+---
+
 ## GraphEdge
 
 ```python
@@ -588,8 +675,11 @@ amfs_search(
     agent_id: str | None = None,
     sort_by: str = "confidence",
     limit: int = 20,
+    depth: int = 3,
 ) -> str (JSON)
 ```
+
+`depth` controls progressive retrieval: `1` = Hot only, `2` = Hot + Warm, `3` = all (default).
 
 ### amfs_list
 
@@ -848,10 +938,11 @@ amfs_retrieve(
     entity_path: str | None = None,
     min_confidence: float = 0.0,
     limit: int = 10,
+    depth: int = 3,
 ) -> str (JSON)
 ```
 
-Multi-strategy retrieval combining semantic, keyword, temporal, confidence, and learned ranking signals via Reciprocal Rank Fusion. When a learned model is trained (via `amfs_retrain`), it automatically contributes to ranking.
+Multi-strategy retrieval combining semantic, keyword, temporal, confidence, and learned ranking signals via Reciprocal Rank Fusion. `depth` controls tier scope (same as `amfs_search`). When a learned model is trained (via `amfs_retrain`), it automatically contributes to ranking.
 
 ### amfs_retrain
 

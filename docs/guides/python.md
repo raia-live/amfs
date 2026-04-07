@@ -57,6 +57,21 @@ adapter = FilesystemAdapter(root=Path(".amfs"), namespace="staging")
 mem = AgentMemory(agent_id="my-agent", adapter=adapter)
 ```
 
+### With an Importance Evaluator
+
+```python
+from amfs_core.importance import ImportanceEvaluator
+
+class MyEvaluator(ImportanceEvaluator):
+    def evaluate(self, entity_path, key, value):
+        score = 0.8 if "critical" in str(value).lower() else 0.3
+        return score, {"criticality": score}
+
+mem = AgentMemory(agent_id="my-agent", importance_evaluator=MyEvaluator())
+```
+
+Every `write()` call will automatically score the entry and set `importance_score` and `importance_dimensions`. If the evaluator raises, the write proceeds without scoring.
+
 ---
 
 ## Core Operations
@@ -118,37 +133,32 @@ entries = mem.list("checkout-service", include_superseded=True)
 ### Search
 
 ```python
-results = mem.search(
-    entity_path="checkout-service",   # optional filter
-    min_confidence=0.5,               # optional filter
-)
+results = mem.search(entity_path="checkout-service", min_confidence=0.5)
 ```
 
-Search with a free-text query — uses Postgres tsvector when available, otherwise falls back to substring matching:
+Progressive retrieval with `depth` — search only high-priority tiers for fast, high-signal results:
 
 ```python
-results = mem.search(query="retry backoff strategy", limit=10)
+hot_only = mem.search(query="retry strategy", depth=1)   # Hot tier
+hot_warm = mem.search(query="retry strategy", depth=2)   # Hot + Warm
+all_tiers = mem.search(query="retry strategy")            # All (default)
 ```
 
-Search with composite recall scoring (blends semantic similarity, recency, and confidence):
+Composite recall scoring (blends semantic similarity, recency, and confidence):
 
 ```python
 from amfs_core.models import RecallConfig
 
 scored = mem.search(
     query="how do we handle retries?",
-    recall_config=RecallConfig(
-        semantic_weight=0.5,
-        recency_weight=0.3,
-        confidence_weight=0.2,
-    ),
+    recall_config=RecallConfig(semantic_weight=0.5, recency_weight=0.3, confidence_weight=0.2),
 )
 for item in scored:
-    print(f"{item.entry.key} — score={item.score:.3f} — {item.breakdown}")
+    print(f"{item.entry.key} — score={item.score:.3f}")
 ```
 
 {: .note }
-Semantic scoring requires an `embedder` to be configured. Without one, the semantic component is 0.0 and ranking relies on recency and confidence.
+Semantic scoring requires an `embedder`. Without one, the semantic component is 0.0.
 
 ### Stats
 

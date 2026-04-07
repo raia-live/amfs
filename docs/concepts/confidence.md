@@ -100,26 +100,33 @@ This is powered by the **ReadTracker**, which logs every `read()` call during a 
 
 ---
 
-## Type-Specific Decay
+## Four-Signal Decay Model
 
-When `decay_half_life_days` is configured, confidence decays over time. The decay rate varies by memory type:
+When `decay_half_life_days` is configured, AMFS uses four signals to determine how fast an entry's effective confidence decays:
 
-| Memory Type | Decay Multiplier | Effect |
-|:------------|:----------------|:-------|
-| `fact` | 1.0× | Standard half-life |
-| `belief` | 0.5× | Half-life is halved (decays 2× faster) |
-| `experience` | 1.5× | Half-life is 50% longer (decays slower) |
+| Signal | Effect | Mechanism |
+|:-------|:-------|:----------|
+| **Time** | Base exponential decay | `effective_half_life` in days |
+| **Memory type** | Facts 1×, beliefs 0.5× (faster), experiences 1.5× (slower) | Type multiplier on half-life |
+| **Outcome validation** | Validated entries decay 2× slower | `outcome_count > 0` doubles half-life |
+| **Access frequency** | Frequently read entries resist decay | `log1p(recall_count)` extends half-life |
 
-Additionally, entries with `outcome_count > 0` decay at **half the rate** of unvalidated entries. This means a production-validated fact with a 30-day half-life effectively has a 60-day half-life.
+The effective half-life formula:
+
+```
+effective_half_life = base × type_multiplier × (1 + log1p(recall_count)) × (2 if outcomes else 1)
+```
+
+For example, a fact with `decay_half_life_days=30`, 10 reads, and 1 outcome:
+
+```
+30 × 1.0 × (1 + log1p(10)) × 2 = 30 × 1.0 × 3.40 × 2 = 204 days
+```
+
+This means actively used, production-validated knowledge persists far longer than cold, unvalidated beliefs.
 
 ```python
-mem = AgentMemory(
-    agent_id="my-agent",
-    decay_half_life_days=30.0,  # facts decay with 30-day half-life
-)
-
-# A belief with the same setting decays with a 15-day half-life
-# An experience decays with a 45-day half-life
+mem = AgentMemory(agent_id="my-agent", decay_half_life_days=30.0)
 ```
 
 ---
