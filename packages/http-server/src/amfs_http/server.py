@@ -1643,6 +1643,153 @@ async def resolve_pattern(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Pro — Expertise Graph
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/pro/graph/expertise")
+async def expertise_graph(
+    limit_agents: int = Query(30, ge=1, le=200),
+    limit_entities: int = Query(30, ge=1, le=200),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Build an expertise graph mapping agents to entities they know about.
+
+    Nodes are agents and entities; edges represent write relationships
+    weighted by entry count. The result powers the dashboard Expertise Map.
+    """
+    mem = _get_memory()
+    entries = mem.list()
+
+    agent_entity_weights: dict[str, dict[str, int]] = {}
+    agent_entry_counts: dict[str, int] = {}
+    entity_entry_counts: dict[str, int] = {}
+
+    for e in entries:
+        aid = e.provenance.agent_id
+        ep = e.entity_path
+
+        agent_entry_counts[aid] = agent_entry_counts.get(aid, 0) + 1
+        entity_entry_counts[ep] = entity_entry_counts.get(ep, 0) + 1
+
+        if aid not in agent_entity_weights:
+            agent_entity_weights[aid] = {}
+        agent_entity_weights[aid][ep] = agent_entity_weights[aid].get(ep, 0) + 1
+
+    top_agents = sorted(agent_entry_counts.items(), key=lambda x: x[1], reverse=True)[:limit_agents]
+    top_agent_ids = {a[0] for a in top_agents}
+
+    relevant_entities: set[str] = set()
+    for aid in top_agent_ids:
+        for ep in agent_entity_weights.get(aid, {}):
+            relevant_entities.add(ep)
+    top_entities = sorted(
+        [(ep, entity_entry_counts.get(ep, 0)) for ep in relevant_entities],
+        key=lambda x: x[1],
+        reverse=True,
+    )[:limit_entities]
+    top_entity_paths = {ep[0] for ep in top_entities}
+
+    nodes: list[dict[str, Any]] = []
+    for aid, count in top_agents:
+        nodes.append({
+            "id": f"agent/{aid}",
+            "type": "agent",
+            "label": aid,
+            "entryCount": count,
+        })
+    for ep, count in top_entities:
+        nodes.append({
+            "id": f"entity/{ep}",
+            "type": "entity",
+            "label": ep,
+            "entryCount": count,
+        })
+
+    edges: list[dict[str, Any]] = []
+    for aid in top_agent_ids:
+        for ep, weight in agent_entity_weights.get(aid, {}).items():
+            if ep in top_entity_paths:
+                edges.append({
+                    "source": f"agent/{aid}",
+                    "target": f"entity/{ep}",
+                    "weight": weight,
+                    "type": "writes",
+                })
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "stats": {
+            "totalAgents": len(agent_entry_counts),
+            "totalEntities": len(entity_entry_counts),
+            "totalEdges": len(edges),
+        },
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Pro — Memory Tiers
+# ──────────────────────────────────────────────────────────────────────
+
+_TIER_LABELS: dict[int, str] = {
+    1: "Production Validated",
+    2: "Production Observed",
+    3: "Development",
+    4: "Manual",
+}
+
+
+@app.get("/api/v1/pro/tiers/distribution")
+async def tiers_distribution(
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Return the distribution of memory entries across provenance tiers."""
+    mem = _get_memory()
+    entries = mem.list()
+
+    tier_counts: dict[int, int] = {1: 0, 2: 0, 3: 0, 4: 0}
+    for e in entries:
+        tier = e.provenance_tier.value
+        tier_counts[tier] = tier_counts.get(tier, 0) + 1
+
+    total = sum(tier_counts.values())
+    distribution = []
+    for tier_val in sorted(tier_counts):
+        count = tier_counts[tier_val]
+        distribution.append({
+            "tier": tier_val,
+            "label": _TIER_LABELS.get(tier_val, f"Tier {tier_val}"),
+            "count": count,
+            "percentage": round((count / total * 100) if total > 0 else 0, 1),
+        })
+
+    return {"distribution": distribution, "total": total}
+
+
+@app.get("/api/v1/pro/tiers/entries")
+async def tiers_entries(
+    tier: int = Query(..., ge=1, le=4),
+    limit: int = Query(50, ge=1, le=500),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Return memory entries filtered by provenance tier."""
+    mem = _get_memory()
+    entries = mem.list()
+
+    filtered = [e for e in entries if e.provenance_tier.value == tier]
+    filtered.sort(key=lambda e: e.provenance.written_at, reverse=True)
+
+    return {
+        "tier": tier,
+        "label": _TIER_LABELS.get(tier, f"Tier {tier}"),
+        "entries": [_entry_to_response(e) for e in filtered[:limit]],
+        "count": len(filtered[:limit]),
+        "total": len(filtered),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
 # SSE Stream
 # ──────────────────────────────────────────────────────────────────────
 
