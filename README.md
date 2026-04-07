@@ -15,6 +15,8 @@ Most agent memory is a vector store with a `save()` and `query()`. AMFS is diffe
 - **Versioned** — Every write creates an immutable CoW snapshot. See how knowledge evolved.
 - **Outcome-aware** — Confidence scores adjust automatically when deploys succeed or incidents happen.
 - **Causal** — Every read is tracked. `explain()` shows exactly which memories drove a decision.
+- **Knowledge graph** — Relationships between entities, agents, and outcomes are auto-materialized from normal operations and queryable via `graph_neighbors()`.
+- **Hybrid search** — Combine full-text (Postgres tsvector), semantic (cosine similarity), recency, and confidence into a single ranked result set.
 - **Multi-agent** — Agents share a single memory layer. One agent's finding is another's context.
 - **Pluggable** — Filesystem for dev, Postgres for production, S3 for cloud. Swap without code changes.
 

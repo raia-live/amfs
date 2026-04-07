@@ -16,7 +16,10 @@ You can build a custom adapter for any storage backend by implementing the `Adap
 
 ```python
 from amfs_core.abc import AdapterABC
-from amfs_core.models import MemoryEntry, OutcomeRecord, SearchQuery, MemoryStats
+from amfs_core.models import (
+    MemoryEntry, OutcomeRecord, SearchQuery, MemoryStats,
+    GraphEdge, GraphNeighborQuery,
+)
 
 class MyAdapter(AdapterABC):
     def read(self, entity_path: str, key: str) -> MemoryEntry | None:
@@ -48,6 +51,26 @@ class MyAdapter(AdapterABC):
     def stats(self) -> MemoryStats:
         """Return memory statistics. Default implementation counts list()."""
         ...
+
+    # --- Knowledge graph (optional) ---
+    # The base class provides no-op defaults so these are opt-in.
+    # Only the Postgres adapter implements them with real storage.
+
+    def upsert_graph_edge(self, edge: GraphEdge, *, namespace: str = "default", branch: str = "main") -> GraphEdge:
+        """Insert or merge a graph edge. Default: returns the edge unchanged."""
+        return edge
+
+    def graph_neighbors(self, query: GraphNeighborQuery, *, namespace: str = "default", branch: str = "main") -> list[GraphEdge]:
+        """Traverse the knowledge graph. Default: returns []."""
+        return []
+
+    def list_graph_edges(self, *, namespace: str = "default", branch: str = "main") -> list[GraphEdge]:
+        """List all graph edges. Default: returns []."""
+        return []
+
+    def graph_stats(self, *, namespace: str = "default", branch: str = "main") -> dict:
+        """Graph summary (edge count, unique entities, top relations). Default: empty dict."""
+        return {}
 ```
 
 ---

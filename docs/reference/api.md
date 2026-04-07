@@ -114,15 +114,54 @@ Returns all current entries, optionally filtered by entity. Set `include_superse
 ```python
 search(
     *,
+    query: str | None = None,
     entity_path: str | None = None,
+    entity_paths: list[str] | None = None,
     min_confidence: float = 0.0,
+    max_confidence: float | None = None,
     agent_id: str | None = None,
+    since: datetime | None = None,
+    pattern_ref: str | None = None,
     sort_by: str = "confidence",
-    limit: int = 20,
-) -> list[MemoryEntry]
+    limit: int = 100,
+    recall_config: RecallConfig | None = None,
+) -> list[MemoryEntry] | list[ScoredEntry]
 ```
 
-Search across all entries with filters.
+Search across all entries with rich filters. When `query` is provided, the text is forwarded to the adapter for full-text search (Postgres tsvector) and, when `recall_config` is also set, used for cosine-similarity scoring against entry embeddings.
+
+When `recall_config` is provided, returns `ScoredEntry` objects sorted by composite recall score. Each `ScoredEntry` includes a `breakdown` dict showing how semantic, recency, and confidence signals contributed.
+
+| Behavior | `query` set | `query` not set |
+|:---------|:-----------|:----------------|
+| Postgres adapter | tsvector `@@` filter + `ts_rank` ordering | standard SQL filter |
+| Filesystem/S3 adapter | Python substring fallback | standard filter |
+| With `recall_config` | Real cosine similarity in semantic component | Semantic component is 0.0 |
+
+---
+
+### graph_neighbors
+
+```python
+graph_neighbors(
+    entity: str,
+    *,
+    relation: str | None = None,
+    direction: str = "both",
+    min_confidence: float = 0.0,
+    depth: int = 1,
+    limit: int = 50,
+) -> list[GraphEdge]
+```
+
+Traverse the knowledge graph from an entity. Returns edges connecting the entity to other entities, agents, and outcomes. Multi-hop traversal is supported via `depth > 1` (Postgres adapter uses recursive CTE). The Filesystem and S3 adapters return an empty list.
+
+| Parameter | Description |
+|:----------|:------------|
+| `entity` | Entity to explore (e.g. `"checkout-service/retry-pattern"`) |
+| `relation` | Filter by relation type (e.g. `"references"`, `"informed"`, `"learned_from"`) |
+| `direction` | `"outgoing"`, `"incoming"`, or `"both"` |
+| `depth` | Traversal depth (1 = direct neighbors) |
 
 ---
 
@@ -403,6 +442,71 @@ class ConflictPolicy(str, Enum):
 
 ---
 
+## RecallConfig
+
+```python
+class RecallConfig:
+    semantic_weight: float = 0.5   # Cosine similarity (requires embedder)
+    recency_weight: float = 0.3    # Exponential decay by age
+    confidence_weight: float = 0.2 # Entry confidence score
+    recency_half_life_days: float = 30.0
+```
+
+When no embedder is configured or an entry lacks an embedding, the semantic component scores 0.0 and the remaining weights dominate.
+
+---
+
+## ScoredEntry
+
+```python
+class ScoredEntry:
+    entry: MemoryEntry
+    score: float                # Composite recall score
+    breakdown: dict[str, float] # Per-signal contributions
+```
+
+---
+
+## GraphEdge
+
+```python
+class GraphEdge:
+    source_entity: str
+    source_type: str       # "entry", "agent", "outcome"
+    relation: str          # "references", "informed", "learned_from", "co_occurs_with", "read", "wrote"
+    target_entity: str
+    target_type: str
+    confidence: float      # Edge confidence (0.0–1.0)
+    evidence_count: int    # Times this edge has been reinforced
+    first_seen: datetime
+    last_seen: datetime
+    provenance: dict | None
+```
+
+Graph edges are materialized automatically:
+
+| Trigger | Edge created |
+|:--------|:-------------|
+| `write(pattern_refs=["x"])` | `entry → references → x` |
+| `commit_outcome()` | `entry → informed → outcome`, `agent → read → entry`, co-occurrence edges |
+| `read_from(agent_id)` | `this_agent → learned_from → other_agent` |
+
+---
+
+## GraphNeighborQuery
+
+```python
+class GraphNeighborQuery:
+    entity: str
+    relation: str | None = None
+    direction: str = "both"   # "outgoing", "incoming", "both"
+    min_confidence: float = 0.0
+    depth: int = 1
+    limit: int = 50
+```
+
+---
+
 ## DigestType
 
 ```python
@@ -410,7 +514,7 @@ class DigestType(str, Enum):
     ENTITY = "entity"              # Summary of all knowledge about an entity
     AGENT_BRIEF = "agent_brief"    # Summary of an agent's knowledge and activity
     SOURCE = "source"              # Summary of external data from a connector
-    CONNECTION_MAP = "connection_map"  # Cross-entity relationships (Pro)
+    CONNECTION_MAP = "connection_map"  # Cross-entity relationships from the knowledge graph
 ```
 
 ---
@@ -542,6 +646,37 @@ amfs_explain(
 ```
 
 Returns the causal read chain for the current session: which entries were read and their details.
+
+### amfs_retrieve
+
+```
+amfs_retrieve(
+    query: str,
+    entity_path: str | None = None,
+    min_confidence: float = 0.0,
+    limit: int = 10,
+    semantic_weight: float = 0.5,
+    recency_weight: float = 0.3,
+    confidence_weight: float = 0.2,
+) -> str (JSON)
+```
+
+Find the most relevant memories for a natural language query. Blends semantic similarity, recency, and confidence into a single ranked list. Returns `ScoredEntry`-shaped results with score breakdowns. Requires an embedder for the semantic signal; without one, ranking uses recency and confidence only.
+
+### amfs_graph_neighbors
+
+```
+amfs_graph_neighbors(
+    entity: str,
+    relation: str | None = None,
+    direction: str = "both",
+    min_confidence: float = 0.0,
+    depth: int = 1,
+    limit: int = 50,
+) -> str (JSON)
+```
+
+Explore the knowledge graph around an entity. Returns edges with relation types, confidence, and evidence counts. Use `depth > 1` for multi-hop traversal (Postgres adapter only).
 
 ### amfs_timeline
 
