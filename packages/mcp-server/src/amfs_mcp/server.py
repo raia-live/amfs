@@ -343,6 +343,41 @@ def amfs_list(entity_path: str | None = None) -> str:
 
 
 @mcp.tool
+def amfs_graph_neighbors(
+    entity: str,
+    relation: str | None = None,
+    direction: str = "both",
+    min_confidence: float = 0.0,
+    depth: int = 1,
+    limit: int = 50,
+) -> str:
+    """Explore the knowledge graph around an entity.
+
+    Shows what services, agents, patterns, and outcomes are connected
+    to the given entity, with relationship types and confidence scores.
+    Use depth > 1 for multi-hop traversal.
+
+    Args:
+        entity: The entity to explore (e.g. "checkout-service/retry-pattern")
+        relation: Optional filter by relation type (e.g. "references", "informed")
+        direction: Edge direction — "outgoing", "incoming", or "both"
+        min_confidence: Minimum edge confidence (0.0-1.0)
+        depth: Traversal depth (1 = direct neighbors, 2+ = multi-hop)
+        limit: Maximum edges to return
+    """
+    mem = _get_memory()
+    edges = mem.graph_neighbors(
+        entity,
+        relation=relation,
+        direction=direction,
+        min_confidence=min_confidence,
+        depth=depth,
+        limit=limit,
+    )
+    return json.dumps([e.model_dump(mode="json") for e in edges], default=str)
+
+
+@mcp.tool
 def amfs_stats() -> str:
     """Get aggregate statistics about the memory store.
 
