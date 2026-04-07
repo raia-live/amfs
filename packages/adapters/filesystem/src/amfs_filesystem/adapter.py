@@ -178,6 +178,25 @@ class FilesystemAdapter(AdapterABC):
     # helpers
     # ------------------------------------------------------------------
 
+    def increment_recall_count(
+        self,
+        entity_path: str,
+        key: str,
+        *,
+        branch: str = "main",
+    ) -> None:
+        current_file = self._layout.current_version_file(entity_path, key)
+        if current_file is None:
+            return
+        try:
+            data = json.loads(current_file.read_text(encoding="utf-8"))
+            data["recall_count"] = data.get("recall_count", 0) + 1
+            current_file.write_text(
+                json.dumps(data, indent=2, default=str), encoding="utf-8"
+            )
+        except Exception:
+            logger.warning("Failed to increment recall_count for %s/%s", entity_path, key)
+
     @staticmethod
     def _read_entry(path: Path) -> MemoryEntry:
         try:
