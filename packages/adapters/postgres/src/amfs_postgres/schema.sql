@@ -34,13 +34,8 @@ CREATE INDEX IF NOT EXISTS idx_entries_current
 CREATE INDEX IF NOT EXISTS idx_entries_entity
     ON amfs_memory_entries (namespace, entity_path);
 
-CREATE INDEX IF NOT EXISTS idx_entries_hot
-    ON amfs_memory_entries (namespace, entity_path)
-    WHERE tier = 1 AND superseded_at IS NULL;
-
-CREATE INDEX IF NOT EXISTS idx_entries_warm
-    ON amfs_memory_entries (namespace)
-    WHERE tier <= 2 AND superseded_at IS NULL;
+-- Tier partial indexes (idx_entries_hot, idx_entries_warm) are created
+-- in _apply_migrations() so the tier column exists first on legacy DBs.
 
 CREATE TABLE IF NOT EXISTS amfs_outcomes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
