@@ -252,6 +252,7 @@ class CoWEngine:
         artifact_refs: list[ArtifactRef] | None = None,
         shared: bool = True,
         branch: str = "main",
+        embedding: list[float] | None = None,
     ) -> MemoryEntry:
         """Write a new version of a key with CoW semantics.
 
@@ -275,6 +276,7 @@ class CoWEngine:
             memory_type=memory_type,
             shared=shared,
             branch=branch,
+            embedding=embedding,
         )
 
         return self._adapter.write(entry)

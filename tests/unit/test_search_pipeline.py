@@ -55,13 +55,13 @@ class TestEmbeddingVersion:
         embedder = DeterministicEmbedder()
         mem = _make_memory(tmp_path, embedder=embedder)
 
-        first = mem.write("svc/auth", "pattern-retry", "retry with backoff")
+        first = mem.write("svc-auth", "pattern-retry", "retry with backoff")
         assert first.version == 1
 
-        second = mem.write("svc/auth", "pattern-retry", "retry with jittered backoff")
+        second = mem.write("svc-auth", "pattern-retry", "retry with jittered backoff")
         assert second.version == 2
 
-        current = mem.read("svc/auth", "pattern-retry")
+        current = mem.read("svc-auth", "pattern-retry")
         assert current is not None
         assert current.version == 2
         assert current.embedding is not None
@@ -73,9 +73,9 @@ class TestRecallCosineScoring:
         embedder = DeterministicEmbedder()
         mem = _make_memory(tmp_path, embedder=embedder)
 
-        mem.write("svc/auth", "task-login", "implement OAuth2 login flow")
-        mem.write("svc/auth", "task-cache", "add Redis cache layer for sessions")
-        mem.write("svc/payments", "task-checkout", "stripe checkout integration")
+        mem.write("svc-auth", "task-login", "implement OAuth2 login flow")
+        mem.write("svc-auth", "task-cache", "add Redis cache layer for sessions")
+        mem.write("svc-payments", "task-checkout", "stripe checkout integration")
 
         results = mem.search(
             query="OAuth authentication",
@@ -94,7 +94,7 @@ class TestRecallCosineScoring:
     def test_no_embedder_semantic_score_zero(self, tmp_path: Path):
         """Without embedder, semantic component must be 0.0."""
         mem = _make_memory(tmp_path, embedder=None)
-        mem.write("svc/a", "k1", "value one")
+        mem.write("svc-a", "k1", "value one")
 
         results = mem.search(
             query="value",
@@ -108,7 +108,7 @@ class TestRecallCosineScoring:
     def test_query_threads_to_search_query(self, tmp_path: Path):
         """The query parameter must be passed into SearchQuery for adapters."""
         mem = _make_memory(tmp_path)
-        mem.write("svc/a", "k1", "hello world")
+        mem.write("svc-a", "k1", "hello world")
 
         results = mem.search(query="hello", limit=10)
         assert len(results) >= 1
@@ -118,8 +118,8 @@ class TestRecallConfigDefaults:
     def test_no_embedder_still_ranks_by_recency_and_confidence(self, tmp_path: Path):
         mem = _make_memory(tmp_path, embedder=None)
 
-        mem.write("svc/a", "old", "old entry", confidence=0.5)
-        mem.write("svc/a", "new", "new entry", confidence=0.9)
+        mem.write("svc-a", "old", "old entry", confidence=0.5)
+        mem.write("svc-a", "new", "new entry", confidence=0.9)
 
         results = mem.search(
             query="entry",

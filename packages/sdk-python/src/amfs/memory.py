@@ -224,6 +224,10 @@ class AgentMemory:
                         current.provenance.agent_id,
                     )
 
+        embedding = None
+        if self._embedder is not None:
+            embedding = self._embedder.embed_value(value)
+
         entry = self._engine.write(
             entity_path,
             key,
@@ -235,13 +239,9 @@ class AgentMemory:
             artifact_refs=artifact_refs,
             shared=shared,
             branch=effective_branch,
+            embedding=embedding,
         )
         self._read_tracker.record_write(entity_path, key, entry.version, entry.version == 1)
-
-        if self._embedder is not None:
-            embedding = self._embedder.embed_value(value)
-            entry = entry.model_copy(update={"embedding": embedding})
-            entry = self._adapter.write(entry)
 
         try:
             self._adapter.log_event(Event(
