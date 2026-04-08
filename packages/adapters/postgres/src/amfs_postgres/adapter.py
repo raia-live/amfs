@@ -799,6 +799,7 @@ class PostgresAdapter(AdapterABC):
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 direction_clause = self._graph_direction_seed(query.direction)
+                entity_params = self._graph_entity_params(query.entity, query.direction)
                 cur.execute(
                     f"""
                     WITH RECURSIVE graph_walk AS (
@@ -820,6 +821,7 @@ class PostgresAdapter(AdapterABC):
                     """,
                     (
                         namespace, branch, query.min_confidence,
+                        *entity_params,
                         query.depth, namespace, branch, query.min_confidence,
                         query.limit,
                     ),
@@ -840,14 +842,7 @@ class PostgresAdapter(AdapterABC):
 
         direction_clause = self._graph_direction_seed(query.direction)
         conditions.append(f"({direction_clause})")
-
-        if query.direction in ("outgoing", "both"):
-            params.append(query.entity)
-        if query.direction in ("incoming", "both"):
-            params.append(query.entity)
-        if query.direction not in ("outgoing", "incoming", "both"):
-            params.append(query.entity)
-            params.append(query.entity)
+        params.extend(self._graph_entity_params(query.entity, query.direction))
 
         if query.relation:
             conditions.append("relation = %s")
@@ -871,11 +866,25 @@ class PostgresAdapter(AdapterABC):
 
     @staticmethod
     def _graph_direction_seed(direction: str) -> str:
+        src = "(source_entity = %s OR source_entity LIKE %s)"
+        tgt = "(target_entity = %s OR target_entity LIKE %s)"
         if direction == "outgoing":
-            return "source_entity = %s"
+            return src
         elif direction == "incoming":
-            return "target_entity = %s"
-        return "source_entity = %s OR target_entity = %s"
+            return tgt
+        return f"({src} OR {tgt})"
+
+    @staticmethod
+    def _graph_entity_params(entity: str, direction: str) -> list[str]:
+        """Return SQL params for the direction seed clause with prefix matching."""
+        prefix = entity + "/%"
+        if direction == "outgoing":
+            return [entity, prefix]
+        elif direction == "incoming":
+            return [entity, prefix]
+        elif direction == "both":
+            return [entity, prefix, entity, prefix]
+        return [entity, prefix, entity, prefix]
 
     def list_graph_edges(
         self,
@@ -891,8 +900,12 @@ class PostgresAdapter(AdapterABC):
         params: list[Any] = [namespace, branch]
 
         if entity is not None:
-            conditions.append("(source_entity = %s OR target_entity = %s)")
-            params.extend([entity, entity])
+            prefix = entity + "/%"
+            conditions.append(
+                "((source_entity = %s OR source_entity LIKE %s)"
+                " OR (target_entity = %s OR target_entity LIKE %s))"
+            )
+            params.extend([entity, prefix, entity, prefix])
         if relation is not None:
             conditions.append("relation = %s")
             params.append(relation)
