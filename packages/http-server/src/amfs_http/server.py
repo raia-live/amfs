@@ -1953,7 +1953,10 @@ async def graph_backfill(
 
     mem = _get_memory()
     entries = mem.list()
-    outcomes = mem._adapter.list_outcomes(namespace=mem.namespace) if hasattr(mem._adapter, "list_outcomes") else []
+    try:
+        outcomes = mem._adapter.list_outcomes() if hasattr(mem._adapter, "list_outcomes") else []
+    except Exception:
+        outcomes = []
 
     created = 0
     errors = 0
