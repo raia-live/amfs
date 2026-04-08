@@ -22,6 +22,7 @@ members = [
     "packages/adapters/filesystem",
     "packages/adapters/postgres",
     "packages/adapters/s3",
+    "packages/adapters/http",
     "packages/sdk-python",
     "packages/cli",
     "packages/mcp-server",
@@ -48,6 +49,7 @@ amfs-core = { workspace = true }
 amfs-adapter-filesystem = { workspace = true }
 amfs-adapter-postgres = { workspace = true }
 amfs-adapter-s3 = { workspace = true }
+amfs-adapter-http = { workspace = true }
 amfs = { workspace = true }
 amfs-cli = { workspace = true }
 amfs-mcp-server = { workspace = true }
