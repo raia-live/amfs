@@ -35,7 +35,7 @@ jobs:
         run: |
           source .venv/bin/activate
           for pkg in packages/core packages/adapters/filesystem packages/adapters/postgres packages/adapters/s3 packages/http-server packages/sdk-python packages/cli; do
-            uv publish --skip-existing $pkg/dist/*
+            uv publish --check-url https://pypi.org/simple/ $pkg/dist/*
           done
 
   publish-npm:
