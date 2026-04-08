@@ -14,11 +14,16 @@ logger = logging.getLogger(__name__)
 def apply_tenant_headers_from_request(request: Request) -> None:
     """If proxy secret + account id headers match env, set thread-local tenant for DB RLS."""
     try:
-        from amfs_postgres.tenant_context import set_tls_tenant_account_id
+        from amfs_postgres.tenant_context import (
+            get_request_tenant_account_id,
+            set_tls_tenant_account_id,
+        )
     except ImportError:
         return
 
-    set_tls_tenant_account_id(None)
+    if get_request_tenant_account_id() is not None:
+        return
+
     secret = os.environ.get("AMFS_DASHBOARD_PROXY_SECRET", "")
     if not secret:
         return
