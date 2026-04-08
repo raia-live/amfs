@@ -57,6 +57,13 @@ def get_client() -> httpx.Client:
     return httpx.Client(base_url=url.rstrip("/"), headers=headers, timeout=30.0)
 
 
+def has_remote_config() -> bool:
+    """Return True if remote credentials are available (env vars or stored)."""
+    if os.environ.get("AMFS_HTTP_URL"):
+        return True
+    return bool(_load_credentials().get("url"))
+
+
 def api_get(path: str, params: dict[str, Any] | None = None) -> Any:
     with get_client() as client:
         resp = client.get(path, params=params)

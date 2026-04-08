@@ -20,7 +20,8 @@ def write_command(
     agent_id: str = typer.Option("cli", "--agent", "-a", help="Agent ID"),
     confidence: float = typer.Option(1.0, "--confidence", "-c", help="Confidence score"),
     memory_type: str = typer.Option("fact", "--type", "-t", help="Memory type: fact, belief, experience"),
-    remote: bool = typer.Option(False, "--remote", "-r", help="Write via HTTP API instead of local adapter"),
+    remote: bool | None = typer.Option(None, "--remote", "-r", help="Use HTTP API (auto-detected from login)"),
+    local: bool = typer.Option(False, "--local", "-L", help="Force local adapter"),
 ) -> None:
     """Write a memory entry to AMFS."""
     if value is None:
@@ -33,7 +34,10 @@ def write_command(
     except json.JSONDecodeError:
         parsed = value
 
-    if remote:
+    from amfs_cli.remote import has_remote_config
+    use_remote = (remote is True) or (remote is None and not local and has_remote_config())
+
+    if use_remote:
         from amfs_cli.remote import api_post
 
         with console.status("[cyan]Writing entry...[/cyan]"):

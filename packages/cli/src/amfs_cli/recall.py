@@ -16,10 +16,14 @@ def recall_command(
     key: str = typer.Argument(..., help="Memory key"),
     agent_id: str = typer.Option("cli", "--agent", "-a", help="Agent ID to recall as"),
     format: str = typer.Option("panel", "--format", "-f", help="Output format: panel, json"),
-    remote: bool = typer.Option(False, "--remote", "-r", help="Recall via HTTP API"),
+    remote: bool | None = typer.Option(None, "--remote", "-r", help="Use HTTP API (auto-detected from login)"),
+    local: bool = typer.Option(False, "--local", "-L", help="Force local adapter"),
 ) -> None:
     """Recall an agent-scoped memory entry."""
-    if remote:
+    from amfs_cli.remote import has_remote_config
+    use_remote = (remote is True) or (remote is None and not local and has_remote_config())
+
+    if use_remote:
         from amfs_cli.remote import api_get
 
         with console.status("[cyan]Recalling...[/cyan]"):

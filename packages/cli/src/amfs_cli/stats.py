@@ -14,10 +14,14 @@ console = Console()
 
 def stats_command(
     format: str = typer.Option("panel", "--format", "-f", help="Output format: panel, json"),
-    remote: bool = typer.Option(False, "--remote", "-r", help="Fetch via HTTP API"),
+    remote: bool | None = typer.Option(None, "--remote", "-r", help="Use HTTP API (auto-detected from login)"),
+    local: bool = typer.Option(False, "--local", "-L", help="Force local adapter"),
 ) -> None:
     """Show memory statistics (entries, agents, entities)."""
-    if remote:
+    from amfs_cli.remote import has_remote_config
+    use_remote = (remote is True) or (remote is None and not local and has_remote_config())
+
+    if use_remote:
         from amfs_cli.remote import api_get
 
         with console.status("[cyan]Fetching stats...[/cyan]"):

@@ -13,6 +13,7 @@ from amfs_cli.inspect import app as inspect_app
 from amfs_cli.stats import stats_command
 from amfs_cli.status import status_command
 from amfs_cli.watch import watch_command
+from amfs_cli.whoami import whoami_command
 from amfs_cli.write import write_command
 
 app = typer.Typer(
@@ -22,7 +23,8 @@ app = typer.Typer(
 )
 
 app.command(name="init", help="Initialise an AMFS project")(init_command)
-app.command(name="login", help="Store credentials for remote access")(login_command)
+app.command(name="login", help="Authenticate with an AMFS server")(login_command)
+app.command(name="whoami", help="Show current authentication info")(whoami_command)
 app.command(name="write", help="Write a memory entry")(write_command)
 app.command(name="search", help="Search memory entries")(search_command)
 app.command(name="recall", help="Recall an agent-scoped entry")(recall_command)

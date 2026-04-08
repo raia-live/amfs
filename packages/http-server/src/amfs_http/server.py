@@ -218,6 +218,40 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/v1/auth/whoami")
+async def whoami(
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Return information about the authenticated caller.
+
+    When Pro middleware is active, this returns account, key type, scopes,
+    and rate limit info. In OSS mode, returns basic auth status.
+    """
+    ctx = getattr(request.state, "tenant_ctx", None)
+    if ctx is not None:
+        return {
+            "authenticated": True,
+            "mode": "pro",
+            "account_id": str(ctx.account_id),
+            "actor_id": str(ctx.actor_id),
+            "key_type": ctx.key_type.value if ctx.key_type else None,
+            "scopes": [
+                {
+                    "entity_path_pattern": s.entity_path_pattern,
+                    "permission": s.permission.value,
+                }
+                for s in ctx.scopes
+            ],
+            "rate_limit_rpm": ctx.rate_limit_rpm,
+            "is_admin": ctx.is_admin,
+        }
+    return {
+        "authenticated": _auth is not None,
+        "mode": "oss",
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Entries
 # ──────────────────────────────────────────────────────────────────────
