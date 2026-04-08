@@ -49,6 +49,32 @@ def _get_memory() -> AgentMemory:
         return _memory
 
     agent_id = detect_agent_id()
+
+    http_url = os.environ.get("AMFS_HTTP_URL")
+    if http_url:
+        if os.environ.get("AMFS_POSTGRES_DSN"):
+            logger.warning(
+                "Both AMFS_HTTP_URL and AMFS_POSTGRES_DSN are set. "
+                "The HTTP adapter takes precedence — direct DB access "
+                "is bypassed in favour of the authenticated HTTP API."
+            )
+        try:
+            from amfs_adapter_http import HttpAdapter
+
+            api_key = os.environ.get("AMFS_API_KEY", "")
+            logger.info(
+                "AMFS HTTP adapter mode — routing through %s", http_url
+            )
+            adapter = HttpAdapter(base_url=http_url, api_key=api_key)
+            _memory = AgentMemory(agent_id=agent_id, adapter=adapter)
+            return _memory
+        except ImportError:
+            logger.warning(
+                "AMFS_HTTP_URL is set but amfs-adapter-http is not installed. "
+                "Falling back to local adapter. "
+                "Install with: pip install amfs-adapter-http"
+            )
+
     config = _resolve_config()
 
     ttl_interval_str = os.environ.get("AMFS_TTL_SWEEP_INTERVAL")

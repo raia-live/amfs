@@ -325,7 +325,9 @@ amfs_sk_live_...  →  checkout-service/**  [READ_WRITE]
                      shared/patterns/*     [READ]
 ```
 
-Agents can only access memory within their permitted scope — this is **permissioned inference** enforced at the database level.
+Agents can only access memory within their permitted scope — this is **permissioned inference** enforced at both the application and database level.
+
+**HTTP API-Based Tenant Isolation** — All external agent access (MCP clients, SDKs, REST calls) is routed through the AMFS HTTP API using `AMFS_HTTP_URL` + `AMFS_API_KEY`. The API resolves the tenant, enforces entity-path scopes, sets the Postgres RLS context, and logs the operation — agents never touch the database directly. MCP clients connect transparently via the `HttpAdapter`, which converts memory operations into authenticated HTTP requests.
 
 **Audit Logging** — Every state-changing operation is recorded in an append-only audit log with actor, action, resource, and IP address.
 

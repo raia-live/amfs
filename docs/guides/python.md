@@ -458,6 +458,51 @@ with AgentMemory(agent_id="my-agent") as mem:
 
 ---
 
+## Connecting to AMFS SaaS
+
+When using AMFS as a hosted service (SaaS), connect through the HTTP API with your API key instead of a direct database connection.
+
+### Environment Variables
+
+```bash
+export AMFS_HTTP_URL="https://amfs-api.example.com"
+export AMFS_API_KEY="amfs_sk_your_key_here"
+```
+
+With these set, the SDK auto-detects the HTTP adapter — no code changes needed:
+
+```python
+from amfs import AgentMemory
+
+mem = AgentMemory(agent_id="my-agent")
+mem.write("checkout-service", "retry-pattern", {"max_retries": 3})
+```
+
+### Explicit HttpAdapter
+
+You can also configure the adapter directly:
+
+```python
+from amfs import AgentMemory
+from amfs_adapter_http import HttpAdapter
+
+adapter = HttpAdapter(
+    base_url="https://amfs-api.example.com",
+    api_key="amfs_sk_your_key_here",
+)
+mem = AgentMemory(agent_id="my-agent", adapter=adapter)
+```
+
+{: .note }
+Install the HTTP adapter with `pip install amfs-adapter-http`.
+
+{: .warning }
+Never use `AMFS_POSTGRES_DSN` for external agents in multi-tenant mode. Always use `AMFS_HTTP_URL` + `AMFS_API_KEY` to ensure tenant isolation, scope enforcement, and audit logging.
+
+See the [SaaS Connection Guide](/amfs/guides/saas/) and [Environment Variables](/amfs/reference/environment-variables/) for details.
+
+---
+
 ## Conflict Handling
 
 Handle concurrent writes to the same key:
