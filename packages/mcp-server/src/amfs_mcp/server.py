@@ -460,15 +460,19 @@ def amfs_commit_outcome(
         })
 
     entries = mem.commit_outcome(outcome_ref, otype)
-    return json.dumps(
-        {
-            "outcome_ref": outcome_ref,
-            "outcome_type": outcome_type,
-            "affected_entries": len(entries),
-            "entries": [_serialize_entry(e) for e in entries],
-        },
-        default=str,
-    )
+    trace = getattr(mem, "_last_trace", None)
+    result: dict[str, Any] = {
+        "outcome_ref": outcome_ref,
+        "outcome_type": outcome_type,
+        "affected_entries": len(entries),
+        "entries": [_serialize_entry(e) for e in entries],
+    }
+    if trace and getattr(trace, "id", None):
+        result["trace_id"] = trace.id
+        result["causal_entries"] = len(trace.causal_entries)
+        result["external_contexts"] = len(trace.external_contexts)
+        result["session_duration_ms"] = trace.session_duration_ms
+    return json.dumps(result, default=str)
 
 
 @mcp.tool
@@ -650,6 +654,74 @@ def amfs_explain(outcome_ref: str | None = None) -> str:
     mem = _get_memory()
     explanation = mem.explain(outcome_ref)
     return json.dumps(explanation, default=str)
+
+
+@mcp.tool
+def amfs_list_traces(
+    entity_path: str | None = None,
+    agent_id: str | None = None,
+    outcome_type: str | None = None,
+    limit: int = 20,
+) -> str:
+    """Browse persisted decision traces from past sessions.
+
+    Each trace captures the full causal chain: which memories were read,
+    what external context was gathered, what decisions were made, and the
+    final outcome. Use this to learn from past decisions before making
+    similar ones.
+
+    Args:
+        entity_path: Filter to traces involving this entity
+        agent_id: Filter to traces from a specific agent
+        outcome_type: Filter by outcome type (success, failure, etc.)
+        limit: Maximum traces to return (default 20)
+
+    Example: amfs_list_traces(entity_path="checkout-service", limit=5)
+    """
+    mem = _get_memory()
+    traces = mem._adapter.list_traces(
+        entity_path=entity_path,
+        agent_id=agent_id,
+        outcome_type=outcome_type,
+        limit=limit,
+    )
+    return json.dumps(
+        [
+            {
+                "id": t.id,
+                "agent_id": t.agent_id,
+                "outcome_ref": t.outcome_ref,
+                "outcome_type": t.outcome_type,
+                "decision_summary": t.decision_summary,
+                "causal_entries": len(t.causal_entries),
+                "external_contexts": len(t.external_contexts),
+                "session_duration_ms": t.session_duration_ms,
+                "created_at": t.created_at,
+            }
+            for t in traces
+        ],
+        default=str,
+    )
+
+
+@mcp.tool
+def amfs_get_trace(trace_id: str) -> str:
+    """Retrieve a full decision trace by ID.
+
+    Returns the complete causal chain: every memory read, external context,
+    query, error, and the outcome. Use this to understand exactly what
+    information drove a past decision.
+
+    Args:
+        trace_id: The trace ID (from amfs_list_traces or amfs_commit_outcome)
+
+    Example: amfs_get_trace("abc123-def456")
+    """
+    mem = _get_memory()
+    trace = mem._adapter.get_trace(trace_id)
+    if trace is None:
+        return json.dumps({"status": "not_found", "trace_id": trace_id})
+    return json.dumps(trace.model_dump(mode="json"), default=str)
 
 
 @mcp.tool
