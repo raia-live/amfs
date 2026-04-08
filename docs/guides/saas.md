@@ -77,7 +77,7 @@ Every client — MCP, SDK, CLI, REST — uses the same two environment variables
 
 | Variable | Description |
 |:---------|:------------|
-| `AMFS_HTTP_URL` | Base URL of the AMFS API (e.g. `https://amfs-api.example.com`) |
+| `AMFS_HTTP_URL` | Base URL of the AMFS API (e.g. `https://amfs-login.sense-lab.ai`) |
 | `AMFS_API_KEY` | Your API key (starts with `amfs_sk_`) |
 
 When `AMFS_HTTP_URL` is set, all other adapter configuration (`AMFS_POSTGRES_DSN`, `AMFS_DATA_DIR`, `amfs.yaml`) is ignored.
@@ -101,7 +101,7 @@ Add to your project's `.cursor/mcp.json`:
         "amfs-mcp-server-pro"
       ],
       "env": {
-        "AMFS_HTTP_URL": "https://amfs-api.example.com",
+        "AMFS_HTTP_URL": "https://amfs-login.sense-lab.ai",
         "AMFS_API_KEY": "amfs_sk_your_key_here"
       }
     }
@@ -122,7 +122,7 @@ Or with the OSS MCP server (when `amfs-adapter-http` is installed):
         "amfs-mcp-server"
       ],
       "env": {
-        "AMFS_HTTP_URL": "https://amfs-api.example.com",
+        "AMFS_HTTP_URL": "https://amfs-login.sense-lab.ai",
         "AMFS_API_KEY": "amfs_sk_your_key_here"
       }
     }
@@ -145,7 +145,7 @@ Add to `~/.claude/claude_desktop_config.json`:
         "amfs-mcp-server"
       ],
       "env": {
-        "AMFS_HTTP_URL": "https://amfs-api.example.com",
+        "AMFS_HTTP_URL": "https://amfs-login.sense-lab.ai",
         "AMFS_API_KEY": "amfs_sk_your_key_here"
       }
     }
@@ -169,7 +169,7 @@ Make direct HTTP calls with the `X-AMFS-API-Key` header:
 
 ```bash
 # Write a memory entry
-curl -X POST https://amfs-api.example.com/api/v1/entries \
+curl -X POST https://amfs-login.sense-lab.ai/api/v1/entries \
   -H "Content-Type: application/json" \
   -H "X-AMFS-API-Key: amfs_sk_your_key_here" \
   -d '{
@@ -180,11 +180,11 @@ curl -X POST https://amfs-api.example.com/api/v1/entries \
   }'
 
 # Read a memory entry
-curl https://amfs-api.example.com/api/v1/entries/checkout-service/retry-pattern \
+curl https://amfs-login.sense-lab.ai/api/v1/entries/checkout-service/retry-pattern \
   -H "X-AMFS-API-Key: amfs_sk_your_key_here"
 
 # Search
-curl -X POST https://amfs-api.example.com/api/v1/search \
+curl -X POST https://amfs-login.sense-lab.ai/api/v1/search \
   -H "Content-Type: application/json" \
   -H "X-AMFS-API-Key: amfs_sk_your_key_here" \
   -d '{"entity_path": "checkout-service", "min_confidence": 0.5}'
@@ -199,7 +199,7 @@ See the [API Reference](/amfs/reference/api/) for the full endpoint list.
 Set the environment variables and the SDK auto-detects the HTTP adapter:
 
 ```bash
-export AMFS_HTTP_URL="https://amfs-api.example.com"
+export AMFS_HTTP_URL="https://amfs-login.sense-lab.ai"
 export AMFS_API_KEY="amfs_sk_your_key_here"
 ```
 
@@ -217,7 +217,7 @@ from amfs import AgentMemory
 from amfs_adapter_http import HttpAdapter
 
 adapter = HttpAdapter(
-    base_url="https://amfs-api.example.com",
+    base_url="https://amfs-login.sense-lab.ai",
     api_key="amfs_sk_your_key_here",
 )
 mem = AgentMemory(agent_id="my-agent", adapter=adapter)

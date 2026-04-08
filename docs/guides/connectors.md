@@ -236,14 +236,14 @@ When using AMFS as a hosted service (SaaS), webhook endpoints require an API key
 Include the `X-AMFS-API-Key` header when configuring webhook URLs in external systems:
 
 ```
-POST https://amfs-api.example.com/api/v1/webhooks/pagerduty
+POST https://amfs-login.sense-lab.ai/api/v1/webhooks/pagerduty
 Header: X-AMFS-API-Key: amfs_sk_your_key_here
 ```
 
 ### Direct Event Ingestion with API Key
 
 ```bash
-curl -X POST https://amfs-api.example.com/api/v1/events \
+curl -X POST https://amfs-login.sense-lab.ai/api/v1/events \
   -H "Content-Type: application/json" \
   -H "X-AMFS-API-Key: amfs_sk_your_key_here" \
   -d '{

@@ -465,7 +465,7 @@ When using AMFS as a hosted service (SaaS), connect through the HTTP API with yo
 ### Environment Variables
 
 ```bash
-export AMFS_HTTP_URL="https://amfs-api.example.com"
+export AMFS_HTTP_URL="https://amfs-login.sense-lab.ai"
 export AMFS_API_KEY="amfs_sk_your_key_here"
 ```
 
@@ -487,7 +487,7 @@ from amfs import AgentMemory
 from amfs_adapter_http import HttpAdapter
 
 adapter = HttpAdapter(
-    base_url="https://amfs-api.example.com",
+    base_url="https://amfs-login.sense-lab.ai",
     api_key="amfs_sk_your_key_here",
 )
 mem = AgentMemory(agent_id="my-agent", adapter=adapter)

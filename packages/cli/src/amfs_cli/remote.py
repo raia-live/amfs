@@ -13,7 +13,7 @@ from rich.console import Console
 
 console = Console(stderr=True)
 
-DEFAULT_API_URL = "https://amfs-api-28815235578.us-central1.run.app"
+DEFAULT_API_URL = "https://amfs-login.sense-lab.ai"
 
 _CRED_DIR = Path.home() / ".config" / "amfs"
 _CRED_FILE = _CRED_DIR / "credentials.json"
