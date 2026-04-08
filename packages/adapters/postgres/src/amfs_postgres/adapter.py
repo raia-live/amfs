@@ -1887,7 +1887,7 @@ class PostgresAdapter(AdapterABC):
                         ]
                         params_list: list[Any] = [
                             namespace, be["entity_path"], be["key"], next_ver,
-                            json.dumps(be["value"], default=str) if not isinstance(be["value"], str) else be["value"],
+                            json.dumps(be["value"], default=str),
                             be["agent_id"], be["session_id"], be["written_at"],
                             be.get("pattern_refs") or [],
                             be["confidence"], be["outcome_count"],
