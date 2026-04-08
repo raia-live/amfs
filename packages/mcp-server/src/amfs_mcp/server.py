@@ -148,6 +148,38 @@ def _serialize_entry(entry: Any) -> dict[str, Any]:
 
 
 @mcp.tool
+def amfs_set_identity(name: str, description: str | None = None) -> str:
+    """Set the agent identity for this conversation.
+
+    Call this at the start of every new conversation to give this agent
+    a meaningful, human-readable identity. This identity carries through
+    to the dashboard, traces, and cross-agent reads.
+
+    Each Cursor chat, Claude conversation, or agent session should set
+    its own identity based on what it's working on.
+
+    Args:
+        name: Short, descriptive name (e.g. "dashboard-fixer", "auth-debugger",
+              "mcp-integration"). Use kebab-case.
+        description: Optional one-line description of what this agent is doing.
+
+    Example: amfs_set_identity("tenant-isolation-agent", "Fixing RLS propagation for Pro tenancy")
+    """
+    mem = _get_memory()
+    old_id = mem.agent_id
+    mem._agent_id = name
+    mem._read_tracker._agent_id = name
+    result: dict[str, Any] = {
+        "previous_identity": old_id,
+        "new_identity": name,
+        "session_id": mem.session_id,
+    }
+    if description:
+        result["description"] = description
+    return json.dumps(result, default=str)
+
+
+@mcp.tool
 def amfs_read(entity_path: str, key: str) -> str:
     """Read a memory entry by entity path and key.
 

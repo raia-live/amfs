@@ -4,6 +4,9 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
 
 ## Available MCP Tools
 
+### Identity
+- `amfs_set_identity(name, description?)` — set your agent identity for this conversation. Call first.
+
 ### Brain tools (agent-scoped)
 - `amfs_recall(entity_path, key)` — recall YOUR OWN memory for a key (what do I know about this?)
 - `amfs_my_entries(entity_path?)` — list everything YOU have written (what's in my brain?)
@@ -26,6 +29,13 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
 - `amfs_cross_agent_reads()` — see which other agents' memory you've read
 
 ## Workflow
+
+### First: set your identity
+At the start of every conversation, identify yourself so memories and traces are attributed correctly:
+```
+amfs_set_identity("<descriptive-name>", "<what you're working on>")
+```
+Use kebab-case based on the task (e.g. `"dashboard-fixer"`, `"auth-debugger"`, `"mcp-integration"`).
 
 ### Before starting work
 Get a compiled briefing from the Memory Cortex first — this gives you pre-compiled knowledge about the entity you're about to work on, including what other agents know, recent risks, external events, and confidence-ranked facts:
