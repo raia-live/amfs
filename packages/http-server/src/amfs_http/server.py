@@ -1714,6 +1714,43 @@ async def resolve_pattern(
 # ──────────────────────────────────────────────────────────────────────
 
 
+@app.get("/api/v1/pro/graph/neighbors")
+async def graph_neighbors(
+    entity: str = Query(...),
+    relation: str | None = Query(None),
+    direction: str = Query("both"),
+    min_confidence: float = Query(0.0),
+    depth: int = Query(1, ge=1, le=5),
+    limit: int = Query(200, ge=1, le=1000),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Traverse the knowledge graph from an entity."""
+    from amfs_core.models import GraphNeighborQuery
+
+    mem = _get_memory()
+    query = GraphNeighborQuery(
+        entity=entity,
+        relation=relation,
+        direction=direction,
+        min_confidence=min_confidence,
+        depth=depth,
+        limit=limit,
+    )
+    edges = mem.graph_neighbors(
+        entity,
+        relation=relation,
+        direction=direction,
+        min_confidence=min_confidence,
+        depth=depth,
+        limit=limit,
+    )
+    return {
+        "entity": entity,
+        "edges": [e.model_dump(mode="json") for e in edges],
+        "count": len(edges),
+    }
+
+
 @app.get("/api/v1/pro/graph/expertise")
 async def expertise_graph(
     limit_agents: int = Query(30, ge=1, le=200),
