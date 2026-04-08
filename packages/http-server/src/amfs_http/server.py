@@ -1725,25 +1725,24 @@ async def graph_neighbors(
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Traverse the knowledge graph from an entity."""
-    from amfs_core.models import GraphNeighborQuery
+    from fastapi.responses import JSONResponse
 
     mem = _get_memory()
-    query = GraphNeighborQuery(
-        entity=entity,
-        relation=relation,
-        direction=direction,
-        min_confidence=min_confidence,
-        depth=depth,
-        limit=limit,
-    )
-    edges = mem.graph_neighbors(
-        entity,
-        relation=relation,
-        direction=direction,
-        min_confidence=min_confidence,
-        depth=depth,
-        limit=limit,
-    )
+    try:
+        edges = mem.graph_neighbors(
+            entity,
+            relation=relation,
+            direction=direction,
+            min_confidence=min_confidence,
+            depth=depth,
+            limit=limit,
+        )
+    except Exception as exc:
+        logger.warning("graph_neighbors failed for %s: %s", entity, exc)
+        return JSONResponse(
+            {"entity": entity, "edges": [], "count": 0, "error": str(exc)},
+            status_code=200,
+        )
     return {
         "entity": entity,
         "edges": [e.model_dump(mode="json") for e in edges],
