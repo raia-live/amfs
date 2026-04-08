@@ -77,8 +77,12 @@ class HttpAdapter(AdapterABC):
         key: str,
         *,
         min_confidence: float = 0.0,
+        branch: str = "main",
     ) -> MemoryEntry | None:
-        data = self._get(f"/api/v1/entries/{entity_path}/{key}")
+        params: dict[str, Any] = {}
+        if branch and branch != "main":
+            params["branch"] = branch
+        data = self._get(f"/api/v1/entries/{entity_path}/{key}", **params)
         if data.get("status") == "not_found":
             return None
         entry = _parse_entry(data)
@@ -105,8 +109,14 @@ class HttpAdapter(AdapterABC):
         entity_path: str | None = None,
         *,
         include_superseded: bool = False,
+        branch: str = "main",
     ) -> list[MemoryEntry]:
-        data = self._get("/api/v1/entries", entity_path=entity_path)
+        params: dict[str, Any] = {}
+        if entity_path:
+            params["entity_path"] = entity_path
+        if branch and branch != "main":
+            params["branch"] = branch
+        data = self._get("/api/v1/entries", **params)
         return [_parse_entry(e) for e in data.get("entries", [])]
 
     def watch(
