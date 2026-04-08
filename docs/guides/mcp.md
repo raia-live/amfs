@@ -175,6 +175,63 @@ Point your IDE to the HTTP URL instead of spawning a process:
 
 ---
 
+## Connecting to AMFS SaaS
+
+When using AMFS as a hosted service (SaaS), set `AMFS_HTTP_URL` and `AMFS_API_KEY` in the MCP server environment. This routes all memory operations through the authenticated HTTP API with full tenant isolation.
+
+### Cursor (SaaS)
+
+```json
+{
+  "mcpServers": {
+    "amfs": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory", "/path/to/amfs",
+        "amfs-mcp-server"
+      ],
+      "env": {
+        "AMFS_HTTP_URL": "https://amfs-api.example.com",
+        "AMFS_API_KEY": "amfs_sk_your_key_here"
+      }
+    }
+  }
+}
+```
+
+### Claude Code (SaaS)
+
+```json
+{
+  "mcpServers": {
+    "amfs": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory", "/path/to/amfs",
+        "amfs-mcp-server"
+      ],
+      "env": {
+        "AMFS_HTTP_URL": "https://amfs-api.example.com",
+        "AMFS_API_KEY": "amfs_sk_your_key_here"
+      }
+    }
+  }
+}
+```
+
+### Finding Your Credentials
+
+Go to the **Agents** page in the AMFS dashboard. The **MCP Connection Card** at the top shows your API URL and token, with a ready-to-copy JSON snippet for your `.cursor/mcp.json`.
+
+{: .warning }
+Never use `AMFS_POSTGRES_DSN` for external agents in multi-tenant mode. Always use `AMFS_HTTP_URL` + `AMFS_API_KEY`.
+
+See the [SaaS Connection Guide](/amfs/guides/saas/) for full details.
+
+---
+
 ## Using Postgres for Shared Memory
 
 For team sharing across machines, use Postgres:

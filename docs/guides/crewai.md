@@ -185,6 +185,49 @@ backend = AMFSStorageBackend(
 
 ---
 
+## Connecting to AMFS SaaS
+
+When using AMFS as a hosted service (SaaS), connect through the HTTP API with your API key instead of a direct database connection.
+
+### Environment Variables
+
+Set these before running your crew:
+
+```bash
+export AMFS_HTTP_URL="https://amfs-api.example.com"
+export AMFS_API_KEY="amfs_sk_your_key_here"
+```
+
+The `AMFSStorageBackend` will auto-detect the HTTP adapter when `AMFS_HTTP_URL` is set.
+
+### Explicit HttpAdapter
+
+You can also pass the adapter directly:
+
+```python
+from amfs import AgentMemory
+from amfs_adapter_http import HttpAdapter
+from amfs.integrations.crewai import AMFSStorageBackend
+
+adapter = HttpAdapter(
+    base_url="https://amfs-api.example.com",
+    api_key="amfs_sk_your_key_here",
+)
+
+backend = AMFSStorageBackend(
+    agent_id="my-crew",
+    entity_path="my-project",
+    adapter=adapter,
+)
+```
+
+{: .warning }
+Never use `AMFS_POSTGRES_DSN` for external agents in multi-tenant mode. Always use `AMFS_HTTP_URL` + `AMFS_API_KEY`.
+
+See the [SaaS Connection Guide](/amfs/guides/saas/) and [Environment Variables](/amfs/reference/environment-variables/) for details.
+
+---
+
 ## Example: Research Crew with Persistent Memory
 
 ```python

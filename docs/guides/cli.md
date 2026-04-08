@@ -113,6 +113,26 @@ amfs inspect list -c /path/to/amfs.yaml
 
 ---
 
+## Connecting to AMFS SaaS
+
+When using AMFS as a hosted service (SaaS), CLI commands work against local storage by default. To interact with the SaaS instance, use the HTTP API directly or configure the MCP server with `AMFS_HTTP_URL`.
+
+### Environment Variables
+
+```bash
+export AMFS_HTTP_URL="https://amfs-api.example.com"
+export AMFS_API_KEY="amfs_sk_your_key_here"
+```
+
+With these set, the MCP server and HTTP server automatically route through the authenticated HTTP API. CLI inspection commands (`amfs inspect`, `amfs snapshot`) still read from the local adapter — use the Dashboard or REST API for remote inspection.
+
+{: .warning }
+Never use `AMFS_POSTGRES_DSN` for external agents in multi-tenant mode. Always use `AMFS_HTTP_URL` + `AMFS_API_KEY`.
+
+See the [SaaS Connection Guide](/amfs/guides/saas/) and [Environment Variables](/amfs/reference/environment-variables/) for details.
+
+---
+
 ## MCP Server
 
 The MCP server has its own executable:
