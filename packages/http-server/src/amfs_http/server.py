@@ -79,12 +79,18 @@ async def _dashboard_tenant_middleware(request: Request, call_next):
 _memory: AgentMemory | None = None
 _sse_manager = SSEManager()
 
+_immutable_trace_store = None
 try:
     from amfs_traces.api import mount_pro_routes
     mount_pro_routes(app)
     logger.info("Pro trace endpoints mounted at /api/v1/pro/traces")
+
+    from amfs_traces.store import PostgresImmutableTraceStore
+    from amfs_traces.crypto import seal, get_signing_key, get_signing_key_id
+    from amfs_traces.models import ImmutableDecisionTrace, TraceEntry, TraceExternalContext
+    _HAS_PRO_TRACES = True
 except ImportError:
-    pass
+    _HAS_PRO_TRACES = False
 
 try:
     from amfs_cortex_pro import mount_cortex_pro
@@ -414,6 +420,98 @@ _OUTCOME_TYPE_MAP = {
 }
 
 
+def _get_immutable_store():
+    """Lazily create the immutable trace store (Pro only)."""
+    global _immutable_trace_store
+    if _immutable_trace_store is not None:
+        return _immutable_trace_store
+    if not _HAS_PRO_TRACES:
+        return None
+    dsn = os.environ.get("AMFS_POSTGRES_DSN")
+    if not dsn:
+        return None
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+        conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+        _immutable_trace_store = PostgresImmutableTraceStore(conn)
+        logger.info("Immutable trace store initialized")
+        return _immutable_trace_store
+    except Exception:
+        logger.debug("Failed to init immutable trace store", exc_info=True)
+        return None
+
+
+_seal_sequence: dict[str, int] = {}
+
+
+def _auto_seal_trace(mem: AgentMemory) -> str | None:
+    """If Pro traces are available, auto-seal the last OSS trace as immutable."""
+    if not _HAS_PRO_TRACES:
+        return None
+    oss_trace = getattr(mem, "_last_trace", None)
+    if oss_trace is None:
+        return None
+    store = _get_immutable_store()
+    if store is None:
+        return None
+    try:
+        now = datetime.now(timezone.utc)
+        causal = [
+            TraceEntry(
+                entity_path=e.entity_path,
+                key=e.key,
+                version=e.version,
+                confidence=e.confidence,
+                value=e.value,
+                memory_type=getattr(e, "memory_type", None) or "fact",
+                written_by=getattr(e, "written_by", None),
+                read_at=getattr(e, "read_at", None) or now,
+            )
+            for e in (oss_trace.causal_entries or [])
+        ]
+        contexts = [
+            TraceExternalContext(
+                label=c.label,
+                summary=c.summary,
+                source=getattr(c, "source", None),
+                recorded_at=getattr(c, "recorded_at", None) or now,
+            )
+            for c in (oss_trace.external_contexts or [])
+        ]
+
+        session_id = mem.session_id
+        seq = _seal_sequence.get(session_id, 0)
+        parent_hash = store.get_latest_hash(session_id)
+
+        imm = ImmutableDecisionTrace(
+            agent_id=mem.agent_id,
+            session_id=session_id,
+            sequence_number=seq,
+            outcome_ref=oss_trace.outcome_ref,
+            outcome_type=oss_trace.outcome_type,
+            decision_summary=getattr(oss_trace, "decision_summary", None),
+            causal_entries=causal,
+            external_contexts=contexts,
+            created_at=datetime.now(timezone.utc),
+        )
+        sealed = seal(
+            imm,
+            get_signing_key(),
+            parent_hash=parent_hash,
+            sequence_number=seq,
+            signing_key_id=get_signing_key_id(),
+        )
+        saved = store.save(sealed)
+        _seal_sequence[session_id] = seq + 1
+        logger.info("Auto-sealed immutable trace %s for outcome %s",
+                     saved.id, oss_trace.outcome_ref)
+        return str(saved.id)
+    except Exception:
+        logger.warning("Failed to auto-seal immutable trace", exc_info=True)
+        return None
+
+
 @app.post("/api/v1/outcomes")
 async def commit_outcome(
     req: OutcomeRequest,
@@ -438,12 +536,18 @@ async def commit_outcome(
         resource=req.outcome_ref,
         ip_address=request.client.host if request.client else None,
     )
-    return {
+
+    immutable_trace_id = _auto_seal_trace(mem)
+
+    result: dict[str, Any] = {
         "outcome_ref": req.outcome_ref,
         "outcome_type": req.outcome_type,
         "affected_entries": len(entries),
         "entries": [_entry_to_response(e) for e in entries],
     }
+    if immutable_trace_id:
+        result["immutable_trace_id"] = immutable_trace_id
+    return result
 
 
 @app.get("/api/v1/outcomes")
