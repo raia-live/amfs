@@ -167,8 +167,7 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
     """
     mem = _get_memory()
     old_id = mem.agent_id
-    mem._agent_id = name
-    mem._read_tracker._agent_id = name
+    mem._tagger.agent_id = name
     result: dict[str, Any] = {
         "previous_identity": old_id,
         "new_identity": name,

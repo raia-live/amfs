@@ -100,6 +100,7 @@ class HttpAdapter(AdapterABC):
             "memory_type": entry.memory_type.value if hasattr(entry.memory_type, "value") else str(entry.memory_type),
             "shared": entry.shared,
             "branch": entry.branch,
+            "agent_id": entry.provenance.agent_id,
         }
         data = self._post("/api/v1/entries", body)
         return _parse_entry(data)
@@ -133,6 +134,7 @@ class HttpAdapter(AdapterABC):
             "outcome_type": record.outcome_type.value if hasattr(record.outcome_type, "value") else str(record.outcome_type),
             "causal_entry_keys": record.causal_entry_keys,
             "causal_confidence": record.causal_confidence,
+            "agent_id": record.agent_id,
         }
         data = self._post("/api/v1/outcomes", body)
         return [_parse_entry(e) for e in data.get("entries", [])]
