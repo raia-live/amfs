@@ -1939,6 +1939,92 @@ async def expertise_graph(
     }
 
 
+@app.post("/api/v1/pro/graph/backfill")
+async def graph_backfill(
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Backfill knowledge graph edges from existing entries and outcomes.
+
+    Materializes edges from: pattern_refs → 'references' edges,
+    outcome causal chains → 'informed' + 'read' edges,
+    agent writes → 'wrote' edges.
+    """
+    from amfs_core.models import GraphEdge
+
+    mem = _get_memory()
+    entries = mem.list()
+    outcomes = mem._adapter.list_outcomes(namespace=mem.namespace) if hasattr(mem._adapter, "list_outcomes") else []
+
+    created = 0
+    errors = 0
+
+    for e in entries:
+        aid = e.provenance.agent_id
+        ep = e.entity_path
+        ek = f"{ep}/{e.key}"
+
+        try:
+            mem._adapter.upsert_graph_edge(
+                GraphEdge(
+                    source_entity=aid,
+                    source_type="agent",
+                    relation="wrote",
+                    target_entity=ek,
+                    target_type="entry",
+                    confidence=e.confidence,
+                    provenance={"agent_id": aid, "trigger": "backfill"},
+                ),
+                namespace=mem.namespace,
+                branch=e.branch or "main",
+            )
+            created += 1
+        except Exception:
+            errors += 1
+
+        for ref in (e.provenance.pattern_refs or []):
+            try:
+                mem._adapter.upsert_graph_edge(
+                    GraphEdge(
+                        source_entity=ek,
+                        source_type="entry",
+                        relation="references",
+                        target_entity=ref,
+                        target_type="entry",
+                        provenance={"agent_id": aid, "trigger": "backfill"},
+                    ),
+                    namespace=mem.namespace,
+                    branch=e.branch or "main",
+                )
+                created += 1
+            except Exception:
+                errors += 1
+
+    for o in outcomes:
+        otype = getattr(o, "outcome_type", None)
+        edge_conf = 1.0 if otype and otype.value == "success" else 0.7
+        aid = getattr(o, "agent_id", "unknown")
+        for ek in getattr(o, "causal_entry_keys", []):
+            try:
+                mem._adapter.upsert_graph_edge(
+                    GraphEdge(
+                        source_entity=ek,
+                        source_type="entry",
+                        relation="informed",
+                        target_entity=o.outcome_ref,
+                        target_type="outcome",
+                        confidence=edge_conf,
+                        provenance={"agent_id": aid, "trigger": "backfill"},
+                    ),
+                    namespace=mem.namespace,
+                    branch="main",
+                )
+                created += 1
+            except Exception:
+                errors += 1
+
+    return {"edges_created": created, "errors": errors, "entries_scanned": len(entries), "outcomes_scanned": len(outcomes)}
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Pro — HMO Memory Tiers
 # ──────────────────────────────────────────────────────────────────────
@@ -1955,11 +2041,14 @@ def _compute_tiers(entries: list) -> tuple[dict[str, int], dict[str, float]]:
 
 @app.get("/api/v1/pro/tiers/distribution")
 async def tiers_distribution(
+    agent_id: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Return HMO tier distribution (Hot / Warm / Archive)."""
     mem = _get_memory()
     entries = mem.list()
+    if agent_id:
+        entries = [e for e in entries if e.provenance.agent_id == agent_id]
 
     tiers, scores = _compute_tiers(entries)
 
@@ -1991,11 +2080,14 @@ async def tiers_distribution(
 async def tiers_entries(
     tier: int = Query(..., ge=1, le=3),
     limit: int = Query(50, ge=1, le=500),
+    agent_id: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> list[dict[str, Any]]:
     """Return entries for a given HMO tier as a flat array."""
     mem = _get_memory()
     entries = mem.list()
+    if agent_id:
+        entries = [e for e in entries if e.provenance.agent_id == agent_id]
 
     tier_map, score_map = _compute_tiers(entries)
 
