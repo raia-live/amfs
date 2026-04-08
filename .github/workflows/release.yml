@@ -24,7 +24,7 @@ jobs:
           uv venv .venv
           source .venv/bin/activate
           uv pip install hatchling
-          for pkg in packages/core packages/adapters/filesystem packages/adapters/postgres packages/sdk-python packages/cli; do
+          for pkg in packages/core packages/adapters/filesystem packages/adapters/postgres packages/adapters/s3 packages/http-server packages/sdk-python packages/cli; do
             echo "Building $pkg..."
             cd $pkg && python -m hatchling build && cd -
           done
@@ -34,8 +34,8 @@ jobs:
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
         run: |
           source .venv/bin/activate
-          for pkg in packages/core packages/adapters/filesystem packages/adapters/postgres packages/sdk-python packages/cli; do
-            uv publish $pkg/dist/*
+          for pkg in packages/core packages/adapters/filesystem packages/adapters/postgres packages/adapters/s3 packages/http-server packages/sdk-python packages/cli; do
+            uv publish --skip-existing $pkg/dist/*
           done
 
   publish-npm:
