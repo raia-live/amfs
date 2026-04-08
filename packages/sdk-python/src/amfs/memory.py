@@ -632,7 +632,7 @@ class AgentMemory:
             state_diff=state_diff,
         )
         try:
-            self._adapter.save_trace(trace)
+            trace = self._adapter.save_trace(trace)
         except Exception:
             logger.debug("Failed to persist decision trace", exc_info=True)
 
@@ -655,6 +655,7 @@ class AgentMemory:
 
         self._materialize_causal_edges(outcome_ref, outcome_type, causal_entry_keys)
 
+        self._last_trace = trace
         return updated
 
     def _materialize_causal_edges(
