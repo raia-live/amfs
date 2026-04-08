@@ -21,17 +21,30 @@ def list_entries(
     entity: str | None = typer.Argument(None, help="Filter to entity path"),
     config: Path | None = typer.Option(None, "--config", "-c", help="AMFS config file"),
     superseded: bool = typer.Option(False, "--superseded", help="Include superseded versions"),
+    format: str = typer.Option("table", "--format", "-f", help="Output format: table, json"),
 ) -> None:
     """List memory entries."""
     cfg = load_config_or_default(config)
     adapter = create_adapter_from_config(cfg)
-    entries = adapter.list(entity, include_superseded=superseded)
+
+    with console.status("[cyan]Loading entries...[/cyan]"):
+        entries = adapter.list(entity, include_superseded=superseded)
 
     if not entries:
         console.print("[dim]No entries found.[/dim]")
         return
 
-    table = Table(title="Memory Entries")
+    if format == "json":
+        console.print_json(json.dumps(
+            [{"entity_path": e.entity_path, "key": e.key, "version": e.version,
+              "confidence": e.confidence, "agent_id": e.provenance.agent_id,
+              "written_at": e.provenance.written_at.isoformat()}
+             for e in entries],
+            default=str,
+        ))
+        return
+
+    table = Table(title=f"Memory Entries ({len(entries)})")
     table.add_column("Entity", style="cyan")
     table.add_column("Key", style="green")
     table.add_column("Version", justify="right")
@@ -57,6 +70,7 @@ def read(
     entity: str = typer.Argument(..., help="Entity path"),
     key: str = typer.Argument(..., help="Key name"),
     config: Path | None = typer.Option(None, "--config", "-c", help="AMFS config file"),
+    format: str = typer.Option("panel", "--format", "-f", help="Output format: panel, json"),
 ) -> None:
     """Read a specific memory entry and print its value."""
     cfg = load_config_or_default(config)
@@ -66,6 +80,16 @@ def read(
     if entry is None:
         console.print(f"[red]Entry not found: {entity}/{key}[/red]")
         raise typer.Exit(code=1)
+
+    if format == "json":
+        console.print_json(json.dumps({
+            "entity_path": entry.entity_path, "key": entry.key,
+            "value": entry.value, "version": entry.version,
+            "confidence": entry.confidence,
+            "agent_id": entry.provenance.agent_id,
+            "written_at": entry.provenance.written_at.isoformat(),
+        }, default=str))
+        return
 
     console.print(f"[bold]{entity}/{key}[/bold] v{entry.version}")
     console.print(f"Confidence: {entry.confidence:.4f}")
@@ -86,9 +110,10 @@ def diff(
     """Show version history diff for a key."""
     cfg = load_config_or_default(config)
     adapter = create_adapter_from_config(cfg)
-    entries = adapter.list(entity, include_superseded=True)
 
-    # Filter to just this key and sort by version
+    with console.status("[cyan]Loading history...[/cyan]"):
+        entries = adapter.list(entity, include_superseded=True)
+
     key_entries = sorted(
         [e for e in entries if e.key == key],
         key=lambda e: e.version,

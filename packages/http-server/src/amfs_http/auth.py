@@ -1,6 +1,7 @@
 """API key authentication for the AMFS HTTP server."""
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import secrets
@@ -21,7 +22,11 @@ def get_api_keys() -> set[str]:
 
 
 def _check_db_key(api_key: str) -> bool:
-    """Check if an API key exists in amfs_api_keys table (active keys only)."""
+    """Check if an API key exists in amfs_api_keys table (active keys only).
+
+    Keys are stored as SHA-256 hex digests, so we hash the incoming raw key
+    before comparing.
+    """
     try:
         import psycopg
         from psycopg.rows import dict_row
@@ -30,11 +35,21 @@ def _check_db_key(api_key: str) -> bool:
         if not dsn:
             return False
 
+        key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+
         with psycopg.connect(dsn, row_factory=dict_row) as conn:
             row = conn.execute(
-                "SELECT id FROM amfs_api_keys WHERE key_hash = %s AND active = TRUE LIMIT 1",
-                (api_key,),
+                "SELECT id FROM amfs_api_keys "
+                "WHERE key_hash = %s AND active = TRUE "
+                "AND (expires_at IS NULL OR expires_at > NOW()) "
+                "LIMIT 1",
+                (key_hash,),
             ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE amfs_api_keys SET last_used = NOW() WHERE id = %s",
+                    (row["id"],),
+                )
             return row is not None
     except Exception:
         logger.debug("DB API key check failed (table may not exist)", exc_info=True)

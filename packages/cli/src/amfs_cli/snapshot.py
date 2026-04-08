@@ -6,6 +6,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
 from amfs.config import load_config_or_default
 from amfs.factory import create_adapter_from_config
@@ -25,8 +26,17 @@ def export(
     """Export current memory state to a JSON snapshot."""
     cfg = load_config_or_default(config)
     adapter = create_adapter_from_config(cfg)
-    exporter = SnapshotExporter(adapter)
-    count = exporter.export(output, entity_path=entity, include_superseded=include_superseded)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed} entries"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Exporting...", total=None)
+        exporter = SnapshotExporter(adapter)
+        count = exporter.export(output, entity_path=entity, include_superseded=include_superseded)
+        progress.update(task, completed=count, total=count)
     console.print(f"[green]Exported {count} entries to {output}[/green]")
 
 
@@ -38,6 +48,15 @@ def restore(
     """Restore memory entries from a snapshot file."""
     cfg = load_config_or_default(config)
     adapter = create_adapter_from_config(cfg)
-    importer = SnapshotImporter(adapter)
-    count = importer.restore(input_path)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed} entries"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Restoring...", total=None)
+        importer = SnapshotImporter(adapter)
+        count = importer.restore(input_path)
+        progress.update(task, completed=count, total=count)
     console.print(f"[green]Restored {count} entries from {input_path}[/green]")

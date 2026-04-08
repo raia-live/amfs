@@ -294,20 +294,21 @@ async def search_entries(
 ) -> list[dict[str, Any]]:
     mem = _get_memory()
     branch = getattr(req, "branch", "main") or "main"
-    results = mem._adapter.search(
-        SearchQuery(
-            query=req.query,
-            entity_path=req.entity_path,
-            min_confidence=req.min_confidence,
-            max_confidence=req.max_confidence,
-            agent_id=req.agent_id,
-            since=req.since,
-            pattern_ref=req.pattern_ref,
-            sort_by=req.sort_by,
-            limit=req.limit,
-        ),
-        branch=branch,
+    sq = SearchQuery(
+        query=req.query,
+        entity_path=req.entity_path,
+        min_confidence=req.min_confidence,
+        max_confidence=req.max_confidence,
+        agent_id=req.agent_id,
+        since=req.since,
+        pattern_ref=req.pattern_ref,
+        sort_by=req.sort_by,
+        limit=req.limit,
     )
+    try:
+        results = mem._adapter.search(sq, branch=branch)
+    except TypeError:
+        results = mem._adapter.search(sq)
 
     if req.query and not getattr(mem._adapter, "_has_search_tsv", False):
         query_lower = req.query.lower()
