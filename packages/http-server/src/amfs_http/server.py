@@ -292,16 +292,27 @@ async def write_entry(
     }
     mt = type_map.get(req.memory_type.lower(), MemoryType.FACT)
 
-    entry = mem.write(
-        req.entity_path,
-        req.key,
-        req.value,
-        confidence=req.confidence,
-        pattern_refs=req.pattern_refs or None,
-        memory_type=mt,
-        shared=req.shared,
-        branch=req.branch,
-    )
+    original_agent = mem._tagger.agent_id if req.agent_id else None
+    if req.agent_id:
+        mem._tagger.agent_id = req.agent_id
+        try:
+            mem._adapter.ensure_agent(req.agent_id, mem.namespace)
+        except Exception:
+            pass
+    try:
+        entry = mem.write(
+            req.entity_path,
+            req.key,
+            req.value,
+            confidence=req.confidence,
+            pattern_refs=req.pattern_refs or None,
+            memory_type=mt,
+            shared=req.shared,
+            branch=req.branch,
+        )
+    finally:
+        if original_agent is not None:
+            mem._tagger.agent_id = original_agent
     _sse_manager.broadcast(entry)
     _audit_log(
         "memory.write",
@@ -525,12 +536,23 @@ async def commit_outcome(
         valid = ", ".join(_OUTCOME_TYPE_MAP.keys())
         return {"error": f"Invalid outcome_type '{req.outcome_type}'. Must be one of: {valid}"}
 
-    entries = mem.commit_outcome(
-        req.outcome_ref,
-        otype,
-        causal_entry_keys=req.causal_entry_keys,
-        causal_confidence=req.causal_confidence,
-    )
+    original_agent = mem._tagger.agent_id if req.agent_id else None
+    if req.agent_id:
+        mem._tagger.agent_id = req.agent_id
+        try:
+            mem._adapter.ensure_agent(req.agent_id, mem.namespace)
+        except Exception:
+            pass
+    try:
+        entries = mem.commit_outcome(
+            req.outcome_ref,
+            otype,
+            causal_entry_keys=req.causal_entry_keys,
+            causal_confidence=req.causal_confidence,
+        )
+    finally:
+        if original_agent is not None:
+            mem._tagger.agent_id = original_agent
     _audit_log(
         "outcome.commit",
         resource=req.outcome_ref,
