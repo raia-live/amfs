@@ -7,26 +7,15 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from amfs_cli.remote import CUSTOM_API_URL, DEFAULT_API_URL, save_credentials
+from amfs_cli.remote import DEFAULT_API_URL, save_credentials
 
 console = Console()
 
 
-def _resolve_api_url() -> str:
-    """Try the custom domain first; fall back to direct Cloud Run URL."""
-    import httpx
-
-    try:
-        httpx.head(CUSTOM_API_URL, timeout=3.0)
-        return CUSTOM_API_URL
-    except Exception:
-        return DEFAULT_API_URL
-
-
 def login_command(
     url: str = typer.Option(
-        None, "--url", "-u",
-        help="AMFS HTTP API URL (auto-detects production if omitted)",
+        DEFAULT_API_URL, "--url", "-u",
+        help="AMFS HTTP API URL (defaults to production)",
     ),
     api_key: str = typer.Option(
         ..., "--key", "-k",
@@ -43,10 +32,6 @@ def login_command(
     Get your API key at https://amfs.sense-lab.ai/settings/api-keys
     """
     import httpx
-
-    if url is None:
-        with console.status("[cyan]Resolving AMFS production API...[/cyan]"):
-            url = _resolve_api_url()
 
     with console.status(f"[cyan]Verifying credentials against {url}...[/cyan]"):
         try:
@@ -95,7 +80,7 @@ def login_command(
     table.add_column("Field", style="bold")
     table.add_column("Value")
 
-    is_default = url in (DEFAULT_API_URL, CUSTOM_API_URL)
+    is_default = url == DEFAULT_API_URL
     table.add_row("Server", f"[cyan]{url}[/cyan]{' (production)' if is_default else ''}")
     table.add_row("Key", f"[dim]{api_key[:12]}{'•' * 20}[/dim]")
     table.add_row("Mode", info.get("mode", "unknown"))
