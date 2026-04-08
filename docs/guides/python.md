@@ -259,6 +259,54 @@ chain = mem.explain(outcome_ref="INC-1042")
 
 ---
 
+## Decision Traces
+
+When you call `commit_outcome()`, AMFS snapshots the full decision trace — every entry that was read, every context that was recorded, and every query that was made. The resulting trace is persisted and can be retrieved later.
+
+### Getting the trace from an outcome
+
+```python
+mem.record_context("ci-check", "All tests green", source="GitHub Actions")
+entry = mem.read("checkout-service", "retry-pattern")
+
+updated = mem.commit_outcome("DEP-500", OutcomeType.SUCCESS)
+
+# The trace is attached to the outcome
+trace = mem._last_trace
+print(f"Trace ID: {trace.id}")
+print(f"Causal entries: {len(trace.causal_entries)}")
+print(f"External contexts: {len(trace.external_contexts)}")
+```
+
+### Browsing past traces
+
+```python
+# List recent traces
+traces = mem._adapter.list_traces(limit=10)
+for t in traces:
+    print(f"{t['id']} — {t['agent_id']} — {t['outcome_ref']} ({t['outcome_type']})")
+
+# Get a specific trace
+trace = mem._adapter.get_trace("ddbcefff-901a-4fa6-...")
+print(trace.decision_summary)
+print(f"Session duration: {trace.session_duration_ms}ms")
+for entry in trace.causal_entries:
+    print(f"  Read: {entry.entity_path}/{entry.key} (v{entry.version})")
+```
+
+### Filtering traces
+
+```python
+traces = mem._adapter.list_traces(
+    entity_path="checkout-service",
+    agent_id="deploy-agent",
+    outcome_type="success",
+    limit=5,
+)
+```
+
+---
+
 ## Tool Context
 
 When agents call external tools or APIs, there are two ways to capture that context in AMFS depending on your needs.

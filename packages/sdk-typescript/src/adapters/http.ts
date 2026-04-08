@@ -198,4 +198,89 @@ export class HttpAdapter implements AmfsAdapter {
   async healthAsync(): Promise<Record<string, unknown>> {
     return this.fetch<Record<string, unknown>>("/api/v1/health");
   }
+
+  async listTracesAsync(options?: {
+    entityPath?: string;
+    agentId?: string;
+    outcomeType?: string;
+    limit?: number;
+  }): Promise<DecisionTraceSummary[]> {
+    const params = new URLSearchParams();
+    if (options?.entityPath) params.set("entity_path", options.entityPath);
+    if (options?.agentId) params.set("agent_id", options.agentId);
+    if (options?.outcomeType) params.set("outcome_type", options.outcomeType);
+    if (options?.limit) params.set("limit", String(options.limit));
+    const qs = params.toString();
+    const data = await this.fetch<{ traces: DecisionTraceSummary[] }>(
+      `/api/v1/traces${qs ? `?${qs}` : ""}`
+    );
+    return data.traces ?? [];
+  }
+
+  async getTraceAsync(traceId: string): Promise<DecisionTrace | null> {
+    try {
+      return await this.fetch<DecisionTrace>(`/api/v1/traces/${encodeURIComponent(traceId)}`);
+    } catch {
+      return null;
+    }
+  }
+}
+
+export interface DecisionTraceSummary {
+  id: string;
+  agent_id: string;
+  outcome_ref: string;
+  outcome_type: string;
+  decision_summary?: string;
+  causal_entries: number;
+  external_contexts: number;
+  session_duration_ms?: number;
+  created_at: string;
+}
+
+export interface DecisionTrace {
+  id: string;
+  agent_id: string;
+  session_id: string;
+  outcome_ref: string;
+  outcome_type: string;
+  decision_summary?: string;
+  causal_entries: Array<{
+    entity_path: string;
+    key: string;
+    version: number;
+    confidence: number;
+    value?: unknown;
+    memory_type?: string;
+    written_by?: string;
+    read_at?: string;
+  }>;
+  external_contexts: Array<{
+    label: string;
+    summary: string;
+    source?: string;
+    recorded_at?: string;
+  }>;
+  query_events: Array<{
+    operation: string;
+    parameters: Record<string, unknown>;
+    result_count: number;
+    duration_ms?: number;
+    occurred_at?: string;
+  }>;
+  error_events: Array<{
+    operation: string;
+    error_type: string;
+    message: string;
+    stack_trace?: string;
+    occurred_at?: string;
+  }>;
+  state_diff?: {
+    entries_created: number;
+    entries_updated: number;
+  };
+  session_started_at?: string;
+  session_ended_at?: string;
+  session_duration_ms?: number;
+  created_at: string;
 }
