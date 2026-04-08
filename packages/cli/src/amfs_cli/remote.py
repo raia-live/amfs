@@ -13,6 +13,8 @@ from rich.console import Console
 
 console = Console(stderr=True)
 
+DEFAULT_API_URL = "https://amfs-login.sense-lab.ai"
+
 _CRED_DIR = Path.home() / ".config" / "amfs"
 _CRED_FILE = _CRED_DIR / "credentials.json"
 
@@ -55,6 +57,13 @@ def get_client() -> httpx.Client:
         headers["X-AMFS-API-Key"] = api_key
 
     return httpx.Client(base_url=url.rstrip("/"), headers=headers, timeout=30.0)
+
+
+def has_remote_config() -> bool:
+    """Return True if remote credentials are available (env vars or stored)."""
+    if os.environ.get("AMFS_HTTP_URL"):
+        return True
+    return bool(_load_credentials().get("url"))
 
 
 def api_get(path: str, params: dict[str, Any] | None = None) -> Any:

@@ -20,10 +20,14 @@ def search_command(
     min_confidence: float = typer.Option(0.0, "--min-confidence", help="Minimum confidence"),
     limit: int = typer.Option(50, "--limit", "-l", help="Max results"),
     format: str = typer.Option("table", "--format", "-f", help="Output format: table, json"),
-    remote: bool = typer.Option(False, "--remote", "-r", help="Search via HTTP API"),
+    remote: bool | None = typer.Option(None, "--remote", "-r", help="Use HTTP API (auto-detected from login)"),
+    local: bool = typer.Option(False, "--local", "-L", help="Force local adapter"),
 ) -> None:
     """Search memory entries by query, entity, agent, or confidence."""
-    if remote:
+    from amfs_cli.remote import has_remote_config
+    use_remote = (remote is True) or (remote is None and not local and has_remote_config())
+
+    if use_remote:
         from amfs_cli.remote import api_post
 
         with console.status("[cyan]Searching...[/cyan]"):

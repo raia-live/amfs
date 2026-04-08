@@ -24,7 +24,7 @@ AMFS integrates with popular multi-agent frameworks so you can add persistent me
 When using AMFS as a hosted service (SaaS), all integrations should connect via the HTTP API with an API key. Set these two environment variables before running your agents:
 
 ```bash
-export AMFS_HTTP_URL="https://amfs-api.example.com"
+export AMFS_HTTP_URL="https://amfs-login.sense-lab.ai"
 export AMFS_API_KEY="amfs_sk_your_key_here"
 ```
 

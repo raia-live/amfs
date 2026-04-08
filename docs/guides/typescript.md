@@ -147,7 +147,7 @@ Configure the MCP server with HTTP adapter environment variables:
       "command": "uv",
       "args": ["run", "--directory", "/path/to/amfs", "amfs-mcp-server"],
       "env": {
-        "AMFS_HTTP_URL": "https://amfs-api.example.com",
+        "AMFS_HTTP_URL": "https://amfs-login.sense-lab.ai",
         "AMFS_API_KEY": "amfs_sk_your_key_here"
       }
     }
@@ -160,7 +160,7 @@ Configure the MCP server with HTTP adapter environment variables:
 Make direct HTTP calls with the `X-AMFS-API-Key` header:
 
 ```typescript
-const response = await fetch("https://amfs-api.example.com/api/v1/entries", {
+const response = await fetch("https://amfs-login.sense-lab.ai/api/v1/entries", {
   method: "POST",
   headers: {
     "Content-Type": "application/json",

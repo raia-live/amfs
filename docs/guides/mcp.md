@@ -192,7 +192,7 @@ When using AMFS as a hosted service (SaaS), set `AMFS_HTTP_URL` and `AMFS_API_KE
         "amfs-mcp-server"
       ],
       "env": {
-        "AMFS_HTTP_URL": "https://amfs-api.example.com",
+        "AMFS_HTTP_URL": "https://amfs-login.sense-lab.ai",
         "AMFS_API_KEY": "amfs_sk_your_key_here"
       }
     }
@@ -213,7 +213,7 @@ When using AMFS as a hosted service (SaaS), set `AMFS_HTTP_URL` and `AMFS_API_KE
         "amfs-mcp-server"
       ],
       "env": {
-        "AMFS_HTTP_URL": "https://amfs-api.example.com",
+        "AMFS_HTTP_URL": "https://amfs-login.sense-lab.ai",
         "AMFS_API_KEY": "amfs_sk_your_key_here"
       }
     }

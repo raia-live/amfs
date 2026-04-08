@@ -120,7 +120,7 @@ When using AMFS as a hosted service (SaaS), CLI commands work against local stor
 ### Environment Variables
 
 ```bash
-export AMFS_HTTP_URL="https://amfs-api.example.com"
+export AMFS_HTTP_URL="https://amfs-login.sense-lab.ai"
 export AMFS_API_KEY="amfs_sk_your_key_here"
 ```
 

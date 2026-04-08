@@ -29,7 +29,7 @@ When connecting to AMFS as a hosted service (SaaS), set these variables to route
 
 | Variable | Description | Default |
 |:---------|:------------|:--------|
-| `AMFS_HTTP_URL` | Base URL of the AMFS HTTP API (e.g. `https://amfs-api.example.com`). When set, all memory operations are routed through the HTTP API. **Highest priority** — takes precedence over `AMFS_POSTGRES_DSN` and `AMFS_DATA_DIR`. | — |
+| `AMFS_HTTP_URL` | Base URL of the AMFS HTTP API (e.g. `https://amfs-login.sense-lab.ai`). When set, all memory operations are routed through the HTTP API. **Highest priority** — takes precedence over `AMFS_POSTGRES_DSN` and `AMFS_DATA_DIR`. | — |
 | `AMFS_API_KEY` | API key for authenticating with the AMFS HTTP API. Created via the Dashboard (Agents page or Settings > API Keys). Sent as `X-AMFS-API-Key` header. | — |
 
 {: .warning }

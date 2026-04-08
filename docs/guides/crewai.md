@@ -194,7 +194,7 @@ When using AMFS as a hosted service (SaaS), connect through the HTTP API with yo
 Set these before running your crew:
 
 ```bash
-export AMFS_HTTP_URL="https://amfs-api.example.com"
+export AMFS_HTTP_URL="https://amfs-login.sense-lab.ai"
 export AMFS_API_KEY="amfs_sk_your_key_here"
 ```
 
@@ -210,7 +210,7 @@ from amfs_adapter_http import HttpAdapter
 from amfs.integrations.crewai import AMFSStorageBackend
 
 adapter = HttpAdapter(
-    base_url="https://amfs-api.example.com",
+    base_url="https://amfs-login.sense-lab.ai",
     api_key="amfs_sk_your_key_here",
 )
 
