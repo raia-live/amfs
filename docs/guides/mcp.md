@@ -70,6 +70,31 @@ After setup, your AI agents have tools across five categories:
 
 ---
 
+## AMFS Pro (SaaS) and Cursor
+
+On **Sense Lab**, the AMFS dashboard (**Agents** page, MCP Connection card) is the source of truth. Cursor talks to hosted AMFS by running the **`amfs-mcp-server`** process locally with **stdio** (e.g. `uvx`), while the server uses **`AMFS_HTTP_URL`** (dashboard **Server URL**, e.g. `https://amfs-login.sense-lab.ai`) and **`AMFS_API_KEY`** to call the HTTP API. That URL is the **API base**, not an MCP Streamable HTTP path—there is **no `/mcp`** on it for this setup. The `/mcp` path applies only when you run the MCP server in **HTTP transport mode** as its own listening service (see [Streamable HTTP](#streamable-http-team--remote) below).
+
+Use the official **[Cursor plugin](https://github.com/raia-live/cursor-plugin)** (same shape as the dashboard JSON) or copy the snippet from the dashboard. Set **`AMFS_API_KEY`** in your environment and reference it with [Cursor interpolation](https://cursor.com/docs/mcp.md#config-interpolation). See also [SaaS / hosted AMFS](https://raia-live.github.io/amfs/guides/saas/).
+
+Example (matches dashboard; use `${env:AMFS_API_KEY}` in the plugin so keys are not committed):
+
+```json
+{
+  "mcpServers": {
+    "amfs": {
+      "command": "uvx",
+      "args": ["amfs-mcp-server"],
+      "env": {
+        "AMFS_HTTP_URL": "https://amfs-login.sense-lab.ai",
+        "AMFS_API_KEY": "${env:AMFS_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+---
+
 ## Prerequisites
 
 - Python 3.11+

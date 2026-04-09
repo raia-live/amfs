@@ -67,6 +67,7 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │  │  Trace Detail with Enriched Context · Agent Graph     │ │
 │  │  Sacred Timeline (3D) · Branch Manager · PR Viewer   │ │
 │  │  API Key Console · Audit Viewer · Usage Analytics    │ │
+│  │  Cursor plugin (hosted MCP to Pro API)              │ │
 │  │  Pattern Detection · Memory Tiers · Snapshots        │ │
 │  │  Team Management                                    │ │
 │  └──────────────────────────────────────────────────────┘ │
@@ -505,6 +506,8 @@ exporter.export_trace(trace)  # sends spans to your OTel collector
 ```
 
 ### Pro MCP Server
+
+On **Sense Lab**, Cursor uses **`uvx amfs-mcp-server`** with **`AMFS_HTTP_URL`** (dashboard **Server URL**, e.g. `https://amfs-login.sense-lab.ai`) and **`AMFS_API_KEY`**—same JSON as the **Agents** MCP Connection card. Install the **[Cursor plugin](https://github.com/raia-live/cursor-plugin)** or copy that snippet; see [MCP setup — AMFS Pro and Cursor](https://raia-live.github.io/amfs/guides/mcp/#amfs-pro-saas-and-cursor). **Streamable HTTP** (`url` … `/mcp`) is a separate deployment mode for a self-hosted MCP HTTP listener, not the dashboard default.
 
 Extends the OSS MCP server with additional tools:
 
