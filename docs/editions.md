@@ -9,7 +9,7 @@ permalink: /editions/
 # OSS vs Pro
 {: .no_toc }
 
-AMFS is split into two layers: a fully open-source core and a proprietary Pro layer. The OSS layer gives you everything you need to build production-ready agent memory. Pro adds multi-tenant SaaS infrastructure, persistent decision traces, cross-system ingestion, automated pattern detection, LLM-powered intelligence, and an enterprise dashboard.
+AMFS is GitHub for agent memory, split into two layers. The open-source core gives you the full memory engine with a single-branch repo model — versioning, confidence, outcomes, causal traces, knowledge graph, and a git-like timeline. Pro unlocks the full Git model: branching, merge, pull requests, access control, tags, rollback, cherry-pick, fork — plus multi-tenant SaaS, immutable traces, pattern detection, intelligence, and a dashboard.
 {: .fs-6 .fw-300 }
 
 ## Table of Contents

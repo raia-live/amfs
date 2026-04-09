@@ -9,7 +9,7 @@ permalink: /vs-competitors/
 # AMFS vs Competitors
 {: .no_toc }
 
-How AMFS compares to every serious memory system in the 2026 landscape.
+Every other memory system is a smarter store. AMFS is the only one that treats agent memory like code — with version control, branching, pull requests, and rollback.
 {: .fs-6 .fw-300 }
 
 ## Table of Contents
@@ -24,6 +24,15 @@ How AMFS compares to every serious memory system in the 2026 landscape.
 
 | Feature | AMFS | Mem0 | Zep / Graphiti | Hindsight | Letta | Cognee | LangMem |
 |:--------|:----:|:----:|:--------------:|:---------:|:-----:|:------:|:-------:|
+| **Git-like collaboration** | | | | | | | |
+| Branching (isolated experiments) | Pro | No | No | No | No | No | No |
+| Pull requests (review before merge) | Pro | No | No | No | No | No | No |
+| Diff, merge, rollback | Pro | No | No | No | No | No | No |
+| Tags / named snapshots | Pro | No | No | No | No | No | No |
+| Branch-level access control | Pro | No | No | No | No | No | No |
+| Fork (clone brain to new agent) | Pro | No | No | No | No | No | No |
+| Git-like timeline (event log) | Yes | No | No | No | No | No | No |
+| **Memory fundamentals** | | | | | | | |
 | Persistent memory | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
 | Versioning (full history) | CoW | No | Temporal | No | No | No | No |
 | Provenance (who wrote, when) | Yes | No | Partial | No | No | No | No |
@@ -55,12 +64,12 @@ How AMFS compares to every serious memory system in the 2026 landscape.
 **Where Mem0 excels:** Simple API, automatic fact extraction from chat, optional graph memory, wide framework integrations (CrewAI, LangGraph, Flowise).
 
 **Where AMFS differs:**
+- **Git model for collaboration** -- Branching, PRs, diff, merge, rollback, access control. Mem0 has no collaboration model — it's a single-writer store.
 - **Outcome feedback loop** -- AMFS confidence evolves from production events. Mem0 stores facts without trust signals.
 - **CoW versioning** -- Every write is immutable and replayable. Mem0 overwrites.
 - **Multi-agent provenance** -- AMFS tracks authorship, detects conflicts, and auto-links causality. Mem0 is single-user oriented.
 - **Four-signal decay** -- Time + type + outcomes + access frequency. Mem0 has no decay model.
 - **Tiered memory** -- Hot/Warm/Archive with progressive retrieval. Mem0 searches everything.
-- **Cross-system ingestion** -- Webhooks from PagerDuty, Slack, GitHub, Jira. Mem0 only ingests from conversations.
 
 ---
 
@@ -71,6 +80,7 @@ How AMFS compares to every serious memory system in the 2026 landscape.
 **Where Zep excels:** Temporal knowledge graphs with time-bounded edges, entity resolution across conversations, strong on multi-hop temporal queries.
 
 **Where AMFS differs:**
+- **Git model for collaboration** -- Branching, PRs, diff, merge, rollback. Zep has no collaboration or version control model.
 - **Outcome back-propagation** -- AMFS learns from production events. Zep tracks temporal validity but doesn't learn from what happens after retrieval.
 - **CoW vs temporal graph** -- Different models. AMFS versions individual entries; Graphiti maintains a graph with time-bounded edges. AMFS is simpler; Graphiti captures richer temporal relationships.
 - **Multi-agent** -- AMFS has conflict detection and per-agent provenance. Zep targets single-assistant use.
@@ -153,11 +163,11 @@ Memvid is the right choice for single-user, offline, or edge scenarios where inf
 
 ## What Makes AMFS Unique
 
-1. **Memory that learns from production** -- Confidence scoring evolves from incidents, deployments, and regressions. No other system connects memory to real-world outcomes.
+1. **GitHub for agent memory** -- No other system treats agent knowledge like code. AMFS gives every agent a brain (repo), with branching, pull requests, diff, merge, rollback, access control, and fork. The mental model is already in every developer's head. No competitor has any of this.
 
-2. **Memory as cognitive substrate** -- Tiered memory (Hot/Warm/Archive), frequency-modulated decay, multi-dimensional importance scoring, and progressive retrieval make AMFS a self-organizing memory system -- not just a retrieval layer. This is the "new wave" the industry is moving toward.
+2. **Memory that learns from production** -- Confidence scoring evolves from incidents, deployments, and regressions. No other system connects memory to real-world outcomes.
 
-3. **Four-signal decay** -- Time, memory type, outcome validation, and access frequency all modulate how fast entries fade. Frequently recalled, outcome-validated entries resist decay; cold, unvalidated beliefs decay quickly.
+3. **Self-organizing memory** -- Tiered memory (Hot/Warm/Archive), frequency-modulated decay, multi-dimensional importance scoring, and progressive retrieval. Not just a retrieval layer — a memory system that reorganizes itself based on what matters.
 
 4. **Copy-on-Write versioning** -- Every write is immutable. Replay history, compare versions, audit decisions. Most competitors overwrite.
 

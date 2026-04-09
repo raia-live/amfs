@@ -24,9 +24,9 @@ Vector databases and AMFS solve different problems. Understanding the distinctio
 
 **Vector databases** store embeddings and retrieve them by similarity. They answer: *"what is most relevant to this query?"*
 
-**AMFS** stores versioned, provenanced knowledge and evolves it based on outcomes. It answers: *"what does this agent know, who wrote it, how confident are we, and what happened when we acted on it?"*
+**AMFS** is version control for what agents know. It answers: *"what does this agent know, who wrote it, how confident are we, what happened when we acted on it, and how do we collaborate on changing it?"*
 
-A vector database is a **retrieval engine**. AMFS is a **memory system**.
+A vector database is a **search index**. AMFS is **GitHub for agent memory** — versioning, branching, pull requests, rollback, and a collaboration model developers already understand.
 
 ---
 
@@ -35,6 +35,7 @@ A vector database is a **retrieval engine**. AMFS is a **memory system**.
 | Dimension | Vector Database | AMFS |
 |:----------|:----------------|:-----|
 | **Primary operation** | Similarity search over embeddings | Read/write versioned knowledge with provenance |
+| **Collaboration model** | Shared index — last write wins | Git model — branch, diff, PR, merge, rollback, access control |
 | **Data model** | Vectors + metadata | Structured entries with entity/key scoping, confidence, memory type, provenance |
 | **Versioning** | Overwrite or append | Copy-on-Write — every write creates a new version, full history preserved |
 | **Who wrote it?** | Not tracked | Provenance: agent ID, session ID, timestamp, pattern refs |
@@ -71,6 +72,7 @@ Vector databases are **stateless retrieval indexes**. They don't track:
 - **What happened when you used it** — No outcome tracking. If an agent retrieves a vector and acts on it, and that action causes an incident, the vector database has no way to learn from that.
 - **How data changed over time** — Vectors are overwritten or appended. You can't ask "what did this entry say last week?"
 - **Why a decision was made** — No causal chain linking retrieved data to actions and outcomes.
+- **How to collaborate on changes** — No branching, no review process, no way for one agent to propose a change and another to approve it. It's like coding without Git.
 
 ---
 
@@ -174,8 +176,9 @@ No vector database provides this lifecycle. They are a retrieval layer. AMFS is 
 
 | | Vector Database | AMFS |
 |:--|:----------------|:-----|
-| **Think of it as** | A search index for embeddings | A version-controlled knowledge base for agents |
-| **Best for** | Finding relevant data | Remembering, learning, and explaining decisions |
+| **Think of it as** | A search index for embeddings | GitHub for agent memory |
+| **Best for** | Finding relevant data | Collaborating on knowledge the way developers collaborate on code |
+| **Collaboration** | None — shared index, last write wins | Branch, diff, PR, review, merge, rollback, access control |
 | **Data lifecycle** | Write once, query many | Write, version, track outcomes, decay, explain |
 | **Multi-agent** | Shared index | Shared memory with provenance, conflicts, and causal chains |
 | **Cross-system context** | Manual ingestion | Pro: auto-ingest from PagerDuty, Slack, GitHub, Jira |
