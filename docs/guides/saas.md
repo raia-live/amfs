@@ -10,6 +10,8 @@ description: "Connect to AMFS SaaS — authenticate agents, use scoped API keys,
 {: .no_toc }
 
 When using AMFS as a hosted service, all agents connect through the HTTP API with an API key. This guide covers credentials, client configuration, and security best practices.
+
+For **ops metering, quotas, and the control-plane API** used on SenseLab Cloud, see **[Hosted billing & metering]({{ site.baseurl }}/guides/saas-billing-metering/)**.
 {: .fs-6 .fw-300 }
 
 ## Table of Contents
