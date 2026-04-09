@@ -72,11 +72,11 @@ After setup, your AI agents have tools across five categories:
 
 ## AMFS Pro (SaaS) and Cursor
 
-[AMFS Pro](https://raia-live.github.io/amfs/editions/) hosts MCP for you over **Streamable HTTP**—no local Python process or `uvx` on the developer machine. Use the official **[Cursor plugin](https://github.com/raia-live/cursor-plugin)** to connect Cursor to Raia’s API.
+[AMFS Pro](https://raia-live.github.io/amfs/editions/) hosts MCP for you over **Streamable HTTP**—no local Python process or `uvx` on the developer machine. Use the official **[Cursor plugin](https://github.com/raia-live/cursor-plugin)** to connect Cursor to Sense Lab’s hosted API (`https://amfs-login.sense-lab.ai`).
 
-1. Obtain an **API key** and confirm your tenant’s **MCP endpoint URL** in the AMFS Pro dashboard ([raia.live](https://raia.live)).
+1. Obtain an **API key** and confirm your tenant’s **MCP URL** on the **Agents** page (MCP Connection Card)—see [SaaS / hosted AMFS](https://raia-live.github.io/amfs/guides/saas/).
 2. Set **`AMFS_API_KEY`** in your environment. Cursor resolves [`${env:…}`](https://cursor.com/docs/mcp.md#config-interpolation) in MCP config.
-3. The plugin defaults to **`https://api.raia.live/mcp`**. If your dashboard shows a different URL (region, staging, or custom host), use that value in `.cursor/mcp.json` or in the plugin’s `mcp.json`.
+3. The Cursor plugin defaults to **`https://amfs-login.sense-lab.ai/mcp`** (same host as `AMFS_HTTP_URL`, with the default MCP path `/mcp`). If your dashboard shows a different MCP URL, use that value in `.cursor/mcp.json` or in the plugin’s `mcp.json`.
 
 Example (global or project `.cursor/mcp.json`):
 
@@ -84,7 +84,7 @@ Example (global or project `.cursor/mcp.json`):
 {
   "mcpServers": {
     "amfs": {
-      "url": "https://api.raia.live/mcp",
+      "url": "https://amfs-login.sense-lab.ai/mcp",
       "headers": {
         "Authorization": "Bearer ${env:AMFS_API_KEY}"
       }
