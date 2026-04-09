@@ -2,14 +2,14 @@
 title: AMFS vs Competitors
 layout: default
 nav_order: 6
-description: "How AMFS compares to Mem0, Cognee, Zep/Graphiti, LangMem, CrewAI Memory, and other AI memory systems."
+description: "How AMFS compares to Mem0, Zep, Hindsight, Letta/MemGPT, Cognee, and other AI memory systems."
 permalink: /vs-competitors/
 ---
 
 # AMFS vs Competitors
 {: .no_toc }
 
-The AI memory space is evolving fast. Here's how AMFS compares to the leading alternatives — Mem0, Cognee, Zep/Graphiti, CrewAI Memory, and LangMem — and where each excels.
+How AMFS compares to every serious memory system in the 2026 landscape.
 {: .fs-6 .fw-300 }
 
 ## Table of Contents
@@ -22,197 +22,151 @@ The AI memory space is evolving fast. Here's how AMFS compares to the leading al
 
 ## Feature Matrix
 
-| Feature | AMFS | Mem0 | Cognee | Zep / Graphiti | LangMem | CrewAI Memory |
-|:--------|:----:|:----:|:------:|:--------------:|:-------:|:-------------:|
-| Persistent memory across sessions | Yes | Yes | Yes | Yes | Yes | Yes |
-| Versioning (full history) | CoW | No | No | Temporal | No | No |
-| Provenance (who wrote, when) | Yes | No | No | Partial | No | No |
-| Confidence scoring | Yes | No | No | No | No | Composite |
-| Outcome back-propagation | Yes | No | No | No | No | No |
-| Memory types (fact/belief/experience) | Yes | No | No | No | No | Short/Long/Entity |
-| Provenance tiers | Yes | No | No | No | No | No |
-| Causal explainability | Yes | No | No | No | No | No |
-| LLM-powered organization | No | No | Yes | No | No | Yes |
-| Composite scoring (relevance+recency+importance) | Yes | No | No | No | No | Yes |
-| Scope tree (hierarchical scoping) | Pro | No | No | No | No | Yes |
-| Deep recall (multi-step retrieval) | Pro | No | No | No | No | Yes |
-| Persistent decision traces | Pro | No | No | No | No | No |
-| Cross-system ingestion (webhooks) | Yes | No | No | No | No | No |
-| Connector ecosystem | Yes | No | No | No | No | No |
-| Automated pattern detection | Pro | No | No | No | No | No |
-| Knowledge graph | Via pattern_refs | No | Yes | Yes | No | No |
-| Semantic search | Yes | Yes | Yes | Yes | Yes | Yes |
-| Multi-agent support | Native | Partial | No | No | No | Native |
-| Conflict detection | Yes | No | No | No | No | No |
-| Multi-tenant with RLS | Pro | Cloud-only | Cloud-only | Cloud-only | Cloud-only | No |
-| Scoped API keys per agent | Pro | No | No | No | No | No |
-| MCP server | Yes | Yes | No | No | No | No |
-| Framework integrations | Yes | Yes | Yes | Yes | Yes | CrewAI only |
-| Self-hosted / OSS | Apache 2.0 | OSS + Cloud | OSS + Cloud | OSS + Cloud | OSS | OSS |
-| Pluggable storage backends | Yes | No | No | No | No | Yes |
-| Enterprise dashboard | Pro | Cloud | Cloud | Cloud | Cloud | No |
-| Learned ranking from outcomes | Pro | No | No | No | No | No |
-| Training data export (SFT/DPO) | Pro | No | No | No | No | No |
+| Feature | AMFS | Mem0 | Zep / Graphiti | Hindsight | Letta | Cognee | LangMem |
+|:--------|:----:|:----:|:--------------:|:---------:|:-----:|:------:|:-------:|
+| Persistent memory | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Versioning (full history) | CoW | No | Temporal | No | No | No | No |
+| Provenance (who wrote, when) | Yes | No | Partial | No | No | No | No |
+| Confidence scoring | Yes | No | No | Opinion only | No | No | No |
+| Outcome back-propagation | Yes | No | No | No | No | No | No |
+| Memory types (fact/belief/experience) | Yes | No | No | 4 networks | 3 stores | No | 3 types |
+| Causal explainability | Yes | No | No | No | No | No | No |
+| Knowledge graph | Auto | Optional | Yes | Manual | No | Yes | No |
+| Semantic search | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Multi-agent native | Yes | Partial | No | No | No | No | No |
+| Conflict detection | Yes | No | No | No | No | No | No |
+| Tiered memory (hot/warm/archive) | Yes | No | No | No | 3-tier | No | No |
+| Frequency-modulated decay | Yes | No | No | No | No | No | No |
+| Progressive retrieval (depth) | Yes | No | No | No | No | No | No |
+| Importance scoring (multi-dim) | Pro | No | No | No | No | No | No |
+| Cortex drift gate | Yes | No | No | No | No | No | No |
+| MCP server | Yes | Yes | No | Yes | No | No | No |
+| Self-hosted / OSS | Apache 2.0 | OSS+Cloud | OSS+Cloud | OSS | OSS | OSS+Cloud | OSS |
+| Multi-tenant with RLS | Pro | Cloud | Cloud | No | No | Cloud | Cloud |
+| Enterprise dashboard | Pro | Cloud | Cloud | No | No | Cloud | Cloud |
+| Learned ranking from outcomes | Pro | No | No | No | No | No | No |
 
 ---
 
 ## AMFS vs Mem0
 
-[Mem0](https://mem0.ai) is a popular memory layer for LLM applications. It focuses on storing user preferences and conversational context.
+[Mem0](https://mem0.ai) is the most widely adopted memory library (41K+ stars). It extracts facts from conversations and stores them with ADD/UPDATE/DELETE/NOOP operations against a vector store.
 
-### Where Mem0 Excels
+**Where Mem0 excels:** Simple API, automatic fact extraction from chat, optional graph memory, wide framework integrations (CrewAI, LangGraph, Flowise).
 
-- **Conversational memory** — Extracts and manages user preferences from chat history automatically.
-- **Cloud-hosted option** — Managed service with minimal setup.
-- **Simple API** — `add()`, `search()`, `get()` — easy to get started.
-- **Graph memory** — Optional knowledge graph for relationship extraction.
-
-### Where AMFS Differs
-
-- **Outcome-driven confidence** — AMFS entries carry confidence scores that evolve when deploys succeed or incidents occur. Mem0 stores facts without a trust signal.
-- **Copy-on-Write versioning** — Every AMFS write creates a new version. You can replay history, compare versions, and answer "what did we know at the time?" Mem0 overwrites.
-- **Provenance** — AMFS records which agent wrote each entry, in which session, with which cross-references. Mem0 doesn't track authorship.
-- **Multi-agent native** — AMFS supports conflict detection, auto-causal linking, and per-agent identity. Mem0 is designed primarily for single-user conversational context.
-- **Decision traces** — AMFS's `explain()` API and `record_context()` capture the full causal chain. Pro persists these traces durably, enabling historical queries months later. Mem0 doesn't track why decisions were made.
-- **Cross-system ingestion** — AMFS Pro ingests events from PagerDuty, Slack, GitHub, and Jira via webhooks with HMAC verification and deduplication. Mem0 only ingests from LLM conversations.
-- **Pattern detection** — AMFS Pro automatically surfaces recurring failures, stale clusters, and confidence drift across your memory store. Mem0 provides no automated analysis.
-- **Self-hosted control** — AMFS runs on your infrastructure with pluggable backends (filesystem, Postgres, S3). Mem0's advanced features require their cloud service.
-
----
-
-## AMFS vs Cognee
-
-[Cognee](https://cognee.ai) builds knowledge graphs from documents using LLM-powered extraction, with a focus on multi-hop reasoning benchmarks.
-
-### Where Cognee Excels
-
-- **Knowledge graph construction** — Automatically builds structured graphs from unstructured documents.
-- **Multi-hop reasoning** — Strong performance on HotpotQA and similar benchmarks that require connecting information across sources.
-- **Dreamify optimization** — Proprietary tool for rewiring knowledge graph connections to improve accuracy.
-- **Ontology-based validation** — Uses ontologies to ground extracted knowledge in structured schemas.
-
-### Where AMFS Differs
-
-- **Agent-oriented, not document-oriented** — AMFS is designed for agents that read, write, and act on knowledge. Cognee is designed for processing documents into queryable graphs.
-- **Outcome feedback loop** — AMFS connects knowledge to real-world outcomes. Cognee's knowledge graph doesn't learn from what happens after retrieval.
-- **Versioning and provenance** — AMFS preserves full history and tracks authorship. Cognee's graph is a living structure that's updated in place.
-- **Pluggable storage** — AMFS runs on filesystem, Postgres, or S3. Cognee has its own storage layer.
-- **Decision explainability** — AMFS can explain why a decision was made (what was read, what external context was gathered). Pro persists these traces forever with precedent search. Cognee focuses on what's in the graph, not how it was used.
-- **Enterprise foundation** — AMFS Pro provides multi-tenant isolation (Postgres RLS), RBAC, scoped API keys, audit logging, and rate limiting out of the box. Cognee relies on its cloud platform for access control.
+**Where AMFS differs:**
+- **Outcome feedback loop** -- AMFS confidence evolves from production events. Mem0 stores facts without trust signals.
+- **CoW versioning** -- Every write is immutable and replayable. Mem0 overwrites.
+- **Multi-agent provenance** -- AMFS tracks authorship, detects conflicts, and auto-links causality. Mem0 is single-user oriented.
+- **Four-signal decay** -- Time + type + outcomes + access frequency. Mem0 has no decay model.
+- **Tiered memory** -- Hot/Warm/Archive with progressive retrieval. Mem0 searches everything.
+- **Cross-system ingestion** -- Webhooks from PagerDuty, Slack, GitHub, Jira. Mem0 only ingests from conversations.
 
 ---
 
 ## AMFS vs Zep / Graphiti
 
-[Zep](https://getzep.com) provides memory for AI assistants and agents. [Graphiti](https://github.com/getzep/graphiti) is Zep's temporal knowledge graph library.
+[Zep](https://getzep.com) builds temporal knowledge graphs via [Graphiti](https://github.com/getzep/graphiti). Facts carry time ranges; queries can ask "what was true at time T?"
 
-### Where Zep/Graphiti Excels
+**Where Zep excels:** Temporal knowledge graphs with time-bounded edges, entity resolution across conversations, strong on multi-hop temporal queries.
 
-- **Temporal knowledge graphs** — Graphiti maintains a graph where facts have valid-time ranges, supporting queries like "what was true at time T?"
-- **Conversation memory** — Zep excels at managing dialog history with summarization and entity extraction.
-- **Episodic + semantic memory** — Combines conversation episodes with extracted facts.
-- **Built-in entity resolution** — Automatically links mentions of the same entity across conversations.
-
-### Where AMFS Differs
-
-- **Outcome back-propagation** — AMFS's confidence scoring evolves based on production outcomes. Zep tracks temporal validity but doesn't learn from what happens after retrieval.
-- **Copy-on-Write vs. temporal graph** — AMFS versions individual entries with full history. Graphiti maintains a graph with time-bounded edges. Different models with different strengths: AMFS is simpler to reason about; Graphiti captures richer relationships.
-- **Agent provenance** — AMFS records which agent wrote each entry and supports multi-agent conflict detection. Zep is designed for single-assistant use.
-- **Pluggable backends** — AMFS supports filesystem (dev), Postgres (production), and S3 (cloud) with the same API. Zep requires its own infrastructure.
-- **Decision traces** — AMFS captures the full causal chain including external tool context. Pro persists traces durably with precedent search across all historical decisions. Zep focuses on conversation-derived knowledge.
-- **Cross-system context** — AMFS Pro's webhook ingester and connectors automatically pull context from PagerDuty, Slack, GitHub into the memory store. Zep only processes conversations.
-- **Pattern intelligence** — AMFS Pro detects recurring failures, stale knowledge, and confidence anomalies automatically. Zep doesn't analyze memory quality.
+**Where AMFS differs:**
+- **Outcome back-propagation** -- AMFS learns from production events. Zep tracks temporal validity but doesn't learn from what happens after retrieval.
+- **CoW vs temporal graph** -- Different models. AMFS versions individual entries; Graphiti maintains a graph with time-bounded edges. AMFS is simpler; Graphiti captures richer temporal relationships.
+- **Multi-agent** -- AMFS has conflict detection and per-agent provenance. Zep targets single-assistant use.
+- **Operational context** -- AMFS ingests infrastructure events via webhooks. Zep only processes conversations.
 
 ---
 
-## AMFS vs CrewAI Memory
+## AMFS vs Hindsight
 
-[CrewAI](https://crewai.com) includes a built-in memory system designed for multi-agent crews, with short-term, long-term, and entity memory backed by a pluggable storage layer.
+[Hindsight](https://github.com/hindsight-ai/hindsight) maintains four separate memory networks (World, Experience, Opinion, Entity/Observation). It reports 91.4% on LongMemEval, the strongest published accuracy in the space.
 
-### Where CrewAI Memory Excels
+**Where Hindsight excels:** Benchmark accuracy, clean separation of evidence vs inference (Opinion Network has confidence scores), multi-session temporal reasoning (21% -> 80% on LongMemEval multi-session questions).
 
-- **LLM-powered auto-organization** — CrewAI uses LLMs to automatically categorize and organize memories, reducing manual overhead.
-- **Composite scoring** — Memories are scored by a composite of relevance, recency, and importance, enabling nuanced retrieval.
-- **Deep recall (RecallFlow)** — Multi-step retrieval pipeline that refines and enriches results through iterative LLM passes.
-- **Scope tree** — Hierarchical scoping lets you define memory boundaries at crew, agent, task, or custom levels.
-- **Native multi-agent** — Memory is shared across agents within a crew by default, with scoping for isolation when needed.
-- **Short/Long/Entity memory types** — Purpose-built memory categories for different retention needs.
+**Where AMFS differs:**
+- **Production feedback loop** -- Hindsight's Opinion Network has confidence scores, but they don't evolve from real-world outcomes. AMFS's confidence changes when deploys succeed or incidents occur.
+- **Versioning** -- Hindsight overwrites network state. AMFS preserves full CoW history.
+- **Tiered memory** -- AMFS's Hot/Warm/Archive with priority scoring is data-driven, vs Hindsight's fixed 4-network separation. AMFS's tiers rebalance automatically based on access patterns and importance.
+- **Importance scoring** -- Pro evaluates entries across behavioral alignment, reasoning utility, and contextual persistence -- three LLM-scored dimensions that feed into tier assignment.
+- **Knowledge graph** -- AMFS auto-materializes a graph from normal operations. Hindsight's networks are structurally defined.
+- **Enterprise features** -- Multi-tenant isolation, RBAC, scoped API keys, audit logging, webhooks, dashboard. Hindsight is a research tool without enterprise infrastructure.
 
-### Where AMFS Differs
+---
 
-- **Outcome back-propagation** — AMFS adjusts confidence scores based on real-world outcomes (deploys, incidents, regressions). CrewAI's composite scoring doesn't incorporate production feedback.
-- **Copy-on-Write versioning** — Every AMFS write creates an immutable version. You can reconstruct the state of knowledge at any point in time. CrewAI overwrites memories in place.
-- **Provenance tiers** — AMFS automatically ranks entries by how they were created: production-validated, observed, dev, or manual. CrewAI doesn't distinguish provenance quality.
-- **Persistent decision traces** — AMFS captures the full causal chain (what was read, what external context was gathered, what decision was made) and can persist it indefinitely. CrewAI doesn't track decision provenance.
-- **Connector ecosystem** — AMFS ingests events from PagerDuty, GitHub, Slack, Jira, and custom systems via webhooks. CrewAI memory only captures agent-generated knowledge.
-- **Multi-tenant isolation** — AMFS Pro provides hard tenant isolation via Postgres RLS, RBAC, scoped API keys, and audit logging. CrewAI memory is single-tenant.
-- **Framework agnostic** — AMFS works with any framework (CrewAI, LangGraph, AutoGen, standalone). CrewAI memory is tightly coupled to the CrewAI framework.
-- **MCP server** — AMFS exposes memory to IDE agents (Cursor, Claude Code) via MCP. CrewAI memory is only accessible from within CrewAI crews.
+## AMFS vs Letta / MemGPT
 
-### Better Together
+[Letta](https://letta.com) (formerly MemGPT) treats the LLM as an OS managing its own memory: main context (RAM), recall store (recent history), and archival store (long-term).
 
-AMFS can serve as the storage backend for CrewAI's memory system via `AMFSStorageBackend`. This gives you the best of both worlds:
+**Where Letta excels:** Transparent memory management (the LLM decides what to page in/out), inspectable memory blocks, elegant OS metaphor.
 
-- **CrewAI's UX** — LLM-powered organization, composite scoring, scope trees, RecallFlow — all the features that make CrewAI's memory ergonomic for crew orchestration.
-- **AMFS's durability** — CoW versioning, outcome feedback, provenance tracking, connector ingestion, and persistent decision traces underneath.
+**Where AMFS differs:**
+- **Data-driven tiering** -- AMFS's Hot/Warm/Archive tiers are assigned by priority scoring (confidence, recency, recall frequency, importance), not by LLM paging decisions. This avoids the latency and cost of LLM-managed memory.
+- **Outcome feedback** -- AMFS confidence evolves from production events. Letta doesn't connect memory to outcomes.
+- **CoW versioning** -- Full history. Letta's archival store doesn't version.
+- **Multi-agent native** -- AMFS supports per-agent provenance, conflict detection, and cross-agent knowledge transfer. Letta is single-agent.
 
-```python
-from crewai.memory import Memory
-from amfs.integrations.crewai import AMFSStorageBackend
+---
 
-backend = AMFSStorageBackend(agent_id="my-crew", entity_path="my-project")
-crew = Crew(
-    agents=[...],
-    tasks=[...],
-    memory=Memory(storage=backend),
-)
-```
+## AMFS vs Cognee
 
-See the [CrewAI Integration guide](/amfs/guides/crewai/) for full setup instructions.
+[Cognee](https://cognee.ai) builds knowledge graphs from documents using LLM-powered extraction. Backed by OpenAI and FAIR founders.
+
+**Where Cognee excels:** Document-to-graph construction, multi-hop reasoning (HotpotQA), ontology-based validation.
+
+**Where AMFS differs:**
+- **Agent-oriented vs document-oriented** -- AMFS is for agents that read, write, and act. Cognee processes documents into queryable graphs.
+- **Outcome feedback** -- AMFS connects knowledge to production reality. Cognee's graph doesn't learn from post-retrieval events.
+- **Versioning and provenance** -- AMFS preserves full history. Cognee updates its graph in place.
 
 ---
 
 ## AMFS vs LangMem
 
-[LangMem](https://langchain-ai.github.io/long-term-memory/) is LangChain's long-term memory library, designed to work within the LangChain/LangGraph ecosystem.
+[LangMem](https://langchain-ai.github.io/long-term-memory/) is LangChain's long-term memory library for the LangGraph ecosystem.
 
-### Where LangMem Excels
+**Where LangMem excels:** Native LangGraph integration, managed service via LangSmith, namespace scoping.
 
-- **LangGraph integration** — First-class integration with LangGraph state management.
-- **Managed service** — Available as part of LangSmith's hosted platform.
-- **Namespace scoping** — Organize memories by user, thread, or custom namespace.
+**Where AMFS differs:**
+- **Framework-agnostic** -- AMFS works with CrewAI, LangGraph, AutoGen, or standalone. LangMem is tied to LangChain.
+- **Outcome feedback** -- AMFS's core differentiator. No LangMem equivalent.
+- **MCP-native** -- Built-in MCP server for IDE integration (Cursor, Claude Code).
+- **Self-hosted** -- Pluggable backends (filesystem, Postgres, S3). LangMem is primarily managed.
 
-### Where AMFS Differs
+---
 
-- **Framework-agnostic** — AMFS works with CrewAI, LangGraph, LangChain, AutoGen, or standalone. LangMem is tied to the LangChain ecosystem.
-- **Outcome-driven confidence** — AMFS's core differentiator. Knowledge quality improves based on what actually happens in production.
-- **Full versioning** — Every AMFS write creates a new CoW version with history. LangMem stores current state.
-- **Provenance and explainability** — AMFS tracks who wrote what and can explain the full decision chain. Pro persists traces permanently for auditing and precedent search. LangMem doesn't provide provenance or causal tracing.
-- **MCP-native** — AMFS has a built-in MCP server for IDE integration (Cursor, Claude Code). LangMem doesn't support MCP.
-- **Self-hosted with pluggable storage** — AMFS runs on filesystem, Postgres, or S3. LangMem is primarily a managed service.
-- **Enterprise-grade access control** — AMFS Pro provides multi-tenant isolation, RBAC, scoped API keys, and audit logging. LangMem delegates to LangSmith's platform-level controls.
-- **Operational intelligence** — AMFS Pro ingests events from infrastructure tools (PagerDuty, GitHub, Jira), detects failure patterns, and alerts on anomalies. LangMem is memory-only with no operational awareness.
+## AMFS vs Memvid
+
+[Memvid](https://github.com/memvid/memvid) packages memory into a single `.mv2` file -- data, embeddings, index, metadata. No database, no server.
+
+**Where Memvid excels:** Zero infrastructure, 0.025ms P50 retrieval, portable single-file memory, ideal for offline/edge agents.
+
+**Where AMFS differs:**
+- **Different category** -- Memvid is a read-mostly, append-only search tool. AMFS is a multi-agent memory platform with versioning, outcomes, and enterprise features.
+- **Multi-agent** -- Memvid has no concurrent writes, no conflict detection, no provenance.
+- **Tiered memory** -- AMFS's Hot/Warm/Archive hierarchy doesn't exist in Memvid's flat file.
+- **Production feedback** -- Memvid stores and retrieves. AMFS learns from outcomes.
+
+Memvid is the right choice for single-user, offline, or edge scenarios where infrastructure is a non-starter. AMFS is for production multi-agent systems that need versioning, feedback, and collaboration.
 
 ---
 
 ## What Makes AMFS Unique
 
-Across all competitors, AMFS's differentiators are:
+1. **Memory that learns from production** -- Confidence scoring evolves from incidents, deployments, and regressions. No other system connects memory to real-world outcomes.
 
-1. **Memory that learns from production** — No other system connects memory to real-world outcomes. AMFS's confidence scoring evolves based on incidents, deployments, and regressions.
+2. **Memory as cognitive substrate** -- Tiered memory (Hot/Warm/Archive), frequency-modulated decay, multi-dimensional importance scoring, and progressive retrieval make AMFS a self-organizing memory system -- not just a retrieval layer. This is the "new wave" the industry is moving toward.
 
-2. **Complete decision traces** — `explain()` + `record_context()` capture the full picture: what AMFS entries were read, what external tools were consulted, and what happened afterward. Pro persists these permanently — queryable months or years later.
+3. **Four-signal decay** -- Time, memory type, outcome validation, and access frequency all modulate how fast entries fade. Frequently recalled, outcome-validated entries resist decay; cold, unvalidated beliefs decay quickly.
 
-3. **Copy-on-Write versioning** — Every write is immutable. You can replay the state of knowledge at any point in time, compare versions, and audit how decisions evolved. Most competitors overwrite.
+4. **Copy-on-Write versioning** -- Every write is immutable. Replay history, compare versions, audit decisions. Most competitors overwrite.
 
-4. **Multi-agent native** — Provenance tracking, conflict detection (`LAST_WRITE_WINS` / `RAISE`), auto-causal linking, and per-agent identity are built in. Competitors are primarily designed for single-agent or single-user use.
+5. **Complete decision traces** -- `explain()` + `record_context()` capture the full causal chain. Pro persists traces permanently with cryptographic integrity.
 
-5. **Cross-system context graph** — Pro's webhook ingester and connectors pull events from PagerDuty, Slack, GitHub, and Jira into the same memory store where agents operate. This creates a unified context graph that spans code, infrastructure, and team communication — something no competitor offers.
+6. **Multi-agent native** -- Provenance tracking, conflict detection, auto-causal linking, and per-agent identity. Not bolted on.
 
-6. **Automated pattern intelligence** — Pro continuously scans memory for recurring failures, stale clusters, hot entities, and confidence drift. Configurable alert rules route findings to Slack, PagerDuty, or email. No competitor provides automated memory health monitoring.
+7. **Cross-system context** -- Webhooks from PagerDuty, Slack, GitHub, Jira flow into the same memory store. No competitor unifies agent memory with operational events.
 
-7. **Framework and infrastructure agnostic** — Works with any agent framework, any IDE via MCP, any storage backend via adapters. Not locked into one ecosystem.
+8. **Framework and infrastructure agnostic** -- Any framework, any IDE via MCP, any storage backend via adapters.
 
-8. **Enterprise-grade multi-tenancy** — Postgres Row-Level Security for hard tenant isolation, RBAC with three roles, scoped API keys per agent, sliding-window rate limiting, audit logging, and usage quotas. Purpose-built for running as a multi-tenant SaaS.
-
-9. **ML that improves with use** (Pro) — Outcome data trains a learned ranking model that gets better at surfacing useful memories. Confidence multipliers calibrate to your domain. Decision traces export as fine-tuning datasets (SFT, DPO, reward model) so your agents themselves improve from their own history.
+9. **Enterprise-grade** -- Postgres RLS, RBAC, scoped API keys, audit logging, rate limiting, usage quotas. Purpose-built for multi-tenant SaaS.

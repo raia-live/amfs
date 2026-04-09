@@ -21,6 +21,8 @@ from amfs_core.models import (
     Event,
     EventType,
     ExternalContext,
+    GraphEdge,
+    GraphNeighborQuery,
     MemoryEntry,
     MemoryStateDiff,
     MemoryStats,
@@ -76,6 +78,7 @@ class AgentMemory:
         embedder: EmbedderABC | None = None,
         conflict_policy: ConflictPolicy = ConflictPolicy.LAST_WRITE_WINS,
         on_conflict: Callable[[MemoryEntry, MemoryEntry, Any], Any] | None = None,
+        importance_evaluator: Any | None = None,
     ) -> None:
         self._config = load_config_or_default(config_path)
 
@@ -92,6 +95,7 @@ class AgentMemory:
         self._embedder = embedder
         self._conflict_policy = conflict_policy
         self._on_conflict = on_conflict
+        self._importance_evaluator = importance_evaluator
         self._branch = "main"
 
         self._lifecycle: LifecycleManager | None = None
@@ -224,6 +228,22 @@ class AgentMemory:
                         current.provenance.agent_id,
                     )
 
+        embedding = None
+        if self._embedder is not None:
+            embedding = self._embedder.embed_value(value)
+
+        importance_score = None
+        importance_dimensions = None
+        if self._importance_evaluator is not None:
+            try:
+                importance_score, importance_dimensions = self._importance_evaluator.evaluate(
+                    value,
+                    entity_path=entity_path,
+                    key=key,
+                )
+            except Exception:
+                logger.debug("Importance evaluation failed, skipping", exc_info=True)
+
         entry = self._engine.write(
             entity_path,
             key,
@@ -235,13 +255,11 @@ class AgentMemory:
             artifact_refs=artifact_refs,
             shared=shared,
             branch=effective_branch,
+            embedding=embedding,
+            importance_score=importance_score,
+            importance_dimensions=importance_dimensions or None,
         )
         self._read_tracker.record_write(entity_path, key, entry.version, entry.version == 1)
-
-        if self._embedder is not None:
-            embedding = self._embedder.embed_value(value)
-            entry = entry.model_copy(update={"embedding": embedding, "version": 1})
-            entry = self._adapter.write(entry)
 
         try:
             self._adapter.log_event(Event(
@@ -262,7 +280,37 @@ class AgentMemory:
         except Exception:
             logger.debug("Failed to log write event", exc_info=True)
 
+        if pattern_refs:
+            self._materialize_pattern_ref_edges(
+                entity_path, key, pattern_refs, effective_branch,
+            )
+
         return entry
+
+    def _materialize_pattern_ref_edges(
+        self,
+        entity_path: str,
+        key: str,
+        pattern_refs: list[str],
+        branch: str,
+    ) -> None:
+        """Best-effort: create graph edges from pattern_refs."""
+        for ref in pattern_refs:
+            try:
+                self._adapter.upsert_graph_edge(
+                    GraphEdge(
+                        source_entity=f"{entity_path}/{key}",
+                        source_type="entry",
+                        relation="references",
+                        target_entity=ref,
+                        target_type="entry",
+                        provenance={"agent_id": self.agent_id, "trigger": "write"},
+                    ),
+                    namespace=self.namespace,
+                    branch=branch,
+                )
+            except Exception:
+                logger.debug("Failed to materialize pattern_ref edge for %s", ref, exc_info=True)
 
     def list(
         self,
@@ -307,6 +355,7 @@ class AgentMemory:
     def search(
         self,
         *,
+        query: str | None = None,
         entity_path: str | None = None,
         entity_paths: list[str] | None = None,
         min_confidence: float = 0.0,
@@ -317,8 +366,13 @@ class AgentMemory:
         limit: int = 100,
         sort_by: str = "confidence",
         recall_config: RecallConfig | None = None,
+        depth: int = 3,
     ) -> list[MemoryEntry] | list[ScoredEntry]:
         """Search across all entities with rich filters.
+
+        When *query* is provided the text is forwarded to the adapter for
+        full-text search (Postgres tsvector) and, when *recall_config* is
+        also set, used for cosine-similarity scoring against entry embeddings.
 
         When *entity_paths* is provided, runs a search for each path and merges
         the results.  *entity_path* (singular) is still supported for backwards
@@ -326,13 +380,19 @@ class AgentMemory:
 
         When *recall_config* is provided, returns ``ScoredEntry`` objects
         sorted by composite recall score instead.
+
+        *depth* controls progressive retrieval across memory tiers:
+          1 = HOT only, 2 = HOT + WARM, 3 = all tiers (default).
         """
+        from amfs_core.embedder import cosine_similarity
+
         paths = entity_paths or ([entity_path] if entity_path else [None])
 
         seen_keys: set[str] = set()
         merged: list[MemoryEntry] = []
         for ep in paths:
-            query = SearchQuery(
+            sq = SearchQuery(
+                query=query,
                 entity_path=ep,
                 min_confidence=min_confidence,
                 max_confidence=max_confidence,
@@ -342,8 +402,9 @@ class AgentMemory:
                 limit=limit,
                 sort_by=sort_by,
                 recall_config=recall_config,
+                depth=depth,
             )
-            for entry in self._adapter.search(query):
+            for entry in self._adapter.search(sq):
                 if entry.entry_key not in seen_keys:
                     if not entry.shared and entry.provenance.agent_id != self.agent_id:
                         continue
@@ -369,6 +430,10 @@ class AgentMemory:
         if recall_config is None:
             return entries
 
+        query_vec: list[float] | None = None
+        if query and self._embedder is not None:
+            query_vec = self._embedder.embed(query)
+
         now = datetime.now(timezone.utc)
         scored: list[ScoredEntry] = []
         for entry in entries:
@@ -379,8 +444,12 @@ class AgentMemory:
             recency_score = math.exp(-math.log(2) * age_days / half_life) if half_life > 0 else 0.0
             confidence_score = max(0.0, min(1.0, entry.confidence))
 
+            semantic_score = 0.0
+            if query_vec is not None and entry.embedding is not None:
+                semantic_score = max(0.0, cosine_similarity(query_vec, entry.embedding))
+
             composite = (
-                recall_config.semantic_weight * 1.0
+                recall_config.semantic_weight * semantic_score
                 + recall_config.recency_weight * recency_score
                 + recall_config.confidence_weight * confidence_score
             )
@@ -388,7 +457,7 @@ class AgentMemory:
                 entry=entry,
                 score=composite,
                 breakdown={
-                    "semantic": recall_config.semantic_weight * 1.0,
+                    "semantic": recall_config.semantic_weight * semantic_score,
                     "recency": recall_config.recency_weight * recency_score,
                     "confidence": recall_config.confidence_weight * confidence_score,
                 },
@@ -427,6 +496,35 @@ class AgentMemory:
     def stats(self) -> MemoryStats:
         """Aggregate statistics about current memory state."""
         return self._adapter.stats()
+
+    # ------------------------------------------------------------------
+    # Knowledge graph
+    # ------------------------------------------------------------------
+
+    def graph_neighbors(
+        self,
+        entity: str,
+        *,
+        relation: str | None = None,
+        direction: str = "both",
+        min_confidence: float = 0.0,
+        depth: int = 1,
+        limit: int = 50,
+    ) -> list[GraphEdge]:
+        """Traverse the knowledge graph from an entity."""
+        query = GraphNeighborQuery(
+            entity=entity,
+            relation=relation,
+            direction=direction,
+            min_confidence=min_confidence,
+            depth=depth,
+            limit=limit,
+        )
+        return self._adapter.graph_neighbors(
+            query,
+            namespace=self.namespace,
+            branch=self._branch,
+        )
 
     # ------------------------------------------------------------------
     # Outcomes
@@ -534,7 +632,7 @@ class AgentMemory:
             state_diff=state_diff,
         )
         try:
-            self._adapter.save_trace(trace)
+            trace = self._adapter.save_trace(trace)
         except Exception:
             logger.debug("Failed to persist decision trace", exc_info=True)
 
@@ -555,7 +653,69 @@ class AgentMemory:
         except Exception:
             logger.debug("Failed to log outcome event", exc_info=True)
 
+        self._materialize_causal_edges(outcome_ref, outcome_type, causal_entry_keys)
+
+        self._last_trace = trace
         return updated
+
+    def _materialize_causal_edges(
+        self,
+        outcome_ref: str,
+        outcome_type: OutcomeType,
+        causal_entry_keys: list[str],
+    ) -> None:
+        """Best-effort: create graph edges from the causal chain."""
+        edge_conf = 1.0 if outcome_type in (OutcomeType.SUCCESS,) else 0.7
+        branch = self._branch
+        for ek in causal_entry_keys:
+            try:
+                self._adapter.upsert_graph_edge(
+                    GraphEdge(
+                        source_entity=ek,
+                        source_type="entry",
+                        relation="informed",
+                        target_entity=outcome_ref,
+                        target_type="outcome",
+                        confidence=edge_conf,
+                        provenance={"agent_id": self.agent_id, "trigger": "commit_outcome"},
+                    ),
+                    namespace=self.namespace,
+                    branch=branch,
+                )
+                self._adapter.upsert_graph_edge(
+                    GraphEdge(
+                        source_entity=self.agent_id,
+                        source_type="agent",
+                        relation="read",
+                        target_entity=ek,
+                        target_type="entry",
+                        confidence=edge_conf,
+                        provenance={"agent_id": self.agent_id, "trigger": "commit_outcome"},
+                    ),
+                    namespace=self.namespace,
+                    branch=branch,
+                )
+            except Exception:
+                logger.debug("Failed to materialize causal edge for %s", ek, exc_info=True)
+
+        for i, a in enumerate(causal_entry_keys):
+            for b in causal_entry_keys[i + 1:]:
+                try:
+                    self._adapter.upsert_graph_edge(
+                        GraphEdge(
+                            source_entity=a,
+                            source_type="entry",
+                            relation="co_occurs_with",
+                            target_entity=b,
+                            target_type="entry",
+                            confidence=edge_conf,
+                            provenance={"agent_id": self.agent_id, "trigger": "commit_outcome"},
+                        ),
+                        namespace=self.namespace,
+                        branch=branch,
+                    )
+                except Exception:
+                    logger.debug("Failed to materialize co-occurrence edge", exc_info=True)
 
     # ------------------------------------------------------------------
     # Temporal & Explainability
@@ -702,6 +862,26 @@ class AgentMemory:
             ))
         except Exception:
             logger.debug("Failed to log cross-agent read event", exc_info=True)
+
+        try:
+            self._adapter.upsert_graph_edge(
+                GraphEdge(
+                    source_entity=self.agent_id,
+                    source_type="agent",
+                    relation="learned_from",
+                    target_entity=agent_id,
+                    target_type="agent",
+                    provenance={
+                        "entity_path": entity_path,
+                        "key": key,
+                        "trigger": "read_from",
+                    },
+                ),
+                namespace=self.namespace,
+                branch=self._branch,
+            )
+        except Exception:
+            logger.debug("Failed to materialize cross-agent graph edge", exc_info=True)
 
         return entry
 

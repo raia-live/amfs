@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import TYPE_CHECKING, Protocol
 
@@ -23,6 +24,7 @@ class CompilationStrategy(Protocol):
     def compile_entity(self, entity_path: str, adapter: PostgresAdapter, namespace: str, branch: str = "main") -> Digest | None: ...
     def compile_agent_brief(self, agent_id: str, adapter: PostgresAdapter, namespace: str, branch: str = "main") -> Digest | None: ...
     def compile_source(self, source_id: str, adapter: PostgresAdapter, namespace: str, branch: str = "main") -> Digest | None: ...
+    def compile_connection_map(self, entity_path: str, adapter: PostgresAdapter, namespace: str, branch: str = "main") -> Digest | None: ...
 
 
 class DigestCompiler:
@@ -69,6 +71,8 @@ class DigestCompiler:
             digest = self._strategy.compile_agent_brief(scope, self._adapter, self._namespace, b)
         elif kind == "source":
             digest = self._strategy.compile_source(scope, self._adapter, self._namespace, b)
+        elif kind == "connection":
+            digest = self._strategy.compile_connection_map(scope, self._adapter, self._namespace, b)
         else:
             logger.warning("Unknown scope kind: %s", kind)
             return None
@@ -102,6 +106,8 @@ class DigestCompiler:
         for ep in entity_paths:
             if self.compile(f"entity:{ep}", branch=b):
                 count += 1
+            if self.compile(f"connection:{ep}", branch=b):
+                count += 1
         for aid in agent_ids:
             if self.compile(f"agent:{aid}", branch=b):
                 count += 1
@@ -112,3 +118,47 @@ class DigestCompiler:
         logger.info("Recompiled %d digests (%d entities, %d agents, %d sources) branch=%s",
                      count, len(entity_paths), len(agent_ids), len(source_ids), b)
         return count
+
+    def compute_scope_fingerprint(self, scope_key: str, *, branch: str | None = None) -> str | None:
+        """Compute a lightweight fingerprint for a scope's current state.
+
+        Used by the drift gate to decide whether recompilation is worthwhile.
+        The fingerprint captures entry count, newest written_at, and average
+        confidence — changes in any of these signal meaningful state drift.
+        """
+        b = branch or self._branch
+        kind, _, scope = scope_key.partition(":")
+        if not scope:
+            return None
+
+        try:
+            if kind == "entity":
+                entries = self._adapter.list(scope, branch=b)
+            elif kind == "agent":
+                entries = [
+                    e for e in self._adapter.list(branch=b)
+                    if e.provenance.agent_id == scope
+                ]
+            elif kind == "source":
+                entries = [
+                    e for e in self._adapter.list(branch=b)
+                    if e.provenance.agent_id.endswith(f"/{scope}")
+                ]
+            elif kind == "connection":
+                entries = self._adapter.list(scope, branch=b)
+            else:
+                return None
+        except Exception:
+            return None
+
+        if not entries:
+            return hashlib.sha256(b"empty").hexdigest()[:16]
+
+        count = len(entries)
+        newest = max(e.provenance.written_at for e in entries)
+        avg_conf = sum(e.confidence for e in entries) / count
+        top_keys = sorted(entries, key=lambda e: e.confidence, reverse=True)[:3]
+        top_key_str = "|".join(e.key for e in top_keys)
+
+        raw = f"{count}:{newest.isoformat()}:{avg_conf:.6f}:{top_key_str}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]

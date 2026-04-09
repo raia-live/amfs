@@ -14,6 +14,8 @@ from amfs_core.models import (
     DecisionTrace,
     DiffEntry,
     Event,
+    GraphEdge,
+    GraphNeighborQuery,
     MemoryEntry,
     MemoryStats,
     MergeResult,
@@ -236,6 +238,40 @@ class AdapterABC(ABC):
             newest_entry_at=newest,
         )
 
+    # ── Recall tracking ─────────────────────────────────────────────────
+
+    def increment_recall_count(
+        self,
+        entity_path: str,
+        key: str,
+        *,
+        branch: str = "main",
+    ) -> None:
+        """Increment the recall_count of the current entry version in place.
+
+        This is a mutable metadata update that does NOT create a new CoW
+        version.  Adapters that do not support in-place updates can safely
+        leave the default no-op.
+        """
+
+    # ── Tiered memory ─────────────────────────────────────────────────
+
+    def update_tiers(
+        self,
+        tier_assignments: dict[str, int],
+        scores: dict[str, float],
+        *,
+        branch: str = "main",
+    ) -> int:
+        """Batch-update tier and priority_score for entries in place.
+
+        *tier_assignments* maps ``entry_key`` -> tier (1/2/3).
+        *scores* maps ``entry_key`` -> priority_score.
+        Returns count of entries updated.  Default no-op returns 0.
+        """
+        return 0
+
+
     # ── Agent registration ─────────────────────────────────────────────
 
     def ensure_agent(self, agent_id: str, namespace: str = "default") -> Agent:
@@ -405,6 +441,58 @@ class AdapterABC(ABC):
         Returns the number of entries copied.
         """
         raise NotImplementedError("Fork requires the Postgres adapter")
+
+    # ── Knowledge graph ─────────────────────────────────────────────
+
+    def upsert_graph_edge(
+        self,
+        edge: GraphEdge,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> GraphEdge:
+        """Insert or update a knowledge graph edge.
+
+        On conflict (same source, relation, target within namespace+branch)
+        bumps evidence_count, updates last_seen and takes max confidence.
+        Default is a no-op returning the edge unchanged.
+        """
+        return edge
+
+    def graph_neighbors(
+        self,
+        query: GraphNeighborQuery,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> list[GraphEdge]:
+        """Traverse the knowledge graph from an entity.
+
+        Supports multi-hop via *query.depth*. Default returns empty list.
+        """
+        return []
+
+    def list_graph_edges(
+        self,
+        *,
+        entity: str | None = None,
+        relation: str | None = None,
+        min_confidence: float = 0.0,
+        namespace: str = "default",
+        branch: str = "main",
+        limit: int = 500,
+    ) -> list[GraphEdge]:
+        """List graph edges with optional filters. Default returns empty list."""
+        return []
+
+    def graph_stats(
+        self,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> dict:
+        """Return aggregate graph statistics. Default returns empty dict."""
+        return {}
 
     def semantic_search(
         self, query: SemanticQuery, embedder: EmbedderABC

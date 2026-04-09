@@ -4,6 +4,9 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
 
 ## Available MCP Tools
 
+### Identity
+- `amfs_set_identity(name, description?)` — set your agent identity for this conversation. Call first.
+
 ### Brain tools (agent-scoped)
 - `amfs_recall(entity_path, key)` — recall YOUR OWN memory for a key (what do I know about this?)
 - `amfs_my_entries(entity_path?)` — list everything YOU have written (what's in my brain?)
@@ -17,13 +20,22 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
 - `amfs_stats()` — memory overview
 
 ### Tracing and explainability
-- `amfs_commit_outcome(outcome_ref, outcome_type)` — record outcomes, auto-links to read log
-- `amfs_record_context(label, summary, source?)` — capture external tool/API context in the causal chain
+- `amfs_commit_outcome(outcome_ref, outcome_type)` — **critical**: snapshots the full decision trace (all reads, writes, decisions, contexts) and persists it. Call this after completing significant work.
+- `amfs_record_context(label, summary, source?)` — capture decisions, external tool results, or user choices in the causal chain. Call this **as decisions happen**, not at the end.
 - `amfs_history(entity_path, key, since?, until?)` — retrieve version history of an entry
-- `amfs_explain(outcome_ref?)` — inspect the full decision trace: reads + external contexts
+- `amfs_explain(outcome_ref?)` — inspect the current session's decision trace: reads + external contexts
+- `amfs_list_traces(entity_path?, agent_id?, limit?)` — browse persisted decision traces from past sessions
+- `amfs_get_trace(trace_id)` — retrieve a full decision trace by ID
 - `amfs_cross_agent_reads()` — see which other agents' memory you've read
 
 ## Workflow
+
+### First: set your identity
+At the start of every conversation, identify yourself so memories and traces are attributed correctly:
+```
+amfs_set_identity("<descriptive-name>", "<what you're working on>")
+```
+Use kebab-case based on the task (e.g. `"dashboard-fixer"`, `"auth-debugger"`, `"mcp-integration"`).
 
 ### Before starting work
 Get a compiled briefing from the Memory Cortex first — this gives you pre-compiled knowledge about the entity you're about to work on, including what other agents know, recent risks, external events, and confidence-ranked facts:
@@ -66,19 +78,28 @@ Record what you did so future agents can retrace steps (experiences decay slower
 amfs_write("<repo>/<module>", "action-<desc>", "<what you did>", memory_type="experience")
 ```
 
-### When consulting external tools or APIs
-Record external context so the decision trace is complete:
+### When decisions are made (build the causal chain)
+Record decisions **as they happen** — both your own and the user's:
 ```
+amfs_record_context("user-decision", "User chose thread-local over request-scoped", source="chat")
+amfs_record_context("architecture-decision", "Using uvx for distribution", source="analysis")
 amfs_record_context("pagerduty-incidents", "3 SEV-1 in last 24h", source="PagerDuty API")
 ```
 
-### When something significant happens
-Record outcomes to update confidence of related entries:
+### After completing significant work (commit the trace)
+**Always call `commit_outcome`** after finishing a task. This snapshots all reads, writes, decisions, and contexts into a persisted `DecisionTrace`:
 ```
-amfs_commit_outcome("<ref>", "success")            # successful outcome
-amfs_commit_outcome("<ref>", "minor_failure")      # minor setback
-amfs_commit_outcome("<ref>", "critical_failure")   # severe failure
-amfs_commit_outcome("<ref>", "failure")            # moderate failure
+amfs_commit_outcome("tenant-rls-fix", "success")
+amfs_commit_outcome("<ticket>", "minor_failure")
+amfs_commit_outcome("<incident-id>", "critical_failure")
+```
+Without this, the decision trace is lost when the session ends.
+
+### Before making similar decisions (browse past traces)
+Check if a past decision trace already covers this area:
+```
+amfs_list_traces(entity_path="<repo>/<module>", limit=5)
+amfs_get_trace("<trace-id>")
 ```
 
 ## Entity Naming

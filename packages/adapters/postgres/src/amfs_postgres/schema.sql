@@ -14,6 +14,11 @@ CREATE TABLE IF NOT EXISTS amfs_memory_entries (
     pattern_refs TEXT[] DEFAULT '{}',
     confidence NUMERIC(6,4) DEFAULT 1.0,
     outcome_count INTEGER DEFAULT 0,
+    recall_count INTEGER DEFAULT 0,
+    priority_score NUMERIC(10,6),
+    tier SMALLINT DEFAULT 3,
+    importance_score NUMERIC(6,4),
+    importance_dimensions JSONB,
     ttl_at TIMESTAMPTZ,
     memory_type TEXT DEFAULT 'fact',
     shared BOOLEAN NOT NULL DEFAULT TRUE,
@@ -28,6 +33,9 @@ CREATE INDEX IF NOT EXISTS idx_entries_current
 
 CREATE INDEX IF NOT EXISTS idx_entries_entity
     ON amfs_memory_entries (namespace, entity_path);
+
+-- Tier partial indexes (idx_entries_hot, idx_entries_warm) are created
+-- in _apply_migrations() so the tier column exists first on legacy DBs.
 
 CREATE TABLE IF NOT EXISTS amfs_outcomes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -375,13 +383,13 @@ BEGIN
             INSERT INTO amfs_memory_entries (
                 namespace, entity_path, key, version, value,
                 agent_id, session_id, written_at, pattern_refs,
-                confidence, outcome_count, ttl_at, memory_type,
+                confidence, outcome_count, recall_count, ttl_at, memory_type,
                 shared, artifact_refs
             ) VALUES (
                 cur.namespace, cur.entity_path, cur.key, cur.version + 1, cur.value,
                 cur.agent_id, cur.session_id, cur.written_at, cur.pattern_refs,
                 cur.confidence * multiplier * NEW.causal_confidence,
-                cur.outcome_count + 1, cur.ttl_at, cur.memory_type,
+                cur.outcome_count + 1, cur.recall_count, cur.ttl_at, cur.memory_type,
                 cur.shared, cur.artifact_refs
             );
         END IF;

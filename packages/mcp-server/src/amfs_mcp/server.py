@@ -49,6 +49,32 @@ def _get_memory() -> AgentMemory:
         return _memory
 
     agent_id = detect_agent_id()
+
+    http_url = os.environ.get("AMFS_HTTP_URL")
+    if http_url:
+        if os.environ.get("AMFS_POSTGRES_DSN"):
+            logger.warning(
+                "Both AMFS_HTTP_URL and AMFS_POSTGRES_DSN are set. "
+                "The HTTP adapter takes precedence — direct DB access "
+                "is bypassed in favour of the authenticated HTTP API."
+            )
+        try:
+            from amfs_adapter_http import HttpAdapter
+
+            api_key = os.environ.get("AMFS_API_KEY", "")
+            logger.info(
+                "AMFS HTTP adapter mode — routing through %s", http_url
+            )
+            adapter = HttpAdapter(base_url=http_url, api_key=api_key)
+            _memory = AgentMemory(agent_id=agent_id, adapter=adapter)
+            return _memory
+        except ImportError:
+            logger.warning(
+                "AMFS_HTTP_URL is set but amfs-adapter-http is not installed. "
+                "Falling back to local adapter. "
+                "Install with: pip install amfs-adapter-http"
+            )
+
     config = _resolve_config()
 
     ttl_interval_str = os.environ.get("AMFS_TTL_SWEEP_INTERVAL")
@@ -119,6 +145,37 @@ def _serialize_entry(entry: Any) -> dict[str, Any]:
 # ──────────────────────────────────────────────────────────────────────
 # MCP Tools
 # ──────────────────────────────────────────────────────────────────────
+
+
+@mcp.tool
+def amfs_set_identity(name: str, description: str | None = None) -> str:
+    """Set the agent identity for this conversation.
+
+    Call this at the start of every new conversation to give this agent
+    a meaningful, human-readable identity. This identity carries through
+    to the dashboard, traces, and cross-agent reads.
+
+    Each Cursor chat, Claude conversation, or agent session should set
+    its own identity based on what it's working on.
+
+    Args:
+        name: Short, descriptive name (e.g. "dashboard-fixer", "auth-debugger",
+              "mcp-integration"). Use kebab-case.
+        description: Optional one-line description of what this agent is doing.
+
+    Example: amfs_set_identity("tenant-isolation-agent", "Fixing RLS propagation for Pro tenancy")
+    """
+    mem = _get_memory()
+    old_id = mem.agent_id
+    mem._tagger.agent_id = name
+    result: dict[str, Any] = {
+        "previous_identity": old_id,
+        "new_identity": name,
+        "session_id": mem.session_id,
+    }
+    if description:
+        result["description"] = description
+    return json.dumps(result, default=str)
 
 
 @mcp.tool
@@ -212,14 +269,19 @@ def amfs_search(
     pattern_ref: str | None = None,
     sort_by: str = "confidence",
     limit: int = 20,
+    depth: int = 3,
 ) -> str:
     """Search across all memory entries with filters.
 
     Use this before starting work to find context about the entity you're
     modifying, or to check if another agent already solved a similar problem.
 
+    When a Postgres adapter with tsvector support is configured, the query
+    text is used for full-text search.  Otherwise falls back to Python
+    substring matching on keys/values.
+
     Args:
-        query: Optional text to match in keys/values (basic substring match)
+        query: Optional text to search for (full-text when available, substring fallback)
         entity_path: Filter to a specific entity path
         min_confidence: Minimum confidence threshold (0.0-1.0)
         max_confidence: Maximum confidence threshold (0.0-1.0)
@@ -228,6 +290,7 @@ def amfs_search(
         pattern_ref: Filter to entries tagged with this pattern reference
         sort_by: Sort order — "confidence", "recency", or "version"
         limit: Maximum results to return
+        depth: Tier depth (1=hot only, 2=hot+warm, 3=all tiers)
 
     Example: amfs_search(entity_path="checkout-service", min_confidence=0.5)
     """
@@ -237,6 +300,7 @@ def amfs_search(
     since_dt = dt.fromisoformat(since) if since else None
 
     results = mem.search(
+        query=query,
         entity_path=entity_path,
         min_confidence=min_confidence,
         max_confidence=max_confidence,
@@ -245,9 +309,10 @@ def amfs_search(
         pattern_ref=pattern_ref,
         sort_by=sort_by,
         limit=limit,
+        depth=depth,
     )
 
-    if query:
+    if query and not _adapter_supports_fts(mem):
         query_lower = query.lower()
         results = [
             e
@@ -258,6 +323,70 @@ def amfs_search(
         ]
 
     return json.dumps([_serialize_entry(e) for e in results], default=str)
+
+
+def _adapter_supports_fts(mem) -> bool:
+    """Check if the adapter handles full-text search natively."""
+    adapter = getattr(mem, "_adapter", None) or getattr(mem, "adapter", None)
+    return getattr(adapter, "_has_search_tsv", False)
+
+
+@mcp.tool
+def amfs_retrieve(
+    query: str,
+    entity_path: str | None = None,
+    min_confidence: float = 0.0,
+    limit: int = 10,
+    semantic_weight: float = 0.5,
+    recency_weight: float = 0.3,
+    confidence_weight: float = 0.2,
+    depth: int = 3,
+) -> str:
+    """Find the most relevant memories for a natural language query.
+
+    Blends semantic similarity, recency, and confidence into a single
+    ranked list.  Use this when you need to find memories by meaning,
+    not exact key/value match.  Use amfs_search for structured filtering.
+
+    Args:
+        query: Natural language query describing what you're looking for
+        entity_path: Optional entity path filter
+        min_confidence: Minimum confidence threshold (0.0-1.0)
+        limit: Maximum results to return
+        semantic_weight: Weight for semantic similarity (0.0-1.0)
+        recency_weight: Weight for recency (0.0-1.0)
+        confidence_weight: Weight for confidence (0.0-1.0)
+        depth: Tier depth (1=hot only, 2=hot+warm, 3=all tiers)
+
+    Returns ranked results with score breakdowns showing how each
+    signal contributed to the final ranking.
+    """
+    from amfs_core.models import RecallConfig
+
+    mem = _get_memory()
+    recall_config = RecallConfig(
+        semantic_weight=semantic_weight,
+        recency_weight=recency_weight,
+        confidence_weight=confidence_weight,
+    )
+
+    results = mem.search(
+        query=query,
+        entity_path=entity_path,
+        min_confidence=min_confidence,
+        limit=limit,
+        recall_config=recall_config,
+        depth=depth,
+    )
+
+    serialized = []
+    for scored in results:
+        data = _serialize_entry(scored.entry)
+        data["_score"] = round(scored.score, 4)
+        data["_breakdown"] = {k: round(v, 4) for k, v in scored.breakdown.items()}
+        serialized.append(data)
+
+    return json.dumps(serialized, default=str)
 
 
 @mcp.tool
@@ -274,6 +403,41 @@ def amfs_list(entity_path: str | None = None) -> str:
     mem = _get_memory()
     entries = mem.list(entity_path)
     return json.dumps([_serialize_entry(e) for e in entries], default=str)
+
+
+@mcp.tool
+def amfs_graph_neighbors(
+    entity: str,
+    relation: str | None = None,
+    direction: str = "both",
+    min_confidence: float = 0.0,
+    depth: int = 1,
+    limit: int = 50,
+) -> str:
+    """Explore the knowledge graph around an entity.
+
+    Shows what services, agents, patterns, and outcomes are connected
+    to the given entity, with relationship types and confidence scores.
+    Use depth > 1 for multi-hop traversal.
+
+    Args:
+        entity: The entity to explore (e.g. "checkout-service/retry-pattern")
+        relation: Optional filter by relation type (e.g. "references", "informed")
+        direction: Edge direction — "outgoing", "incoming", or "both"
+        min_confidence: Minimum edge confidence (0.0-1.0)
+        depth: Traversal depth (1 = direct neighbors, 2+ = multi-hop)
+        limit: Maximum edges to return
+    """
+    mem = _get_memory()
+    edges = mem.graph_neighbors(
+        entity,
+        relation=relation,
+        direction=direction,
+        min_confidence=min_confidence,
+        depth=depth,
+        limit=limit,
+    )
+    return json.dumps([e.model_dump(mode="json") for e in edges], default=str)
 
 
 @mcp.tool
@@ -327,15 +491,19 @@ def amfs_commit_outcome(
         })
 
     entries = mem.commit_outcome(outcome_ref, otype)
-    return json.dumps(
-        {
-            "outcome_ref": outcome_ref,
-            "outcome_type": outcome_type,
-            "affected_entries": len(entries),
-            "entries": [_serialize_entry(e) for e in entries],
-        },
-        default=str,
-    )
+    trace = getattr(mem, "_last_trace", None)
+    result: dict[str, Any] = {
+        "outcome_ref": outcome_ref,
+        "outcome_type": outcome_type,
+        "affected_entries": len(entries),
+        "entries": [_serialize_entry(e) for e in entries],
+    }
+    if trace and getattr(trace, "id", None):
+        result["trace_id"] = trace.id
+        result["causal_entries"] = len(trace.causal_entries)
+        result["external_contexts"] = len(trace.external_contexts)
+        result["session_duration_ms"] = trace.session_duration_ms
+    return json.dumps(result, default=str)
 
 
 @mcp.tool
@@ -517,6 +685,74 @@ def amfs_explain(outcome_ref: str | None = None) -> str:
     mem = _get_memory()
     explanation = mem.explain(outcome_ref)
     return json.dumps(explanation, default=str)
+
+
+@mcp.tool
+def amfs_list_traces(
+    entity_path: str | None = None,
+    agent_id: str | None = None,
+    outcome_type: str | None = None,
+    limit: int = 20,
+) -> str:
+    """Browse persisted decision traces from past sessions.
+
+    Each trace captures the full causal chain: which memories were read,
+    what external context was gathered, what decisions were made, and the
+    final outcome. Use this to learn from past decisions before making
+    similar ones.
+
+    Args:
+        entity_path: Filter to traces involving this entity
+        agent_id: Filter to traces from a specific agent
+        outcome_type: Filter by outcome type (success, failure, etc.)
+        limit: Maximum traces to return (default 20)
+
+    Example: amfs_list_traces(entity_path="checkout-service", limit=5)
+    """
+    mem = _get_memory()
+    traces = mem._adapter.list_traces(
+        entity_path=entity_path,
+        agent_id=agent_id,
+        outcome_type=outcome_type,
+        limit=limit,
+    )
+    return json.dumps(
+        [
+            {
+                "id": t.id,
+                "agent_id": t.agent_id,
+                "outcome_ref": t.outcome_ref,
+                "outcome_type": t.outcome_type,
+                "decision_summary": t.decision_summary,
+                "causal_entries": len(t.causal_entries),
+                "external_contexts": len(t.external_contexts),
+                "session_duration_ms": t.session_duration_ms,
+                "created_at": t.created_at,
+            }
+            for t in traces
+        ],
+        default=str,
+    )
+
+
+@mcp.tool
+def amfs_get_trace(trace_id: str) -> str:
+    """Retrieve a full decision trace by ID.
+
+    Returns the complete causal chain: every memory read, external context,
+    query, error, and the outcome. Use this to understand exactly what
+    information drove a past decision.
+
+    Args:
+        trace_id: The trace ID (from amfs_list_traces or amfs_commit_outcome)
+
+    Example: amfs_get_trace("abc123-def456")
+    """
+    mem = _get_memory()
+    trace = mem._adapter.get_trace(trace_id)
+    if trace is None:
+        return json.dumps({"status": "not_found", "trace_id": trace_id})
+    return json.dumps(trace.model_dump(mode="json"), default=str)
 
 
 @mcp.tool

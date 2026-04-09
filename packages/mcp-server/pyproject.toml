@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
     "amfs",
+    "amfs-adapter-http>=0.1.1",
     "fastmcp>=2.0",
 ]
 

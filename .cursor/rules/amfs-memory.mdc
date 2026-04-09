@@ -8,6 +8,14 @@ alwaysApply: true
 
 You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives you a **persistent brain** — memory that survives across sessions, agents, and machines. Use it to build institutional knowledge over time.
 
+## First thing: SET YOUR IDENTITY
+
+- **At the start of every conversation**, set your identity so memories and traces are attributed to you specifically — not a generic "amfs-server".
+  ```
+  amfs_set_identity("<descriptive-name>", "<one-line description>")
+  ```
+  Use a short kebab-case name based on what you're working on (e.g. `"dashboard-fixer"`, `"auth-debugger"`, `"mcp-integration"`).
+
 ## When to GET BRIEFED (start every session with context)
 
 - **Before starting any work**: Get a compiled briefing from the Memory Cortex. This gives you pre-compiled knowledge about the entities you're about to work on — what other agents know, recent risks, external events, and confidence-ranked facts. This is your most important first step.
@@ -65,11 +73,37 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
   amfs_record_context("<label>", "<summary of what was found>", source="<tool name>")
   ```
 
-## When to COMMIT OUTCOMES
+## When to RECORD DECISIONS (build the causal chain)
 
-- After a **successful deployment**: `amfs_commit_outcome("deploy-<version>", "success")`
+- **When a decision is made** (by you or the user): Record it so the decision trace is complete.
+  ```
+  amfs_record_context("user-decision", "User chose thread-local approach over request-scoped", source="chat")
+  amfs_record_context("architecture-decision", "Using uvx for distribution — no source code needed", source="analysis")
+  ```
+- **When consulting external tools or APIs**: Record the context so decision traces are complete.
+  ```
+  amfs_record_context("pagerduty-incidents", "3 SEV-1 in last 24h", source="PagerDuty API")
+  ```
+- Record contexts **as they happen** during the session, not all at the end. This preserves the causal order.
+
+## When to COMMIT OUTCOMES (capture the full trace)
+
+- **After completing a significant task**: This snapshots all reads, writes, decisions, and contexts from the session into a persisted `DecisionTrace`. Always do this at the end of meaningful work.
+  ```
+  amfs_commit_outcome("tenant-rls-fix", "success")
+  amfs_commit_outcome("mcp-pypi-publish", "success")
+  ```
 - After a **bug or minor setback**: `amfs_commit_outcome("<ticket>", "minor_failure")`
 - After a **severe failure**: `amfs_commit_outcome("<incident-id>", "critical_failure")` or `"failure"`
+- **Don't skip this step** — without `commit_outcome`, the decision trace is lost when the session ends.
+
+## When to BROWSE TRACES (learn from past decisions)
+
+- **Before making similar decisions**: Check if a past trace already covers this area.
+  ```
+  amfs_list_traces(entity_path="<repo>/<module>", limit=5)
+  amfs_get_trace("<trace-id>")
+  ```
 
 ## Entity naming convention
 

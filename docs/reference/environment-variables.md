@@ -23,6 +23,31 @@ AMFS supports the following environment variables. They override values set in `
 
 ---
 
+## HTTP Adapter (SaaS / Multi-Tenant)
+
+When connecting to AMFS as a hosted service (SaaS), set these variables to route all memory operations through the authenticated HTTP API instead of a direct database connection.
+
+| Variable | Description | Default |
+|:---------|:------------|:--------|
+| `AMFS_HTTP_URL` | Base URL of the AMFS HTTP API (e.g. `https://amfs-login.sense-lab.ai`). When set, all memory operations are routed through the HTTP API. **Highest priority** — takes precedence over `AMFS_POSTGRES_DSN` and `AMFS_DATA_DIR`. | — |
+| `AMFS_API_KEY` | API key for authenticating with the AMFS HTTP API. Created via the Dashboard (Agents page or Settings > API Keys). Sent as `X-AMFS-API-Key` header. | — |
+
+{: .warning }
+When `AMFS_HTTP_URL` is set, `AMFS_POSTGRES_DSN` and `AMFS_DATA_DIR` are ignored. A log warning is emitted if both `AMFS_HTTP_URL` and `AMFS_POSTGRES_DSN` are set.
+
+{: .important }
+Never share `AMFS_POSTGRES_DSN` with external agents in multi-tenant deployments. Always use `AMFS_HTTP_URL` + `AMFS_API_KEY` for external access — this ensures tenant isolation, scope enforcement, and audit logging.
+
+### Adapter Precedence
+
+1. **`AMFS_HTTP_URL`** — HTTP adapter via authenticated API (SaaS / multi-tenant)
+2. **`AMFS_POSTGRES_DSN`** — direct Postgres adapter (self-hosted)
+3. **`AMFS_DATA_DIR`** — filesystem adapter at custom path
+4. **`amfs.yaml`** — configuration file discovery
+5. **Default** — filesystem adapter at `.amfs/`
+
+---
+
 ## S3 Adapter
 
 | Variable | Description | Default |
@@ -144,6 +169,7 @@ These are set by IDEs and read by AMFS for agent identity detection. You don't s
 
 ## Precedence
 
-1. **Environment variables** take highest priority
-2. **YAML config file** (`amfs.yaml`) is next
-3. **SDK defaults** are used as fallback (filesystem adapter, `.amfs/` root, `default` namespace)
+1. **`AMFS_HTTP_URL`** — routes all operations through the authenticated HTTP API (required for SaaS)
+2. **Other environment variables** (`AMFS_POSTGRES_DSN`, `AMFS_DATA_DIR`, etc.)
+3. **YAML config file** (`amfs.yaml`)
+4. **SDK defaults** (filesystem adapter, `.amfs/` root, `default` namespace)

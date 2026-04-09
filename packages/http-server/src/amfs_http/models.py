@@ -16,6 +16,7 @@ class WriteRequest(BaseModel):
     memory_type: str = "fact"
     shared: bool = True
     branch: str = "main"
+    agent_id: str | None = None
 
 
 class OutcomeRequest(BaseModel):
@@ -23,6 +24,7 @@ class OutcomeRequest(BaseModel):
     outcome_type: str
     causal_entry_keys: list[str] | None = None
     causal_confidence: float = 1.0
+    agent_id: str | None = None
 
 
 class SearchRequest(BaseModel):
@@ -42,6 +44,7 @@ class ContextRequest(BaseModel):
     label: str
     summary: str
     source: str | None = None
+    agent_id: str | None = None
 
 
 class CreateAPIKeyRequest(BaseModel):
@@ -90,6 +93,17 @@ class RunPatternDetectionRequest(BaseModel):
     hot_entity_stddev: float = 2.0
     drift_stddev: float = 2.0
     entity_path: str | None = None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Agent Snapshots
+# ──────────────────────────────────────────────────────────────────────
+
+
+class CreateSnapshotRequest(BaseModel):
+    name: str
+    description: str = ""
+    snapshot_data: dict[str, Any] = Field(default_factory=dict)
 
 
 # ──────────────────────────────────────────────────────────────────────

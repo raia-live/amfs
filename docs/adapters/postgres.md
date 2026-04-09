@@ -63,7 +63,7 @@ adapter = PostgresAdapter(
 
 ## Schema
 
-The adapter auto-creates two tables and associated triggers:
+The adapter auto-creates three tables and associated triggers:
 
 ### `amfs_memory_entries`
 
@@ -78,6 +78,11 @@ The adapter auto-creates two tables and associated triggers:
 | `provenance` | `JSONB` | Agent, session, timestamp, pattern_refs |
 | `confidence` | `FLOAT` | Trust score |
 | `outcome_count` | `INT` | Outcomes applied |
+| `recall_count` | `INT` | Times read (in-place update, default: `0`) |
+| `priority_score` | `NUMERIC(10,6)` | Composite priority for tier assignment |
+| `tier` | `SMALLINT` | Memory tier: `1`=Hot, `2`=Warm, `3`=Archive (default: `3`) |
+| `importance_score` | `NUMERIC(6,4)` | Multi-dimensional importance (0.0–1.0) |
+| `importance_dimensions` | `JSONB` | Per-dimension breakdown |
 | `memory_type` | `TEXT` | Memory type: `fact`, `belief`, or `experience` (default: `fact`) |
 | `artifact_refs` | `JSONB` | Linked external blobs (default: `[]`) |
 | `search_tsv` | `TSVECTOR` | Auto-generated full-text search vector (GIN-indexed) |
@@ -92,6 +97,37 @@ The adapter auto-creates two tables and associated triggers:
 | `outcome_ref` | `TEXT` | External reference (ticket ID, deploy ID) |
 | `outcome_type` | `TEXT` | One of: `critical_failure`, `failure`, `minor_failure`, `success` |
 | `causal_entry_keys` | `TEXT[]` | Array of `entity_path/key` strings |
+
+### `amfs_knowledge_graph`
+
+| Column | Type | Description |
+|:-------|:-----|:------------|
+| `id` | `UUID` | Primary key |
+| `namespace` | `TEXT` | Namespace isolation |
+| `source_entity` | `TEXT` | Source node (entity path, agent ID, or outcome ref) |
+| `source_type` | `TEXT` | `"entry"`, `"agent"`, or `"outcome"` |
+| `relation` | `TEXT` | Edge label (`"references"`, `"informed"`, `"learned_from"`, `"co_occurs_with"`, etc.) |
+| `target_entity` | `TEXT` | Target node |
+| `target_type` | `TEXT` | Target node type |
+| `confidence` | `FLOAT` | Edge confidence (0.0–1.0) |
+| `evidence_count` | `INT` | Times this edge has been reinforced |
+| `first_seen` | `TIMESTAMPTZ` | When this edge was first created |
+| `last_seen` | `TIMESTAMPTZ` | Most recent reinforcement |
+| `provenance` | `JSONB` | Contextual metadata (session, trigger) |
+| `branch` | `TEXT` | Branch scope (default: `"main"`) |
+
+A unique constraint on `(namespace, branch, source_entity, relation, target_entity)` ensures idempotent upserts — repeated writes increment `evidence_count` and update `last_seen` rather than creating duplicates.
+
+The knowledge graph is populated automatically by the SDK's materializers: `write()` with `pattern_refs`, `commit_outcome()`, and `read_from()` all create edges without extra code. See [API Reference](/amfs/reference/api/#graphedge) for the full model.
+
+#### Graph Methods
+
+| Method | Description |
+|:-------|:------------|
+| `upsert_graph_edge(edge)` | Insert or merge a graph edge (ON CONFLICT increments evidence) |
+| `graph_neighbors(query)` | Recursive CTE traversal — returns edges within `depth` hops |
+| `list_graph_edges(namespace, branch)` | List all edges in a namespace/branch |
+| `graph_stats(namespace, branch)` | Edge count, unique entities, top relations |
 
 ---
 
@@ -136,7 +172,7 @@ export AMFS_POSTGRES_DSN="postgresql://postgres:amfs@localhost:5432/amfs"
 
 ### Full-Text Search
 
-The adapter automatically maintains a `search_tsv` column (GIN-indexed) that combines the `key`, `entity_path`, and `value` fields. The `search()` method uses SQL `WHERE` clauses with `@@` operators for efficient filtering — no in-memory scanning.
+The adapter automatically maintains a `search_tsv` column (GIN-indexed) that combines the `key`, `entity_path`, and `value` fields. When `SearchQuery.query` is set, the adapter uses `plainto_tsquery` with the `@@` operator for efficient in-database filtering. When `sort_by` is `"confidence"` and a `query` is present, results are ordered by `ts_rank(search_tsv, ...)` first, then by confidence — so textually relevant results float to the top.
 
 ### Vector Similarity Search (pgvector)
 
@@ -150,6 +186,15 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 {: .tip }
 The `pgvector/pgvector:pg16` Docker image ships with pgvector pre-installed. The `docker-compose.yml` in the repo uses this image.
+
+### Tier Indexes
+
+Two partial indexes accelerate progressive retrieval queries:
+
+- `idx_entries_hot` — `WHERE tier = 1 AND superseded_at IS NULL`
+- `idx_entries_warm` — `WHERE tier <= 2 AND superseded_at IS NULL`
+
+When `depth=1`, the query uses the hot index; `depth=2` uses the warm index.
 
 ### Connection Pooling
 

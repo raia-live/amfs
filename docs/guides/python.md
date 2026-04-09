@@ -57,6 +57,21 @@ adapter = FilesystemAdapter(root=Path(".amfs"), namespace="staging")
 mem = AgentMemory(agent_id="my-agent", adapter=adapter)
 ```
 
+### With an Importance Evaluator
+
+```python
+from amfs_core.importance import ImportanceEvaluator
+
+class MyEvaluator(ImportanceEvaluator):
+    def evaluate(self, entity_path, key, value):
+        score = 0.8 if "critical" in str(value).lower() else 0.3
+        return score, {"criticality": score}
+
+mem = AgentMemory(agent_id="my-agent", importance_evaluator=MyEvaluator())
+```
+
+Every `write()` call will automatically score the entry and set `importance_score` and `importance_dimensions`. If the evaluator raises, the write proceeds without scoring.
+
 ---
 
 ## Core Operations
@@ -118,11 +133,32 @@ entries = mem.list("checkout-service", include_superseded=True)
 ### Search
 
 ```python
-results = mem.search(
-    entity_path="checkout-service",   # optional filter
-    min_confidence=0.5,               # optional filter
-)
+results = mem.search(entity_path="checkout-service", min_confidence=0.5)
 ```
+
+Progressive retrieval with `depth` — search only high-priority tiers for fast, high-signal results:
+
+```python
+hot_only = mem.search(query="retry strategy", depth=1)   # Hot tier
+hot_warm = mem.search(query="retry strategy", depth=2)   # Hot + Warm
+all_tiers = mem.search(query="retry strategy")            # All (default)
+```
+
+Composite recall scoring (blends semantic similarity, recency, and confidence):
+
+```python
+from amfs_core.models import RecallConfig
+
+scored = mem.search(
+    query="how do we handle retries?",
+    recall_config=RecallConfig(semantic_weight=0.5, recency_weight=0.3, confidence_weight=0.2),
+)
+for item in scored:
+    print(f"{item.entry.key} — score={item.score:.3f}")
+```
+
+{: .note }
+Semantic scoring requires an `embedder`. Without one, the semantic component is 0.0.
 
 ### Stats
 
@@ -219,6 +255,54 @@ Filter by outcome reference:
 
 ```python
 chain = mem.explain(outcome_ref="INC-1042")
+```
+
+---
+
+## Decision Traces
+
+When you call `commit_outcome()`, AMFS snapshots the full decision trace — every entry that was read, every context that was recorded, and every query that was made. The resulting trace is persisted and can be retrieved later.
+
+### Getting the trace from an outcome
+
+```python
+mem.record_context("ci-check", "All tests green", source="GitHub Actions")
+entry = mem.read("checkout-service", "retry-pattern")
+
+updated = mem.commit_outcome("DEP-500", OutcomeType.SUCCESS)
+
+# The trace is attached to the outcome
+trace = mem._last_trace
+print(f"Trace ID: {trace.id}")
+print(f"Causal entries: {len(trace.causal_entries)}")
+print(f"External contexts: {len(trace.external_contexts)}")
+```
+
+### Browsing past traces
+
+```python
+# List recent traces
+traces = mem._adapter.list_traces(limit=10)
+for t in traces:
+    print(f"{t['id']} — {t['agent_id']} — {t['outcome_ref']} ({t['outcome_type']})")
+
+# Get a specific trace
+trace = mem._adapter.get_trace("ddbcefff-901a-4fa6-...")
+print(trace.decision_summary)
+print(f"Session duration: {trace.session_duration_ms}ms")
+for entry in trace.causal_entries:
+    print(f"  Read: {entry.entity_path}/{entry.key} (v{entry.version})")
+```
+
+### Filtering traces
+
+```python
+traces = mem._adapter.list_traces(
+    entity_path="checkout-service",
+    agent_id="deploy-agent",
+    outcome_type="success",
+    limit=5,
+)
 ```
 
 ---
@@ -370,6 +454,33 @@ importer.restore("backup.json")
 
 ---
 
+## Knowledge Graph
+
+The knowledge graph builds automatically as agents write, commit outcomes, and learn from each other. You can also traverse it directly:
+
+```python
+edges = mem.graph_neighbors(
+    "checkout-service/retry-pattern",
+    direction="both",
+    depth=2,
+    min_confidence=0.5,
+)
+for edge in edges:
+    print(f"{edge.source_entity} --{edge.relation}--> {edge.target_entity}")
+```
+
+| Parameter | Description |
+|:----------|:------------|
+| `entity` | Starting entity to explore |
+| `relation` | Filter by relation type (e.g. `"references"`, `"informed"`) |
+| `direction` | `"outgoing"`, `"incoming"`, or `"both"` |
+| `depth` | Traversal depth (1 = direct neighbors, >1 for multi-hop) |
+
+{: .note }
+Multi-hop traversal (`depth > 1`) requires the Postgres adapter. The Filesystem and S3 adapters return an empty list for graph methods.
+
+---
+
 ## Semantic Search
 
 If you configure an embedder, you can search by meaning:
@@ -392,6 +503,51 @@ with AgentMemory(agent_id="my-agent") as mem:
     entry = mem.read("svc", "key")
 # Watchers, TTL sweepers, and background threads are cleaned up
 ```
+
+---
+
+## Connecting to AMFS SaaS
+
+When using AMFS as a hosted service (SaaS), connect through the HTTP API with your API key instead of a direct database connection.
+
+### Environment Variables
+
+```bash
+export AMFS_HTTP_URL="https://amfs-login.sense-lab.ai"
+export AMFS_API_KEY="amfs_sk_your_key_here"
+```
+
+With these set, the SDK auto-detects the HTTP adapter — no code changes needed:
+
+```python
+from amfs import AgentMemory
+
+mem = AgentMemory(agent_id="my-agent")
+mem.write("checkout-service", "retry-pattern", {"max_retries": 3})
+```
+
+### Explicit HttpAdapter
+
+You can also configure the adapter directly:
+
+```python
+from amfs import AgentMemory
+from amfs_adapter_http import HttpAdapter
+
+adapter = HttpAdapter(
+    base_url="https://amfs-login.sense-lab.ai",
+    api_key="amfs_sk_your_key_here",
+)
+mem = AgentMemory(agent_id="my-agent", adapter=adapter)
+```
+
+{: .note }
+Install the HTTP adapter with `pip install amfs-adapter-http`.
+
+{: .warning }
+Never use `AMFS_POSTGRES_DSN` for external agents in multi-tenant mode. Always use `AMFS_HTTP_URL` + `AMFS_API_KEY` to ensure tenant isolation, scope enforcement, and audit logging.
+
+See the [SaaS Connection Guide](/amfs/guides/saas/) and [Environment Variables](/amfs/reference/environment-variables/) for details.
 
 ---
 

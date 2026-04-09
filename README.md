@@ -15,6 +15,8 @@ Most agent memory is a vector store with a `save()` and `query()`. AMFS is diffe
 - **Versioned** — Every write creates an immutable CoW snapshot. See how knowledge evolved.
 - **Outcome-aware** — Confidence scores adjust automatically when deploys succeed or incidents happen.
 - **Causal** — Every read is tracked. `explain()` shows exactly which memories drove a decision.
+- **Knowledge graph** — Relationships between entities, agents, and outcomes are auto-materialized from normal operations and queryable via `graph_neighbors()`.
+- **Hybrid search** — Combine full-text (Postgres tsvector), semantic (cosine similarity), recency, and confidence into a single ranked result set.
 - **Multi-agent** — Agents share a single memory layer. One agent's finding is another's context.
 - **Pluggable** — Filesystem for dev, Postgres for production, S3 for cloud. Swap without code changes.
 
@@ -90,7 +92,7 @@ docker run -p 8080:8080 -v amfs-data:/data ghcr.io/raia-live/amfs
 | **Connectors** | Ingest events from PagerDuty, GitHub, Slack, Jira — or [build your own](https://raia-live.github.io/amfs/guides/connectors/). |
 | **Composite Scoring** | Rank results by weighted blend of relevance, recency, and confidence. |
 | **Multi-Scope** | Query across scopes with `search(entity_paths=[...])` and visualize with `tree()`. |
-| **MCP Server** | First-class support for Cursor, Claude Code, and any MCP client. [Setup →](https://raia-live.github.io/amfs/guides/mcp/) · **[Cursor plugin repo →](https://github.com/raia-live/cursor-plugin)** |
+| **MCP Server** | First-class support for Cursor, Claude Code, and any MCP client. [Setup →](https://raia-live.github.io/amfs/guides/mcp/) · **Cursor:** [cursor-plugin](https://github.com/raia-live/cursor-plugin) (Sense Lab dashboard MCP) |
 | **Integrations** | [CrewAI](https://raia-live.github.io/amfs/guides/crewai/), LangGraph, LangChain, AutoGen. |
 | **Python & TypeScript** | Same API in both languages. |
 

@@ -47,6 +47,8 @@ from amfs_core.models import (
     PullRequest,
     PullRequestStatus,
     Provenance,
+    GraphEdge,
+    GraphNeighborQuery,
     QueryEvent,
     SearchQuery,
     SemanticQuery,
@@ -83,6 +85,42 @@ class _SingleConnectionPool:
         self._conn.close()
 
 
+class _TenantRLSConnection:
+    """Applies ``amfs.current_account_id`` when a request-scoped tenant is set."""
+
+    def __init__(self, inner_ctx: Any) -> None:
+        self._inner_ctx = inner_ctx
+
+    def __enter__(self) -> Any:
+        from amfs_postgres.tenant_context import get_request_tenant_account_id
+
+        conn = self._inner_ctx.__enter__()
+        tid = get_request_tenant_account_id()
+        if tid:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT set_config('amfs.current_account_id', %s, false)",
+                    (tid,),
+                )
+        return conn
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
+        return self._inner_ctx.__exit__(exc_type, exc, tb)
+
+
+class _TenantRLSPoolWrapper:
+    """Wraps a psycopg pool so each checkout applies RLS session vars."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def connection(self) -> _TenantRLSConnection:
+        return _TenantRLSConnection(self._inner.connection())
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class PostgresAdapter(AdapterABC):
     """Store AMFS entries in PostgreSQL.
 
@@ -112,6 +150,7 @@ class PostgresAdapter(AdapterABC):
         self._dsn = dsn
         self._namespace = namespace
         self._has_embedding_col = False
+        self._has_search_tsv = False
         pool_kwargs: dict[str, Any] = {
             "kwargs": {"row_factory": dict_row, "autocommit": True},
         }
@@ -127,6 +166,7 @@ class PostgresAdapter(AdapterABC):
                 "psycopg_pool not installed — falling back to single connection"
             )
             self._pool = _SingleConnectionPool(dsn, **pool_kwargs)
+        self._pool = _TenantRLSPoolWrapper(self._pool)
         if auto_schema:
             self._apply_schema()
         self._detect_optional_columns()
@@ -191,6 +231,37 @@ class PostgresAdapter(AdapterABC):
             END;
             $$ LANGUAGE plpgsql
         """)
+        # HMO feature columns (frequency decay, tiered memory, importance)
+        cur.execute("""
+            ALTER TABLE amfs_memory_entries
+            ADD COLUMN IF NOT EXISTS recall_count INTEGER DEFAULT 0
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_memory_entries
+            ADD COLUMN IF NOT EXISTS priority_score NUMERIC(10,6)
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_memory_entries
+            ADD COLUMN IF NOT EXISTS tier SMALLINT DEFAULT 3
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_memory_entries
+            ADD COLUMN IF NOT EXISTS importance_score NUMERIC(6,4)
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_memory_entries
+            ADD COLUMN IF NOT EXISTS importance_dimensions JSONB
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_hot
+            ON amfs_memory_entries (namespace, entity_path)
+            WHERE tier = 1 AND superseded_at IS NULL
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_warm
+            ON amfs_memory_entries (namespace, entity_path)
+            WHERE tier <= 2 AND superseded_at IS NULL
+        """)
         cur.execute("""
             CREATE OR REPLACE FUNCTION amfs_propagate_outcome() RETURNS TRIGGER AS $$
             DECLARE
@@ -236,13 +307,14 @@ class PostgresAdapter(AdapterABC):
                         INSERT INTO amfs_memory_entries (
                             namespace, entity_path, key, version, value,
                             agent_id, session_id, written_at, pattern_refs,
-                            confidence, outcome_count, ttl_at, memory_type,
-                            shared, artifact_refs
+                            confidence, outcome_count, recall_count,
+                            ttl_at, memory_type, shared, artifact_refs
                         ) VALUES (
                             cur.namespace, cur.entity_path, cur.key, cur.version + 1, cur.value,
                             cur.agent_id, cur.session_id, cur.written_at, cur.pattern_refs,
                             cur.confidence * multiplier * NEW.causal_confidence,
-                            cur.outcome_count + 1, cur.ttl_at, cur.memory_type,
+                            cur.outcome_count + 1, cur.recall_count,
+                            cur.ttl_at, cur.memory_type,
                             cur.shared, cur.artifact_refs
                         );
                     END IF;
@@ -264,7 +336,7 @@ class PostgresAdapter(AdapterABC):
     def _detect_optional_columns(self) -> None:
         """Check whether optional columns (embedding, search_tsv) exist.
 
-        These are added by migration 002_search_indexes.sql and require
+        These are added by migration 002_search_indexes.sql and may require
         the pgvector extension.  The adapter works without them.
         """
         with self._pool.connection() as conn:
@@ -273,10 +345,12 @@ class PostgresAdapter(AdapterABC):
                     """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'amfs_memory_entries'
-                      AND column_name = 'embedding'
+                      AND column_name IN ('embedding', 'search_tsv')
                     """,
                 )
-                self._has_embedding_col = cur.fetchone() is not None
+                found = {row["column_name"] for row in cur.fetchall()}
+                self._has_embedding_col = "embedding" in found
+                self._has_search_tsv = "search_tsv" in found
 
     # ------------------------------------------------------------------
     # read
@@ -486,9 +560,22 @@ class PostgresAdapter(AdapterABC):
     # ------------------------------------------------------------------
 
     def search(self, query: SearchQuery, *, branch: str = "main") -> list[MemoryEntry]:
-        """Search using PostgreSQL full-text search when a text query is available."""
+        """Search using PostgreSQL full-text search when a text query is available.
+
+        When ``SearchQuery.query`` is set and the ``search_tsv`` column exists
+        the adapter adds a ``search_tsv @@ plainto_tsquery(...)`` filter and,
+        when ``sort_by`` is the default ``"confidence"``, orders by ts_rank so
+        keyword relevance is factored in.  Explicit ``sort_by`` values
+        (``"recency"``, ``"version"``) are respected as-is.
+        """
+        use_fts = bool(query.query and getattr(self, "_has_search_tsv", False))
+
         conditions = ["namespace = %s", "branch = %s", "superseded_at IS NULL"]
         params: list[Any] = [self._namespace, branch]
+
+        if query.depth < 3:
+            conditions.append("tier <= %s")
+            params.append(query.depth)
 
         if query.entity_path is not None:
             conditions.append("entity_path = %s")
@@ -509,12 +596,21 @@ class PostgresAdapter(AdapterABC):
             conditions.append("%s = ANY(pattern_refs)")
             params.append(query.pattern_ref)
 
+        if use_fts:
+            conditions.append("search_tsv @@ plainto_tsquery('english', %s)")
+            params.append(query.query)
+
         order_map = {
             "confidence": "confidence DESC",
             "recency": "written_at DESC",
             "version": "version DESC",
         }
-        order = order_map.get(query.sort_by, "confidence DESC")
+
+        if use_fts and query.sort_by == "confidence":
+            order = "ts_rank(search_tsv, plainto_tsquery('english', %s)) DESC, confidence DESC"
+            params.append(query.query)
+        else:
+            order = order_map.get(query.sort_by, "confidence DESC")
 
         where = " AND ".join(conditions)
         sql = f"""
@@ -582,6 +678,314 @@ class PostgresAdapter(AdapterABC):
             if sim >= query.min_similarity:
                 results.append((self._row_to_entry(row), sim))
         return results
+
+    # ------------------------------------------------------------------
+    # Recall tracking + tiered memory (mutable in-place updates)
+    # ------------------------------------------------------------------
+
+    def increment_recall_count(
+        self,
+        entity_path: str,
+        key: str,
+        *,
+        branch: str = "main",
+    ) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                """UPDATE amfs_memory_entries
+                   SET recall_count = recall_count + 1
+                   WHERE namespace = %s AND branch = %s
+                     AND entity_path = %s AND key = %s
+                     AND superseded_at IS NULL""",
+                (self._namespace, branch, entity_path, key),
+            )
+
+    def update_tiers(
+        self,
+        tier_assignments: dict[str, int],
+        scores: dict[str, float],
+        *,
+        branch: str = "main",
+    ) -> int:
+        if not tier_assignments:
+            return 0
+        updated = 0
+        with self._pool.connection() as conn:
+            for entry_key, tier_val in tier_assignments.items():
+                if "/" not in entry_key:
+                    continue
+                k = entry_key.rsplit("/", 1)[-1]
+                ep = entry_key[: len(entry_key) - len(k) - 1]
+                score = scores.get(entry_key)
+                result = conn.execute(
+                    """UPDATE amfs_memory_entries
+                       SET tier = %s, priority_score = %s
+                       WHERE namespace = %s AND branch = %s
+                         AND entity_path = %s AND key = %s
+                         AND superseded_at IS NULL""",
+                    (tier_val, score, self._namespace, branch, ep, k),
+                )
+                if result.rowcount:
+                    updated += result.rowcount
+        return updated
+
+    # ------------------------------------------------------------------
+    # Knowledge graph (Postgres implementation)
+    # ------------------------------------------------------------------
+
+    def upsert_graph_edge(
+        self,
+        edge: GraphEdge,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> GraphEdge:
+        provenance_json = json.dumps(edge.provenance) if edge.provenance else None
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_knowledge_graph
+                        (namespace, branch, source_entity, source_type, relation,
+                         target_entity, target_type, confidence, evidence_count,
+                         first_seen, last_seen, provenance)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (namespace, branch, source_entity, relation, target_entity)
+                    DO UPDATE SET
+                        evidence_count = amfs_knowledge_graph.evidence_count + 1,
+                        last_seen = NOW(),
+                        confidence = GREATEST(amfs_knowledge_graph.confidence, EXCLUDED.confidence),
+                        provenance = EXCLUDED.provenance,
+                        target_type = EXCLUDED.target_type,
+                        source_type = EXCLUDED.source_type
+                    RETURNING *
+                    """,
+                    (
+                        namespace, branch,
+                        edge.source_entity, edge.source_type, edge.relation,
+                        edge.target_entity, edge.target_type,
+                        edge.confidence, edge.evidence_count,
+                        edge.first_seen, edge.last_seen,
+                        provenance_json,
+                    ),
+                )
+                row = cur.fetchone()
+
+        if row is None:
+            return edge
+        return GraphEdge(
+            source_entity=row["source_entity"],
+            source_type=row["source_type"],
+            relation=row["relation"],
+            target_entity=row["target_entity"],
+            target_type=row["target_type"],
+            confidence=row["confidence"],
+            evidence_count=row["evidence_count"],
+            first_seen=row["first_seen"],
+            last_seen=row["last_seen"],
+            provenance=row["provenance"],
+        )
+
+    def graph_neighbors(
+        self,
+        query: GraphNeighborQuery,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> list[GraphEdge]:
+        if query.depth <= 1:
+            return self._graph_neighbors_single(query, namespace=namespace, branch=branch)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                direction_clause = self._graph_direction_seed(query.direction)
+                entity_params = self._graph_entity_params(query.entity, query.direction)
+                cur.execute(
+                    f"""
+                    WITH RECURSIVE graph_walk AS (
+                        SELECT *, 1 AS depth FROM amfs_knowledge_graph
+                        WHERE namespace = %s AND branch = %s
+                          AND confidence >= %s
+                          AND ({direction_clause})
+                        UNION ALL
+                        SELECT g.*, gw.depth + 1
+                        FROM amfs_knowledge_graph g
+                        JOIN graph_walk gw ON g.source_entity = gw.target_entity
+                        WHERE gw.depth < %s
+                          AND g.namespace = %s AND g.branch = %s
+                          AND g.confidence >= %s
+                    )
+                    SELECT * FROM graph_walk
+                    ORDER BY depth, confidence DESC
+                    LIMIT %s
+                    """,
+                    (
+                        namespace, branch, query.min_confidence,
+                        *entity_params,
+                        query.depth, namespace, branch, query.min_confidence,
+                        query.limit,
+                    ),
+                )
+                rows = cur.fetchall()
+
+        return [self._row_to_graph_edge(r) for r in rows]
+
+    def _graph_neighbors_single(
+        self,
+        query: GraphNeighborQuery,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> list[GraphEdge]:
+        conditions = ["namespace = %s", "branch = %s", "confidence >= %s"]
+        params: list[Any] = [namespace, branch, query.min_confidence]
+
+        direction_clause = self._graph_direction_seed(query.direction)
+        conditions.append(f"({direction_clause})")
+        params.extend(self._graph_entity_params(query.entity, query.direction))
+
+        if query.relation:
+            conditions.append("relation = %s")
+            params.append(query.relation)
+
+        where = " AND ".join(conditions)
+        sql = f"""
+            SELECT * FROM amfs_knowledge_graph
+            WHERE {where}
+            ORDER BY confidence DESC
+            LIMIT %s
+        """
+        params.append(query.limit)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        return [self._row_to_graph_edge(r) for r in rows]
+
+    @staticmethod
+    def _graph_direction_seed(direction: str) -> str:
+        src = "(source_entity = %s OR source_entity LIKE %s)"
+        tgt = "(target_entity = %s OR target_entity LIKE %s)"
+        if direction == "outgoing":
+            return src
+        elif direction == "incoming":
+            return tgt
+        return f"({src} OR {tgt})"
+
+    @staticmethod
+    def _graph_entity_params(entity: str, direction: str) -> list[str]:
+        """Return SQL params for the direction seed clause with prefix matching."""
+        prefix = entity + "/%"
+        if direction == "outgoing":
+            return [entity, prefix]
+        elif direction == "incoming":
+            return [entity, prefix]
+        elif direction == "both":
+            return [entity, prefix, entity, prefix]
+        return [entity, prefix, entity, prefix]
+
+    def list_graph_edges(
+        self,
+        *,
+        entity: str | None = None,
+        relation: str | None = None,
+        min_confidence: float = 0.0,
+        namespace: str = "default",
+        branch: str = "main",
+        limit: int = 500,
+    ) -> list[GraphEdge]:
+        conditions = ["namespace = %s", "branch = %s"]
+        params: list[Any] = [namespace, branch]
+
+        if entity is not None:
+            prefix = entity + "/%"
+            conditions.append(
+                "((source_entity = %s OR source_entity LIKE %s)"
+                " OR (target_entity = %s OR target_entity LIKE %s))"
+            )
+            params.extend([entity, prefix, entity, prefix])
+        if relation is not None:
+            conditions.append("relation = %s")
+            params.append(relation)
+        if min_confidence > 0:
+            conditions.append("confidence >= %s")
+            params.append(min_confidence)
+
+        where = " AND ".join(conditions)
+        sql = f"""
+            SELECT * FROM amfs_knowledge_graph
+            WHERE {where}
+            ORDER BY evidence_count DESC, confidence DESC
+            LIMIT %s
+        """
+        params.append(limit)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        return [self._row_to_graph_edge(r) for r in rows]
+
+    def graph_stats(
+        self,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> dict:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) as total_edges,
+                        COUNT(DISTINCT source_entity) + COUNT(DISTINCT target_entity) as approx_nodes,
+                        AVG(confidence) as avg_confidence,
+                        AVG(evidence_count) as avg_evidence
+                    FROM amfs_knowledge_graph
+                    WHERE namespace = %s AND branch = %s
+                    """,
+                    (namespace, branch),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {}
+
+                cur.execute(
+                    """
+                    SELECT relation, COUNT(*) as cnt
+                    FROM amfs_knowledge_graph
+                    WHERE namespace = %s AND branch = %s
+                    GROUP BY relation ORDER BY cnt DESC
+                    """,
+                    (namespace, branch),
+                )
+                relation_counts = {r["relation"]: r["cnt"] for r in cur.fetchall()}
+
+        return {
+            "total_edges": row["total_edges"],
+            "approx_nodes": row["approx_nodes"],
+            "avg_confidence": float(row["avg_confidence"] or 0),
+            "avg_evidence": float(row["avg_evidence"] or 0),
+            "relations": relation_counts,
+        }
+
+    @staticmethod
+    def _row_to_graph_edge(row: dict) -> GraphEdge:
+        return GraphEdge(
+            source_entity=row["source_entity"],
+            source_type=row["source_type"],
+            relation=row["relation"],
+            target_entity=row["target_entity"],
+            target_type=row["target_type"],
+            confidence=row["confidence"],
+            evidence_count=row["evidence_count"],
+            first_seen=row["first_seen"],
+            last_seen=row["last_seen"],
+            provenance=row.get("provenance"),
+        )
 
     # ------------------------------------------------------------------
     # stats (SQL aggregates)
@@ -971,6 +1375,11 @@ class PostgresAdapter(AdapterABC):
             ),
             confidence=float(row["confidence"]),
             outcome_count=row["outcome_count"],
+            recall_count=row.get("recall_count", 0),
+            priority_score=float(row["priority_score"]) if row.get("priority_score") is not None else None,
+            tier=row.get("tier", 3),
+            importance_score=float(row["importance_score"]) if row.get("importance_score") is not None else None,
+            importance_dimensions=row.get("importance_dimensions"),
             ttl_at=row.get("ttl_at"),
             artifact_refs=[ArtifactRef.model_validate(r) for r in (row.get("artifact_refs") or [])],
             memory_type=memory_type,
@@ -1478,7 +1887,7 @@ class PostgresAdapter(AdapterABC):
                         ]
                         params_list: list[Any] = [
                             namespace, be["entity_path"], be["key"], next_ver,
-                            json.dumps(be["value"], default=str) if not isinstance(be["value"], str) else be["value"],
+                            json.dumps(be["value"], default=str),
                             be["agent_id"], be["session_id"], be["written_at"],
                             be.get("pattern_refs") or [],
                             be["confidence"], be["outcome_count"],
@@ -1645,12 +2054,12 @@ class PostgresAdapter(AdapterABC):
                 cur.execute(
                     """
                     INSERT INTO amfs_tags
-                        (namespace, name, branch, tagged_at, description, created_by)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                        (namespace, name, branch, tagged_at, description, created_by, event_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING id, created_at
                     """,
                     (tag.namespace, tag.name, tag.branch, tag.tagged_at,
-                     tag.description, tag.created_by),
+                     tag.description, tag.created_by, tag.event_id),
                 )
                 row = cur.fetchone()
         return tag.model_copy(update={
@@ -1704,6 +2113,7 @@ class PostgresAdapter(AdapterABC):
             description=row.get("description"),
             created_by=row["created_by"],
             created_at=row.get("created_at"),
+            event_id=row.get("event_id"),
         )
 
     # ── Pull Requests (Pro) ─────────────────────────────────────────────

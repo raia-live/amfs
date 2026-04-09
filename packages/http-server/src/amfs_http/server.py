@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import uvicorn
@@ -36,6 +36,7 @@ from amfs_http.models import (
     AddTeamMemberRequest,
     ContextRequest,
     CreateAPIKeyRequest,
+    CreateSnapshotRequest,
     CreateTeamRequest,
     EventRequest,
     OutcomeRequest,
@@ -63,15 +64,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def _dashboard_tenant_middleware(request: Request, call_next):
+    """Optional X-AMFS-Dashboard-Account-Id + secret → amfs.current_account_id on DB connections."""
+    from amfs_http.tenant_middleware import apply_tenant_headers_from_request, clear_tenant_headers
+
+    apply_tenant_headers_from_request(request)
+    try:
+        return await call_next(request)
+    finally:
+        clear_tenant_headers()
+
+
 _memory: AgentMemory | None = None
 _sse_manager = SSEManager()
 
+_immutable_trace_store = None
 try:
     from amfs_traces.api import mount_pro_routes
     mount_pro_routes(app)
     logger.info("Pro trace endpoints mounted at /api/v1/pro/traces")
+
+    from amfs_traces.store import PostgresImmutableTraceStore
+    from amfs_traces.crypto import seal, get_signing_key, get_signing_key_id
+    from amfs_traces.models import ImmutableDecisionTrace, TraceEntry, TraceExternalContext
+    _HAS_PRO_TRACES = True
 except ImportError:
-    pass
+    _HAS_PRO_TRACES = False
 
 try:
     from amfs_cortex_pro import mount_cortex_pro
@@ -88,6 +108,32 @@ def _get_memory() -> AgentMemory:
         return _memory
 
     agent_id = os.environ.get("AMFS_AGENT_ID", "http-server")
+
+    http_url = os.environ.get("AMFS_HTTP_URL")
+    if http_url:
+        if os.environ.get("AMFS_POSTGRES_DSN"):
+            logger.warning(
+                "Both AMFS_HTTP_URL and AMFS_POSTGRES_DSN are set. "
+                "The HTTP adapter takes precedence — direct DB access "
+                "is bypassed in favour of the authenticated HTTP API."
+            )
+        try:
+            from amfs_adapter_http import HttpAdapter
+
+            api_key = os.environ.get("AMFS_API_KEY", "")
+            logger.info(
+                "AMFS HTTP adapter mode — routing through %s", http_url
+            )
+            adapter = HttpAdapter(base_url=http_url, api_key=api_key)
+            _memory = AgentMemory(agent_id=agent_id, adapter=adapter)
+            return _memory
+        except ImportError:
+            logger.warning(
+                "AMFS_HTTP_URL is set but amfs-adapter-http is not installed. "
+                "Falling back to local adapter. "
+                "Install with: pip install amfs-adapter-http"
+            )
+
     config = _resolve_config()
 
     ttl_interval_str = os.environ.get("AMFS_TTL_SWEEP_INTERVAL")
@@ -116,6 +162,12 @@ try:
     from amfs_pro_api import mount_pro_api
     mount_pro_api(app, get_memory=_get_memory)
     logger.info("Pro API endpoints mounted (intelligence, extraction)")
+except ImportError:
+    pass
+
+try:
+    from amfs_tenant.http_deps import mount_scope_enforcement
+    mount_scope_enforcement(app)
 except ImportError:
     pass
 
@@ -173,6 +225,45 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/v1/health")
+async def health_v1() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/api/v1/auth/whoami")
+async def whoami(
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Return information about the authenticated caller.
+
+    When Pro middleware is active, this returns account, key type, scopes,
+    and rate limit info. In OSS mode, returns basic auth status.
+    """
+    ctx = getattr(request.state, "tenant_ctx", None)
+    if ctx is not None:
+        return {
+            "authenticated": True,
+            "mode": "pro",
+            "account_id": str(ctx.account_id),
+            "actor_id": str(ctx.actor_id),
+            "key_type": ctx.key_type.value if ctx.key_type else None,
+            "scopes": [
+                {
+                    "entity_path_pattern": s.entity_path_pattern,
+                    "permission": s.permission.value,
+                }
+                for s in ctx.scopes
+            ],
+            "rate_limit_rpm": ctx.rate_limit_rpm,
+            "is_admin": ctx.is_admin,
+        }
+    return {
+        "authenticated": _auth is not None,
+        "mode": "oss",
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Entries
 # ──────────────────────────────────────────────────────────────────────
@@ -207,22 +298,54 @@ async def write_entry(
     }
     mt = type_map.get(req.memory_type.lower(), MemoryType.FACT)
 
-    entry = mem.write(
-        req.entity_path,
-        req.key,
-        req.value,
-        confidence=req.confidence,
-        pattern_refs=req.pattern_refs or None,
-        memory_type=mt,
-        shared=req.shared,
-        branch=req.branch,
-    )
+    original_agent = mem._tagger.agent_id if req.agent_id else None
+    if req.agent_id:
+        mem._tagger.agent_id = req.agent_id
+        try:
+            mem._adapter.ensure_agent(req.agent_id, mem.namespace)
+        except Exception:
+            pass
+    try:
+        entry = mem.write(
+            req.entity_path,
+            req.key,
+            req.value,
+            confidence=req.confidence,
+            pattern_refs=req.pattern_refs or None,
+            memory_type=mt,
+            shared=req.shared,
+            branch=req.branch,
+        )
+    finally:
+        if original_agent is not None:
+            mem._tagger.agent_id = original_agent
     _sse_manager.broadcast(entry)
     _audit_log(
         "memory.write",
         resource=f"{req.entity_path}/{req.key}",
         ip_address=request.client.host if request.client else None,
     )
+
+    try:
+        from amfs_core.models import GraphEdge
+        agent = entry.provenance.agent_id
+        ek = f"{entry.entity_path}/{entry.key}"
+        mem._adapter.upsert_graph_edge(
+            GraphEdge(
+                source_entity=agent,
+                source_type="agent",
+                relation="wrote",
+                target_entity=ek,
+                target_type="entry",
+                confidence=entry.confidence,
+                provenance={"agent_id": agent, "trigger": "write"},
+            ),
+            namespace=mem.namespace,
+            branch=entry.branch or "main",
+        )
+    except Exception:
+        logger.debug("Failed to materialize wrote edge", exc_info=True)
+
     return _entry_to_response(entry)
 
 
@@ -249,21 +372,23 @@ async def search_entries(
 ) -> list[dict[str, Any]]:
     mem = _get_memory()
     branch = getattr(req, "branch", "main") or "main"
-    results = mem._adapter.search(
-        SearchQuery(
-            entity_path=req.entity_path,
-            min_confidence=req.min_confidence,
-            max_confidence=req.max_confidence,
-            agent_id=req.agent_id,
-            since=req.since,
-            pattern_ref=req.pattern_ref,
-            sort_by=req.sort_by,
-            limit=req.limit,
-        ),
-        branch=branch,
+    sq = SearchQuery(
+        query=req.query,
+        entity_path=req.entity_path,
+        min_confidence=req.min_confidence,
+        max_confidence=req.max_confidence,
+        agent_id=req.agent_id,
+        since=req.since,
+        pattern_ref=req.pattern_ref,
+        sort_by=req.sort_by,
+        limit=req.limit,
     )
+    try:
+        results = mem._adapter.search(sq, branch=branch)
+    except TypeError:
+        results = mem._adapter.search(sq)
 
-    if req.query:
+    if req.query and not getattr(mem._adapter, "_has_search_tsv", False):
         query_lower = req.query.lower()
         results = [
             e
@@ -333,6 +458,98 @@ _OUTCOME_TYPE_MAP = {
 }
 
 
+def _get_immutable_store():
+    """Lazily create the immutable trace store (Pro only)."""
+    global _immutable_trace_store
+    if _immutable_trace_store is not None:
+        return _immutable_trace_store
+    if not _HAS_PRO_TRACES:
+        return None
+    dsn = os.environ.get("AMFS_POSTGRES_DSN")
+    if not dsn:
+        return None
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+        conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+        _immutable_trace_store = PostgresImmutableTraceStore(conn)
+        logger.info("Immutable trace store initialized")
+        return _immutable_trace_store
+    except Exception:
+        logger.debug("Failed to init immutable trace store", exc_info=True)
+        return None
+
+
+_seal_sequence: dict[str, int] = {}
+
+
+def _auto_seal_trace(mem: AgentMemory) -> str | None:
+    """If Pro traces are available, auto-seal the last OSS trace as immutable."""
+    if not _HAS_PRO_TRACES:
+        return None
+    oss_trace = getattr(mem, "_last_trace", None)
+    if oss_trace is None:
+        return None
+    store = _get_immutable_store()
+    if store is None:
+        return None
+    try:
+        now = datetime.now(timezone.utc)
+        causal = [
+            TraceEntry(
+                entity_path=e.entity_path,
+                key=e.key,
+                version=e.version,
+                confidence=e.confidence,
+                value=e.value,
+                memory_type=getattr(e, "memory_type", None) or "fact",
+                written_by=getattr(e, "written_by", None),
+                read_at=getattr(e, "read_at", None) or now,
+            )
+            for e in (oss_trace.causal_entries or [])
+        ]
+        contexts = [
+            TraceExternalContext(
+                label=c.label,
+                summary=c.summary,
+                source=getattr(c, "source", None),
+                recorded_at=getattr(c, "recorded_at", None) or now,
+            )
+            for c in (oss_trace.external_contexts or [])
+        ]
+
+        session_id = mem.session_id
+        seq = _seal_sequence.get(session_id, 0)
+        parent_hash = store.get_latest_hash(session_id)
+
+        imm = ImmutableDecisionTrace(
+            agent_id=mem.agent_id,
+            session_id=session_id,
+            sequence_number=seq,
+            outcome_ref=oss_trace.outcome_ref,
+            outcome_type=oss_trace.outcome_type,
+            decision_summary=getattr(oss_trace, "decision_summary", None),
+            causal_entries=causal,
+            external_contexts=contexts,
+            created_at=datetime.now(timezone.utc),
+        )
+        sealed = seal(
+            imm,
+            get_signing_key(),
+            parent_hash=parent_hash,
+            sequence_number=seq,
+            signing_key_id=get_signing_key_id(),
+        )
+        saved = store.save(sealed)
+        _seal_sequence[session_id] = seq + 1
+        logger.info("Auto-sealed immutable trace %s for outcome %s",
+                     saved.id, oss_trace.outcome_ref)
+        return str(saved.id)
+    except Exception:
+        logger.warning("Failed to auto-seal immutable trace", exc_info=True)
+        return None
+
+
 @app.post("/api/v1/outcomes")
 async def commit_outcome(
     req: OutcomeRequest,
@@ -346,23 +563,40 @@ async def commit_outcome(
         valid = ", ".join(_OUTCOME_TYPE_MAP.keys())
         return {"error": f"Invalid outcome_type '{req.outcome_type}'. Must be one of: {valid}"}
 
-    entries = mem.commit_outcome(
-        req.outcome_ref,
-        otype,
-        causal_entry_keys=req.causal_entry_keys,
-        causal_confidence=req.causal_confidence,
-    )
+    original_agent = mem._tagger.agent_id if req.agent_id else None
+    if req.agent_id:
+        mem._tagger.agent_id = req.agent_id
+        try:
+            mem._adapter.ensure_agent(req.agent_id, mem.namespace)
+        except Exception:
+            pass
+    try:
+        entries = mem.commit_outcome(
+            req.outcome_ref,
+            otype,
+            causal_entry_keys=req.causal_entry_keys,
+            causal_confidence=req.causal_confidence,
+        )
+    finally:
+        if original_agent is not None:
+            mem._tagger.agent_id = original_agent
     _audit_log(
         "outcome.commit",
         resource=req.outcome_ref,
         ip_address=request.client.host if request.client else None,
     )
-    return {
+
+    immutable_trace_id = _auto_seal_trace(mem)
+
+    result: dict[str, Any] = {
         "outcome_ref": req.outcome_ref,
         "outcome_type": req.outcome_type,
         "affected_entries": len(entries),
         "entries": [_entry_to_response(e) for e in entries],
     }
+    if immutable_trace_id:
+        result["immutable_trace_id"] = immutable_trace_id
+    return result
 
 
 @app.get("/api/v1/outcomes")
@@ -897,6 +1131,180 @@ async def agent_timeline(
         "agentId": agent_id,
         "events": [e.model_dump(mode="json") for e in events],
         "count": len(events),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Agent Snapshots
+# ──────────────────────────────────────────────────────────────────────
+
+
+SNAPSHOT_ENTITY = "_system/agent-snapshots"
+
+
+@app.post("/api/v1/agents/{agent_id}/snapshots")
+async def create_snapshot(
+    agent_id: str,
+    req: CreateSnapshotRequest,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Create a named snapshot of an agent's brain state."""
+    from amfs_core.models import Event, EventType
+
+    mem = _get_memory()
+    snapshot_id = f"snap-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+    snapshot_value = {
+        "id": snapshot_id,
+        "agent_id": agent_id,
+        "name": req.name,
+        "description": req.description,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "stats": req.snapshot_data.get("stats", {}),
+        "data": req.snapshot_data,
+    }
+
+    original_agent = mem._tagger.agent_id
+    mem._tagger.agent_id = agent_id
+    try:
+        mem.write(
+            SNAPSHOT_ENTITY,
+            f"{agent_id}/{snapshot_id}",
+            snapshot_value,
+            confidence=1.0,
+        )
+    finally:
+        mem._tagger.agent_id = original_agent
+
+    try:
+        mem._adapter.log_event(Event(
+            namespace=mem.namespace,
+            agent_id=agent_id,
+            branch="main",
+            event_type=EventType.SNAPSHOT_TAKEN,
+            summary=f"Snapshot '{req.name}' taken",
+            details={
+                "snapshot_id": snapshot_id,
+                "name": req.name,
+                "description": req.description,
+                **snapshot_value.get("stats", {}),
+            },
+        ))
+    except Exception:
+        logger.debug("Failed to log snapshot event", exc_info=True)
+
+    return {
+        "id": snapshot_id,
+        "name": req.name,
+        "agent_id": agent_id,
+        "created_at": snapshot_value["created_at"],
+    }
+
+
+@app.get("/api/v1/agents/{agent_id}/snapshots")
+async def list_snapshots(
+    agent_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """List all snapshots for an agent."""
+    mem = _get_memory()
+    entries = mem.list(entity_path=SNAPSHOT_ENTITY)
+    prefix = f"{agent_id}/"
+    snapshots = []
+    for e in entries:
+        if not e.key.startswith(prefix):
+            continue
+        val = e.value if isinstance(e.value, dict) else {}
+        snapshots.append({
+            "id": val.get("id", e.key.split("/")[-1]),
+            "name": val.get("name", e.key),
+            "description": val.get("description", ""),
+            "agent_id": agent_id,
+            "created_at": val.get("created_at", e.provenance.written_at.isoformat()),
+            "stats": val.get("stats", {}),
+        })
+    snapshots.sort(key=lambda s: s["created_at"], reverse=True)
+    return {"snapshots": snapshots, "count": len(snapshots)}
+
+
+@app.get("/api/v1/agents/{agent_id}/snapshots/{snapshot_id}")
+async def get_snapshot(
+    agent_id: str,
+    snapshot_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Get the full data for a specific snapshot."""
+    mem = _get_memory()
+    key = f"{agent_id}/{snapshot_id}"
+    entry = mem.recall(SNAPSHOT_ENTITY, key)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    val = entry.value if isinstance(entry.value, dict) else {}
+    return val
+
+
+@app.delete("/api/v1/agents/{agent_id}/snapshots/{snapshot_id}")
+async def delete_snapshot(
+    agent_id: str,
+    snapshot_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Delete a snapshot."""
+    mem = _get_memory()
+    key = f"{agent_id}/{snapshot_id}"
+    entry = mem.recall(SNAPSHOT_ENTITY, key)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    mem.write(SNAPSHOT_ENTITY, key, None, confidence=0.0)
+    return {"deleted": True, "id": snapshot_id}
+
+
+@app.post("/api/v1/agents/{agent_id}/snapshots/{snapshot_id}/recover")
+async def recover_snapshot(
+    agent_id: str,
+    snapshot_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Recover an agent's memory to the state captured in a snapshot."""
+    from amfs_core.models import Event, EventType
+
+    mem = _get_memory()
+    key = f"{agent_id}/{snapshot_id}"
+    entry = mem.recall(SNAPSHOT_ENTITY, key)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    val = entry.value if isinstance(entry.value, dict) else {}
+    created_at = val.get("created_at")
+    if not created_at:
+        raise HTTPException(status_code=400, detail="Snapshot missing timestamp")
+
+    timestamp = datetime.fromisoformat(created_at)
+    count = mem._adapter.rollback_to_timestamp(
+        agent_id, "main", timestamp, mem.namespace,
+    )
+
+    try:
+        mem._adapter.log_event(Event(
+            namespace=mem.namespace,
+            agent_id=agent_id,
+            branch="main",
+            event_type=EventType.SNAPSHOT_RECOVERED,
+            summary=f"Recovered from snapshot '{val.get('name', snapshot_id)}'",
+            details={
+                "snapshot_id": snapshot_id,
+                "name": val.get("name", ""),
+                "recovered_to": created_at,
+                "entries_restored": count,
+            },
+        ))
+    except Exception:
+        logger.debug("Failed to log recovery event", exc_info=True)
+
+    return {
+        "recovered": True,
+        "snapshot_id": snapshot_id,
+        "entries_restored": count,
+        "recovered_to": created_at,
     }
 
 
@@ -1626,6 +2034,284 @@ async def resolve_pattern(
         ip_address=request.client.host if request.client else None,
     )
     return {"resolved": str(row["id"]), "patternType": row["pattern_type"]}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Pro — Expertise Heatmap
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/pro/graph/neighbors")
+async def graph_neighbors(
+    entity: str = Query(...),
+    relation: str | None = Query(None),
+    direction: str = Query("both"),
+    min_confidence: float = Query(0.0),
+    depth: int = Query(1, ge=1, le=5),
+    limit: int = Query(200, ge=1, le=1000),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Traverse the knowledge graph from an entity."""
+    from fastapi.responses import JSONResponse
+
+    mem = _get_memory()
+    try:
+        edges = mem.graph_neighbors(
+            entity,
+            relation=relation,
+            direction=direction,
+            min_confidence=min_confidence,
+            depth=depth,
+            limit=limit,
+        )
+    except Exception as exc:
+        logger.warning("graph_neighbors failed for %s: %s", entity, exc)
+        return JSONResponse(
+            {"entity": entity, "edges": [], "count": 0, "error": str(exc)},
+            status_code=200,
+        )
+    return {
+        "entity": entity,
+        "edges": [e.model_dump(mode="json") for e in edges],
+        "count": len(edges),
+    }
+
+
+@app.get("/api/v1/pro/graph/expertise")
+async def expertise_graph(
+    limit_agents: int = Query(30, ge=1, le=200),
+    limit_entities: int = Query(30, ge=1, le=200),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Build an agent×entity expertise heatmap.
+
+    Returns a list of agents, entities, and cells with scores derived
+    from write counts. The dashboard renders this as a heatmap table.
+    """
+    mem = _get_memory()
+    entries = mem.list()
+
+    agent_entity_weights: dict[str, dict[str, int]] = {}
+    agent_totals: dict[str, int] = {}
+    entity_totals: dict[str, int] = {}
+
+    for e in entries:
+        aid = e.provenance.agent_id
+        ep = e.entity_path
+        agent_totals[aid] = agent_totals.get(aid, 0) + 1
+        entity_totals[ep] = entity_totals.get(ep, 0) + 1
+        if aid not in agent_entity_weights:
+            agent_entity_weights[aid] = {}
+        agent_entity_weights[aid][ep] = agent_entity_weights[aid].get(ep, 0) + 1
+
+    top_agents = [
+        a for a, _ in sorted(agent_totals.items(), key=lambda x: x[1], reverse=True)
+    ][:limit_agents]
+    top_agent_set = set(top_agents)
+
+    relevant_entities: set[str] = set()
+    for aid in top_agent_set:
+        relevant_entities.update(agent_entity_weights.get(aid, {}).keys())
+    top_entities = [
+        ep
+        for ep, _ in sorted(
+            [(ep, entity_totals.get(ep, 0)) for ep in relevant_entities],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+    ][:limit_entities]
+    top_entity_set = set(top_entities)
+
+    cells: list[dict[str, Any]] = []
+    for aid in top_agents:
+        for ep, weight in agent_entity_weights.get(aid, {}).items():
+            if ep in top_entity_set:
+                cells.append({
+                    "agent": aid,
+                    "entity": ep,
+                    "score": weight,
+                    "relations": ["writes"],
+                })
+
+    return {
+        "agents": top_agents,
+        "entities": top_entities,
+        "cells": cells,
+    }
+
+
+@app.post("/api/v1/pro/graph/backfill")
+async def graph_backfill(
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Backfill knowledge graph edges from existing entries and outcomes.
+
+    Materializes edges from: pattern_refs → 'references' edges,
+    outcome causal chains → 'informed' + 'read' edges,
+    agent writes → 'wrote' edges.
+    """
+    from amfs_core.models import GraphEdge
+
+    mem = _get_memory()
+    entries = mem.list()
+    try:
+        outcomes = mem._adapter.list_outcomes() if hasattr(mem._adapter, "list_outcomes") else []
+    except Exception:
+        outcomes = []
+
+    created = 0
+    errors = 0
+
+    for e in entries:
+        aid = e.provenance.agent_id
+        ep = e.entity_path
+        ek = f"{ep}/{e.key}"
+
+        try:
+            mem._adapter.upsert_graph_edge(
+                GraphEdge(
+                    source_entity=aid,
+                    source_type="agent",
+                    relation="wrote",
+                    target_entity=ek,
+                    target_type="entry",
+                    confidence=e.confidence,
+                    provenance={"agent_id": aid, "trigger": "backfill"},
+                ),
+                namespace=mem.namespace,
+                branch=e.branch or "main",
+            )
+            created += 1
+        except Exception:
+            errors += 1
+
+        for ref in (e.provenance.pattern_refs or []):
+            try:
+                mem._adapter.upsert_graph_edge(
+                    GraphEdge(
+                        source_entity=ek,
+                        source_type="entry",
+                        relation="references",
+                        target_entity=ref,
+                        target_type="entry",
+                        provenance={"agent_id": aid, "trigger": "backfill"},
+                    ),
+                    namespace=mem.namespace,
+                    branch=e.branch or "main",
+                )
+                created += 1
+            except Exception:
+                errors += 1
+
+    for o in outcomes:
+        otype = getattr(o, "outcome_type", None)
+        edge_conf = 1.0 if otype and otype.value == "success" else 0.7
+        aid = getattr(o, "agent_id", "unknown")
+        for ek in getattr(o, "causal_entry_keys", []):
+            try:
+                mem._adapter.upsert_graph_edge(
+                    GraphEdge(
+                        source_entity=ek,
+                        source_type="entry",
+                        relation="informed",
+                        target_entity=o.outcome_ref,
+                        target_type="outcome",
+                        confidence=edge_conf,
+                        provenance={"agent_id": aid, "trigger": "backfill"},
+                    ),
+                    namespace=mem.namespace,
+                    branch="main",
+                )
+                created += 1
+            except Exception:
+                errors += 1
+
+    return {"edges_created": created, "errors": errors, "entries_scanned": len(entries), "outcomes_scanned": len(outcomes)}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Pro — HMO Memory Tiers
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _compute_tiers(entries: list) -> tuple[dict[str, int], dict[str, float]]:
+    """Score entries and assign HMO tiers (Hot/Warm/Archive)."""
+    from amfs_core.tiering import PriorityScorer, TierAssigner
+
+    scorer = PriorityScorer()
+    assigner = TierAssigner()
+    return assigner.assign_with_scores(entries, scorer)
+
+
+@app.get("/api/v1/pro/tiers/distribution")
+async def tiers_distribution(
+    agent_id: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Return HMO tier distribution (Hot / Warm / Archive)."""
+    mem = _get_memory()
+    entries = mem.list()
+    if agent_id:
+        entries = [e for e in entries if e.provenance.agent_id == agent_id]
+
+    tiers, scores = _compute_tiers(entries)
+
+    hot = warm = archive = scored_count = 0
+    score_sum = 0.0
+    for key, tier in tiers.items():
+        if tier == 1:
+            hot += 1
+        elif tier == 2:
+            warm += 1
+        else:
+            archive += 1
+        s = scores.get(key)
+        if s is not None:
+            scored_count += 1
+            score_sum += s
+
+    return {
+        "total": len(entries),
+        "hot": hot,
+        "warm": warm,
+        "archive": archive,
+        "scored": scored_count,
+        "avg_priority_score": round(score_sum / scored_count, 6) if scored_count else None,
+    }
+
+
+@app.get("/api/v1/pro/tiers/entries")
+async def tiers_entries(
+    tier: int = Query(..., ge=1, le=3),
+    limit: int = Query(50, ge=1, le=500),
+    agent_id: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> list[dict[str, Any]]:
+    """Return entries for a given HMO tier as a flat array."""
+    mem = _get_memory()
+    entries = mem.list()
+    if agent_id:
+        entries = [e for e in entries if e.provenance.agent_id == agent_id]
+
+    tier_map, score_map = _compute_tiers(entries)
+
+    filtered = [e for e in entries if tier_map.get(e.entry_key) == tier]
+    filtered.sort(key=lambda e: score_map.get(e.entry_key, 0.0), reverse=True)
+
+    return [
+        {
+            "entity_path": e.entity_path,
+            "key": e.key,
+            "confidence": e.confidence,
+            "tier": tier,
+            "priority_score": round(score_map.get(e.entry_key, 0.0), 6),
+            "recall_count": getattr(e, "recall_count", 0),
+            "importance_score": getattr(e, "importance_score", None),
+            "written_at": e.provenance.written_at.isoformat(),
+            "agent_id": e.provenance.agent_id,
+        }
+        for e in filtered[:limit]
+    ]
 
 
 # ──────────────────────────────────────────────────────────────────────

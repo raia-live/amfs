@@ -235,8 +235,10 @@ class CoWEngine:
         for causal linking.
         """
         entry = self._adapter.read(entity_path, key, min_confidence=min_confidence, branch=branch)
-        if entry is not None and self._read_tracker is not None:
-            self._read_tracker.record(entry)
+        if entry is not None:
+            self._adapter.increment_recall_count(entity_path, key, branch=branch)
+            if self._read_tracker is not None:
+                self._read_tracker.record(entry)
         return entry
 
     def write(
@@ -252,6 +254,9 @@ class CoWEngine:
         artifact_refs: list[ArtifactRef] | None = None,
         shared: bool = True,
         branch: str = "main",
+        embedding: list[float] | None = None,
+        importance_score: float | None = None,
+        importance_dimensions: dict[str, float] | None = None,
     ) -> MemoryEntry:
         """Write a new version of a key with CoW semantics.
 
@@ -270,11 +275,15 @@ class CoWEngine:
             provenance=self._tagger.tag(pattern_refs=pattern_refs),
             confidence=confidence,
             outcome_count=current.outcome_count if current else 0,
+            recall_count=current.recall_count if current else 0,
+            importance_score=importance_score,
+            importance_dimensions=importance_dimensions,
             ttl_at=ttl_at,
             artifact_refs=artifact_refs or [],
             memory_type=memory_type,
             shared=shared,
             branch=branch,
+            embedding=embedding,
         )
 
         return self._adapter.write(entry)

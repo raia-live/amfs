@@ -130,6 +130,57 @@ console.log(stats.avgConfidence);
 
 ---
 
+## Connecting to AMFS SaaS
+
+When using AMFS as a hosted service (SaaS), connect through the HTTP API with your API key instead of a direct database connection.
+
+The TypeScript SDK currently uses an in-memory adapter by default. For SaaS, agents should use the MCP server (with `AMFS_HTTP_URL` set) or make direct REST API calls.
+
+### Via MCP Server
+
+Configure the MCP server with HTTP adapter environment variables:
+
+```json
+{
+  "mcpServers": {
+    "amfs": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/amfs", "amfs-mcp-server"],
+      "env": {
+        "AMFS_HTTP_URL": "https://amfs-login.sense-lab.ai",
+        "AMFS_API_KEY": "amfs_sk_your_key_here"
+      }
+    }
+  }
+}
+```
+
+### Via REST API
+
+Make direct HTTP calls with the `X-AMFS-API-Key` header:
+
+```typescript
+const response = await fetch("https://amfs-login.sense-lab.ai/api/v1/entries", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-AMFS-API-Key": process.env.AMFS_API_KEY!,
+  },
+  body: JSON.stringify({
+    entity_path: "checkout-service",
+    key: "retry-pattern",
+    value: { maxRetries: 3 },
+  }),
+});
+```
+
+{: .warning }
+Never use `AMFS_POSTGRES_DSN` for external agents in multi-tenant mode. Always use `AMFS_HTTP_URL` + `AMFS_API_KEY` to ensure tenant isolation.
+
+See the [SaaS Connection Guide](/amfs/guides/saas/) and [Environment Variables](/amfs/reference/environment-variables/) for details.
+
+---
+
 ## Full API Reference
 
 ### Constructor

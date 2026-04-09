@@ -227,6 +227,41 @@ This is useful for:
 
 ---
 
+## Connecting to AMFS SaaS
+
+When using AMFS as a hosted service (SaaS), webhook endpoints require an API key for authentication. All connector events are scoped to the tenant identified by the key.
+
+### Webhook URL with API Key
+
+Include the `X-AMFS-API-Key` header when configuring webhook URLs in external systems:
+
+```
+POST https://amfs-login.sense-lab.ai/api/v1/webhooks/pagerduty
+Header: X-AMFS-API-Key: amfs_sk_your_key_here
+```
+
+### Direct Event Ingestion with API Key
+
+```bash
+curl -X POST https://amfs-login.sense-lab.ai/api/v1/events \
+  -H "Content-Type: application/json" \
+  -H "X-AMFS-API-Key: amfs_sk_your_key_here" \
+  -d '{
+    "source": "monitoring",
+    "entity_path": "myapp/checkout",
+    "key": "high-cpu-alert",
+    "value": {"host": "prod-3", "cpu_percent": 95},
+    "event_type": "alert.triggered"
+  }'
+```
+
+{: .warning }
+Never use `AMFS_POSTGRES_DSN` for external agents in multi-tenant mode. Always use the HTTP API with `X-AMFS-API-Key` for connector events.
+
+See the [SaaS Connection Guide](/amfs/guides/saas/) and [Environment Variables](/amfs/reference/environment-variables/) for details.
+
+---
+
 ## Building Your Own Connector
 
 You can build a connector for any system that sends webhooks or has an API.

@@ -21,20 +21,77 @@ AMFS provides a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
 
 ## What You Get
 
-After setup, your AI agents have 10 memory tools:
+After setup, your AI agents have tools across five categories:
+
+**Identity & Context**
+
+| Tool | Description |
+|:-----|:------------|
+| `amfs_set_identity` | Set agent identity for this conversation (e.g. `"dashboard-fixer"`) |
+| `amfs_briefing` | Get compiled knowledge digests from the Memory Cortex |
+
+**Read & Write**
 
 | Tool | Description |
 |:-----|:------------|
 | `amfs_read` | Read a memory entry by entity path and key |
 | `amfs_write` | Write knowledge with automatic provenance tracking |
-| `amfs_search` | Search across all entries with filters |
+| `amfs_search` | Search entries with filters and progressive retrieval (`depth`: 1=Hot, 2=+Warm, 3=all) |
+| `amfs_retrieve` | Natural language retrieval with semantic + recency + confidence scoring |
 | `amfs_list` | List entries for an entity |
 | `amfs_stats` | Get a memory overview (entry counts, outcome counts) |
-| `amfs_commit_outcome` | Record outcomes with auto-causal linking |
-| `amfs_record_context` | Capture external tool/API inputs in the causal chain |
 | `amfs_history` | Retrieve version history of an entry with optional time range |
-| `amfs_explain` | Inspect the full decision trace for the current session |
-| `amfs_briefing` | Get compiled knowledge digests from the Memory Cortex |
+| `amfs_graph_neighbors` | Explore the knowledge graph around an entity |
+
+**Agent Brain (scoped to you)**
+
+| Tool | Description |
+|:-----|:------------|
+| `amfs_recall` | Recall YOUR OWN memory for a specific key |
+| `amfs_my_entries` | List everything YOU have written |
+| `amfs_read_from` | Read from ANOTHER agent's memory (tracked knowledge transfer) |
+| `amfs_cross_agent_reads` | See which other agents' memory you've read |
+
+**Decision Traces**
+
+| Tool | Description |
+|:-----|:------------|
+| `amfs_record_context` | Capture decisions, external tool results, or user choices in the causal chain |
+| `amfs_commit_outcome` | Record outcomes — snapshots the full decision trace (reads, writes, contexts) |
+| `amfs_explain` | Inspect the current session's decision trace |
+| `amfs_list_traces` | Browse persisted decision traces from past sessions |
+| `amfs_get_trace` | Retrieve a full decision trace by ID |
+
+**Timeline**
+
+| Tool | Description |
+|:-----|:------------|
+| `amfs_timeline` | Browse the git-style event timeline |
+
+---
+
+## AMFS Pro (SaaS) and Cursor
+
+On **Sense Lab**, the AMFS dashboard (**Agents** page, MCP Connection card) is the source of truth. Cursor talks to hosted AMFS by running the **`amfs-mcp-server`** process locally with **stdio** (e.g. `uvx`), while the server uses **`AMFS_HTTP_URL`** (dashboard **Server URL**, e.g. `https://amfs-login.sense-lab.ai`) and **`AMFS_API_KEY`** to call the HTTP API. That URL is the **API base**, not an MCP Streamable HTTP path—there is **no `/mcp`** on it for this setup. The `/mcp` path applies only when you run the MCP server in **HTTP transport mode** as its own listening service (see [Streamable HTTP](#streamable-http-team--remote) below).
+
+Use the official **[Cursor plugin](https://github.com/raia-live/cursor-plugin)** (same shape as the dashboard JSON) or copy the snippet from the dashboard. Set **`AMFS_API_KEY`** in your environment and reference it with [Cursor interpolation](https://cursor.com/docs/mcp.md#config-interpolation). See also [SaaS / hosted AMFS](https://raia-live.github.io/amfs/guides/saas/).
+
+Example (matches dashboard; use `${env:AMFS_API_KEY}` in the plugin so keys are not committed):
+
+```json
+{
+  "mcpServers": {
+    "amfs": {
+      "command": "uvx",
+      "args": ["amfs-mcp-server"],
+      "env": {
+        "AMFS_HTTP_URL": "https://amfs-login.sense-lab.ai",
+        "AMFS_API_KEY": "${env:AMFS_API_KEY}"
+      }
+    }
+  }
+}
+```
 
 ---
 
@@ -173,6 +230,42 @@ Point your IDE to the HTTP URL instead of spawning a process:
 
 ---
 
+## Connecting to AMFS SaaS
+
+When using AMFS as a hosted service (SaaS), set `AMFS_HTTP_URL` and `AMFS_API_KEY` in the MCP server environment. This routes all memory operations through the authenticated HTTP API with full tenant isolation.
+
+### Cursor / Claude Code (SaaS)
+
+No local code needed — install directly from PyPI with `uvx`:
+
+```json
+{
+  "mcpServers": {
+    "amfs": {
+      "command": "uvx",
+      "args": ["amfs-mcp-server@latest"],
+      "env": {
+        "AMFS_HTTP_URL": "https://amfs-login.sense-lab.ai",
+        "AMFS_API_KEY": "<your-api-key>"
+      }
+    }
+  }
+}
+```
+
+Get your API key from the AMFS dashboard at **Settings → API Keys**.
+
+### Finding Your Credentials
+
+Go to the **Agents** page in the AMFS dashboard. The **MCP Connection Card** at the top shows your API URL and token, with a ready-to-copy JSON snippet for your `.cursor/mcp.json`.
+
+{: .warning }
+Never use `AMFS_POSTGRES_DSN` for external agents in multi-tenant mode. Always use `AMFS_HTTP_URL` + `AMFS_API_KEY`.
+
+See the [SaaS Connection Guide](/amfs/guides/saas/) for full details.
+
+---
+
 ## Using Postgres for Shared Memory
 
 For team sharing across machines, use Postgres:
@@ -199,7 +292,17 @@ For team sharing across machines, use Postgres:
 
 ## Agent Identity
 
-The MCP server auto-detects the agent's identity from the environment:
+Each Cursor chat or Claude conversation should have its own meaningful identity. The recommended approach is to call `amfs_set_identity` at the start of every conversation:
+
+```
+amfs_set_identity("dashboard-fixer", "Fixing entity detail pages and auth headers")
+```
+
+This sets the agent identity for the current session — all memories, traces, and cross-agent reads are attributed to this name. The agent rules (`amfs-memory.mdc` / `CLAUDE.md`) already instruct agents to do this automatically.
+
+### Default Identity
+
+If `amfs_set_identity` is not called, the MCP server auto-detects from the environment:
 
 | Environment | Detected ID |
 |:------------|:------------|
@@ -207,7 +310,7 @@ The MCP server auto-detects the agent's identity from the environment:
 | Claude Code | `claude-code/<username>` |
 | Other | `agent/<username>` |
 
-Override with `AMFS_AGENT_ID`:
+Override the default with `AMFS_AGENT_ID`:
 
 ```json
 {
@@ -221,15 +324,16 @@ Override with `AMFS_AGENT_ID`:
 
 ## How It Works
 
-1. **Agent starts** — MCP server launches, creates an `AgentMemory` instance with auto-detected agent ID.
-2. **Agent gets briefed** — The agent calls `amfs_briefing` to get pre-compiled knowledge digests from the Memory Cortex, providing instant context about relevant entities and past agent activity.
-3. **Agent searches** — For specific queries, the agent calls `amfs_search` to find individual entries.
-4. **Agent gathers context** — External tool calls are captured with `amfs_record_context` so the decision trace is complete.
-5. **Agent writes** — After completing tasks, decisions and risks are recorded with `amfs_write` (optionally specifying `memory_type`: `fact`, `belief`, or `experience`).
-6. **Cortex compiles** — The Memory Cortex continuously processes new writes and compiles them into up-to-date knowledge digests.
-7. **Outcomes propagate** — `amfs_commit_outcome` updates confidence on all entries the agent read.
-8. **Agent reviews** — `amfs_history` shows how a memory evolved over time; `amfs_explain` reveals the full decision trace including external inputs.
-9. **Knowledge compounds** — The next agent starts with compiled context instead of from scratch.
+1. **Agent identifies** — `amfs_set_identity("dashboard-fixer")` gives this conversation a unique, human-readable name.
+2. **Agent gets briefed** — `amfs_briefing` returns pre-compiled knowledge digests from the Memory Cortex.
+3. **Agent retrieves** — `amfs_retrieve` for natural language queries, `amfs_search` for structured filters, `amfs_recall` for own memories.
+4. **Agent explores** — `amfs_graph_neighbors` traverses the knowledge graph to discover related entities and agents.
+5. **Decisions are captured** — `amfs_record_context` captures decisions, user choices, and external tool results as they happen.
+6. **Agent writes** — `amfs_write` records knowledge with automatic provenance. `pattern_refs` create graph edges.
+7. **Cortex compiles** — The Memory Cortex continuously builds up-to-date knowledge digests.
+8. **Outcome committed** — `amfs_commit_outcome` snapshots the full decision trace (all reads, writes, and contexts) and back-propagates confidence.
+9. **Traces persist** — `amfs_list_traces` and `amfs_get_trace` let future agents learn from past decisions.
+10. **Knowledge compounds** — The next agent starts with compiled context, cross-agent reads, and full decision history.
 
 ### Example Scenario
 

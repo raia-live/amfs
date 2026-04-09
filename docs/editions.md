@@ -58,6 +58,7 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │  ┌─ Intelligence Layer ─────────────────────────────────┐ │
 │  │  Extraction · Critic · Distiller · Safety · Retrieval │ │
 │  │  Learned Ranking · Confidence Calibration · ML Export │ │
+│  │  LLM Importance Scoring · TierWorker (background)    │ │
 │  │  Auto Entity/Relationship Extraction from Traces     │ │
 │  └──────────────────────────────────────────────────────┘ │
 │                                                          │
@@ -66,7 +67,9 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │  │  Trace Detail with Enriched Context · Agent Graph     │ │
 │  │  Sacred Timeline (3D) · Branch Manager · PR Viewer   │ │
 │  │  API Key Console · Audit Viewer · Usage Analytics    │ │
-│  │  Pattern Detection · Team Management · Snapshots     │ │
+│  │  Cursor plugin (hosted MCP to Pro API)              │ │
+│  │  Pattern Detection · Memory Tiers · Snapshots        │ │
+│  │  Team Management                                    │ │
 │  └──────────────────────────────────────────────────────┘ │
 │                                                          │
 ├──────────────────────────────────────────────────────────┤
@@ -78,6 +81,11 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │  Temporal Queries · Session-Level Causal Explainability   │
 │  Enriched Decision Traces · Query/Error Event Tracking    │
 │  Composite Recall Scoring · Multi-Scope Search            │
+│  Knowledge Graph (auto-materialized edges)               │
+│  Hybrid Search (full-text + semantic + composite)         │
+│  Tiered Memory (Hot/Warm/Archive) · Priority Scoring      │
+│  Frequency-Modulated Decay · Cortex Drift Gate            │
+│  ImportanceEvaluator ABC · Progressive Retrieval          │
 │  Per-Agent Memory Graph · Agent Activity Timeline         │
 │  Connector Framework · CLI · Built-in Connectors          │
 │  Webhook Receiver · Adapters (FS, Postgres, S3)           │
@@ -105,6 +113,15 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | Per-agent memory graph and activity timeline | Yes | Yes |
 | Composite recall scoring | Yes | Yes |
 | Multi-scope search | Yes | Yes |
+| Knowledge graph (auto-materialized from writes/outcomes) | Yes | Yes |
+| Hybrid search (full-text + semantic + composite scoring) | Yes | Yes |
+| Frequency-modulated decay (4-signal model) | Yes | Yes |
+| Tiered memory (Hot / Warm / Archive) | Yes | Yes |
+| Progressive retrieval (`depth`) | Yes | Yes |
+| Importance evaluator hook (`ImportanceEvaluator` ABC) | Yes | Yes |
+| Cortex drift gate (skip-redundant recompilations) | Yes | Yes |
+| LLM importance scoring (3-dimension) | — | Yes |
+| Background tier recomputation (`TierWorker`) | — | Yes |
 | **Git-like Timeline** | | |
 | Event logging (writes, outcomes, reads, briefs) on main | Yes | Yes |
 | Branch-aware read/write/list/search (`branch` parameter) | Yes | Yes |
@@ -133,7 +150,7 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | S3 adapter | Yes | Yes |
 | HTTP/REST API server | Yes | Yes |
 | Docker + Docker Compose + Helm charts | Yes | Yes |
-| MCP server (9 tools) | Yes | Yes |
+| MCP server (12 tools) | Yes | Yes |
 | **SDKs & Clients** | | |
 | Python SDK (full parity) | Yes | Yes |
 | TypeScript SDK (full parity) | Yes | Yes |
@@ -176,7 +193,7 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | Automated memory critic | — | Yes |
 | Memory distillation & bootstrap sets | — | Yes |
 | Memory safety validation | — | Yes |
-| Multi-strategy retrieval (semantic + BM25 + temporal) | — | Yes |
+| Multi-strategy retrieval with learned ranking (RRF + ML) | — | Yes |
 | Learned retrieval ranking from outcome data | — | Yes |
 | Adaptive confidence calibration | — | Yes |
 | Training data export (SFT, DPO, reward model) | — | Yes |
@@ -190,25 +207,26 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 | Audit log viewer with search/filter | — | Yes |
 | Usage analytics & quota monitoring | — | Yes |
 | Snapshot capture, compare, and export | — | Yes |
+| Memory Tiers dashboard (distribution, entry browser) | — | Yes |
 | Extended MCP server (Pro tools) | — | Yes |
 
 ---
 
 ## OSS Layer — What's Included
 
-The open-source layer ([github.com/raia-live/amfs](https://github.com/raia-live/amfs)) provides the full memory primitive: read, write, version, search, and learn from outcomes. It includes a **git-like timeline engine** that logs every operation as an event, branch-aware read/write operations, a connector framework for ingesting events from external systems, composite recall scoring, and multi-scope search.
+The open-source layer ([github.com/raia-live/amfs](https://github.com/raia-live/amfs)) provides the full memory primitive: read, write, version, search, and learn from outcomes. It includes a **git-like timeline engine**, branch-aware operations, a connector framework, composite recall scoring, multi-scope search, a **knowledge graph** auto-materialized from writes and outcomes, **hybrid search** (full-text + semantic + composite scoring), **tiered memory** (Hot/Warm/Archive with progressive retrieval), **frequency-modulated decay** (4-signal model), and a **Cortex drift gate** that avoids redundant digest recompilations.
 
 ### Packages
 
 | Package | Description |
 |:--------|:------------|
-| `amfs-core` | CoW engine, models (`MemoryEntry`, `MemoryType`, `ProvenanceTier`, `Event`), read tracking, causal tagging, default embedder |
+| `amfs-core` | CoW engine, models, read tracking, causal tagging, default embedder, `tiering` (PriorityScorer, TierAssigner), `importance` (ImportanceEvaluator ABC) |
 | `amfs` (SDK) | `AgentMemory` class — `read`, `write`, `list`, `search`, `history`, `timeline`, `explain`, `commit_outcome`, `record_context` |
 | `amfs-adapter-filesystem` | JSON-file-based adapter for local development |
 | `amfs-adapter-postgres` | PostgreSQL adapter with PL/pgSQL triggers for outcome propagation and `LISTEN/NOTIFY` for watch |
 | `amfs-adapter-s3` | Amazon S3 / S3-compatible adapter for cloud-native storage |
 | `amfs-http-server` | REST API server (FastAPI/Uvicorn) for remote access, branch-aware endpoints |
-| `amfs-mcp-server` | MCP server exposing 10 tools: `amfs_read`, `amfs_write`, `amfs_search`, `amfs_list`, `amfs_stats`, `amfs_commit_outcome`, `amfs_record_context`, `amfs_history`, `amfs_explain`, `amfs_timeline` |
+| `amfs-mcp-server` | MCP server exposing 12 tools: `amfs_read`, `amfs_write`, `amfs_search`, `amfs_retrieve`, `amfs_list`, `amfs_stats`, `amfs_commit_outcome`, `amfs_record_context`, `amfs_history`, `amfs_explain`, `amfs_graph_neighbors`, `amfs_timeline` |
 | `amfs-cli` | Terminal tools for inspecting, diffing, snapshotting, and restoring memory |
 | `@amfs/sdk` | TypeScript SDK (full parity with Python: ReadTracker, search, stats, history, explain, recordContext) |
 
@@ -308,7 +326,9 @@ amfs_sk_live_...  →  checkout-service/**  [READ_WRITE]
                      shared/patterns/*     [READ]
 ```
 
-Agents can only access memory within their permitted scope — this is **permissioned inference** enforced at the database level.
+Agents can only access memory within their permitted scope — this is **permissioned inference** enforced at both the application and database level.
+
+**HTTP API-Based Tenant Isolation** — All external agent access (MCP clients, SDKs, REST calls) is routed through the AMFS HTTP API using `AMFS_HTTP_URL` + `AMFS_API_KEY`. The API resolves the tenant, enforces entity-path scopes, sets the Postgres RLS context, and logs the operation — agents never touch the database directly. MCP clients connect transparently via the `HttpAdapter`, which converts memory operations into authenticated HTTP requests.
 
 **Audit Logging** — Every state-changing operation is recorded in an append-only audit log with actor, action, resource, and IP address.
 
@@ -487,6 +507,8 @@ exporter.export_trace(trace)  # sends spans to your OTel collector
 
 ### Pro MCP Server
 
+On **Sense Lab**, Cursor uses **`uvx amfs-mcp-server`** with **`AMFS_HTTP_URL`** (dashboard **Server URL**, e.g. `https://amfs-login.sense-lab.ai`) and **`AMFS_API_KEY`**—same JSON as the **Agents** MCP Connection card. Install the **[Cursor plugin](https://github.com/raia-live/cursor-plugin)** or copy that snippet; see [MCP setup — AMFS Pro and Cursor](https://raia-live.github.io/amfs/guides/mcp/#amfs-pro-saas-and-cursor). **Streamable HTTP** (`url` … `/mcp`) is a separate deployment mode for a self-hosted MCP HTTP listener, not the dashboard default.
+
 Extends the OSS MCP server with additional tools:
 
 | Tool | Description |
@@ -494,11 +516,12 @@ Extends the OSS MCP server with additional tools:
 | `amfs_critique` | Run the Memory Critic and get a quality report |
 | `amfs_distill` | Trigger distillation (prune, consolidate, or generate bootstrap set) |
 | `amfs_validate` | Validate a candidate memory before writing |
-| `amfs_retrieve` | Multi-strategy retrieval with RRF-merged results (+ learned ranking) |
 | `amfs_retrain` | Train the learned ranking model from outcome data |
 | `amfs_calibrate` | Learn optimal confidence multipliers from outcome history |
 | `amfs_export_training_data` | Export decision traces as SFT/DPO/reward model datasets |
 | `amfs_record_llm_call` | Record an LLM call with model, tokens, cost, and latency |
+| `amfs_graph_path` | Find shortest trust-weighted path between two entities in the knowledge graph |
+| `amfs_graph_query` | Flexible graph edge search by relation, entity type, or confidence range |
 
 ---
 
@@ -513,7 +536,7 @@ Extends the OSS MCP server with additional tools:
               ▼                             ▼
    ┌─────────────────┐          ┌───────────────────────────┐
    │  MCP Server OSS │          │  MCP Server Pro            │
-   │  (10 tools)     │          │  (10 + 7 tools)            │
+   │  (12 tools)     │          │  (12 + 8 tools)            │
    └────────┬────────┘          │                           │
             │                   │  Branching Layer:         │
             │                   │  Branches · Merge · PRs   │
