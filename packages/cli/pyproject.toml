@@ -1,6 +1,6 @@
 [project]
 name = "amfs-cli"
-version = "0.2.2"
+version = "0.2.3"
 description = "AMFS CLI — snapshot, inspect, and manage agent memory"
 requires-python = ">=3.11"
 license = "Apache-2.0"

@@ -455,6 +455,8 @@ class EventType(str, Enum):
     TAG_CREATED = "tag_created"
     CHERRY_PICK = "cherry_pick"
     FORK = "fork"
+    SNAPSHOT_TAKEN = "snapshot_taken"
+    SNAPSHOT_RECOVERED = "snapshot_recovered"
 
 
 class Agent(BaseModel):

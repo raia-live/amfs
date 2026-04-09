@@ -96,6 +96,17 @@ class RunPatternDetectionRequest(BaseModel):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Agent Snapshots
+# ──────────────────────────────────────────────────────────────────────
+
+
+class CreateSnapshotRequest(BaseModel):
+    name: str
+    description: str = ""
+    snapshot_data: dict[str, Any] = Field(default_factory=dict)
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Events (Shared Pool Ingestion)
 # ──────────────────────────────────────────────────────────────────────
 

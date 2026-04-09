@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import uvicorn
@@ -36,6 +36,7 @@ from amfs_http.models import (
     AddTeamMemberRequest,
     ContextRequest,
     CreateAPIKeyRequest,
+    CreateSnapshotRequest,
     CreateTeamRequest,
     EventRequest,
     OutcomeRequest,
@@ -221,6 +222,11 @@ def _entry_to_response(entry: MemoryEntry) -> dict[str, Any]:
 
 @app.get("/health")
 async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/api/v1/health")
+async def health_v1() -> dict[str, str]:
     return {"status": "ok"}
 
 
@@ -1125,6 +1131,180 @@ async def agent_timeline(
         "agentId": agent_id,
         "events": [e.model_dump(mode="json") for e in events],
         "count": len(events),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Agent Snapshots
+# ──────────────────────────────────────────────────────────────────────
+
+
+SNAPSHOT_ENTITY = "_system/agent-snapshots"
+
+
+@app.post("/api/v1/agents/{agent_id}/snapshots")
+async def create_snapshot(
+    agent_id: str,
+    req: CreateSnapshotRequest,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Create a named snapshot of an agent's brain state."""
+    from amfs_core.models import Event, EventType
+
+    mem = _get_memory()
+    snapshot_id = f"snap-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+    snapshot_value = {
+        "id": snapshot_id,
+        "agent_id": agent_id,
+        "name": req.name,
+        "description": req.description,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "stats": req.snapshot_data.get("stats", {}),
+        "data": req.snapshot_data,
+    }
+
+    original_agent = mem._tagger.agent_id
+    mem._tagger.agent_id = agent_id
+    try:
+        mem.write(
+            SNAPSHOT_ENTITY,
+            f"{agent_id}/{snapshot_id}",
+            snapshot_value,
+            confidence=1.0,
+        )
+    finally:
+        mem._tagger.agent_id = original_agent
+
+    try:
+        mem._adapter.log_event(Event(
+            namespace=mem.namespace,
+            agent_id=agent_id,
+            branch="main",
+            event_type=EventType.SNAPSHOT_TAKEN,
+            summary=f"Snapshot '{req.name}' taken",
+            details={
+                "snapshot_id": snapshot_id,
+                "name": req.name,
+                "description": req.description,
+                **snapshot_value.get("stats", {}),
+            },
+        ))
+    except Exception:
+        logger.debug("Failed to log snapshot event", exc_info=True)
+
+    return {
+        "id": snapshot_id,
+        "name": req.name,
+        "agent_id": agent_id,
+        "created_at": snapshot_value["created_at"],
+    }
+
+
+@app.get("/api/v1/agents/{agent_id}/snapshots")
+async def list_snapshots(
+    agent_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """List all snapshots for an agent."""
+    mem = _get_memory()
+    entries = mem.list(entity_path=SNAPSHOT_ENTITY)
+    prefix = f"{agent_id}/"
+    snapshots = []
+    for e in entries:
+        if not e.key.startswith(prefix):
+            continue
+        val = e.value if isinstance(e.value, dict) else {}
+        snapshots.append({
+            "id": val.get("id", e.key.split("/")[-1]),
+            "name": val.get("name", e.key),
+            "description": val.get("description", ""),
+            "agent_id": agent_id,
+            "created_at": val.get("created_at", e.provenance.written_at.isoformat()),
+            "stats": val.get("stats", {}),
+        })
+    snapshots.sort(key=lambda s: s["created_at"], reverse=True)
+    return {"snapshots": snapshots, "count": len(snapshots)}
+
+
+@app.get("/api/v1/agents/{agent_id}/snapshots/{snapshot_id}")
+async def get_snapshot(
+    agent_id: str,
+    snapshot_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Get the full data for a specific snapshot."""
+    mem = _get_memory()
+    key = f"{agent_id}/{snapshot_id}"
+    entry = mem.recall(SNAPSHOT_ENTITY, key)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    val = entry.value if isinstance(entry.value, dict) else {}
+    return val
+
+
+@app.delete("/api/v1/agents/{agent_id}/snapshots/{snapshot_id}")
+async def delete_snapshot(
+    agent_id: str,
+    snapshot_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Delete a snapshot."""
+    mem = _get_memory()
+    key = f"{agent_id}/{snapshot_id}"
+    entry = mem.recall(SNAPSHOT_ENTITY, key)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    mem.write(SNAPSHOT_ENTITY, key, None, confidence=0.0)
+    return {"deleted": True, "id": snapshot_id}
+
+
+@app.post("/api/v1/agents/{agent_id}/snapshots/{snapshot_id}/recover")
+async def recover_snapshot(
+    agent_id: str,
+    snapshot_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Recover an agent's memory to the state captured in a snapshot."""
+    from amfs_core.models import Event, EventType
+
+    mem = _get_memory()
+    key = f"{agent_id}/{snapshot_id}"
+    entry = mem.recall(SNAPSHOT_ENTITY, key)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    val = entry.value if isinstance(entry.value, dict) else {}
+    created_at = val.get("created_at")
+    if not created_at:
+        raise HTTPException(status_code=400, detail="Snapshot missing timestamp")
+
+    timestamp = datetime.fromisoformat(created_at)
+    count = mem._adapter.rollback_to_timestamp(
+        agent_id, "main", timestamp, mem.namespace,
+    )
+
+    try:
+        mem._adapter.log_event(Event(
+            namespace=mem.namespace,
+            agent_id=agent_id,
+            branch="main",
+            event_type=EventType.SNAPSHOT_RECOVERED,
+            summary=f"Recovered from snapshot '{val.get('name', snapshot_id)}'",
+            details={
+                "snapshot_id": snapshot_id,
+                "name": val.get("name", ""),
+                "recovered_to": created_at,
+                "entries_restored": count,
+            },
+        ))
+    except Exception:
+        logger.debug("Failed to log recovery event", exc_info=True)
+
+    return {
+        "recovered": True,
+        "snapshot_id": snapshot_id,
+        "entries_restored": count,
+        "recovered_to": created_at,
     }
 
 
