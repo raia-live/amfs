@@ -4,21 +4,32 @@
 [![TypeScript Tests](https://github.com/raia-live/amfs/actions/workflows/test-typescript.yml/badge.svg)](https://github.com/raia-live/amfs/actions/workflows/test-typescript.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-A shared, causally-linked memory layer for multi-agent AI systems. Agents write versioned findings with confidence scores, read each other's knowledge, and learn from real-world outcomes — turning isolated LLM calls into compounding institutional intelligence.
+**GitHub for agent memory.** Every agent gets a brain — its own repo of what it knows. Branch it, diff it, open a PR, review the changes, merge. Roll back to any point. The mental model is already in every developer's head.
 
 **[Documentation](https://raia-live.github.io/amfs/)** · **[Roadmap](https://github.com/orgs/raia-live/projects/2)** · **[Contributing](https://raia-live.github.io/amfs/contributing/)**
 
-## Why AMFS
+## The Problem
 
-Most agent memory is a vector store with a `save()` and `query()`. AMFS is different:
+When agents share memory today, it's chaos — last write wins, no branching, no review, no rollback. It's like coding without Git. Every team that tried that eventually hit a wall. Agent teams are hitting that wall right now.
 
-- **Versioned** — Every write creates an immutable CoW snapshot. See how knowledge evolved.
-- **Outcome-aware** — Confidence scores adjust automatically when deploys succeed or incidents happen.
-- **Causal** — Every read is tracked. `explain()` shows exactly which memories drove a decision.
-- **Knowledge graph** — Relationships between entities, agents, and outcomes are auto-materialized from normal operations and queryable via `graph_neighbors()`.
-- **Hybrid search** — Combine full-text (Postgres tsvector), semantic (cosine similarity), recency, and confidence into a single ranked result set.
-- **Multi-agent** — Agents share a single memory layer. One agent's finding is another's context.
-- **Pluggable** — Filesystem for dev, Postgres for production, S3 for cloud. Swap without code changes.
+The solution isn't "better permissions" or "smarter retrieval." It's giving agents the same collaboration model developers already live in: **version control for knowledge**.
+
+## How AMFS Works
+
+```
+Every developer knows this:          AMFS does the same for agent memory:
+
+  repo                                 agent brain
+  ├── main branch                      ├── main (what the agent knows)
+  ├── feature branch                   ├── experiment branch (isolated changes)
+  ├── pull request                     ├── pull request (review before merge)
+  ├── code review                      ├── diff (what changed in the branch)
+  ├── merge                            ├── merge (accept changes into main)
+  ├── git log                          ├── timeline (every operation logged)
+  └── git revert                       └── rollback (restore to any point)
+```
+
+Every write is a versioned commit. Every agent has provenance (who wrote what, when). Changes stay isolated on branches until the owner reviews the diff and merges. You can roll back to any point. You can fork an agent's entire brain to a new agent.
 
 ## Quick Start
 
@@ -31,12 +42,15 @@ from amfs import AgentMemory, OutcomeType
 
 mem = AgentMemory(agent_id="review-agent")
 
+# Agent discovers a pattern and commits it to memory
 mem.write("checkout-service", "retry-pattern",
           {"max_retries": 3, "strategy": "exponential-backoff"},
           confidence=0.85)
 
+# Another agent reads it — the read is tracked automatically
 entry = mem.read("checkout-service", "retry-pattern")
 
+# When the deploy fails, confidence on related entries adjusts
 mem.commit_outcome("INC-1042", OutcomeType.CRITICAL_FAILURE)
 ```
 
@@ -59,17 +73,36 @@ Or run with Docker:
 docker run -p 8080:8080 -v amfs-data:/data ghcr.io/raia-live/amfs
 ```
 
+## What You Get
+
+| | |
+|:--|:--|
+| **Git-like Timeline** | Every write, outcome, and cross-agent read is logged as an event. Full history, always. |
+| **Branching & PRs** | Create branches, diff changes, open pull requests, merge or discard. Pro feature — [details →](https://raia-live.github.io/amfs/editions/) |
+| **Rollback & Tags** | Create named snapshots. Roll back to any tag or event. Pro feature. |
+| **Access Control** | Grant read or read/write access per branch, per user, team, or API key. Pro feature. |
+| **Versioned Knowledge** | Copy-on-Write — every write creates a new version. Nothing is lost. `history()` to replay. |
+| **Confidence & Outcomes** | Entries carry trust scores that evolve when deploys succeed or incidents happen. |
+| **Causal Explainability** | `explain()` shows exactly which memories and external contexts drove a decision. |
+| **Knowledge Graph** | Relationships between entities, agents, and outcomes auto-materialize from normal operations. |
+| **Hybrid Search** | Full-text + semantic + recency + confidence in a single ranked result set. |
+| **MCP Server** | First-class support for Cursor, Claude Code, and any MCP client. [Setup →](https://raia-live.github.io/amfs/guides/mcp/) · [Cursor plugin](https://github.com/raia-live/cursor-plugin) |
+| **Connectors** | Ingest events from PagerDuty, GitHub, Slack, Jira — or [build your own](https://raia-live.github.io/amfs/guides/connectors/). |
+| **Python & TypeScript** | Same API in both languages. Plus [CrewAI](https://raia-live.github.io/amfs/guides/crewai/), LangGraph, LangChain, AutoGen. |
+
 ## Architecture
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│ Review Agent│     │Release Agent│     │  Other Agent │
+│ Agent A      │     │ Agent B      │     │ Agent C      │
+│ (its brain)  │     │ (its brain)  │     │ (its brain)  │
 └──────┬──────┘     └──────┬──────┘     └──────┬──────┘
        │                   │                   │
        └───────────┬───────┴───────────────────┘
                    │
        ┌───────────┴───────────┐
-       │ AgentMemory (CoW)     │  ← Python / TypeScript SDK
+       │ AgentMemory           │  ← Python / TypeScript SDK
+       │ (versioned, branched) │
        └───────────┬───────────┘
                    │
        ┌───────────┴───────────┐
@@ -82,25 +115,13 @@ docker run -p 8080:8080 -v amfs-data:/data ghcr.io/raia-live/amfs
   Adapter    Adapter  Adapter   Adapter
 ```
 
-## Highlights
-
-| | |
-|:--|:--|
-| **CoW Versioning** | Full version history for every entry. `history()` to replay changes. |
-| **Confidence & Outcomes** | Scores adjust when real-world outcomes (deploys, incidents) are recorded. |
-| **Causal Explainability** | `explain()` returns the full decision trace: what was read, by whom, and when. |
-| **Connectors** | Ingest events from PagerDuty, GitHub, Slack, Jira — or [build your own](https://raia-live.github.io/amfs/guides/connectors/). |
-| **Composite Scoring** | Rank results by weighted blend of relevance, recency, and confidence. |
-| **Multi-Scope** | Query across scopes with `search(entity_paths=[...])` and visualize with `tree()`. |
-| **MCP Server** | First-class support for Cursor, Claude Code, and any MCP client. [Setup →](https://raia-live.github.io/amfs/guides/mcp/) · **Cursor:** [cursor-plugin](https://github.com/raia-live/cursor-plugin) (Sense Lab dashboard MCP) |
-| **Integrations** | [CrewAI](https://raia-live.github.io/amfs/guides/crewai/), LangGraph, LangChain, AutoGen. |
-| **Python & TypeScript** | Same API in both languages. |
-
 ## OSS vs Pro
 
-AMFS is open source under [Apache 2.0](LICENSE). The OSS edition includes the full memory engine, SDKs, adapters, connectors, HTTP API, MCP server, and CLI.
+AMFS is open source under [Apache 2.0](LICENSE). The OSS edition gives you the full memory engine — versioned writes, confidence scoring, outcome feedback, causal traces, knowledge graph, hybrid search, git-like timeline on `main`, SDKs, adapters, HTTP API, MCP server, and CLI.
 
-**[AMFS Pro](https://raia-live.github.io/amfs/editions/)** adds enterprise capabilities: multi-tenant isolation (Postgres RLS + RBAC), persistent decision traces, automated pattern detection, an intelligence layer (LLM extraction, memory critic), and a web dashboard.
+**[AMFS Pro](https://raia-live.github.io/amfs/editions/)** unlocks the full Git model: branching, merge, pull requests, access control, tags, rollback, cherry-pick, and fork. Plus multi-tenant SaaS isolation, immutable decision traces, automated pattern detection, an intelligence layer, and a web dashboard.
+
+Think of it this way: OSS gives you a single-branch repo with full history. Pro gives you GitHub.
 
 **[Full comparison →](https://raia-live.github.io/amfs/editions/)**
 
