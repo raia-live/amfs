@@ -586,6 +586,7 @@ class Tag(BaseModel):
     description: str | None = None
     created_by: str
     created_at: datetime | None = None
+    event_id: str | None = None
 
 
 class PullRequestStatus(str, Enum):

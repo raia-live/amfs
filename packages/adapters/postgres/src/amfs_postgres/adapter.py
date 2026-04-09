@@ -2054,12 +2054,12 @@ class PostgresAdapter(AdapterABC):
                 cur.execute(
                     """
                     INSERT INTO amfs_tags
-                        (namespace, name, branch, tagged_at, description, created_by)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                        (namespace, name, branch, tagged_at, description, created_by, event_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING id, created_at
                     """,
                     (tag.namespace, tag.name, tag.branch, tag.tagged_at,
-                     tag.description, tag.created_by),
+                     tag.description, tag.created_by, tag.event_id),
                 )
                 row = cur.fetchone()
         return tag.model_copy(update={
@@ -2113,6 +2113,7 @@ class PostgresAdapter(AdapterABC):
             description=row.get("description"),
             created_by=row["created_by"],
             created_at=row.get("created_at"),
+            event_id=row.get("event_id"),
         )
 
     # ── Pull Requests (Pro) ─────────────────────────────────────────────
