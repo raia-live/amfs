@@ -92,7 +92,7 @@ docker run -p 8080:8080 -v amfs-data:/data ghcr.io/raia-live/amfs
 | **Connectors** | Ingest events from PagerDuty, GitHub, Slack, Jira — or [build your own](https://raia-live.github.io/amfs/guides/connectors/). |
 | **Composite Scoring** | Rank results by weighted blend of relevance, recency, and confidence. |
 | **Multi-Scope** | Query across scopes with `search(entity_paths=[...])` and visualize with `tree()`. |
-| **MCP Server** | First-class support for Cursor, Claude Code, and any MCP client. [Setup →](https://raia-live.github.io/amfs/guides/mcp/) |
+| **MCP Server** | First-class support for Cursor, Claude Code, and any MCP client. [Setup →](https://raia-live.github.io/amfs/guides/mcp/) · **AMFS Pro + Cursor:** [cursor-plugin](https://github.com/raia-live/cursor-plugin) (hosted API, Streamable HTTP) |
 | **Integrations** | [CrewAI](https://raia-live.github.io/amfs/guides/crewai/), LangGraph, LangChain, AutoGen. |
 | **Python & TypeScript** | Same API in both languages. |
 

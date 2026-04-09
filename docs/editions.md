@@ -67,6 +67,7 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 │  │  Trace Detail with Enriched Context · Agent Graph     │ │
 │  │  Sacred Timeline (3D) · Branch Manager · PR Viewer   │ │
 │  │  API Key Console · Audit Viewer · Usage Analytics    │ │
+│  │  Cursor plugin (hosted MCP to Pro API)              │ │
 │  │  Pattern Detection · Memory Tiers · Snapshots        │ │
 │  │  Team Management                                    │ │
 │  └──────────────────────────────────────────────────────┘ │
@@ -505,6 +506,8 @@ exporter.export_trace(trace)  # sends spans to your OTel collector
 ```
 
 ### Pro MCP Server
+
+Pro exposes MCP over **Streamable HTTP** on Raia’s API (default base `https://api.raia.live/mcp`; confirm in your dashboard). Install the official **[Cursor plugin](https://github.com/raia-live/cursor-plugin)** and set **`AMFS_API_KEY`** in your environment—see [MCP setup — AMFS Pro and Cursor](https://raia-live.github.io/amfs/guides/mcp/#amfs-pro-saas-and-cursor).
 
 Extends the OSS MCP server with additional tools:
 

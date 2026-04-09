@@ -70,6 +70,33 @@ After setup, your AI agents have tools across five categories:
 
 ---
 
+## AMFS Pro (SaaS) and Cursor
+
+[AMFS Pro](https://raia-live.github.io/amfs/editions/) hosts MCP for you over **Streamable HTTP**—no local Python process or `uvx` on the developer machine. Use the official **[Cursor plugin](https://github.com/raia-live/cursor-plugin)** to connect Cursor to Raia’s API.
+
+1. Obtain an **API key** and confirm your tenant’s **MCP endpoint URL** in the AMFS Pro dashboard ([raia.live](https://raia.live)).
+2. Set **`AMFS_API_KEY`** in your environment. Cursor resolves [`${env:…}`](https://cursor.com/docs/mcp.md#config-interpolation) in MCP config.
+3. The plugin defaults to **`https://api.raia.live/mcp`**. If your dashboard shows a different URL (region, staging, or custom host), use that value in `.cursor/mcp.json` or in the plugin’s `mcp.json`.
+
+Example (global or project `.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "amfs": {
+      "url": "https://api.raia.live/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:AMFS_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+If your tenant uses **OAuth** instead of API keys, follow the Pro dashboard instructions and [Cursor’s static OAuth MCP documentation](https://cursor.com/docs/mcp.md#static-oauth-for-remote-servers).
+
+---
+
 ## Prerequisites
 
 - Python 3.11+
