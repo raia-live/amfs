@@ -507,7 +507,7 @@ exporter.export_trace(trace)  # sends spans to your OTel collector
 
 ### Pro MCP Server
 
-Pro exposes MCP over **Streamable HTTP** on Sense Lab’s hosted API (default **`https://amfs-login.sense-lab.ai/mcp`**; confirm the exact **MCP URL** in your dashboard). Install the official **[Cursor plugin](https://github.com/raia-live/cursor-plugin)** and set **`AMFS_API_KEY`** in your environment—see [MCP setup — AMFS Pro and Cursor](https://raia-live.github.io/amfs/guides/mcp/#amfs-pro-saas-and-cursor).
+On **Sense Lab**, Cursor uses **`uvx amfs-mcp-server`** with **`AMFS_HTTP_URL`** (dashboard **Server URL**, e.g. `https://amfs-login.sense-lab.ai`) and **`AMFS_API_KEY`**—same JSON as the **Agents** MCP Connection card. Install the **[Cursor plugin](https://github.com/raia-live/cursor-plugin)** or copy that snippet; see [MCP setup — AMFS Pro and Cursor](https://raia-live.github.io/amfs/guides/mcp/#amfs-pro-saas-and-cursor). **Streamable HTTP** (`url` … `/mcp`) is a separate deployment mode for a self-hosted MCP HTTP listener, not the dashboard default.
 
 Extends the OSS MCP server with additional tools:
 
