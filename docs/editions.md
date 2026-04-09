@@ -212,6 +212,24 @@ AMFS is split into two layers: a fully open-source core and a proprietary Pro la
 
 ---
 
+## Hosted SaaS tiers (SenseLab Cloud)
+
+**Stripe, subscriptions, and the tenant control plane** are implemented in the private SenseLab **`amfs-internal`** repository (not in the open-source tree). Self-serve tiers are summarized below; see also [Hosted billing & metering]({{ site.baseurl }}/guides/saas-billing-metering/).
+
+| Tier | Indicative price | Included ops / month | Notes |
+|:-----|:-----------------|:----------------------|:------|
+| **Free** | $0 | 1K | Solo; no team invites; hard cap |
+| **Starter** | $29 | 25K | Entry tier; auto top-up near limit (paid) |
+| **Pro** | $149 | 50K | Production agent teams |
+| **Teams** | $449 | 300K | Org scale; lower overage unit / 10K ops |
+| **Enterprise** | Custom | Custom | SSO, committed volume, SLA |
+
+**Ops (hosted):** read-like calls typically **1 op**, writes **2 ops**, `commit_outcome` **0 ops**. The HTTP + MCP mapping lives in the metering guide linked above.
+
+**Onboarding:** Users must **choose a plan** (including Free) before the dashboard unlocks; paid plans complete **Stripe Checkout** and activation via **webhooks** (not browser success URL alone).
+
+---
+
 ## OSS Layer — What's Included
 
 The open-source layer ([github.com/raia-live/amfs](https://github.com/raia-live/amfs)) provides the full memory primitive: read, write, version, search, and learn from outcomes. It includes a **git-like timeline engine**, branch-aware operations, a connector framework, composite recall scoring, multi-scope search, a **knowledge graph** auto-materialized from writes and outcomes, **hybrid search** (full-text + semantic + composite scoring), **tiered memory** (Hot/Warm/Archive with progressive retrieval), **frequency-modulated decay** (4-signal model), and a **Cortex drift gate** that avoids redundant digest recompilations.
