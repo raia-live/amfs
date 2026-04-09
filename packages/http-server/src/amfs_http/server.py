@@ -1321,6 +1321,18 @@ except ImportError:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Control Plane Plugin (amfs_control_plane — proprietary SaaS billing)
+# ──────────────────────────────────────────────────────────────────────
+
+try:
+    from amfs_control_plane import mount_control_plane  # type: ignore[import-not-found]
+    mount_control_plane(app)
+    logger.info("Control-plane routes mounted (auth, billing, Stripe webhook)")
+except ImportError:
+    pass
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Admin — API Keys
 # ──────────────────────────────────────────────────────────────────────
 
