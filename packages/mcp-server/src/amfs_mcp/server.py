@@ -33,7 +33,7 @@ from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
 from amfs_core.models import AMFSConfig, LayerConfig
 
-from amfs_mcp.agent_id import detect_agent_id
+from amfs_mcp.agent_id import detect_agent_id, detect_platform
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +168,22 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
     mem = _get_memory()
     old_id = mem.agent_id
     mem._tagger.agent_id = name
+
+    try:
+        mem.write(
+            "_system/agents",
+            name,
+            {
+                "description": description or "",
+                "platform": detect_platform(),
+                "previous_identity": old_id,
+                "session_id": mem.session_id,
+            },
+            confidence=1.0,
+        )
+    except Exception:
+        logger.debug("Failed to persist agent description", exc_info=True)
+
     result: dict[str, Any] = {
         "previous_identity": old_id,
         "new_identity": name,

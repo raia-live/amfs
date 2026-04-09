@@ -30,12 +30,20 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
 
 ## Workflow
 
-### First: set your identity
-At the start of every conversation, identify yourself so memories and traces are attributed correctly:
+### MANDATORY FIRST STEP: Set your identity
+
+> **You MUST call `amfs_set_identity` before doing anything else.** Without it, all your work is attributed to a generic default and you won't appear as a distinct agent on the AMFS dashboard.
+
 ```
-amfs_set_identity("<descriptive-name>", "<what you're working on>")
+amfs_set_identity("<role-name>", "<one-line description of current task>")
 ```
-Use kebab-case based on the task (e.g. `"dashboard-fixer"`, `"auth-debugger"`, `"mcp-integration"`).
+
+**Naming rules:**
+- Use **kebab-case role/domain names** that persist across conversations about the same topic.
+- Good: `"dashboard-agent"`, `"stripe-agent"`, `"api-agent"`, `"infra-agent"`, `"mcp-agent"`
+- Bad: `"fix-button-color"` (too specific — won't be reused), `"agent-1"` (meaningless)
+- If continuing work a previous agent started, **use the same name** to build on their knowledge.
+- The description should say what you're doing *right now* (e.g. `"Fixing tag rollback for slashed names"`).
 
 ### Before starting work
 Get a compiled briefing from the Memory Cortex first — this gives you pre-compiled knowledge about the entity you're about to work on, including what other agents know, recent risks, external events, and confidence-ranked facts:

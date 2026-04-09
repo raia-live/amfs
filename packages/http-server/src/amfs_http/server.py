@@ -888,13 +888,28 @@ async def list_agents(
         if e.provenance.written_at > agent_data[aid]["last_active"]:
             agent_data[aid]["last_active"] = e.provenance.written_at
 
+    agent_descriptions: dict[str, dict[str, Any]] = {}
+    try:
+        desc_entries = mem.list("_system/agents")
+        for de in desc_entries:
+            val = de.value if isinstance(de.value, dict) else {}
+            agent_descriptions[de.key] = {
+                "description": val.get("description", ""),
+                "platform": val.get("platform", ""),
+            }
+    except Exception:
+        pass
+
     agents = []
     for ad in sorted(agent_data.values(), key=lambda x: x["entries_written"], reverse=True):
+        desc_info = agent_descriptions.get(ad["agent_id"], {})
         agents.append({
             "agentId": ad["agent_id"],
             "entriesWritten": ad["entries_written"],
             "entitiesTouched": len(ad["entities_touched"]),
             "lastActive": ad["last_active"].isoformat() if ad["last_active"] else None,
+            "description": desc_info.get("description", ""),
+            "platform": desc_info.get("platform", ""),
         })
     return {"agents": agents}
 
