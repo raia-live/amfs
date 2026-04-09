@@ -292,25 +292,44 @@ For team sharing across machines, use Postgres:
 
 ## Agent Identity
 
-Each Cursor chat or Claude conversation should have its own meaningful identity. The recommended approach is to call `amfs_set_identity` at the start of every conversation:
+Every Cursor chat, Claude Code conversation, or agent session **must** call `amfs_set_identity` at the start. Without it, all work is attributed to a generic default and the agent won't appear as a distinct entry on the AMFS dashboard.
 
 ```
-amfs_set_identity("dashboard-fixer", "Fixing entity detail pages and auth headers")
+amfs_set_identity("dashboard-agent", "Fixing entity detail pages and auth headers")
 ```
 
-This sets the agent identity for the current session — all memories, traces, and cross-agent reads are attributed to this name. The agent rules (`amfs-memory.mdc` / `CLAUDE.md`) already instruct agents to do this automatically.
+This sets the agent identity for the current session — all memories, traces, and cross-agent reads are attributed to this name. The description is persisted so the dashboard can show what each agent is working on.
 
-### Default Identity
+### Naming Conventions
 
-If `amfs_set_identity` is not called, the MCP server auto-detects from the environment:
+Use **kebab-case role/domain names** that persist across conversations about the same topic:
 
-| Environment | Detected ID |
-|:------------|:------------|
-| Cursor | `cursor/<username>` |
-| Claude Code | `claude-code/<username>` |
-| Other | `agent/<username>` |
+| Good | Bad |
+|:-----|:----|
+| `dashboard-agent` | `fix-button-color` (too specific, won't be reused) |
+| `stripe-agent` | `agent-1` (meaningless) |
+| `api-agent` | `session-42` (ephemeral) |
+| `infra-agent` | `amfs-server` (too generic) |
 
-Override the default with `AMFS_AGENT_ID`:
+If continuing work a previous agent started, **use the same name** to build on their knowledge.
+
+The agent rules (`amfs-memory.mdc` / `CLAUDE.md`) already instruct agents to do this automatically.
+
+### Default Identity (Auto-Detection)
+
+If `amfs_set_identity` is not called, the MCP server auto-detects from the environment. IDE platform signals take priority:
+
+| Priority | Environment | Detected ID |
+|:---------|:------------|:------------|
+| 1 | Cursor (`CURSOR_SESSION_ID` or `VSCODE_PID` set) | `cursor/<username>` |
+| 2 | Claude Code (`CLAUDE_CODE_SESSION` set) | `claude-code/<username>` |
+| 3 | `AMFS_AGENT_ID` env var (servers, CI, scripts) | value of `AMFS_AGENT_ID` |
+| 4 | Fallback | `agent/<username>` |
+
+{: .note }
+IDE signals are checked **before** `AMFS_AGENT_ID`. This prevents server-side env vars (e.g. `AMFS_AGENT_ID=amfs-server` on Cloud Run) from leaking into local MCP sessions when inherited by the IDE's shell. `AMFS_AGENT_ID` is still honoured in headless, CI, and server contexts where no IDE signals are present.
+
+For non-IDE environments (CI bots, deploy scripts), set `AMFS_AGENT_ID`:
 
 ```json
 {

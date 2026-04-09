@@ -8,13 +8,20 @@ alwaysApply: true
 
 You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives you a **persistent brain** — memory that survives across sessions, agents, and machines. Use it to build institutional knowledge over time.
 
-## First thing: SET YOUR IDENTITY
+## MANDATORY FIRST STEP: Set Your Identity
 
-- **At the start of every conversation**, set your identity so memories and traces are attributed to you specifically — not a generic "amfs-server".
-  ```
-  amfs_set_identity("<descriptive-name>", "<one-line description>")
-  ```
-  Use a short kebab-case name based on what you're working on (e.g. `"dashboard-fixer"`, `"auth-debugger"`, `"mcp-integration"`).
+> **You MUST call `amfs_set_identity` before doing anything else.** Without it, all your work is attributed to a generic default and you won't appear as a distinct agent on the AMFS dashboard.
+
+```
+amfs_set_identity("<role-name>", "<one-line description of current task>")
+```
+
+**Naming rules:**
+- Use **kebab-case role/domain names** that persist across conversations about the same topic.
+- Good: `"dashboard-agent"`, `"stripe-agent"`, `"api-agent"`, `"infra-agent"`, `"mcp-agent"`
+- Bad: `"fix-button-color"` (too specific — won't be reused), `"agent-1"` (meaningless)
+- If you're continuing work a previous agent started, **use the same name** to build on their knowledge.
+- The description should say what you're doing *right now* (e.g. `"Fixing tag rollback for slashed names"`).
 
 ## When to GET BRIEFED (start every session with context)
 
