@@ -319,6 +319,27 @@ async def write_entry(
         resource=f"{req.entity_path}/{req.key}",
         ip_address=request.client.host if request.client else None,
     )
+
+    try:
+        from amfs_core.models import GraphEdge
+        agent = entry.provenance.agent_id
+        ek = f"{entry.entity_path}/{entry.key}"
+        mem._adapter.upsert_graph_edge(
+            GraphEdge(
+                source_entity=agent,
+                source_type="agent",
+                relation="wrote",
+                target_entity=ek,
+                target_type="entry",
+                confidence=entry.confidence,
+                provenance={"agent_id": agent, "trigger": "write"},
+            ),
+            namespace=mem.namespace,
+            branch=entry.branch or "main",
+        )
+    except Exception:
+        logger.debug("Failed to materialize wrote edge", exc_info=True)
+
     return _entry_to_response(entry)
 
 
