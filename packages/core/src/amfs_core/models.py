@@ -102,6 +102,27 @@ class ArtifactRef(BaseModel):
     size_bytes: int | None = None
 
 
+class QualityIssue(BaseModel):
+    """A single quality issue found during write-time evaluation."""
+
+    type: str
+    message: str
+    suggestion: str
+
+
+class QualityReport(BaseModel):
+    """Quality assessment of a memory write.
+
+    Returned alongside the stored entry so agents can improve low-quality
+    memories.  A score >= 0.8 is considered acceptable; below that the
+    ``issues`` list contains actionable suggestions.
+    """
+
+    score: float = Field(ge=0.0, le=1.0)
+    action: str = "stored_ok"
+    issues: list[QualityIssue] = Field(default_factory=list)
+
+
 class MemoryEntry(BaseModel):
     """A single versioned memory entry within the AMFS namespace."""
 

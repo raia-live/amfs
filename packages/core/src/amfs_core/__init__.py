@@ -45,6 +45,8 @@ from amfs_core.models import (
     OutcomeRecord,
     OutcomeType,
     Provenance,
+    QualityIssue,
+    QualityReport,
     QueryEvent,
     SearchQuery,
     SemanticQuery,
@@ -52,6 +54,11 @@ from amfs_core.models import (
     TraceEntry,
 )
 from amfs_core.outcome import OutcomeBackPropagator
+from amfs_core.quality import (
+    HeuristicQualityEvaluator,
+    MemoryQualityEvaluator,
+    NoOpQualityEvaluator,
+)
 
 __all__ = [
     "AMFSConfig",
@@ -92,10 +99,15 @@ __all__ = [
     "PRReviewStatus",
     "PullRequest",
     "PullRequestStatus",
+    "HeuristicQualityEvaluator",
+    "MemoryQualityEvaluator",
+    "NoOpQualityEvaluator",
     "OutcomeBackPropagator",
     "OutcomeRecord",
     "OutcomeType",
     "Provenance",
+    "QualityIssue",
+    "QualityReport",
     "QueryEvent",
     "ReadTracker",
     "SearchQuery",
