@@ -17,6 +17,9 @@ import httpx
 from amfs_core.abc import AdapterABC, WatchHandle
 from amfs_core.models import (
     DecisionTrace,
+    Event,
+    EventType,
+    GraphEdge,
     MemoryEntry,
     MemoryStats,
     OutcomeRecord,
@@ -209,3 +212,54 @@ class HttpAdapter(AdapterABC):
         if data.get("error"):
             return None
         return DecisionTrace.model_validate(data)
+
+    def log_event(self, event: Event) -> Event:
+        body: dict[str, Any] = {
+            "agent_id": event.agent_id,
+            "event_type": event.event_type.value if isinstance(event.event_type, EventType) else str(event.event_type),
+            "summary": event.summary,
+            "details": event.details,
+            "branch": event.branch,
+        }
+        if event.actor_agent_id:
+            body["actor_agent_id"] = event.actor_agent_id
+        data = self._post("/api/v1/timeline/events", body)
+        return Event.model_validate(data)
+
+    def list_events(
+        self,
+        agent_id: str,
+        namespace: str = "default",
+        *,
+        branch: str | None = None,
+        event_type: str | None = None,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[Event]:
+        params: dict[str, Any] = {"limit": limit}
+        if branch:
+            params["branch"] = branch
+        if event_type:
+            params["event_type"] = event_type
+        if since:
+            params["since"] = since.isoformat()
+        data = self._get(f"/api/v1/agents/{agent_id}/timeline", **params)
+        return [Event.model_validate(e) for e in data.get("events", [])]
+
+    def upsert_graph_edge(
+        self,
+        edge: GraphEdge,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> None:
+        body = {
+            "source_entity": edge.source_entity,
+            "source_type": edge.source_type,
+            "relation": edge.relation,
+            "target_entity": edge.target_entity,
+            "target_type": edge.target_type,
+            "provenance": edge.provenance,
+            "branch": branch,
+        }
+        self._post("/api/v1/graph/edges", body)

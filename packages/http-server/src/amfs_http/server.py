@@ -25,11 +25,21 @@ from typing import Any
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
-from amfs_core.models import AMFSConfig, LayerConfig, MemoryEntry, SearchQuery
+from pydantic import BaseModel, Field
+from amfs_core.models import (
+    AMFSConfig,
+    Event,
+    EventType,
+    GraphEdge,
+    LayerConfig,
+    MemoryEntry,
+    SearchQuery,
+)
 
 from amfs_http.auth import verify_api_key
 from amfs_http.models import (
@@ -327,7 +337,6 @@ async def write_entry(
     )
 
     try:
-        from amfs_core.models import GraphEdge
         agent = entry.provenance.agent_id
         ek = f"{entry.entity_path}/{entry.key}"
         mem._adapter.upsert_graph_edge(
@@ -671,7 +680,6 @@ async def get_trace(
     mem = _get_memory()
     trace = mem._adapter.get_trace(trace_id)
     if trace is None:
-        from fastapi.responses import JSONResponse
         return JSONResponse({"error": "Trace not found"}, status_code=404)
     return trace.model_dump(mode="json")
 
@@ -681,8 +689,6 @@ async def explain_trace(
     trace_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    from fastapi.responses import JSONResponse
-
     api_key = os.environ.get("AMFS_LLM_API_KEY", "")
     if not api_key:
         return JSONResponse(
@@ -1097,9 +1103,12 @@ async def agent_activity(
     limit: int = Query(100),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    """Timeline of writes and outcomes for this agent."""
+    """Timeline of writes, outcomes, reads, and other events for this agent."""
     mem = _get_memory()
-    entries = [e for e in mem.list() if e.provenance.agent_id == agent_id]
+    entries = [
+        e for e in mem.list()
+        if e.provenance.agent_id == agent_id and not e.entity_path.startswith("_system/")
+    ]
     entries.sort(key=lambda e: e.provenance.written_at, reverse=True)
 
     writes = [
@@ -1126,7 +1135,23 @@ async def agent_activity(
         for t in traces if t.outcome_ref
     ]
 
-    timeline = sorted(writes + outcomes, key=lambda x: x["timestamp"], reverse=True)[:limit]
+    events = mem._adapter.list_events(agent_id, mem.namespace, limit=limit)
+    event_items = [
+        {
+            "type": evt.event_type.value if hasattr(evt.event_type, "value") else str(evt.event_type),
+            "summary": evt.summary,
+            "details": evt.details,
+            "actorAgentId": evt.actor_agent_id,
+            "timestamp": evt.created_at.isoformat(),
+        }
+        for evt in events
+    ]
+
+    timeline = sorted(
+        writes + outcomes + event_items,
+        key=lambda x: x["timestamp"],
+        reverse=True,
+    )[:limit]
     return {"agentId": agent_id, "timeline": timeline}
 
 
@@ -1154,6 +1179,71 @@ async def agent_timeline(
     }
 
 
+class LogEventRequest(BaseModel):
+    agent_id: str
+    event_type: str
+    summary: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+    actor_agent_id: str | None = None
+    branch: str = "main"
+
+
+@app.post("/api/v1/timeline/events")
+async def log_timeline_event(
+    body: LogEventRequest,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Log a timeline event for an agent."""
+    mem = _get_memory()
+    try:
+        event_type_enum = EventType(body.event_type)
+    except ValueError:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Unknown event_type: {body.event_type}"},
+        )
+    event = Event(
+        namespace=mem.namespace,
+        agent_id=body.agent_id,
+        branch=body.branch,
+        event_type=event_type_enum,
+        summary=body.summary,
+        details=body.details,
+        actor_agent_id=body.actor_agent_id,
+    )
+    saved = mem._adapter.log_event(event)
+    return saved.model_dump(mode="json")
+
+
+class UpsertGraphEdgeRequest(BaseModel):
+    source_entity: str
+    source_type: str = "agent"
+    relation: str
+    target_entity: str
+    target_type: str = "agent"
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    branch: str = "main"
+
+
+@app.post("/api/v1/graph/edges")
+async def upsert_graph_edge_endpoint(
+    body: UpsertGraphEdgeRequest,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Create or update a knowledge graph edge."""
+    mem = _get_memory()
+    edge = GraphEdge(
+        source_entity=body.source_entity,
+        source_type=body.source_type,
+        relation=body.relation,
+        target_entity=body.target_entity,
+        target_type=body.target_type,
+        provenance=body.provenance,
+    )
+    mem._adapter.upsert_graph_edge(edge, namespace=mem.namespace, branch=body.branch)
+    return {"status": "ok"}
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Agent Snapshots
 # ──────────────────────────────────────────────────────────────────────
@@ -1169,8 +1259,6 @@ async def create_snapshot(
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Create a named snapshot of an agent's brain state."""
-    from amfs_core.models import Event, EventType
-
     mem = _get_memory()
     snapshot_id = f"snap-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
     snapshot_value = {
@@ -1285,8 +1373,6 @@ async def recover_snapshot(
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Recover an agent's memory to the state captured in a snapshot."""
-    from amfs_core.models import Event, EventType
-
     mem = _get_memory()
     key = f"{agent_id}/{snapshot_id}"
     entry = mem.recall(SNAPSHOT_ENTITY, key)
@@ -1325,6 +1411,58 @@ async def recover_snapshot(
         "snapshot_id": snapshot_id,
         "entries_restored": count,
         "recovered_to": created_at,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Agent-scoped branches & pull requests
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/agents/{agent_id}/branches")
+async def agent_branches(
+    agent_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Branches created or merged by this agent."""
+    mem = _get_memory()
+    try:
+        all_branches = mem.list_branches()  # type: ignore[attr-defined]
+    except (AttributeError, Exception):
+        return {"agentId": agent_id, "branches": [], "count": 0}
+    scoped = [
+        b for b in all_branches
+        if getattr(b, "created_by", None) == agent_id
+        or getattr(b, "merged_by", None) == agent_id
+    ]
+    return {
+        "agentId": agent_id,
+        "branches": [b.model_dump(mode="json") if hasattr(b, "model_dump") else b for b in scoped],
+        "count": len(scoped),
+    }
+
+
+@app.get("/api/v1/agents/{agent_id}/pull-requests")
+async def agent_pull_requests(
+    agent_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Pull requests created, merged, or closed by this agent."""
+    mem = _get_memory()
+    try:
+        all_prs = mem.list_pull_requests()  # type: ignore[attr-defined]
+    except (AttributeError, Exception):
+        return {"agentId": agent_id, "pullRequests": [], "count": 0}
+    scoped = [
+        pr for pr in all_prs
+        if getattr(pr, "created_by", None) == agent_id
+        or getattr(pr, "merged_by", None) == agent_id
+        or getattr(pr, "closed_by", None) == agent_id
+    ]
+    return {
+        "agentId": agent_id,
+        "pullRequests": [pr.model_dump(mode="json") if hasattr(pr, "model_dump") else pr for pr in scoped],
+        "count": len(scoped),
     }
 
 
@@ -2303,8 +2441,6 @@ async def graph_neighbors(
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Traverse the knowledge graph from an entity."""
-    from fastapi.responses import JSONResponse
-
     mem = _get_memory()
     try:
         edges = mem.graph_neighbors(
@@ -2405,8 +2541,6 @@ async def graph_backfill(
     outcome causal chains → 'informed' + 'read' edges,
     agent writes → 'wrote' edges.
     """
-    from amfs_core.models import GraphEdge
-
     mem = _get_memory()
     entries = mem.list()
     try:

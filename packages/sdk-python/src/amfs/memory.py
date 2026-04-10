@@ -864,6 +864,25 @@ class AgentMemory:
             logger.debug("Failed to log cross-agent read event", exc_info=True)
 
         try:
+            self._adapter.log_event(Event(
+                namespace=self.namespace,
+                agent_id=agent_id,
+                branch=self._branch,
+                event_type=EventType.CROSS_AGENT_READ,
+                summary=f"Memory {entity_path}/{key} was read by agent '{self.agent_id}'",
+                actor_agent_id=self.agent_id,
+                details={
+                    "reader_agent_id": self.agent_id,
+                    "entity_path": entity_path,
+                    "key": key,
+                    "version": entry.version,
+                    "direction": "inbound",
+                },
+            ))
+        except Exception:
+            logger.debug("Failed to log inbound cross-agent read event", exc_info=True)
+
+        try:
             self._adapter.upsert_graph_edge(
                 GraphEdge(
                     source_entity=self.agent_id,
