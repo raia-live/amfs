@@ -84,12 +84,41 @@ class CortexWorker:
         }
 
     def run(self) -> None:
-        """Main event loop. Blocks until stop() is called."""
-        import psycopg
+        """Main event loop. Blocks until stop() is called.
 
+        Automatically reconnects on connection loss with exponential backoff.
+        """
         self._started_at = time.monotonic()
         logger.info("Cortex worker starting (debounce=%dms, advisory_lock=%s)",
                      self._debounce_ms, self._use_advisory_lock)
+
+        backoff = 1.0
+        max_backoff = 60.0
+
+        while not self._stop.is_set():
+            try:
+                self._run_once()
+                # Clean exit (stop() was called)
+                break
+            except Exception:
+                if self._stop.is_set():
+                    break
+                logger.exception(
+                    "Cortex worker connection lost — reconnecting in %.0fs", backoff
+                )
+                self._activity_log.append({
+                    "type": "connection_lost",
+                    "backoff_s": backoff,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+                self._stop.wait(backoff)
+                backoff = min(backoff * 2, max_backoff)
+
+        logger.info("Cortex worker stopped")
+
+    def _run_once(self) -> None:
+        """Single connection lifecycle. Raises on connection loss."""
+        import psycopg
 
         conn = psycopg.connect(self._dsn, autocommit=True)
         try:
@@ -116,11 +145,8 @@ class CortexWorker:
                         break
                     self._handle_notify(notify)
 
-        except Exception:
-            logger.exception("Cortex worker error")
         finally:
             conn.close()
-            logger.info("Cortex worker stopped")
 
     def stop(self) -> None:
         """Signal the worker to stop."""
