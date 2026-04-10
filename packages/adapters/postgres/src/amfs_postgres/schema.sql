@@ -224,10 +224,11 @@ CREATE TABLE IF NOT EXISTS amfs_events (
     actor_agent_id TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT chk_event_type CHECK (event_type IN (
-        'write', 'outcome', 'webhook', 'brief_compiled', 'cross_agent_read',
+        'write', 'read', 'outcome', 'webhook', 'brief_compiled', 'cross_agent_read',
         'branch_created', 'branch_merged', 'branch_closed',
         'access_granted', 'access_revoked',
-        'rollback', 'tag_created', 'cherry_pick', 'fork'
+        'rollback', 'tag_created', 'cherry_pick', 'fork',
+        'snapshot_taken', 'snapshot_recovered'
     ))
 );
 
