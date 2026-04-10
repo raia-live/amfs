@@ -34,12 +34,32 @@ from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
 from amfs_core.abc import AdapterABC
 from amfs_core.models import AMFSConfig, LayerConfig
+from amfs_core.quality import (
+    HeuristicQualityEvaluator,
+    MemoryQualityEvaluator,
+    NoOpQualityEvaluator,
+)
 
 from amfs_mcp.agent_id import detect_agent_id, detect_platform
 
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP(name="amfs")
+
+# ---------------------------------------------------------------------------
+# Quality evaluation
+# ---------------------------------------------------------------------------
+
+_quality_evaluator: MemoryQualityEvaluator | None = None
+
+
+def _get_quality_evaluator() -> MemoryQualityEvaluator:
+    """Return the singleton quality evaluator, respecting AMFS_QUALITY_FEEDBACK."""
+    global _quality_evaluator
+    if _quality_evaluator is None:
+        enabled = os.environ.get("AMFS_QUALITY_FEEDBACK", "1") not in ("0", "false", "off")
+        _quality_evaluator = HeuristicQualityEvaluator() if enabled else NoOpQualityEvaluator()
+    return _quality_evaluator
 
 # ---------------------------------------------------------------------------
 # Identity-scoped memory management
@@ -334,7 +354,31 @@ def amfs_write(
         artifact_refs=parsed_artifact_refs,
         shared=shared,
     )
-    return json.dumps(_serialize_entry(entry), default=str)
+
+    evaluator = _get_quality_evaluator()
+    quality_report = None
+    try:
+        existing_entries = mem.list(entity_path)
+        existing_keys = [e.key for e in existing_entries if e.key != key]
+    except Exception:
+        existing_keys = []
+    try:
+        quality_report = evaluator.evaluate(
+            parsed_value,
+            entity_path=entity_path,
+            key=key,
+            confidence=confidence,
+            memory_type=memory_type,
+            pattern_refs=pattern_refs,
+            existing_keys=existing_keys,
+        )
+    except Exception:
+        logger.debug("Quality evaluation failed, skipping", exc_info=True)
+
+    result: dict[str, Any] = {"entry": _serialize_entry(entry)}
+    if quality_report is not None:
+        result["quality"] = quality_report.model_dump(mode="json")
+    return json.dumps(result, default=str)
 
 
 @mcp.tool

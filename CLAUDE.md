@@ -124,6 +124,16 @@ Use `{repo}/{service-or-module}` paths:
 - **0.4-0.6** — hypothesis, needs validation
 - **< 0.4** — speculative signal
 
+## Quality Feedback on Writes
+
+When you call `amfs_write`, the response includes a `quality` field with a score and any issues found.
+If the quality score is below 0.8, review the `issues` array and consider calling `amfs_write` again
+with an improved value. Common issues:
+- **too_short**: Value lacks detail. Add specifics: what, why, key parameters.
+- **missing_pattern_refs**: Related entries exist. Add pattern_refs to link them.
+- **belief_no_rationale**: Beliefs should explain reasoning (use "because", "hypothesis").
+- **overconfident_belief**: Beliefs should have confidence < 0.9.
+
 ## Guidelines
 
 - **Always start with `amfs_briefing`** — this gives you compiled, ranked knowledge from the Cortex before you dig into specifics

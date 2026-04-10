@@ -87,12 +87,14 @@ class TestMCPTools:
     def test_amfs_write_and_read(self) -> None:
         from amfs_mcp.server import amfs_read, amfs_write
 
-        result = json.loads(amfs_write("svc", "retry", '{"max_retries": 3}'))
+        raw = json.loads(amfs_write("svc", "retry", '{"max_retries": 3}'))
+        result = raw["entry"]
         assert result["entity_path"] == "svc"
         assert result["key"] == "retry"
         assert result["value"] == {"max_retries": 3}
         assert result["provenance"]["agent_id"] == "test-mcp-agent"
         assert result["version"] == 1
+        assert "quality" in raw
 
         read_result = json.loads(amfs_read("svc", "retry"))
         assert read_result["value"] == {"max_retries": 3}
@@ -106,22 +108,22 @@ class TestMCPTools:
     def test_amfs_write_plain_text(self) -> None:
         from amfs_mcp.server import amfs_write
 
-        result = json.loads(amfs_write("svc", "note", "plain text value"))
-        assert result["value"] == "plain text value"
+        raw = json.loads(amfs_write("svc", "note", "plain text value"))
+        assert raw["entry"]["value"] == "plain text value"
 
     def test_amfs_write_with_confidence(self) -> None:
         from amfs_mcp.server import amfs_write
 
-        result = json.loads(amfs_write("svc", "risky", "might fail", confidence=0.6))
-        assert result["confidence"] == 0.6
+        raw = json.loads(amfs_write("svc", "risky", "might fail", confidence=0.6))
+        assert raw["entry"]["confidence"] == 0.6
 
     def test_amfs_write_with_pattern_refs(self) -> None:
         from amfs_mcp.server import amfs_write
 
-        result = json.loads(
+        raw = json.loads(
             amfs_write("svc", "pattern", "retry logic", pattern_refs=["timeout-handling"])
         )
-        assert result["provenance"]["pattern_refs"] == ["timeout-handling"]
+        assert raw["entry"]["provenance"]["pattern_refs"] == ["timeout-handling"]
 
     def test_amfs_list_empty(self) -> None:
         from amfs_mcp.server import amfs_list
@@ -264,6 +266,40 @@ class TestMCPTools:
         serialized = _serialize_entry(entry)
         assert "embedding" not in serialized
 
+    # -- quality feedback tests --
+
+    def test_amfs_write_quality_feedback_short_value(self) -> None:
+        from amfs_mcp.server import amfs_write
+
+        raw = json.loads(amfs_write("svc", "k", "short"))
+        assert "quality" in raw
+        assert raw["quality"]["score"] < 0.8
+        types = [i["type"] for i in raw["quality"]["issues"]]
+        assert "too_short" in types
+
+    def test_amfs_write_quality_good_structured_value(self) -> None:
+        from amfs_mcp.server import amfs_write
+
+        raw = json.loads(amfs_write(
+            "svc", "retry-config",
+            '{"max_retries": 3, "backoff": "exponential", "timeout_ms": 5000}',
+        ))
+        assert "quality" in raw
+        assert raw["quality"]["score"] >= 0.8
+        assert raw["quality"]["action"] == "stored_ok"
+
+    def test_amfs_write_quality_disabled(self) -> None:
+        import amfs_mcp.server as srv
+
+        srv._quality_evaluator = None
+        with patch.dict(os.environ, {"AMFS_QUALITY_FEEDBACK": "0"}, clear=False):
+            from amfs_mcp.server import amfs_write
+
+            raw = json.loads(amfs_write("svc", "k", "short"))
+            assert raw["quality"]["score"] == 1.0
+            assert raw["quality"]["issues"] == []
+        srv._quality_evaluator = None
+
 
 # ---------------------------------------------------------------------------
 # Identity conflict guard tests
@@ -349,8 +385,8 @@ class TestIdentityGuard:
         from amfs_mcp.server import amfs_set_identity, amfs_write
 
         amfs_set_identity("writer-agent")
-        result = json.loads(amfs_write("svc", "key", '"value"'))
-        assert result["provenance"]["agent_id"] == "writer-agent"
+        raw = json.loads(amfs_write("svc", "key", '"value"'))
+        assert raw["entry"]["provenance"]["agent_id"] == "writer-agent"
 
 
 # ---------------------------------------------------------------------------

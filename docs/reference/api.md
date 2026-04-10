@@ -665,6 +665,44 @@ amfs_write(
 
 Each item in `artifact_refs` should be a dict with `uri` (required), and optionally `media_type`, `label`, and `size_bytes`.
 
+**Response format:**
+
+The response wraps the stored entry with a quality assessment:
+
+```json
+{
+  "entry": { /* full MemoryEntry fields */ },
+  "quality": {
+    "score": 0.85,
+    "action": "stored_ok",
+    "issues": []
+  }
+}
+```
+
+When quality issues are detected, `action` is `"stored_with_suggestions"` and `issues` contains actionable feedback:
+
+```json
+{
+  "entry": { /* ... */ },
+  "quality": {
+    "score": 0.55,
+    "action": "stored_with_suggestions",
+    "issues": [
+      {
+        "type": "too_short",
+        "message": "Value is only 12 characters...",
+        "suggestion": "Rewrite with specific details..."
+      }
+    ]
+  }
+}
+```
+
+Issue types: `too_short`, `unstructured`, `missing_pattern_refs`, `belief_no_rationale`, `overconfident_belief`.
+
+Quality feedback can be disabled by setting `AMFS_QUALITY_FEEDBACK=0`.
+
 ### amfs_search
 
 ```

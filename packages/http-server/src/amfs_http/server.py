@@ -40,6 +40,7 @@ from amfs_core.models import (
     MemoryEntry,
     SearchQuery,
 )
+from amfs_core.quality import HeuristicQualityEvaluator
 
 from amfs_http.auth import verify_api_key
 from amfs_http.models import (
@@ -291,6 +292,43 @@ async def read_entry(
     if entry is None:
         return {"status": "not_found", "entity_path": entity_path, "key": key}
     return _entry_to_response(entry)
+
+
+@app.get("/api/v1/quality/{entity_path:path}/{key}")
+async def entry_quality(
+    entity_path: str,
+    key: str,
+    branch: str = Query("main"),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Compute a quality report for a stored entry on demand."""
+    mem = _get_memory()
+    entry = mem.read(entity_path, key, branch=branch)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    try:
+        existing_entries = mem.list(entity_path)
+        existing_keys = [e.key for e in existing_entries if e.key != key]
+    except Exception:
+        existing_keys = []
+
+    evaluator = HeuristicQualityEvaluator()
+    mt = entry.memory_type.value if hasattr(entry.memory_type, "value") else str(entry.memory_type)
+    report = evaluator.evaluate(
+        entry.value,
+        entity_path=entity_path,
+        key=key,
+        confidence=entry.confidence,
+        memory_type=mt,
+        pattern_refs=list(entry.provenance.pattern_refs),
+        existing_keys=existing_keys,
+    )
+    return {
+        "entity_path": entity_path,
+        "key": key,
+        "quality": report.model_dump(mode="json"),
+    }
 
 
 @app.post("/api/v1/entries")
