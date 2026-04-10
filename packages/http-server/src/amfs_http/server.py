@@ -1366,6 +1366,18 @@ def _get_db_pool():
     return None
 
 
+def _get_namespace() -> str:
+    """Return the namespace for the current adapter.
+
+    All admin queries MUST use this to scope data to the correct tenant.
+    """
+    mem = _get_memory()
+    adapter = mem._adapter
+    if hasattr(adapter, "_namespace"):
+        return adapter._namespace
+    return "default"
+
+
 def _audit_log(
     action: str,
     *,
@@ -1378,14 +1390,15 @@ def _audit_log(
     pool = _get_db_pool()
     if pool is None:
         return
+    ns = _get_namespace()
     try:
         with pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO amfs_audit_log
-                           (actor_type, actor_name, action, resource, ip_address)
-                       VALUES (%s, %s, %s, %s, %s)""",
-                    (actor_type, actor_name, action, resource, ip_address),
+                           (namespace, actor_type, actor_name, action, resource, ip_address)
+                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                    (ns, actor_type, actor_name, action, resource, ip_address),
                 )
     except Exception:
         logger.debug("Failed to write audit log", exc_info=True)
@@ -1398,12 +1411,16 @@ async def list_api_keys(
     pool = _get_db_pool()
     if pool is None:
         return {"keys": []}
+    ns = _get_namespace()
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """SELECT id, name, prefix, key_type, active, scopes,
                           rate_limit_rpm, last_used, created_at, expires_at
-                   FROM amfs_api_keys ORDER BY created_at DESC"""
+                   FROM amfs_api_keys
+                   WHERE namespace = %s
+                   ORDER BY created_at DESC""",
+                (ns,),
             )
             rows = cur.fetchall()
     keys = []
@@ -1439,15 +1456,17 @@ async def create_api_key(
     raw_key = f"amfs_{secrets.token_urlsafe(32)}"
     prefix = raw_key[:12]
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    ns = _get_namespace()
 
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO amfs_api_keys
-                       (name, key_hash, prefix, key_type, scopes, rate_limit_rpm, expires_at)
-                   VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s)
+                       (namespace, name, key_hash, prefix, key_type, scopes, rate_limit_rpm, expires_at)
+                   VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s)
                    RETURNING id, created_at""",
                 (
+                    ns,
                     req.name,
                     key_hash,
                     prefix,
@@ -1484,11 +1503,14 @@ async def revoke_api_key(
     pool = _get_db_pool()
     if pool is None:
         return {"error": "API key management requires a Postgres backend"}
+    ns = _get_namespace()
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE amfs_api_keys SET active = FALSE WHERE id = %s::uuid RETURNING id, name",
-                (key_id,),
+                """UPDATE amfs_api_keys SET active = FALSE
+                   WHERE id = %s::uuid AND namespace = %s
+                   RETURNING id, name""",
+                (key_id, ns),
             )
             row = cur.fetchone()
     if row is None:
@@ -1516,8 +1538,9 @@ async def list_audit_log(
     if pool is None:
         return {"entries": []}
 
-    conditions = ["1=1"]
-    params: list[Any] = []
+    ns = _get_namespace()
+    conditions = ["namespace = %s"]
+    params: list[Any] = [ns]
 
     if action is not None and action != "all":
         conditions.append("action = %s")
@@ -1603,6 +1626,7 @@ async def list_teams(
     pool = _get_db_pool()
     if pool is None:
         return {"teams": []}
+    ns = _get_namespace()
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -1612,8 +1636,10 @@ async def list_teams(
                    FROM amfs_teams t
                    LEFT JOIN amfs_team_members m
                        ON m.team_id = t.id AND m.removed_at IS NULL
+                   WHERE t.namespace = %s
                    GROUP BY t.id
-                   ORDER BY t.created_at DESC"""
+                   ORDER BY t.created_at DESC""",
+                (ns,),
             )
             rows = cur.fetchall()
     return {
@@ -1641,13 +1667,14 @@ async def create_team(
     pool = _get_db_pool()
     if pool is None:
         return {"error": "Team management requires a Postgres backend"}
+    ns = _get_namespace()
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO amfs_teams (name, slug, description)
-                   VALUES (%s, %s, %s)
+                """INSERT INTO amfs_teams (namespace, name, slug, description)
+                   VALUES (%s, %s, %s, %s)
                    RETURNING id, created_at, updated_at""",
-                (req.name, req.slug, req.description),
+                (ns, req.name, req.slug, req.description),
             )
             row = cur.fetchone()
     _audit_log(
@@ -1689,13 +1716,14 @@ async def update_team(
         return {"error": "No fields to update"}
 
     updates.append("updated_at = NOW()")
-    params.append(team_id)
+    ns = _get_namespace()
+    params.extend([team_id, ns])
 
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"""UPDATE amfs_teams SET {', '.join(updates)}
-                    WHERE id = %s::uuid
+                    WHERE id = %s::uuid AND namespace = %s
                     RETURNING id, name, slug, description, created_at, updated_at""",
                 params,
             )
@@ -1727,11 +1755,14 @@ async def delete_team(
     pool = _get_db_pool()
     if pool is None:
         return {"error": "Team management requires a Postgres backend"}
+    ns = _get_namespace()
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM amfs_teams WHERE id = %s::uuid RETURNING id, slug",
-                (team_id,),
+                """DELETE FROM amfs_teams
+                   WHERE id = %s::uuid AND namespace = %s
+                   RETURNING id, slug""",
+                (team_id, ns),
             )
             row = cur.fetchone()
     if row is None:
@@ -1758,6 +1789,7 @@ async def list_team_members(
     pool = _get_db_pool()
     if pool is None:
         return {"members": []}
+    ns = _get_namespace()
     with pool.connection() as conn:
         with conn.cursor() as cur:
             if include_removed:
@@ -1766,9 +1798,9 @@ async def list_team_members(
                               invited_at, accepted_at, created_at,
                               removed_at, removed_by
                        FROM amfs_team_members
-                       WHERE team_id = %s::uuid
+                       WHERE team_id = %s::uuid AND namespace = %s
                        ORDER BY created_at""",
-                    (team_id,),
+                    (team_id, ns),
                 )
             else:
                 cur.execute(
@@ -1776,9 +1808,10 @@ async def list_team_members(
                               invited_at, accepted_at, created_at,
                               removed_at, removed_by
                        FROM amfs_team_members
-                       WHERE team_id = %s::uuid AND removed_at IS NULL
+                       WHERE team_id = %s::uuid AND namespace = %s
+                         AND removed_at IS NULL
                        ORDER BY created_at""",
-                    (team_id,),
+                    (team_id, ns),
                 )
             rows = cur.fetchall()
     return {
@@ -1809,13 +1842,15 @@ async def add_team_member(
     pool = _get_db_pool()
     if pool is None:
         return {"error": "Team management requires a Postgres backend"}
+    ns = _get_namespace()
     with pool.connection() as conn:
         with conn.cursor() as cur:
             # If this email was previously removed from this team, reinstate instead of duplicating
             cur.execute(
                 """SELECT id FROM amfs_team_members
-                   WHERE team_id = %s::uuid AND email = %s AND removed_at IS NOT NULL""",
-                (team_id, req.email),
+                   WHERE team_id = %s::uuid AND email = %s AND namespace = %s
+                     AND removed_at IS NOT NULL""",
+                (team_id, req.email, ns),
             )
             existing_removed = cur.fetchone()
             if existing_removed:
@@ -1830,10 +1865,11 @@ async def add_team_member(
                 row = cur.fetchone()
             else:
                 cur.execute(
-                    """INSERT INTO amfs_team_members (team_id, email, display_name, role)
-                       VALUES (%s::uuid, %s, %s, %s)
+                    """INSERT INTO amfs_team_members
+                       (namespace, team_id, email, display_name, role)
+                       VALUES (%s, %s::uuid, %s, %s, %s)
                        RETURNING id, invited_at, created_at""",
-                    (team_id, req.email, req.display_name, req.role),
+                    (ns, team_id, req.email, req.display_name, req.role),
                 )
                 row = cur.fetchone()
     _audit_log(
@@ -1876,13 +1912,14 @@ async def update_team_member(
     if not updates:
         return {"error": "No fields to update"}
 
-    params.extend([member_id, team_id])
+    ns = _get_namespace()
+    params.extend([member_id, team_id, ns])
 
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"""UPDATE amfs_team_members SET {', '.join(updates)}
-                    WHERE id = %s::uuid AND team_id = %s::uuid
+                    WHERE id = %s::uuid AND team_id = %s::uuid AND namespace = %s
                     RETURNING id, email, display_name, role, invited_at, accepted_at, created_at""",
                 params,
             )
@@ -1917,15 +1954,16 @@ async def remove_team_member(
     if pool is None:
         return {"error": "Team management requires a Postgres backend"}
     removed_by = request.headers.get("X-AMFS-Dashboard-Actor", "api")
+    ns = _get_namespace()
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """UPDATE amfs_team_members
                    SET removed_at = NOW(), removed_by = %s
                    WHERE id = %s::uuid AND team_id = %s::uuid
-                     AND removed_at IS NULL
+                     AND namespace = %s AND removed_at IS NULL
                    RETURNING id, email""",
-                (removed_by, member_id, team_id),
+                (removed_by, member_id, team_id, ns),
             )
             row = cur.fetchone()
     if row is None:
@@ -1949,16 +1987,17 @@ async def reinstate_team_member(
     pool = _get_db_pool()
     if pool is None:
         return {"error": "Team management requires a Postgres backend"}
+    ns = _get_namespace()
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """UPDATE amfs_team_members
                    SET removed_at = NULL, removed_by = NULL
                    WHERE id = %s::uuid AND team_id = %s::uuid
-                     AND removed_at IS NOT NULL
+                     AND namespace = %s AND removed_at IS NOT NULL
                    RETURNING id, email, display_name, role,
                              invited_at, accepted_at, created_at""",
-                (member_id, team_id),
+                (member_id, team_id, ns),
             )
             row = cur.fetchone()
     if row is None:
@@ -1995,6 +2034,7 @@ async def check_member_email(
     pool = _get_db_pool()
     if pool is None:
         return {"email": email, "status": "unknown", "memberships": []}
+    ns = _get_namespace()
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -2003,9 +2043,9 @@ async def check_member_email(
                           m.created_at, m.accepted_at
                    FROM amfs_team_members m
                    JOIN amfs_teams t ON t.id = m.team_id
-                   WHERE m.email = %s
+                   WHERE m.email = %s AND m.namespace = %s
                    ORDER BY m.removed_at NULLS FIRST""",
-                (email,),
+                (email, ns),
             )
             rows = cur.fetchall()
     if not rows:
@@ -2059,8 +2099,9 @@ async def list_detected_patterns(
     if pool is None:
         return {"patterns": [], "categories": PATTERN_CATEGORIES, "metadata": PATTERN_METADATA}
 
-    conditions = ["1=1"]
-    params: list[Any] = []
+    ns = _get_namespace()
+    conditions = ["namespace = %s"]
+    params: list[Any] = [ns]
 
     if pattern_type is not None:
         conditions.append("pattern_type = %s")
