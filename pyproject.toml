@@ -14,6 +14,10 @@ dev = [
     "amfs",
     "amfs-cli",
     "amfs-mcp-server",
+    "amfs-crewai",
+    "amfs-langchain",
+    "amfs-langgraph",
+    "amfs-autogen",
 ]
 
 [tool.uv.workspace]
@@ -31,6 +35,9 @@ members = [
     "packages/patterns",
     "packages/cortex",
     "packages/integrations/crewai",
+    "packages/integrations/langchain",
+    "packages/integrations/langgraph",
+    "packages/integrations/autogen",
 ]
 
 [tool.pytest.ini_options]
@@ -57,6 +64,10 @@ amfs-http-server = { workspace = true }
 amfs-connectors = { workspace = true }
 amfs-patterns = { workspace = true }
 amfs-cortex = { workspace = true }
+amfs-crewai = { workspace = true }
+amfs-langchain = { workspace = true }
+amfs-langgraph = { workspace = true }
+amfs-autogen = { workspace = true }
 
 [tool.mypy]
 python_version = "3.11"

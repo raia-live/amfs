@@ -69,15 +69,20 @@ class TestMCPTools:
 
     @pytest.fixture(autouse=True)
     def _setup_memory(self, tmp_amfs_root: Path) -> None:
-        """Inject a test AgentMemory into the server module."""
+        """Inject a test adapter and identity into the server module."""
         import amfs_mcp.server as srv
 
         adapter = FilesystemAdapter(root=tmp_amfs_root, namespace="test")
-        mem = AgentMemory(agent_id="test-mcp-agent", adapter=adapter)
-        srv._memory = mem
+        srv._adapter = adapter
+        srv._active_identity = "test-mcp-agent"
+        srv._memories = {}
+        srv._last_activity = 0.0
         yield
-        mem.close()
-        srv._memory = None
+        for m in srv._memories.values():
+            m.close()
+        srv._memories = {}
+        srv._adapter = None
+        srv._active_identity = None
 
     def test_amfs_write_and_read(self) -> None:
         from amfs_mcp.server import amfs_read, amfs_write
@@ -258,6 +263,94 @@ class TestMCPTools:
         )
         serialized = _serialize_entry(entry)
         assert "embedding" not in serialized
+
+
+# ---------------------------------------------------------------------------
+# Identity conflict guard tests
+# ---------------------------------------------------------------------------
+
+
+class TestIdentityGuard:
+    """Test that set_identity prevents cross-conversation clobbering."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_amfs_root: Path) -> None:
+        import amfs_mcp.server as srv
+
+        adapter = FilesystemAdapter(root=tmp_amfs_root, namespace="test")
+        srv._adapter = adapter
+        srv._active_identity = None
+        srv._memories = {}
+        srv._last_activity = 0.0
+        yield
+        for m in srv._memories.values():
+            m.close()
+        srv._memories = {}
+        srv._adapter = None
+        srv._active_identity = None
+
+    def test_set_identity_creates_memory(self) -> None:
+        import amfs_mcp.server as srv
+        from amfs_mcp.server import amfs_set_identity
+
+        result = json.loads(amfs_set_identity("agent-a", "doing stuff"))
+        assert result["new_identity"] == "agent-a"
+        assert "agent-a" in srv._memories
+        assert srv._active_identity == "agent-a"
+
+    def test_set_identity_idempotent(self) -> None:
+        from amfs_mcp.server import amfs_set_identity
+
+        amfs_set_identity("agent-a")
+        result = json.loads(amfs_set_identity("agent-a"))
+        assert result["status"] == "already_active"
+
+    def test_set_identity_rejects_during_cooldown(self) -> None:
+        import amfs_mcp.server as srv
+        from amfs_mcp.server import amfs_set_identity
+
+        amfs_set_identity("agent-a")
+        srv._last_activity = srv.time.monotonic()
+
+        result = json.loads(amfs_set_identity("agent-b"))
+        assert result.get("error") == "identity_conflict"
+        assert result["current_identity"] == "agent-a"
+        assert result["requested_identity"] == "agent-b"
+        assert srv._active_identity == "agent-a"
+
+    def test_set_identity_allows_after_cooldown(self) -> None:
+        import amfs_mcp.server as srv
+        from amfs_mcp.server import amfs_set_identity
+
+        amfs_set_identity("agent-a")
+        srv._last_activity = srv.time.monotonic() - srv._IDENTITY_COOLDOWN_SECONDS - 1
+
+        result = json.loads(amfs_set_identity("agent-b"))
+        assert result["new_identity"] == "agent-b"
+        assert srv._active_identity == "agent-b"
+
+    def test_separate_memories_per_identity(self) -> None:
+        import amfs_mcp.server as srv
+        from amfs_mcp.server import amfs_set_identity, amfs_write
+
+        amfs_set_identity("agent-a")
+        amfs_write("svc", "key-a", '"from-a"')
+
+        srv._last_activity = 0.0
+        amfs_set_identity("agent-b")
+        amfs_write("svc", "key-b", '"from-b"')
+
+        assert "agent-a" in srv._memories
+        assert "agent-b" in srv._memories
+        assert srv._memories["agent-a"].agent_id == "agent-a"
+        assert srv._memories["agent-b"].agent_id == "agent-b"
+
+    def test_writes_use_active_identity(self) -> None:
+        from amfs_mcp.server import amfs_set_identity, amfs_write
+
+        amfs_set_identity("writer-agent")
+        result = json.loads(amfs_write("svc", "key", '"value"'))
+        assert result["provenance"]["agent_id"] == "writer-agent"
 
 
 # ---------------------------------------------------------------------------
