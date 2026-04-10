@@ -875,6 +875,8 @@ async def list_agents(
     entries = mem.list()
     agent_data: dict[str, dict[str, Any]] = {}
     for e in entries:
+        if e.entity_path.startswith("_system/"):
+            continue
         aid = e.provenance.agent_id
         if aid not in agent_data:
             agent_data[aid] = {
@@ -924,7 +926,10 @@ async def agent_memory_graph(
     entries = mem.list()
     traces = mem._adapter.list_traces(agent_id=agent_id, limit=10000)
 
-    written_by_agent = [e for e in entries if e.provenance.agent_id == agent_id]
+    written_by_agent = [
+        e for e in entries
+        if e.provenance.agent_id == agent_id and not e.entity_path.startswith("_system/")
+    ]
     entities_written: dict[str, list[dict]] = {}
     for e in written_by_agent:
         ep = e.entity_path
