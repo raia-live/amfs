@@ -165,10 +165,13 @@ class AgentMemory:
                 )
                 if effective < min_confidence:
                     return None
+                self._log_read_event(entry, effective_branch)
                 return entry
             entry = self._engine.read(entity_path, key, min_confidence=min_confidence, branch=effective_branch)
             if entry is not None and not entry.shared and entry.provenance.agent_id != self.agent_id:
                 return None
+            if entry is not None:
+                self._log_read_event(entry, effective_branch)
             return entry
         except Exception as exc:
             self._read_tracker.record_error(
@@ -796,6 +799,25 @@ class AgentMemory:
     # Agent brain — scoped recall & cross-agent reads
     # ------------------------------------------------------------------
 
+    def _log_read_event(self, entry: MemoryEntry, branch: str | None = None) -> None:
+        """Log a READ event to the timeline (fire-and-forget)."""
+        try:
+            self._adapter.log_event(Event(
+                namespace=self.namespace,
+                agent_id=self.agent_id,
+                branch=branch or self._branch,
+                event_type=EventType.READ,
+                summary=f"Read {entry.entity_path}/{entry.key}",
+                details={
+                    "entity_path": entry.entity_path,
+                    "key": entry.key,
+                    "version": entry.version,
+                    "author_agent_id": entry.provenance.agent_id,
+                },
+            ))
+        except Exception:
+            logger.debug("Failed to log read event", exc_info=True)
+
     def recall(
         self,
         entity_path: str,
@@ -814,11 +836,17 @@ class AgentMemory:
         if entry is None:
             return None
         if entry.provenance.agent_id == self.agent_id:
-            return entry if entry.confidence >= min_confidence else None
+            if entry.confidence >= min_confidence:
+                self._log_read_event(entry)
+                return entry
+            return None
         versions = self._engine.history(entity_path, key)
         for v in reversed(versions):
             if v.provenance.agent_id == self.agent_id:
-                return v if v.confidence >= min_confidence else None
+                if v.confidence >= min_confidence:
+                    self._log_read_event(v)
+                    return v
+                return None
         return None
 
     def my_entries(

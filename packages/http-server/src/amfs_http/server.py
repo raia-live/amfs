@@ -1001,6 +1001,7 @@ async def agent_memory_graph(
             "writtenAt": e.provenance.written_at.isoformat(),
         })
 
+    # Build read counts from both traces (causal_entries) and timeline events.
     read_entities: dict[str, dict[str, int]] = {}
     for t in traces:
         for ce in t.causal_entries:
@@ -1009,6 +1010,26 @@ async def agent_memory_graph(
             if ep not in read_entities:
                 read_entities[ep] = {}
             read_entities[ep][key] = read_entities[ep].get(key, 0) + 1
+
+    # Supplement with READ events from the timeline (persisted independently).
+    total_read_events = 0
+    try:
+        read_events = mem._adapter.list_events(
+            agent_id, mem.namespace, event_type="read", limit=10000,
+        )
+        cross_read_events = mem._adapter.list_events(
+            agent_id, mem.namespace, event_type="cross_agent_read", limit=10000,
+        )
+        for ev in read_events + cross_read_events:
+            ep = ev.details.get("entity_path", "")
+            key = ev.details.get("key", "")
+            if ep and key:
+                if ep not in read_entities:
+                    read_entities[ep] = {}
+                read_entities[ep][key] = read_entities[ep].get(key, 0) + 1
+        total_read_events = len(read_events) + len(cross_read_events)
+    except Exception:
+        pass
 
     entry_authors: dict[str, str] = {}
     for e in entries:
@@ -1040,6 +1061,7 @@ async def agent_memory_graph(
         "nodes": nodes,
         "traceCount": len(traces),
         "totalWritten": len(written_by_agent),
+        "totalReads": total_read_events,
         "crossAgentReads": cross_agent_reads,
     }
 
