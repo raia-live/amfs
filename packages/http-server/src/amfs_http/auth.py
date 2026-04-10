@@ -26,6 +26,10 @@ def _check_db_key(api_key: str) -> bool:
 
     Keys are stored as SHA-256 hex digests, so we hash the incoming raw key
     before comparing.
+
+    Uses SECURITY DEFINER functions to bypass RLS — this connection does not
+    set amfs.current_account_id, so direct table queries would return nothing
+    when FORCE ROW LEVEL SECURITY is enabled.
     """
     try:
         import psycopg
@@ -39,16 +43,13 @@ def _check_db_key(api_key: str) -> bool:
 
         with psycopg.connect(dsn, row_factory=dict_row) as conn:
             row = conn.execute(
-                "SELECT id FROM amfs_api_keys "
-                "WHERE key_hash = %s AND active = TRUE "
-                "AND (expires_at IS NULL OR expires_at > NOW()) "
-                "LIMIT 1",
+                "SELECT * FROM amfs_authenticate_api_key(%s)",
                 (key_hash,),
             ).fetchone()
             if row:
                 conn.execute(
-                    "UPDATE amfs_api_keys SET last_used = NOW() WHERE id = %s",
-                    (row["id"],),
+                    "SELECT amfs_touch_api_key_usage(%s)",
+                    (row["key_id"],),
                 )
             return row is not None
     except Exception:
