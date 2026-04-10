@@ -2106,6 +2106,7 @@ async def graph_neighbors(
 
 @app.get("/api/v1/pro/graph/expertise")
 async def expertise_graph(
+    agent_id: str | None = Query(None),
     limit_agents: int = Query(30, ge=1, le=200),
     limit_entities: int = Query(30, ge=1, le=200),
     _auth: str | None = Depends(verify_api_key),
@@ -2113,7 +2114,8 @@ async def expertise_graph(
     """Build an agent×entity expertise heatmap.
 
     Returns a list of agents, entities, and cells with scores derived
-    from write counts. The dashboard renders this as a heatmap table.
+    from write counts. When ``agent_id`` is provided, results are scoped
+    to that single agent.
     """
     mem = _get_memory()
     entries = mem.list()
@@ -2124,6 +2126,8 @@ async def expertise_graph(
 
     for e in entries:
         aid = e.provenance.agent_id
+        if agent_id and aid != agent_id:
+            continue
         ep = e.entity_path
         agent_totals[aid] = agent_totals.get(aid, 0) + 1
         entity_totals[ep] = entity_totals.get(ep, 0) + 1
