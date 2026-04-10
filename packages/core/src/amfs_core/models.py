@@ -456,13 +456,14 @@ class Digest(BaseModel):
 class EventType(str, Enum):
     """Types of events on the agent timeline (git commit log).
 
-    Core event types (OSS): WRITE, OUTCOME, WEBHOOK, BRIEF_COMPILED,
-    CROSS_AGENT_READ. Branching event types (Pro): BRANCH_CREATED,
-    BRANCH_MERGED, BRANCH_CLOSED, ACCESS_GRANTED, ACCESS_REVOKED,
-    ROLLBACK, TAG_CREATED, CHERRY_PICK, FORK.
+    Core event types (OSS): WRITE, READ, OUTCOME, WEBHOOK,
+    BRIEF_COMPILED, CROSS_AGENT_READ. Branching event types (Pro):
+    BRANCH_CREATED, BRANCH_MERGED, BRANCH_CLOSED, ACCESS_GRANTED,
+    ACCESS_REVOKED, ROLLBACK, TAG_CREATED, CHERRY_PICK, FORK.
     """
 
     WRITE = "write"
+    READ = "read"
     OUTCOME = "outcome"
     WEBHOOK = "webhook"
     BRIEF_COMPILED = "brief_compiled"
