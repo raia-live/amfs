@@ -166,9 +166,18 @@ class RuleBasedStrategy:
         entities_written: set[str] = set()
         total_entries = len(entries)
         top_knowledge: list[dict[str, Any]] = []
+        memory_types: dict[str, int] = {}
+        risk_entries: list[str] = []
+        pattern_refs: set[str] = set()
 
         for e in entries:
             entities_written.add(e.entity_path)
+            mt = e.memory_type.value if hasattr(e.memory_type, "value") else str(e.memory_type)
+            memory_types[mt] = memory_types.get(mt, 0) + 1
+            if e.key.startswith("risk-"):
+                risk_entries.append(e.key)
+            for pr in e.provenance.pattern_refs:
+                pattern_refs.add(pr)
 
         by_confidence = sorted(entries, key=lambda e: e.confidence, reverse=True)
         for e in by_confidence[:5]:
@@ -178,7 +187,7 @@ class RuleBasedStrategy:
                 "confidence": round(e.confidence, 3),
             })
 
-        recent_entities = []
+        recent_entities: list[str] = []
         seen: set[str] = set()
         for e in entries:
             if e.entity_path not in seen:
@@ -190,9 +199,26 @@ class RuleBasedStrategy:
         outcomes_committed = sum(1 for e in entries if e.outcome_count > 0)
         last_active = max(e.provenance.written_at for e in entries)
 
+        expertise_areas = self._derive_expertise(entries)
+
+        all_entries = adapter.search(SearchQuery(limit=5000, sort_by="recency"), branch=branch)
+        other_agents_on_entities: dict[str, set[str]] = {}
+        for e in all_entries:
+            if e.provenance.agent_id != agent_id and e.entity_path in entities_written:
+                other_agents_on_entities.setdefault(e.entity_path, set()).add(e.provenance.agent_id)
+
+        collaboration_score = len([ep for ep in entities_written if ep in other_agents_on_entities])
+        solo_entities = [ep for ep in entities_written if ep not in other_agents_on_entities]
+
+        anticipation = self._compute_anticipation(
+            entries, outcomes_committed, total_entries, len(entities_written),
+        )
+
         narrative = self._narrate_agent(
             agent_id, total_entries, entities_written,
-            top_knowledge, outcomes_committed,
+            top_knowledge, outcomes_committed, expertise_areas,
+            collaboration_score, solo_entities, risk_entries,
+            memory_types, recent_entities,
         )
 
         return Digest(
@@ -206,12 +232,62 @@ class RuleBasedStrategy:
                 "recent_activity": recent_entities,
                 "outcomes_committed": outcomes_committed,
                 "last_active": last_active.isoformat(),
+                "expertise_areas": expertise_areas,
+                "memory_types": memory_types,
+                "collaboration_score": collaboration_score,
+                "solo_entities": sorted(solo_entities),
+                "risk_entries": risk_entries,
+                "pattern_refs": sorted(pattern_refs),
             },
             entry_count=total_entries,
             source_agents=[agent_id],
             compiled_at=datetime.now(timezone.utc),
             namespace=namespace,
+            anticipation_score=anticipation,
         )
+
+    @staticmethod
+    def _derive_expertise(entries: list) -> list[str]:
+        """Derive expertise areas from entity paths the agent writes to most."""
+        entity_counts: dict[str, int] = {}
+        for e in entries:
+            entity_counts[e.entity_path] = entity_counts.get(e.entity_path, 0) + 1
+
+        sorted_entities = sorted(entity_counts.items(), key=lambda x: x[1], reverse=True)
+        areas: list[str] = []
+        for ep, count in sorted_entities[:5]:
+            short = ep.split("/")[-1] if "/" in ep else ep
+            areas.append(short)
+        return areas
+
+    @staticmethod
+    def _compute_anticipation(
+        entries: list, outcomes_committed: int, total_entries: int, entity_count: int,
+    ) -> float:
+        """Compute an anticipation score (0–1) based on activity signals."""
+        if total_entries == 0:
+            return 0.0
+
+        score = 0.0
+
+        outcome_ratio = outcomes_committed / total_entries if total_entries else 0
+        score += outcome_ratio * 0.3
+
+        now = datetime.now(timezone.utc)
+        recent_count = sum(
+            1 for e in entries
+            if (now - e.provenance.written_at).total_seconds() < 86400
+        )
+        recency_ratio = min(recent_count / max(total_entries, 1), 1.0)
+        score += recency_ratio * 0.3
+
+        breadth = min(entity_count / 5, 1.0)
+        score += breadth * 0.2
+
+        depth = min(total_entries / 20, 1.0)
+        score += depth * 0.2
+
+        return round(min(score, 1.0), 3)
 
     @staticmethod
     def _narrate_agent(
@@ -220,25 +296,56 @@ class RuleBasedStrategy:
         entities_written: set[str],
         top_knowledge: list[dict[str, Any]],
         outcomes_committed: int,
+        expertise_areas: list[str],
+        collaboration_score: int,
+        solo_entities: list[str],
+        risk_entries: list[str],
+        memory_types: dict[str, int],
+        recent_entities: list[str],
     ) -> str:
         parts: list[str] = []
 
-        parts.append(
-            f"{agent_id} has written {_pluralize(total_entries, 'entry')} "
-            f"across {_pluralize(len(entities_written), 'entity')}."
-        )
+        if expertise_areas:
+            areas_str = ", ".join(expertise_areas[:3])
+            parts.append(f"{agent_id} specializes in {areas_str}.")
+        else:
+            parts.append(f"{agent_id} is active across {_pluralize(len(entities_written), 'entity')}.")
 
-        if top_knowledge:
-            top = top_knowledge[0]
+        if collaboration_score > 0:
             parts.append(
-                f"Highest-confidence knowledge: {top['key']} in {top['entity']} "
-                f"({_confidence_label(top['confidence'])}, {top['confidence']:.0%})."
+                f"Collaborates with other agents on "
+                f"{_pluralize(collaboration_score, 'shared entity')}."
+            )
+
+        if solo_entities and len(solo_entities) <= 3:
+            solo_str = ", ".join(e.split("/")[-1] for e in solo_entities)
+            parts.append(f"Sole contributor to {solo_str}.")
+        elif solo_entities:
+            parts.append(
+                f"Sole contributor to {_pluralize(len(solo_entities), 'entity')} — "
+                f"knowledge bus factor is 1."
             )
 
         if outcomes_committed > 0:
+            ratio = outcomes_committed / total_entries if total_entries else 0
             parts.append(
-                f"{_pluralize(outcomes_committed, 'entry')} validated by outcomes."
+                f"{ratio:.0%} of knowledge is validated by outcomes."
             )
+        elif total_entries > 5:
+            parts.append("No outcomes recorded yet — consider committing outcomes to validate knowledge.")
+
+        if risk_entries:
+            parts.append(f"Tracking {_pluralize(len(risk_entries), 'active risk')}.")
+
+        beliefs = memory_types.get("belief", 0)
+        if beliefs > 0:
+            parts.append(
+                f"{_pluralize(beliefs, 'entry')} marked as beliefs (unvalidated hypotheses)."
+            )
+
+        if recent_entities:
+            recent_str = ", ".join(e.split("/")[-1] for e in recent_entities[:3])
+            parts.append(f"Recently focused on: {recent_str}.")
 
         return " ".join(parts)
 
