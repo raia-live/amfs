@@ -215,6 +215,23 @@ class PostgresAdapter(AdapterABC):
             ADD COLUMN IF NOT EXISTS default_branch TEXT
         """)
         cur.execute("""
+            ALTER TABLE amfs_detected_patterns
+            ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'collaboration'
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_detected_patterns DROP CONSTRAINT IF EXISTS chk_pattern_type
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_detected_patterns ADD CONSTRAINT chk_pattern_type CHECK (
+                pattern_type IN (
+                    'knowledge_conflict', 'stale_knowledge', 'orphaned_branch',
+                    'redundant_writes', 'single_point_of_knowledge', 'passive_consumer',
+                    'unreviewed_changes', 'recurring_failure',
+                    'hot_entity', 'stale_cluster', 'confidence_drift'
+                )
+            )
+        """)
+        cur.execute("""
             CREATE OR REPLACE FUNCTION amfs_notify_write() RETURNS TRIGGER AS $$
             BEGIN
                 IF NEW.superseded_at IS NULL THEN
