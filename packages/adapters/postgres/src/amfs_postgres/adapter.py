@@ -349,6 +349,30 @@ class PostgresAdapter(AdapterABC):
             END;
             $$ LANGUAGE plpgsql
         """)
+        # Soft-delete for team members (user removal flow)
+        cur.execute("""
+            ALTER TABLE amfs_team_members
+            ADD COLUMN IF NOT EXISTS removed_at TIMESTAMPTZ
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_team_members
+            ADD COLUMN IF NOT EXISTS removed_by TEXT
+        """)
+        # Replace full unique constraint with partial index (active members only)
+        cur.execute("""
+            ALTER TABLE amfs_team_members
+            DROP CONSTRAINT IF EXISTS uq_team_member
+        """)
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_team_member_active
+            ON amfs_team_members (team_id, email)
+            WHERE removed_at IS NULL
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_team_members_removed
+            ON amfs_team_members (namespace, email)
+            WHERE removed_at IS NOT NULL
+        """)
 
     def _detect_optional_columns(self) -> None:
         """Check whether optional columns (embedding, search_tsv) exist.
