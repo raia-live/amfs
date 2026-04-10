@@ -202,6 +202,10 @@ class HttpAdapter(AdapterABC):
         )
         return [DecisionTrace.model_validate(t) for t in data.get("traces", [])]
 
+    def save_trace(self, trace: DecisionTrace) -> DecisionTrace:
+        data = self._post("/api/v1/traces", trace.model_dump(mode="json"))
+        return DecisionTrace.model_validate(data)
+
     def get_trace(self, trace_id: str) -> DecisionTrace | None:
         try:
             data = self._get(f"/api/v1/traces/{trace_id}")

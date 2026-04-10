@@ -33,6 +33,7 @@ from amfs.config import load_config_or_default
 from pydantic import BaseModel, Field
 from amfs_core.models import (
     AMFSConfig,
+    DecisionTrace,
     Event,
     EventType,
     GraphEdge,
@@ -708,6 +709,19 @@ async def list_traces(
         limit=limit,
     )
     return {"traces": [t.model_dump(mode="json") for t in traces]}
+
+
+@app.post("/api/v1/traces")
+async def save_trace(
+    req: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Persist a decision trace (used by HttpAdapter.save_trace)."""
+    body = await req.json()
+    trace = DecisionTrace.model_validate(body)
+    mem = _get_memory()
+    saved = mem._adapter.save_trace(trace)
+    return saved.model_dump(mode="json")
 
 
 @app.get("/api/v1/traces/{trace_id}")
