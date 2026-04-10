@@ -141,15 +141,25 @@ CREATE TABLE IF NOT EXISTS amfs_team_members (
     invited_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     accepted_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_team_member UNIQUE (team_id, email),
+    removed_at TIMESTAMPTZ,
+    removed_by TEXT,
     CONSTRAINT chk_member_role CHECK (role IN ('admin', 'developer', 'viewer'))
 );
+
+-- Only one active (non-removed) membership per (team_id, email)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_team_member_active
+    ON amfs_team_members (team_id, email)
+    WHERE removed_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_team_members_team
     ON amfs_team_members (team_id);
 
 CREATE INDEX IF NOT EXISTS idx_team_members_email
     ON amfs_team_members (namespace, email);
+
+CREATE INDEX IF NOT EXISTS idx_team_members_removed
+    ON amfs_team_members (namespace, email)
+    WHERE removed_at IS NOT NULL;
 
 -- ──────────────────────────────────────────────────────────────────────
 -- Pattern Detection Results (Pro)

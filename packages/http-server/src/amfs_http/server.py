@@ -1605,7 +1605,8 @@ async def list_teams(
                           t.created_at, t.updated_at,
                           COUNT(m.id) AS member_count
                    FROM amfs_teams t
-                   LEFT JOIN amfs_team_members m ON m.team_id = t.id
+                   LEFT JOIN amfs_team_members m
+                       ON m.team_id = t.id AND m.removed_at IS NULL
                    GROUP BY t.id
                    ORDER BY t.created_at DESC"""
             )
@@ -1746,6 +1747,7 @@ async def delete_team(
 @app.get("/api/v1/admin/teams/{team_id}/members")
 async def list_team_members(
     team_id: str,
+    include_removed: bool = Query(False),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     pool = _get_db_pool()
@@ -1753,14 +1755,26 @@ async def list_team_members(
         return {"members": []}
     with pool.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """SELECT id, email, display_name, role,
-                          invited_at, accepted_at, created_at
-                   FROM amfs_team_members
-                   WHERE team_id = %s::uuid
-                   ORDER BY created_at""",
-                (team_id,),
-            )
+            if include_removed:
+                cur.execute(
+                    """SELECT id, email, display_name, role,
+                              invited_at, accepted_at, created_at,
+                              removed_at, removed_by
+                       FROM amfs_team_members
+                       WHERE team_id = %s::uuid
+                       ORDER BY created_at""",
+                    (team_id,),
+                )
+            else:
+                cur.execute(
+                    """SELECT id, email, display_name, role,
+                              invited_at, accepted_at, created_at,
+                              removed_at, removed_by
+                       FROM amfs_team_members
+                       WHERE team_id = %s::uuid AND removed_at IS NULL
+                       ORDER BY created_at""",
+                    (team_id,),
+                )
             rows = cur.fetchall()
     return {
         "members": [
@@ -1772,6 +1786,8 @@ async def list_team_members(
                 "invitedAt": row["invited_at"].isoformat(),
                 "acceptedAt": row["accepted_at"].isoformat() if row["accepted_at"] else None,
                 "createdAt": row["created_at"].isoformat(),
+                "removedAt": row["removed_at"].isoformat() if row.get("removed_at") else None,
+                "removedBy": row.get("removed_by"),
             }
             for row in rows
         ]
@@ -1790,13 +1806,31 @@ async def add_team_member(
         return {"error": "Team management requires a Postgres backend"}
     with pool.connection() as conn:
         with conn.cursor() as cur:
+            # If this email was previously removed from this team, reinstate instead of duplicating
             cur.execute(
-                """INSERT INTO amfs_team_members (team_id, email, display_name, role)
-                   VALUES (%s::uuid, %s, %s, %s)
-                   RETURNING id, invited_at, created_at""",
-                (team_id, req.email, req.display_name, req.role),
+                """SELECT id FROM amfs_team_members
+                   WHERE team_id = %s::uuid AND email = %s AND removed_at IS NOT NULL""",
+                (team_id, req.email),
             )
-            row = cur.fetchone()
+            existing_removed = cur.fetchone()
+            if existing_removed:
+                cur.execute(
+                    """UPDATE amfs_team_members
+                       SET removed_at = NULL, removed_by = NULL,
+                           role = %s, display_name = %s
+                       WHERE id = %s::uuid
+                       RETURNING id, invited_at, created_at""",
+                    (req.role, req.display_name, existing_removed["id"]),
+                )
+                row = cur.fetchone()
+            else:
+                cur.execute(
+                    """INSERT INTO amfs_team_members (team_id, email, display_name, role)
+                       VALUES (%s::uuid, %s, %s, %s)
+                       RETURNING id, invited_at, created_at""",
+                    (team_id, req.email, req.display_name, req.role),
+                )
+                row = cur.fetchone()
     _audit_log(
         "team.member.add",
         resource=f"{team_id}/{req.email}",
@@ -1877,13 +1911,16 @@ async def remove_team_member(
     pool = _get_db_pool()
     if pool is None:
         return {"error": "Team management requires a Postgres backend"}
+    removed_by = request.headers.get("X-AMFS-Dashboard-Actor", "api")
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """DELETE FROM amfs_team_members
+                """UPDATE amfs_team_members
+                   SET removed_at = NOW(), removed_by = %s
                    WHERE id = %s::uuid AND team_id = %s::uuid
+                     AND removed_at IS NULL
                    RETURNING id, email""",
-                (member_id, team_id),
+                (removed_by, member_id, team_id),
             )
             row = cur.fetchone()
     if row is None:
@@ -1894,6 +1931,105 @@ async def remove_team_member(
         ip_address=request.client.host if request.client else None,
     )
     return {"deleted": str(row["id"])}
+
+
+@app.post("/api/v1/admin/teams/{team_id}/members/{member_id}/reinstate")
+async def reinstate_team_member(
+    team_id: str,
+    member_id: str,
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Re-activate a previously removed team member."""
+    pool = _get_db_pool()
+    if pool is None:
+        return {"error": "Team management requires a Postgres backend"}
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE amfs_team_members
+                   SET removed_at = NULL, removed_by = NULL
+                   WHERE id = %s::uuid AND team_id = %s::uuid
+                     AND removed_at IS NOT NULL
+                   RETURNING id, email, display_name, role,
+                             invited_at, accepted_at, created_at""",
+                (member_id, team_id),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return {"error": "Removed member not found"}
+    _audit_log(
+        "team.member.reinstate",
+        resource=f"{team_id}/{row['email']}",
+        ip_address=request.client.host if request.client else None,
+    )
+    return {
+        "id": str(row["id"]),
+        "email": row["email"],
+        "displayName": row["display_name"],
+        "role": row["role"],
+        "invitedAt": row["invited_at"].isoformat(),
+        "acceptedAt": row["accepted_at"].isoformat() if row["accepted_at"] else None,
+        "createdAt": row["created_at"].isoformat(),
+        "reinstated": True,
+    }
+
+
+@app.get("/api/v1/admin/members/check-email")
+async def check_member_email(
+    email: str = Query(...),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Check if an email is associated with any active or removed team memberships.
+
+    Called by the dashboard OAuth flow to determine if a returning user
+    should be blocked (removed) or allowed through.
+
+    Returns status: "active", "removed", or "not_found".
+    """
+    pool = _get_db_pool()
+    if pool is None:
+        return {"email": email, "status": "unknown", "memberships": []}
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT m.id, m.team_id, t.name AS team_name, m.role,
+                          m.removed_at, m.removed_by,
+                          m.created_at, m.accepted_at
+                   FROM amfs_team_members m
+                   JOIN amfs_teams t ON t.id = m.team_id
+                   WHERE m.email = %s
+                   ORDER BY m.removed_at NULLS FIRST""",
+                (email,),
+            )
+            rows = cur.fetchall()
+    if not rows:
+        return {"email": email, "status": "not_found", "memberships": []}
+    active = [r for r in rows if r["removed_at"] is None]
+    removed = [r for r in rows if r["removed_at"] is not None]
+    if active:
+        status = "active"
+    elif removed:
+        status = "removed"
+    else:
+        status = "not_found"
+    return {
+        "email": email,
+        "status": status,
+        "memberships": [
+            {
+                "id": str(r["id"]),
+                "teamId": str(r["team_id"]),
+                "teamName": r["team_name"],
+                "role": r["role"],
+                "removedAt": r["removed_at"].isoformat() if r["removed_at"] else None,
+                "removedBy": r["removed_by"],
+                "createdAt": r["created_at"].isoformat(),
+                "acceptedAt": r["accepted_at"].isoformat() if r["accepted_at"] else None,
+            }
+            for r in rows
+        ],
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────
