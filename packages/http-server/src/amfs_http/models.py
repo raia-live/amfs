@@ -88,11 +88,13 @@ class UpdateTeamMemberRequest(BaseModel):
 
 
 class RunPatternDetectionRequest(BaseModel):
-    incident_threshold: int = 2
-    stale_days: int = 30
-    hot_entity_stddev: float = 2.0
-    drift_stddev: float = 2.0
     entity_path: str | None = None
+    agent_id: str | None = None
+    stale_days: int = 14
+    orphan_days: int = 7
+    pr_stale_days: int = 3
+    similarity_threshold: float = 0.75
+    incident_threshold: int = 2
 
 
 # ──────────────────────────────────────────────────────────────────────

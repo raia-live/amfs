@@ -166,8 +166,14 @@ CREATE TABLE IF NOT EXISTS amfs_detected_patterns (
     resolved BOOLEAN NOT NULL DEFAULT FALSE,
     detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     resolved_at TIMESTAMPTZ,
+    category TEXT NOT NULL DEFAULT 'collaboration',
     CONSTRAINT chk_pattern_type CHECK (
-        pattern_type IN ('recurring_failure', 'hot_entity', 'stale_cluster', 'confidence_drift')
+        pattern_type IN (
+            'knowledge_conflict', 'stale_knowledge', 'orphaned_branch',
+            'redundant_writes', 'single_point_of_knowledge', 'passive_consumer',
+            'unreviewed_changes', 'recurring_failure',
+            'hot_entity', 'stale_cluster', 'confidence_drift'
+        )
     ),
     CONSTRAINT chk_severity CHECK (severity IN ('info', 'warning', 'critical'))
 );

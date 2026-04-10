@@ -1904,15 +1904,19 @@ async def remove_team_member(
 @app.get("/api/v1/admin/patterns")
 async def list_detected_patterns(
     pattern_type: str | None = Query(None),
+    category: str | None = Query(None),
     severity: str | None = Query(None),
     resolved: bool | None = Query(None),
+    agent_id: str | None = Query(None),
     limit: int = Query(100),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """List previously detected patterns from the database."""
+    from amfs_patterns.detector import PATTERN_CATEGORIES, PATTERN_METADATA
+
     pool = _get_db_pool()
     if pool is None:
-        return {"patterns": []}
+        return {"patterns": [], "categories": PATTERN_CATEGORIES, "metadata": PATTERN_METADATA}
 
     conditions = ["1=1"]
     params: list[Any] = []
@@ -1920,20 +1924,29 @@ async def list_detected_patterns(
     if pattern_type is not None:
         conditions.append("pattern_type = %s")
         params.append(pattern_type)
+    if category is not None:
+        conditions.append("category = %s")
+        params.append(category)
     if severity is not None:
         conditions.append("severity = %s")
         params.append(severity)
     if resolved is not None:
         conditions.append("resolved = %s")
         params.append(resolved)
+    if agent_id is not None:
+        conditions.append("(details->>'agent' = %s OR details->>'agent_a' = %s OR details->>'agent_b' = %s)")
+        params.extend([agent_id, agent_id, agent_id])
 
     where = " AND ".join(conditions)
     sql = f"""
         SELECT id, pattern_type, severity, entity_path, description,
-               details, resolved, detected_at, resolved_at
+               details, resolved, detected_at, resolved_at,
+               COALESCE(category, 'collaboration') as category
         FROM amfs_detected_patterns
         WHERE {where}
-        ORDER BY detected_at DESC
+        ORDER BY
+            CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+            detected_at DESC
         LIMIT %s
     """
     params.append(limit)
@@ -1949,6 +1962,7 @@ async def list_detected_patterns(
                 "id": str(row["id"]),
                 "patternType": row["pattern_type"],
                 "severity": row["severity"],
+                "category": row["category"],
                 "entityPath": row["entity_path"],
                 "description": row["description"],
                 "details": row["details"] or {},
@@ -1957,7 +1971,9 @@ async def list_detected_patterns(
                 "resolvedAt": row["resolved_at"].isoformat() if row["resolved_at"] else None,
             }
             for row in rows
-        ]
+        ],
+        "categories": PATTERN_CATEGORIES,
+        "metadata": PATTERN_METADATA,
     }
 
 
@@ -1967,9 +1983,10 @@ async def run_pattern_scan(
     request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    """Run the pattern detector and persist results."""
+    """Run the collaboration-aware pattern detector and persist results."""
     try:
         from amfs_patterns import PatternDetector
+        from amfs_patterns.detector import PATTERN_CATEGORIES, PATTERN_METADATA
     except ImportError:
         return {"error": "amfs-patterns package not installed"}
 
@@ -1977,28 +1994,50 @@ async def run_pattern_scan(
     entries = mem.list(req.entity_path)
     outcomes = mem._adapter.list_outcomes(entity_path=req.entity_path, limit=10000)
 
+    if req.agent_id:
+        entries = [e for e in entries if e.provenance.agent_id == req.agent_id]
+
+    branches: list[Any] = []
+    pull_requests: list[Any] = []
+    try:
+        branches = mem.list_branches()  # type: ignore[attr-defined]
+    except (AttributeError, Exception):
+        pass
+    try:
+        pull_requests = mem.list_pull_requests()  # type: ignore[attr-defined]
+    except (AttributeError, Exception):
+        pass
+
     detector = PatternDetector(
-        incident_threshold=req.incident_threshold,
         stale_days=req.stale_days,
-        hot_entity_stddev=req.hot_entity_stddev,
-        drift_stddev=req.drift_stddev,
+        orphan_days=req.orphan_days,
+        pr_stale_days=req.pr_stale_days,
+        similarity_threshold=req.similarity_threshold,
+        incident_threshold=req.incident_threshold,
     )
-    report = detector.analyze(entries, outcome_data=outcomes)
+    report = detector.analyze(
+        entries,
+        outcome_data=outcomes,
+        branches=branches,
+        pull_requests=pull_requests,
+    )
 
     pool = _get_db_pool()
     persisted = 0
     if pool is not None:
         with pool.connection() as conn:
             with conn.cursor() as cur:
+                cur.execute("DELETE FROM amfs_detected_patterns WHERE resolved = FALSE")
                 for p in report.patterns:
                     cur.execute(
                         """INSERT INTO amfs_detected_patterns
-                               (pattern_type, severity, entity_path, description,
-                                details, detected_at)
-                           VALUES (%s, %s, %s, %s, %s::jsonb, %s)""",
+                               (pattern_type, severity, category, entity_path,
+                                description, details, detected_at)
+                           VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)""",
                         (
                             p.pattern_type,
                             p.severity,
+                            p.category,
                             p.entity_path,
                             p.description,
                             json.dumps(p.details, default=str),
@@ -2023,6 +2062,7 @@ async def run_pattern_scan(
             {
                 "patternType": p.pattern_type,
                 "severity": p.severity,
+                "category": p.category,
                 "entityPath": p.entity_path,
                 "description": p.description,
                 "details": p.details,
@@ -2030,6 +2070,8 @@ async def run_pattern_scan(
             }
             for p in report.patterns
         ],
+        "categories": PATTERN_CATEGORIES,
+        "metadata": PATTERN_METADATA,
     }
 
 
