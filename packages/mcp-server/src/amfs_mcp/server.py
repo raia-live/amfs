@@ -25,12 +25,14 @@ import argparse
 import json
 import logging
 import os
+import time
 from typing import Any
 
 from fastmcp import FastMCP
 
 from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
+from amfs_core.abc import AdapterABC
 from amfs_core.models import AMFSConfig, LayerConfig
 
 from amfs_mcp.agent_id import detect_agent_id, detect_platform
@@ -39,16 +41,32 @@ logger = logging.getLogger(__name__)
 
 mcp = FastMCP(name="amfs")
 
-_memory: AgentMemory | None = None
+# ---------------------------------------------------------------------------
+# Identity-scoped memory management
+#
+# In stdio mode Cursor multiplexes all conversations through a single MCP
+# process.  A naïve global AgentMemory singleton means set_identity() in
+# one chat silently poisons writes from another.
+#
+# Fix: maintain one *adapter* (storage layer) shared across all identities,
+# but a separate AgentMemory per identity — each with its own CausalTagger,
+# ReadTracker, and session_id.  A staleness guard prevents rapid cross-
+# conversation identity switches from clobbering each other.
+# ---------------------------------------------------------------------------
+
+_adapter: AdapterABC | None = None
+_memories: dict[str, AgentMemory] = {}
+_active_identity: str | None = None
+_last_activity: float = 0.0
+
+_IDENTITY_COOLDOWN_SECONDS = 30
 
 
-def _get_memory() -> AgentMemory:
-    """Lazily initialise the shared AgentMemory singleton."""
-    global _memory
-    if _memory is not None:
-        return _memory
-
-    agent_id = detect_agent_id()
+def _get_adapter() -> AdapterABC:
+    """Lazily initialise the shared storage adapter (one per process)."""
+    global _adapter
+    if _adapter is not None:
+        return _adapter
 
     http_url = os.environ.get("AMFS_HTTP_URL")
     if http_url:
@@ -65,9 +83,8 @@ def _get_memory() -> AgentMemory:
             logger.info(
                 "AMFS HTTP adapter mode — routing through %s", http_url
             )
-            adapter = HttpAdapter(base_url=http_url, api_key=api_key)
-            _memory = AgentMemory(agent_id=agent_id, adapter=adapter)
-            return _memory
+            _adapter = HttpAdapter(base_url=http_url, api_key=api_key)
+            return _adapter
         except ImportError:
             logger.warning(
                 "AMFS_HTTP_URL is set but amfs-adapter-http is not installed. "
@@ -76,27 +93,38 @@ def _get_memory() -> AgentMemory:
             )
 
     config = _resolve_config()
+    from amfs.factory import create_adapter_from_config
 
+    _adapter = create_adapter_from_config(config)
+    return _adapter
+
+
+def _get_memory() -> AgentMemory:
+    """Return the AgentMemory for the currently active identity.
+
+    Each identity gets its own AgentMemory instance (own CausalTagger,
+    ReadTracker, session_id) while sharing the underlying adapter.
+    """
+    global _last_activity
+    _last_activity = time.monotonic()
+
+    name = _active_identity or detect_agent_id()
+
+    if name in _memories:
+        return _memories[name]
+
+    adapter = _get_adapter()
     ttl_interval_str = os.environ.get("AMFS_TTL_SWEEP_INTERVAL")
     ttl_sweep_interval = float(ttl_interval_str) if ttl_interval_str else 300.0
 
-    logger.info("AMFS MCP server starting — agent_id=%s", agent_id)
-    _memory = AgentMemory(
-        agent_id=agent_id,
-        config_path=None,
-        adapter=None,
+    logger.info("AMFS MCP server — creating memory for agent_id=%s", name)
+    mem = AgentMemory(
+        agent_id=name,
+        adapter=adapter,
         ttl_sweep_interval=ttl_sweep_interval,
     )
-
-    _memory._config = config
-    from amfs.factory import create_adapter_from_config
-
-    adapter = create_adapter_from_config(config)
-    _memory._adapter = adapter
-    _memory._engine._adapter = adapter
-    _memory._propagator._adapter = adapter
-
-    return _memory
+    _memories[name] = mem
+    return mem
 
 
 def _resolve_config() -> AMFSConfig:
@@ -158,6 +186,10 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
     Each Cursor chat, Claude conversation, or agent session should set
     its own identity based on what it's working on.
 
+    Identity is protected by a cooldown: if another conversation recently
+    set a different identity, this call will be rejected to prevent cross-
+    conversation interference.  Re-setting the same name is always allowed.
+
     Args:
         name: Short, descriptive name (e.g. "dashboard-fixer", "auth-debugger",
               "mcp-integration"). Use kebab-case.
@@ -165,9 +197,46 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
 
     Example: amfs_set_identity("tenant-isolation-agent", "Fixing RLS propagation for Pro tenancy")
     """
+    global _active_identity, _last_activity
+    now = time.monotonic()
+
+    # Idempotent: same name is always a no-op
+    if _active_identity == name:
+        _last_activity = now
+        mem = _get_memory()
+        return json.dumps({
+            "identity": name,
+            "session_id": mem.session_id,
+            "status": "already_active",
+        }, default=str)
+
+    # Guard: reject if a *different* identity was recently active
+    if _active_identity is not None:
+        elapsed = now - _last_activity
+        if elapsed < _IDENTITY_COOLDOWN_SECONDS:
+            return json.dumps({
+                "error": "identity_conflict",
+                "current_identity": _active_identity,
+                "requested_identity": name,
+                "seconds_since_last_activity": round(elapsed, 1),
+                "cooldown_seconds": _IDENTITY_COOLDOWN_SECONDS,
+                "hint": (
+                    "Another conversation recently set a different identity. "
+                    "In stdio mode all conversations share one MCP process. "
+                    f"Wait {_IDENTITY_COOLDOWN_SECONDS - elapsed:.0f}s or "
+                    "continue using the current identity."
+                ),
+            })
+        logger.info(
+            "Identity switch: %s → %s (previous idle for %.1fs)",
+            _active_identity, name, elapsed,
+        )
+
+    old_identity = _active_identity or detect_agent_id()
+    _active_identity = name
+    _last_activity = now
+
     mem = _get_memory()
-    old_id = mem.agent_id
-    mem._tagger.agent_id = name
 
     try:
         mem.write(
@@ -176,7 +245,7 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
             {
                 "description": description or "",
                 "platform": detect_platform(),
-                "previous_identity": old_id,
+                "previous_identity": old_identity,
                 "session_id": mem.session_id,
             },
             confidence=1.0,
@@ -185,7 +254,7 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
         logger.debug("Failed to persist agent description", exc_info=True)
 
     result: dict[str, Any] = {
-        "previous_identity": old_id,
+        "previous_identity": old_identity,
         "new_identity": name,
         "session_id": mem.session_id,
     }
