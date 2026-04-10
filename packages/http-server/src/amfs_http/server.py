@@ -2950,6 +2950,17 @@ async def cortex_activity(
     return {"events": [], "total": 0, "throughput": [], "stats": None}
 
 
+@app.post("/api/v1/cortex/recompile")
+async def cortex_recompile(
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Trigger a full digest recompilation."""
+    if not _cortex_worker:
+        raise HTTPException(status_code=503, detail="Cortex worker not running")
+    count = _cortex_worker._compiler.recompile_all()
+    return {"recompiled": count}
+
+
 @app.post("/api/v1/webhooks/{connector_name}")
 async def ingest_webhook(
     connector_name: str,
