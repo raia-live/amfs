@@ -238,20 +238,14 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
 
     mem = _get_memory()
 
-    try:
-        mem.write(
-            "_system/agents",
-            name,
-            {
-                "description": description or "",
-                "platform": detect_platform(),
-                "previous_identity": old_identity,
-                "session_id": mem.session_id,
-            },
-            confidence=1.0,
-        )
-    except Exception:
-        logger.debug("Failed to persist agent description", exc_info=True)
+    # Log identity change for debugging — but do NOT write to _system/agents.
+    # Writing system metadata as regular memory entries pollutes agent stats
+    # (entry counts, entity lists) and creates ghost agents on the dashboard.
+    # Agent identity is already tracked via provenance on every real entry.
+    logger.info(
+        "Identity set: %s → %s (session=%s, platform=%s, description=%s)",
+        old_identity, name, mem.session_id, detect_platform(), description or "",
+    )
 
     result: dict[str, Any] = {
         "previous_identity": old_identity,
