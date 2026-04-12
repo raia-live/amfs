@@ -36,12 +36,14 @@ class CortexWorker:
         debounce_ms: int = 3000,
         use_advisory_lock: bool = True,
         drift_threshold: float = 0.0,
+        periodic_recompile_s: float = 300.0,
     ) -> None:
         self._dsn = dsn
         self._compiler = compiler
         self._debounce_ms = debounce_ms
         self._use_advisory_lock = use_advisory_lock
         self._drift_threshold = drift_threshold
+        self._periodic_recompile_s = periodic_recompile_s
         self._pending: dict[str, float] = {}
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -50,6 +52,7 @@ class CortexWorker:
         self._drift_skipped = 0
         self._started_at: float | None = None
         self._last_event_at: float | None = None
+        self._last_full_recompile: float = 0.0
         self._activity_log: deque[dict[str, Any]] = deque(maxlen=_ACTIVITY_LOG_MAX)
         self._outcome_wiring: Any = None
         self._hot_tracker: Any = None
@@ -130,6 +133,7 @@ class CortexWorker:
             logger.info("Cortex worker active — listening for events")
 
             self._compiler.recompile_all()
+            self._last_full_recompile = time.monotonic()
 
             conn.execute("LISTEN amfs_write")
             conn.execute("LISTEN amfs_outcome")
@@ -144,6 +148,7 @@ class CortexWorker:
                     if self._stop.is_set():
                         break
                     self._handle_notify(notify)
+                self._maybe_periodic_recompile()
 
         finally:
             conn.close()
@@ -173,6 +178,7 @@ class CortexWorker:
             if self._try_acquire_lock(conn):
                 logger.info("Standby worker promoted to active")
                 self._compiler.recompile_all()
+                self._last_full_recompile = time.monotonic()
                 conn.execute("LISTEN amfs_write")
                 conn.execute("LISTEN amfs_outcome")
 
@@ -186,6 +192,7 @@ class CortexWorker:
                         if self._stop.is_set():
                             break
                         self._handle_notify(notify)
+                    self._maybe_periodic_recompile()
                 break
 
     def _handle_notify(self, notify) -> None:
@@ -241,6 +248,31 @@ class CortexWorker:
 
         if self._pro_forwarder:
             self._pro_forwarder.enqueue({"channel": channel, **payload})
+
+    def _maybe_periodic_recompile(self) -> None:
+        """Trigger a full recompile if enough time has passed since the last one.
+
+        Acts as a safety net for environments where NOTIFY events can be lost
+        (Cloud Run scale-to-zero, connection poolers, connection drops).
+        """
+        if self._periodic_recompile_s <= 0:
+            return
+        elapsed = time.monotonic() - self._last_full_recompile
+        if elapsed < self._periodic_recompile_s:
+            return
+
+        logger.info("Periodic recompile triggered (%.0fs since last)", elapsed)
+        try:
+            count = self._compiler.recompile_all()
+            self._last_full_recompile = time.monotonic()
+            self._activity_log.append({
+                "type": "periodic_recompile",
+                "digests_compiled": count,
+                "interval_s": round(elapsed),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:
+            logger.exception("Periodic recompile failed")
 
     def _recompile_loop(self) -> None:
         """Background thread that recompiles debounced pending digests."""
