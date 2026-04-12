@@ -103,20 +103,37 @@ class DigestCompiler:
                 agent_ids.add(aid)
 
         count = 0
+        errors = 0
         for ep in entity_paths:
-            if self.compile(f"entity:{ep}", branch=b):
-                count += 1
-            if self.compile(f"connection:{ep}", branch=b):
-                count += 1
+            try:
+                if self.compile(f"entity:{ep}", branch=b):
+                    count += 1
+            except Exception:
+                errors += 1
+                logger.exception("Failed to compile entity digest for %s", ep)
+            try:
+                if self.compile(f"connection:{ep}", branch=b):
+                    count += 1
+            except Exception:
+                errors += 1
+                logger.exception("Failed to compile connection digest for %s", ep)
         for aid in agent_ids:
-            if self.compile(f"agent:{aid}", branch=b):
-                count += 1
+            try:
+                if self.compile(f"agent:{aid}", branch=b):
+                    count += 1
+            except Exception:
+                errors += 1
+                logger.exception("Failed to compile agent digest for %s", aid)
         for sid in source_ids:
-            if self.compile(f"source:{sid}", branch=b):
-                count += 1
+            try:
+                if self.compile(f"source:{sid}", branch=b):
+                    count += 1
+            except Exception:
+                errors += 1
+                logger.exception("Failed to compile source digest for %s", sid)
 
-        logger.info("Recompiled %d digests (%d entities, %d agents, %d sources) branch=%s",
-                     count, len(entity_paths), len(agent_ids), len(source_ids), b)
+        logger.info("Recompiled %d digests (%d entities, %d agents, %d sources, %d errors) branch=%s",
+                     count, len(entity_paths), len(agent_ids), len(source_ids), errors, b)
         return count
 
     def compute_scope_fingerprint(self, scope_key: str, *, branch: str | None = None) -> str | None:
