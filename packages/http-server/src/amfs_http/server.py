@@ -2912,9 +2912,10 @@ async def cortex_status(
 @app.get("/api/v1/cortex/digests")
 async def list_cortex_digests(
     digest_type: str | None = Query(None),
+    scope: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    """List all compiled digests."""
+    """List compiled digests, optionally filtered by type and scope."""
     try:
         from amfs_postgres.adapter import PostgresAdapter
         from amfs_core.models import DigestType
@@ -2923,13 +2924,18 @@ async def list_cortex_digests(
         adapter = mem._adapter
         if isinstance(adapter, PostgresAdapter):
             dt = DigestType(digest_type) if digest_type else None
-            digests = adapter.list_digests(digest_type=dt)
+            namespace = getattr(adapter, "_namespace", "default")
+            digests = adapter.list_digests(digest_type=dt, namespace=namespace)
+            if scope:
+                digests = [d for d in digests if d.scope == scope]
             return {
                 "digests": [d.model_dump(mode="json") for d in digests],
                 "total": len(digests),
             }
-    except (ImportError, ValueError, Exception):
+    except (ImportError, ValueError):
         pass
+    except Exception:
+        logger.exception("Failed to list cortex digests")
 
     return {"digests": [], "total": 0}
 
