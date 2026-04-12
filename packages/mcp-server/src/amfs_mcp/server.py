@@ -445,7 +445,22 @@ def amfs_search(
             or query_lower in e.entity_path.lower()
         ]
 
-    return json.dumps([_serialize_entry(e) for e in results], default=str)
+    if not results:
+        return json.dumps({
+            "status": "empty",
+            "count": 0,
+            "message": "No entries matched your search filters.",
+            "filters": {
+                "query": query,
+                "entity_path": entity_path,
+                "agent_id": agent_id,
+                "min_confidence": min_confidence,
+            },
+        })
+    return json.dumps({
+        "count": len(results),
+        "entries": [_serialize_entry(e) for e in results],
+    }, default=str)
 
 
 def _adapter_supports_fts(mem) -> bool:
@@ -509,7 +524,18 @@ def amfs_retrieve(
         data["_breakdown"] = {k: round(v, 4) for k, v in scored.breakdown.items()}
         serialized.append(data)
 
-    return json.dumps(serialized, default=str)
+    if not serialized:
+        return json.dumps({
+            "status": "empty",
+            "count": 0,
+            "message": "No entries matched your query.",
+            "query": query,
+            "entity_path": entity_path,
+        })
+    return json.dumps({
+        "count": len(serialized),
+        "entries": serialized,
+    }, default=str)
 
 
 @mcp.tool
@@ -525,7 +551,20 @@ def amfs_list(entity_path: str | None = None) -> str:
     """
     mem = _get_memory()
     entries = mem.list(entity_path)
-    return json.dumps([_serialize_entry(e) for e in entries], default=str)
+    if not entries:
+        return json.dumps({
+            "status": "empty",
+            "count": 0,
+            "entity_path": entity_path,
+            "message": "No entries found." + (
+                " Try without an entity_path filter to see all entries."
+                if entity_path else ""
+            ),
+        })
+    return json.dumps({
+        "count": len(entries),
+        "entries": [_serialize_entry(e) for e in entries],
+    }, default=str)
 
 
 @mcp.tool
@@ -560,7 +599,17 @@ def amfs_graph_neighbors(
         depth=depth,
         limit=limit,
     )
-    return json.dumps([e.model_dump(mode="json") for e in edges], default=str)
+    if not edges:
+        return json.dumps({
+            "status": "empty",
+            "count": 0,
+            "entity": entity,
+            "message": "No graph edges found for this entity.",
+        })
+    return json.dumps({
+        "count": len(edges),
+        "edges": [e.model_dump(mode="json") for e in edges],
+    }, default=str)
 
 
 @mcp.tool
