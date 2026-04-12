@@ -56,7 +56,7 @@ pip install amfs-mcp-server         # MCP server for AI coding agents
 ## TypeScript SDK
 
 ```bash
-npm install @amfs/sdk
+npm install @senselab-ai/amfs
 ```
 
 ---

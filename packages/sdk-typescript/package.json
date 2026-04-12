@@ -1,5 +1,5 @@
 {
-  "name": "@amfs/sdk",
+  "name": "@senselab-ai/amfs",
   "version": "0.1.0",
   "description": "AMFS TypeScript SDK — Agent Memory File System",
   "type": "module",

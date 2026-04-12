@@ -60,7 +60,7 @@ mem.commit_outcome("INC-1042", OutcomeType.CRITICAL_FAILURE)
 
 ```bash
 pip install amfs                    # Python SDK
-npm install @amfs/sdk               # TypeScript SDK
+npm install @senselab-ai/amfs        # TypeScript SDK
 pip install amfs-http-server        # REST API server
 pip install amfs-adapter-postgres   # Postgres backend
 pip install amfs-adapter-s3         # S3 backend

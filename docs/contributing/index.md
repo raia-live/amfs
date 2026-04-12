@@ -68,7 +68,7 @@ amfs/
 │   │   ├── filesystem/          # CoW via atomic rename
 │   │   └── postgres/            # psycopg3 + triggers
 │   ├── sdk-python/              # AgentMemory, config, factory
-│   ├── sdk-typescript/          # @amfs/sdk (TypeScript port)
+│   ├── sdk-typescript/          # @senselab-ai/amfs (TypeScript port)
 │   ├── integrations/
 │   │   ├── crewai/
 │   │   ├── langgraph/
