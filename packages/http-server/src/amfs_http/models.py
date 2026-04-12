@@ -38,6 +38,7 @@ class SearchRequest(BaseModel):
     limit: int = 100
     sort_by: str = "confidence"
     branch: str = "main"
+    depth: int = 3
 
 
 class ContextRequest(BaseModel):
