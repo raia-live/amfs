@@ -1044,6 +1044,16 @@ class AgentMemory:
         Returns:
             List of Digest objects ranked by relevance.
         """
+        # Prefer the adapter's native briefing when available (e.g. HttpAdapter
+        # proxies to the server which has full Cortex + Postgres access).
+        adapter_briefing = getattr(self._adapter, "briefing", None)
+        if callable(adapter_briefing):
+            return adapter_briefing(
+                entity_path=entity_path,
+                agent_id=agent_id or self.agent_id,
+                limit=limit,
+            )
+
         try:
             from amfs_cortex.briefing import BriefingService
         except ImportError:

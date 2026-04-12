@@ -17,6 +17,7 @@ import httpx
 from amfs_core.abc import AdapterABC, WatchHandle
 from amfs_core.models import (
     DecisionTrace,
+    Digest,
     Event,
     EventType,
     GraphEdge,
@@ -267,3 +268,30 @@ class HttpAdapter(AdapterABC):
             "branch": branch,
         }
         self._post("/api/v1/graph/edges", body)
+
+    def list_digests(
+        self,
+        digest_type: Any = None,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> list[Digest]:
+        params: dict[str, Any] = {}
+        if digest_type is not None:
+            params["digest_type"] = digest_type.value if hasattr(digest_type, "value") else str(digest_type)
+        data = self._get("/api/v1/cortex/digests", **params)
+        return [Digest.model_validate(d) for d in data.get("digests", [])]
+
+    def briefing(
+        self,
+        entity_path: str | None = None,
+        agent_id: str | None = None,
+        limit: int = 10,
+    ) -> list[Digest]:
+        """Proxy briefing to the HTTP server which has full Cortex access."""
+        params: dict[str, Any] = {"limit": limit}
+        if entity_path:
+            params["entity_path"] = entity_path
+        if agent_id:
+            params["agent_id"] = agent_id
+        data = self._get("/api/v1/briefing", **params)
+        return [Digest.model_validate(d) for d in data.get("digests", [])]

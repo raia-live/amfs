@@ -903,6 +903,13 @@ def amfs_briefing(
         agent_id=agent_id,
         limit=limit,
     )
+    if not digests:
+        hint = (
+            "No compiled briefings yet. "
+            "Use amfs_search() or amfs_recall() to find existing memories, "
+            "or amfs_write() to start building knowledge."
+        )
+        return json.dumps({"status": "empty", "message": hint})
     return json.dumps(
         [d.model_dump(mode="json") for d in digests],
         default=str,
