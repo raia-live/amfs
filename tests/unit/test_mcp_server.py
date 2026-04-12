@@ -129,7 +129,8 @@ class TestMCPTools:
         from amfs_mcp.server import amfs_list
 
         result = json.loads(amfs_list())
-        assert result == []
+        assert result["status"] == "empty"
+        assert result["count"] == 0
 
     def test_amfs_list_filtered(self) -> None:
         from amfs_mcp.server import amfs_list, amfs_write
@@ -139,8 +140,8 @@ class TestMCPTools:
         amfs_write("svc-b", "k3", "v3")
 
         result = json.loads(amfs_list("svc-a"))
-        assert len(result) == 2
-        assert all(e["entity_path"] == "svc-a" for e in result)
+        assert result["count"] == 2
+        assert all(e["entity_path"] == "svc-a" for e in result["entries"])
 
     def test_amfs_list_all(self) -> None:
         from amfs_mcp.server import amfs_list, amfs_write
@@ -149,7 +150,7 @@ class TestMCPTools:
         amfs_write("svc-b", "k2", "v2")
 
         result = json.loads(amfs_list())
-        assert len(result) == 2
+        assert result["count"] == 2
 
     def test_amfs_search_all(self) -> None:
         from amfs_mcp.server import amfs_search, amfs_write
@@ -158,7 +159,7 @@ class TestMCPTools:
         amfs_write("svc-b", "k2", "v2")
 
         result = json.loads(amfs_search())
-        assert len(result) == 2
+        assert result["count"] == 2
 
     def test_amfs_search_by_entity(self) -> None:
         from amfs_mcp.server import amfs_search, amfs_write
@@ -167,8 +168,8 @@ class TestMCPTools:
         amfs_write("svc-b", "k2", "v2")
 
         result = json.loads(amfs_search(entity_path="svc-a"))
-        assert len(result) == 1
-        assert result[0]["entity_path"] == "svc-a"
+        assert result["count"] == 1
+        assert result["entries"][0]["entity_path"] == "svc-a"
 
     def test_amfs_search_by_min_confidence(self) -> None:
         from amfs_mcp.server import amfs_search, amfs_write
@@ -177,8 +178,8 @@ class TestMCPTools:
         amfs_write("svc", "low", "v2", confidence=0.2)
 
         result = json.loads(amfs_search(min_confidence=0.5))
-        assert len(result) == 1
-        assert result[0]["key"] == "high"
+        assert result["count"] == 1
+        assert result["entries"][0]["key"] == "high"
 
     def test_amfs_search_with_text_query(self) -> None:
         from amfs_mcp.server import amfs_search, amfs_write
@@ -187,8 +188,8 @@ class TestMCPTools:
         amfs_write("svc", "auth-flow", "JWT token validation")
 
         result = json.loads(amfs_search(query="retry"))
-        assert len(result) == 1
-        assert result[0]["key"] == "retry-logic"
+        assert result["count"] == 1
+        assert result["entries"][0]["key"] == "retry-logic"
 
     def test_amfs_search_text_query_in_value(self) -> None:
         from amfs_mcp.server import amfs_search, amfs_write
@@ -197,8 +198,8 @@ class TestMCPTools:
         amfs_write("svc", "k2", "something else entirely")
 
         result = json.loads(amfs_search(query="backoff"))
-        assert len(result) == 1
-        assert result[0]["key"] == "k1"
+        assert result["count"] == 1
+        assert result["entries"][0]["key"] == "k1"
 
     def test_amfs_stats_empty(self) -> None:
         from amfs_mcp.server import amfs_stats

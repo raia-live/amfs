@@ -14,13 +14,14 @@ from typing import Any, Callable
 
 import httpx
 
-from amfs_core.abc import AdapterABC, WatchHandle
+from amfs_core.abc import AdapterABC, Agent, WatchHandle
 from amfs_core.models import (
     DecisionTrace,
     Digest,
     Event,
     EventType,
     GraphEdge,
+    GraphNeighborQuery,
     MemoryEntry,
     MemoryStats,
     OutcomeRecord,
@@ -121,6 +122,8 @@ class HttpAdapter(AdapterABC):
             params["entity_path"] = entity_path
         if branch and branch != "main":
             params["branch"] = branch
+        if include_superseded:
+            params["include_superseded"] = "true"
         data = self._get("/api/v1/entries", **params)
         return [_parse_entry(e) for e in data.get("entries", [])]
 
@@ -145,12 +148,13 @@ class HttpAdapter(AdapterABC):
 
     # ── optional overrides ────────────────────────────────────────────
 
-    def search(self, query: SearchQuery) -> list[MemoryEntry]:
+    def search(self, query: SearchQuery, **kwargs: Any) -> list[MemoryEntry]:
         body: dict[str, Any] = {
             "entity_path": query.entity_path,
             "min_confidence": query.min_confidence,
             "limit": query.limit,
             "sort_by": query.sort_by or "confidence",
+            "depth": query.depth,
         }
         if query.query:
             body["query"] = query.query
@@ -162,6 +166,9 @@ class HttpAdapter(AdapterABC):
             body["since"] = query.since.isoformat()
         if query.pattern_ref:
             body["pattern_ref"] = query.pattern_ref
+        branch = kwargs.get("branch")
+        if branch:
+            body["branch"] = branch
         data = self._post("/api/v1/search", body)
         if isinstance(data, list):
             return [_parse_entry(e) for e in data]
@@ -268,6 +275,29 @@ class HttpAdapter(AdapterABC):
             "branch": branch,
         }
         self._post("/api/v1/graph/edges", body)
+
+    def graph_neighbors(
+        self,
+        query: GraphNeighborQuery,
+        *,
+        namespace: str = "default",
+        branch: str = "main",
+    ) -> list[GraphEdge]:
+        data = self._get(
+            "/api/v1/pro/graph/neighbors",
+            entity=query.entity,
+            relation=query.relation,
+            direction=query.direction,
+            min_confidence=query.min_confidence,
+            depth=query.depth,
+            limit=query.limit,
+        )
+        return [GraphEdge.model_validate(e) for e in data.get("edges", [])]
+
+    def ensure_agent(self, agent_id: str, namespace: str = "default") -> Agent:
+        # Server-side ensure_agent runs automatically during writes.
+        # Return a stub so AgentMemory.__init__ doesn't hit the ABC no-op.
+        return Agent(agent_id=agent_id, namespace=namespace)
 
     def list_digests(
         self,

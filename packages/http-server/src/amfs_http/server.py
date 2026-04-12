@@ -401,10 +401,11 @@ async def write_entry(
 async def list_entries(
     entity_path: str | None = Query(None),
     branch: str = Query("main"),
+    include_superseded: bool = Query(False),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     mem = _get_memory()
-    entries = mem.list(entity_path, branch=branch)
+    entries = mem.list(entity_path, branch=branch, include_superseded=include_superseded)
     return {"entries": [_entry_to_response(e) for e in entries]}
 
 
@@ -430,6 +431,7 @@ async def search_entries(
         pattern_ref=req.pattern_ref,
         sort_by=req.sort_by,
         limit=req.limit,
+        depth=req.depth,
     )
     try:
         results = mem._adapter.search(sq, branch=branch)
