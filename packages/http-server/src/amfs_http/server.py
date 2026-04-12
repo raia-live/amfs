@@ -3177,6 +3177,8 @@ def main() -> None:
                 logger.info("Embedded Cortex worker started")
             except ImportError:
                 logger.warning("--with-cortex requires amfs-cortex package")
+            except Exception:
+                logger.exception("Failed to start embedded Cortex worker — server will run without Cortex")
         else:
             logger.warning("--with-cortex requires AMFS_POSTGRES_DSN")
 

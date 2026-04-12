@@ -174,11 +174,27 @@ class PostgresAdapter(AdapterABC):
         self._listen_stop = threading.Event()
         self._watchers: dict[str, list[Callable[[MemoryEntry], None]]] = {}
 
-    def _apply_schema(self) -> None:
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(_SCHEMA_SQL)
-                self._apply_migrations(cur)
+    def _apply_schema(self, *, retries: int = 3) -> None:
+        import time as _time
+
+        for attempt in range(1, retries + 1):
+            try:
+                with self._pool.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(_SCHEMA_SQL)
+                        self._apply_migrations(cur)
+                return
+            except Exception as exc:
+                is_retryable = "deadlock" in str(exc).lower() or "lock" in str(exc).lower()
+                if is_retryable and attempt < retries:
+                    wait = 0.5 * (2 ** (attempt - 1))
+                    logger.warning(
+                        "Schema apply attempt %d/%d hit %s — retrying in %.1fs",
+                        attempt, retries, type(exc).__name__, wait,
+                    )
+                    _time.sleep(wait)
+                else:
+                    raise
 
     @staticmethod
     def _apply_migrations(cur: psycopg.Cursor) -> None:
