@@ -944,11 +944,37 @@ async def list_agents(
                 "entries_written": 0,
                 "entities_touched": set(),
                 "last_active": e.provenance.written_at,
+                "first_seen": e.provenance.written_at,
             }
         agent_data[aid]["entries_written"] += 1
         agent_data[aid]["entities_touched"].add(e.entity_path)
         if e.provenance.written_at > agent_data[aid]["last_active"]:
             agent_data[aid]["last_active"] = e.provenance.written_at
+        if e.provenance.written_at and (
+            agent_data[aid]["first_seen"] is None
+            or e.provenance.written_at < agent_data[aid]["first_seen"]
+        ):
+            agent_data[aid]["first_seen"] = e.provenance.written_at
+
+    agent_registration: dict[str, dict[str, Any]] = {}
+    known_agent_ids = list(agent_data.keys())
+    if known_agent_ids:
+        try:
+            from amfs_postgres.adapter import PostgresAdapter
+            adapter = mem._adapter
+            if isinstance(adapter, PostgresAdapter):
+                with adapter._pool.connection() as conn:
+                    with conn.cursor() as cur:
+                        placeholders = ", ".join(["%s"] * len(known_agent_ids))
+                        cur.execute(
+                            f"SELECT agent_id, created_at FROM amfs_agents "
+                            f"WHERE namespace = %s AND agent_id IN ({placeholders})",
+                            [adapter._namespace, *known_agent_ids],
+                        )
+                        for row in cur.fetchall():
+                            agent_registration[row["agent_id"]] = {"created_at": row["created_at"]}
+        except (ImportError, Exception):
+            pass
 
     agent_descriptions: dict[str, dict[str, Any]] = {}
     try:
@@ -965,11 +991,14 @@ async def list_agents(
     agents = []
     for ad in sorted(agent_data.values(), key=lambda x: x["entries_written"], reverse=True):
         desc_info = agent_descriptions.get(ad["agent_id"], {})
+        reg = agent_registration.get(ad["agent_id"], {})
+        created = reg.get("created_at") or ad.get("first_seen")
         agents.append({
             "agentId": ad["agent_id"],
             "entriesWritten": ad["entries_written"],
             "entitiesTouched": len(ad["entities_touched"]),
             "lastActive": ad["last_active"].isoformat() if ad["last_active"] else None,
+            "createdAt": created.isoformat() if created else None,
             "description": desc_info.get("description", ""),
             "platform": desc_info.get("platform", ""),
         })
