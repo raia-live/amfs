@@ -1,5 +1,5 @@
 /**
- * @amfs/sdk — Agent Memory File System TypeScript SDK
+ * @senselab-ai/amfs — Agent Memory File System TypeScript SDK
  */
 
 export { AgentMemory, MemoryScope } from "./memory.js";

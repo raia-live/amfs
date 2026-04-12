@@ -145,7 +145,7 @@ curl http://localhost:8080/api/v1/entries/checkout-service/retry-pattern
 | `amfs-http-server` | Python | `pip install amfs-http-server` |
 | `amfs-cli` | Python | `pip install amfs-cli` |
 | `amfs-mcp-server` | Python | `pip install amfs-mcp-server` |
-| `@amfs/sdk` | TypeScript | `npm install @amfs/sdk` |
+| `@senselab-ai/amfs` | TypeScript | `npm install @senselab-ai/amfs` |
 
 ---
 

@@ -246,7 +246,7 @@ The open-source layer ([github.com/raia-live/amfs](https://github.com/raia-live/
 | `amfs-http-server` | REST API server (FastAPI/Uvicorn) for remote access, branch-aware endpoints |
 | `amfs-mcp-server` | MCP server exposing 12 tools: `amfs_read`, `amfs_write`, `amfs_search`, `amfs_retrieve`, `amfs_list`, `amfs_stats`, `amfs_commit_outcome`, `amfs_record_context`, `amfs_history`, `amfs_explain`, `amfs_graph_neighbors`, `amfs_timeline` |
 | `amfs-cli` | Terminal tools for inspecting, diffing, snapshotting, and restoring memory |
-| `@amfs/sdk` | TypeScript SDK (full parity with Python: ReadTracker, search, stats, history, explain, recordContext) |
+| `@senselab-ai/amfs` | TypeScript SDK (full parity with Python: ReadTracker, search, stats, history, explain, recordContext) |
 
 ### Key Primitives
 

@@ -9,7 +9,7 @@ description: "Using AMFS from TypeScript and Node.js applications."
 # TypeScript SDK
 {: .no_toc }
 
-The TypeScript SDK (`@amfs/sdk`) provides full parity with the Python SDK for Node.js and TypeScript applications — including ReadTracker, auto-causal linking, search, history, stats, and explainability.
+The TypeScript SDK (`@senselab-ai/amfs`) provides full parity with the Python SDK for Node.js and TypeScript applications — including ReadTracker, auto-causal linking, search, history, stats, and explainability.
 
 ## Table of Contents
 {: .no_toc .text-delta }
@@ -22,7 +22,7 @@ The TypeScript SDK (`@amfs/sdk`) provides full parity with the Python SDK for No
 ## Installation
 
 ```bash
-npm install @amfs/sdk
+npm install @senselab-ai/amfs
 ```
 
 ---
@@ -30,7 +30,7 @@ npm install @amfs/sdk
 ## Quick Start
 
 ```typescript
-import { AgentMemory, OutcomeType } from "@amfs/sdk";
+import { AgentMemory, OutcomeType } from "@senselab-ai/amfs";
 
 const mem = new AgentMemory("review-agent");
 
@@ -106,7 +106,7 @@ const recent = mem.history("checkout-service", "retry-pattern", {
 ## Search
 
 ```typescript
-import { SearchOptions } from "@amfs/sdk";
+import { SearchOptions } from "@senselab-ai/amfs";
 
 const results = mem.search({
   entityPath: "checkout-service",  // filter by entity
@@ -279,7 +279,7 @@ import {
   SearchOptions,
   MemoryStats,
   ArtifactRef,
-} from "@amfs/sdk";
+} from "@senselab-ai/amfs";
 ```
 
 ---
