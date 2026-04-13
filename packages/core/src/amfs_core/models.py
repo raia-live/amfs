@@ -515,6 +515,39 @@ class EventType(str, Enum):
     SNAPSHOT_RECOVERED = "snapshot_recovered"
 
 
+class AgentProfile(BaseModel):
+    """Declarative profile describing an agent's role and defaults."""
+
+    description: str = ""
+    default_branch: str = "main"
+    auto_context_paths: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+
+
+class AgentCapability(BaseModel):
+    """A declared capability or domain of expertise for an agent."""
+
+    name: str
+    description: str = ""
+    entity_paths: list[str] = Field(default_factory=list)
+
+
+class MemoryContract(BaseModel):
+    """A contract specifying expectations for entries an agent writes.
+
+    Contracts are validated at write time to enforce schema, TTL, and
+    confidence expectations.
+    """
+
+    entity_path: str
+    key_pattern: str = "*"
+    min_confidence: float = 0.0
+    max_confidence: float = 1.0
+    required_fields: list[str] = Field(default_factory=list)
+    ttl_required: bool = False
+    description: str = ""
+
+
 class Agent(BaseModel):
     """Registered agent — auto-created on first write."""
 
@@ -525,6 +558,9 @@ class Agent(BaseModel):
     created_at: datetime | None = None
     last_active_at: datetime | None = None
     entry_count: int = 0
+    profile: AgentProfile | None = None
+    capabilities: list[AgentCapability] = Field(default_factory=list)
+    contracts: list[MemoryContract] = Field(default_factory=list)
 
 
 class Event(BaseModel):

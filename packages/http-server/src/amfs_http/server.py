@@ -544,6 +544,67 @@ async def merge_base(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Agent binding
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.put("/api/v1/agents/{agent_id}/profile")
+async def update_agent_profile(
+    agent_id: str,
+    body: dict[str, Any],
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    from amfs_core.models import AgentProfile
+
+    mem = _get_memory()
+    profile = AgentProfile.model_validate(body)
+    agent = mem._adapter.update_agent_profile(agent_id, profile)
+    return json.loads(json.dumps(agent.model_dump(mode="json"), default=str))
+
+
+@app.put("/api/v1/agents/{agent_id}/capabilities")
+async def update_agent_capabilities(
+    agent_id: str,
+    body: dict[str, Any],
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    from amfs_core.models import AgentCapability
+
+    mem = _get_memory()
+    capabilities = [AgentCapability.model_validate(c) for c in body.get("capabilities", [])]
+    agent = mem._adapter.update_agent_capabilities(agent_id, capabilities)
+    return json.loads(json.dumps(agent.model_dump(mode="json"), default=str))
+
+
+@app.put("/api/v1/agents/{agent_id}/contracts")
+async def update_agent_contracts(
+    agent_id: str,
+    body: dict[str, Any],
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    from amfs_core.models import MemoryContract
+
+    mem = _get_memory()
+    contracts = [MemoryContract.model_validate(c) for c in body.get("contracts", [])]
+    agent = mem._adapter.update_agent_contracts(agent_id, contracts)
+    return json.loads(json.dumps(agent.model_dump(mode="json"), default=str))
+
+
+@app.get("/api/v1/agents/discover")
+async def discover_agents(
+    capability: str | None = Query(None),
+    entity_path: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    agents = mem.discover_agents(capability=capability, entity_path=entity_path)
+    return {
+        "agents": [json.loads(json.dumps(a.model_dump(mode="json"), default=str)) for a in agents],
+        "count": len(agents),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
 # History
 # ──────────────────────────────────────────────────────────────────────
 
