@@ -2,7 +2,7 @@
  * AmfsAdapter — interface that every TS adapter must implement.
  */
 
-import type { MemoryEntry, OutcomeRecord } from "./models.js";
+import type { MemoryEntry, OutcomeRecord, Commit } from "./models.js";
 
 export interface WatchHandle {
   cancel(): void;
@@ -29,6 +29,10 @@ export interface AmfsAdapter {
   ): WatchHandle;
 
   commitOutcome(record: OutcomeRecord): MemoryEntry[];
+
+  listCommits?(options?: { limit?: number }): Commit[];
+
+  getCommit?(commitId: string): Commit | null;
 }
 
 export function createWatchHandle(cancelFn: () => void): WatchHandle {
