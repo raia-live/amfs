@@ -14,7 +14,7 @@ Understanding the building blocks of AMFS.
 
 AMFS treats each agent's knowledge as a **Git repository**. Every write is a versioned commit. Every operation is logged on a timeline. Branches isolate experiments. Pull requests let you review changes before merging. You can roll back to any point.
 
-On top of this Git-like foundation, AMFS adds memory intelligence: **memory entries** store knowledge with a **memory type** (fact, belief, or experience), **copy-on-write** preserves full history, **provenance** tracks authorship, **confidence** scores evolve based on real-world **outcomes**, a **knowledge graph** auto-materializes relationships, and **hybrid search** blends full-text, semantic, and confidence signals.
+On top of this Git-like foundation, AMFS adds memory intelligence: **memory entries** store knowledge with a **memory type** (fact, belief, or experience), **copy-on-write** preserves full history, **provenance** tracks authorship, **confidence** scores evolve based on real-world **outcomes**, a **knowledge graph** auto-materializes relationships, and **hybrid search** blends full-text, semantic, and confidence signals. Every write is protected by **content hashing** and **integrity chains**, multiple writes can be grouped into **atomic commits**, commits form a **DAG** with ancestry tracking, agents declare **profiles and capabilities** for discovery, and **structural JSON diffs** show exactly which fields changed.
 {: .fs-6 .fw-300 }
 
 ---
