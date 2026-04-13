@@ -544,6 +544,8 @@ def _auto_seal_trace(mem: AgentMemory) -> str | None:
     if store is None:
         return None
     try:
+        from uuid import UUID as _UUID
+
         now = datetime.now(timezone.utc)
         causal = [
             TraceEntry(
@@ -572,7 +574,20 @@ def _auto_seal_trace(mem: AgentMemory) -> str | None:
         seq = _seal_sequence.get(session_id, 0)
         parent_hash = store.get_latest_hash(session_id)
 
+        trace_id = _UUID(oss_trace.id) if oss_trace.id else None
+
+        account_id = None
+        try:
+            from amfs_postgres.tenant_context import get_request_tenant_account_id
+            tid = get_request_tenant_account_id()
+            if tid:
+                account_id = _UUID(tid)
+        except (ImportError, ValueError):
+            pass
+
         imm = ImmutableDecisionTrace(
+            **({"id": trace_id} if trace_id else {}),
+            **({"account_id": account_id} if account_id else {}),
             agent_id=mem.agent_id,
             session_id=session_id,
             sequence_number=seq,
@@ -581,7 +596,7 @@ def _auto_seal_trace(mem: AgentMemory) -> str | None:
             decision_summary=getattr(oss_trace, "decision_summary", None),
             causal_entries=causal,
             external_contexts=contexts,
-            created_at=datetime.now(timezone.utc),
+            created_at=now,
         )
         sealed = seal(
             imm,
