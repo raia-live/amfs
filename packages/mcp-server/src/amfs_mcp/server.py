@@ -197,18 +197,26 @@ def _serialize_entry(entry: Any) -> dict[str, Any]:
 
 @mcp.tool
 def amfs_set_identity(name: str, description: str | None = None) -> str:
-    """Set the agent identity for this conversation.
+    """Set the agent identity for this conversation. CALL THIS FIRST before any other AMFS tool.
 
-    Call this at the start of every new conversation to give this agent
-    a meaningful, human-readable identity. This identity carries through
-    to the dashboard, traces, and cross-agent reads.
+    Without this, all your work is attributed to a generic default identity.
 
-    Each Cursor chat, Claude conversation, or agent session should set
-    its own identity based on what it's working on.
+    MANDATORY WORKFLOW — follow this order every session:
+    1. amfs_set_identity(name, description)  ← you are here
+    2. amfs_briefing(entity_path="repo/module")  ← get compiled context before starting work
+    3. Do your work, calling amfs_write() for important discoveries, decisions, and patterns
+    4. amfs_record_context() for external tool results and user decisions as they happen
+    5. amfs_commit_outcome("task-ref", "success|failure")  ← always do this when done
 
-    Identity is protected by a cooldown: if another conversation recently
-    set a different identity, this call will be rejected to prevent cross-
-    conversation interference.  Re-setting the same name is always allowed.
+    Naming rules:
+    - Use kebab-case role names that persist across conversations: "api-agent", "auth-debugger", "infra-agent"
+    - BAD: "fix-button-color" (too specific), "agent-1" (meaningless)
+    - If continuing previous work, reuse the same name to build on that agent's knowledge
+    - The description should say what you're doing right now
+
+    Entity path convention: use "repo/module" paths (e.g. "myapp/auth", "amfs/core-engine")
+
+    Confidence guidelines: 1.0=verified fact, 0.7-0.9=high confidence, 0.4-0.6=hypothesis, <0.4=speculative
 
     Args:
         name: Short, descriptive name (e.g. "dashboard-fixer", "auth-debugger",
@@ -306,17 +314,23 @@ def amfs_write(
 ) -> str:
     """Write a memory entry with automatic provenance tracking.
 
-    The agent_id and session_id are auto-detected from the environment.
-    Use this after completing a task, discovering a pattern, or recording
-    a decision.
+    WHEN TO WRITE (only write things that help a future agent):
+    - After completing a task: key="task-summary-<desc>", value="what you did and why"
+    - When discovering a pattern: key="pattern-<name>", add pattern_refs for cross-referencing
+    - When finding a bug or risk: key="risk-<name>", use memory_type="belief" for hypotheses
+    - When making a non-obvious decision: key="decision-<topic>", include rationale
+    - When logging actions: key="action-<desc>", use memory_type="experience" (decays slower)
+
+    DON'T write trivial info ("added a comment") — write things a colleague would need.
+    Keep values concise but informative. Think of it as a note to a future agent.
 
     Args:
         entity_path: Hierarchical path like "repo/service" (e.g. "amfs/core-engine")
         key: Name for this piece of knowledge (e.g. "retry-pattern", "risk-signals")
         value: The knowledge to store — can be plain text or JSON string
-        confidence: How confident you are (0.0-1.0, default 1.0)
+        confidence: How confident you are (1.0=verified, 0.7-0.9=high, 0.4-0.6=hypothesis, <0.4=speculative)
         pattern_refs: Optional list of related pattern keys for cross-referencing
-        memory_type: One of "fact" (default), "belief", or "experience"
+        memory_type: One of "fact" (default, normal decay), "belief" (decays faster), or "experience" (decays slower)
         artifact_refs: Optional list of external artifact references. Each dict
             should have "uri" (required), and optionally "media_type", "label",
             "size_bytes".
@@ -632,15 +646,21 @@ def amfs_commit_outcome(
 ) -> str:
     """Record an outcome and auto-link it to everything read this session.
 
-    Call this when something significant happens — a deployment succeeds,
-    a bug is found, an incident occurs. The outcome automatically back-
-    propagates confidence changes to all entries that influenced the decision.
+    ALWAYS call this at the end of meaningful work. Without it, the decision
+    trace (which memories were read, what contexts were gathered, what was
+    decided) is lost when the session ends.
+
+    This snapshots all reads, writes, recorded contexts, and decisions from
+    this session into a persisted DecisionTrace. It also back-propagates
+    confidence changes: entries linked to successes stabilize, entries linked
+    to failures get flagged for review.
 
     Args:
         outcome_ref: Reference identifier (e.g. "INC-2047", "task-42", "PR-456")
         outcome_type: One of "success", "minor_failure", "failure", "critical_failure"
 
     Example: amfs_commit_outcome("task-42", "success")
+    Example: amfs_commit_outcome("deploy-v2", "failure")
     """
     mem = _get_memory()
 
@@ -724,9 +744,16 @@ def amfs_record_context(
 ) -> str:
     """Record external context that influenced this session's decisions.
 
-    Call this after consulting an external tool, API, or data source.
-    The context is added to the causal chain returned by amfs_explain(),
-    making decision traces complete.
+    Call this AS IT HAPPENS — not all at the end. This preserves causal order.
+
+    Use this for:
+    - External tool results: amfs_record_context("git-log", "15 commits since last deploy", "git")
+    - User decisions: amfs_record_context("user-decision", "User chose X over Y", "chat")
+    - Architecture decisions: amfs_record_context("arch-decision", "Using Redis for cache", "analysis")
+    - API responses: amfs_record_context("pagerduty", "3 SEV-1 in 24h", "PagerDuty API")
+
+    The context is added to the causal chain persisted by amfs_commit_outcome(),
+    making decision traces complete and explainable.
 
     Args:
         label: Short name for the context (e.g. "pagerduty-incidents", "git-log")
@@ -933,11 +960,15 @@ def amfs_briefing(
     agent_id: str | None = None,
     limit: int = 10,
 ) -> str:
-    """Get a compiled knowledge briefing — what you should know right now.
+    """Get a compiled knowledge briefing — call this at the START of every session after setting identity.
 
     Returns pre-compiled digests from the Memory Cortex, ranked by relevance.
-    Digests include entity summaries, agent brain briefs, and external source
-    summaries. Much faster and more complete than manual search.
+    This is your most important context-gathering step — it tells you what other
+    agents know, recent risks, and confidence-ranked facts about the entity you're
+    about to work on. Call this BEFORE reading code or making decisions.
+
+    After briefing, use amfs_recall() for specific keys you remember, or
+    amfs_search() for broader queries.
 
     Args:
         entity_path: Focus on this entity (e.g. "checkout-service")
