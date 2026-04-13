@@ -1100,6 +1100,29 @@ def amfs_commit_log(
     }, default=str)
 
 
+@mcp.tool
+def amfs_merge_base(
+    commit_a: str,
+    commit_b: str,
+) -> str:
+    """Find the common ancestor of two commits (merge-base).
+
+    Given two commit IDs, walks the DAG to find the most recent
+    commit that is an ancestor of both.
+
+    Args:
+        commit_a: First commit ID
+        commit_b: Second commit ID
+    """
+    mem = _get_memory()
+    ancestor = mem.common_ancestor(commit_a, commit_b)
+    return json.dumps({
+        "ancestor_commit_id": ancestor,
+        "commit_a": commit_a,
+        "commit_b": commit_b,
+    })
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────────────────────────────

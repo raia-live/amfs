@@ -529,6 +529,20 @@ async def get_commit(
     return json.loads(json.dumps(commit.model_dump(mode="json"), default=str))
 
 
+@app.post("/api/v1/merge-base")
+async def merge_base(
+    body: dict[str, Any],
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    ancestor = mem.common_ancestor(body["commit_a"], body["commit_b"])
+    return {
+        "ancestor_commit_id": ancestor,
+        "commit_a": body["commit_a"],
+        "commit_b": body["commit_b"],
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────
 # History
 # ──────────────────────────────────────────────────────────────────────

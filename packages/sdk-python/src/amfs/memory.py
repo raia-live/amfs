@@ -548,6 +548,16 @@ class AgentMemory:
         """Retrieve a single commit by ID."""
         return self._adapter.get_commit(commit_id)
 
+    def common_ancestor(self, commit_a_id: str, commit_b_id: str) -> str | None:
+        """Find the most recent common ancestor of two commits."""
+        from amfs_core.dag import find_common_ancestor
+
+        return find_common_ancestor(
+            commit_a_id,
+            commit_b_id,
+            self._adapter.get_commit,
+        )
+
     # ------------------------------------------------------------------
     # Knowledge graph
     # ------------------------------------------------------------------

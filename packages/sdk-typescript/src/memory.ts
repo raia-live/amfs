@@ -282,6 +282,48 @@ export class AgentMemory {
   }
 
   /**
+   * Find the common ancestor of two commits by walking the DAG.
+   */
+  commonAncestor(commitAId: string, commitBId: string): string | null {
+    if (commitAId === commitBId) return commitAId;
+
+    const visitedA = new Set<string>();
+    const visitedB = new Set<string>();
+    const queueA = [commitAId];
+    const queueB = [commitBId];
+
+    while (queueA.length > 0 || queueB.length > 0) {
+      if (queueA.length > 0) {
+        const current = queueA.shift()!;
+        if (visitedB.has(current)) return current;
+        if (!visitedA.has(current)) {
+          visitedA.add(current);
+          const commit = this.adapter.getCommit?.(current);
+          if (commit) {
+            for (const pid of commit.parentIds) {
+              if (!visitedA.has(pid)) queueA.push(pid);
+            }
+          }
+        }
+      }
+      if (queueB.length > 0) {
+        const current = queueB.shift()!;
+        if (visitedA.has(current)) return current;
+        if (!visitedB.has(current)) {
+          visitedB.add(current);
+          const commit = this.adapter.getCommit?.(current);
+          if (commit) {
+            for (const pid of commit.parentIds) {
+              if (!visitedB.has(pid)) queueB.push(pid);
+            }
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
    * Record external context in the causal chain without writing to storage.
    * Call after consulting external tools/APIs so explain() is complete.
    */

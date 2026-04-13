@@ -31,6 +31,8 @@ export interface AmfsAdapter {
   commitOutcome(record: OutcomeRecord): MemoryEntry[];
 
   listCommits?(options?: { limit?: number }): Commit[];
+
+  getCommit?(commitId: string): Commit | null;
 }
 
 export function createWatchHandle(cancelFn: () => void): WatchHandle {

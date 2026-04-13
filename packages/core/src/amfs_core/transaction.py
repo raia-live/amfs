@@ -149,6 +149,13 @@ class TransactionBuffer:
         entry_hashes = [e.content_hash for e in written if e.content_hash]
         t_hash = tree_hash(entry_hashes) if entry_hashes else None
 
+        parent_ids: list[str] = []
+        existing_commits = adapter.list_commits(
+            branch=self._branch, limit=1, namespace=self._namespace,
+        )
+        if existing_commits:
+            parent_ids = [existing_commits[0].id]
+
         commit = Commit(
             id=commit_id,
             message=self._message,
@@ -156,6 +163,7 @@ class TransactionBuffer:
             session_id=self._session_id,
             entries=commit_entries,
             tree_hash=t_hash,
+            parent_ids=parent_ids,
             branch=self._branch,
             namespace=self._namespace,
         )
