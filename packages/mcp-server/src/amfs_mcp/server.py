@@ -1004,6 +1004,28 @@ def amfs_timeline(
     }, default=str)
 
 
+@mcp.tool
+def amfs_verify(
+    entity_path: str | None = None,
+) -> str:
+    """Verify the content integrity of your memory store.
+
+    Checks that stored content hashes match actual values, and that
+    integrity chains link correctly across entry versions. Use this
+    to detect corruption or tampering.
+
+    Args:
+        entity_path: Optional scope — verify only entries under this path.
+                     If omitted, verifies all entries.
+
+    Returns a report with total_checked, valid count, and any corrupted
+    entries or chain breaks found.
+    """
+    mem = _get_memory()
+    report = mem.verify(entity_path)
+    return json.dumps(report, default=str)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────────────────────────────

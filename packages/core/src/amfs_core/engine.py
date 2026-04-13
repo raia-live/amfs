@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from amfs_core.abc import AdapterABC
+from amfs_core.hashing import content_hash, integrity_chain_hash
 from amfs_core.models import ArtifactRef, MemoryEntry, MemoryType, Provenance
 
 ExternalContext = dict[str, Any]
@@ -267,6 +268,10 @@ class CoWEngine:
         current = self._adapter.read(entity_path, key, branch=branch)
         next_version = (current.version + 1) if current else 1
 
+        value_hash = content_hash(value)
+        previous_chain = current.integrity_chain if current else None
+        chain = integrity_chain_hash(value_hash, previous_chain)
+
         entry = MemoryEntry(
             entity_path=entity_path,
             key=key,
@@ -284,6 +289,8 @@ class CoWEngine:
             shared=shared,
             branch=branch,
             embedding=embedding,
+            content_hash=value_hash,
+            integrity_chain=chain,
         )
 
         return self._adapter.write(entry)

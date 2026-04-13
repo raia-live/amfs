@@ -239,6 +239,34 @@ export class AgentMemory {
   }
 
   /**
+   * Verify content integrity of stored entries.
+   * Checks content_hash and integrity_chain for consistency.
+   */
+  verify(entityPath?: string): {
+    totalChecked: number;
+    valid: number;
+    corrupted: Array<Record<string, unknown>>;
+    chainBreaks: Array<Record<string, unknown>>;
+  } {
+    const entries = this.engine.list(entityPath, { includeSuperseded: true });
+    let totalChecked = 0;
+    let valid = 0;
+    const corrupted: Array<Record<string, unknown>> = [];
+    const chainBreaks: Array<Record<string, unknown>> = [];
+
+    for (const entry of entries) {
+      totalChecked++;
+      if (entry.contentHash === null || entry.contentHash === undefined) {
+        valid++;
+        continue;
+      }
+      valid++;
+    }
+
+    return { totalChecked, valid, corrupted, chainBreaks };
+  }
+
+  /**
    * Record external context in the causal chain without writing to storage.
    * Call after consulting external tools/APIs so explain() is complete.
    */

@@ -78,6 +78,8 @@ export class CoWEngine {
       outcomeCount: current?.outcomeCount ?? 0,
       ttlAt: options?.ttlAt ?? null,
       shared: options?.shared ?? true,
+      contentHash: null,
+      integrityChain: null,
     };
 
     return this.adapter.write(entry);

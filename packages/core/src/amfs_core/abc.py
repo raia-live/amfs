@@ -238,6 +238,26 @@ class AdapterABC(ABC):
             newest_entry_at=newest,
         )
 
+    # ── Content integrity ────────────────────────────────────────────────
+
+    def verify_integrity(
+        self,
+        entity_path: str | None = None,
+        *,
+        branch: str = "main",
+    ) -> dict:
+        """Verify content hashes and integrity chains for stored entries.
+
+        Returns an IntegrityReport dict with total_checked, valid, corrupted,
+        orphaned, and chain_breaks. Default implementation loads entries via
+        list() and delegates to ``amfs_core.hashing.verify_entries``.
+        """
+        from amfs_core.hashing import verify_entries
+
+        entries = self.list(entity_path, include_superseded=True)
+        report = verify_entries(entries)
+        return report.to_dict()
+
     # ── Recall tracking ─────────────────────────────────────────────────
 
     def increment_recall_count(
