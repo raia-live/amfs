@@ -438,16 +438,6 @@ async def search_entries(
     except TypeError:
         results = mem._adapter.search(sq)
 
-    if req.query and not getattr(mem._adapter, "_has_search_tsv", False):
-        query_lower = req.query.lower()
-        results = [
-            e
-            for e in results
-            if query_lower in e.key.lower()
-            or query_lower in str(e.value).lower()
-            or query_lower in e.entity_path.lower()
-        ]
-
     return [_entry_to_response(e) for e in results]
 
 

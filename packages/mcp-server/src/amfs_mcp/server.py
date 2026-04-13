@@ -449,16 +449,6 @@ def amfs_search(
         depth=depth,
     )
 
-    if query and not _adapter_supports_fts(mem):
-        query_lower = query.lower()
-        results = [
-            e
-            for e in results
-            if query_lower in e.key.lower()
-            or query_lower in str(e.value).lower()
-            or query_lower in e.entity_path.lower()
-        ]
-
     if not results:
         return json.dumps({
             "status": "empty",
@@ -475,12 +465,6 @@ def amfs_search(
         "count": len(results),
         "entries": [_serialize_entry(e) for e in results],
     }, default=str)
-
-
-def _adapter_supports_fts(mem) -> bool:
-    """Check if the adapter handles full-text search natively."""
-    adapter = getattr(mem, "_adapter", None) or getattr(mem, "adapter", None)
-    return getattr(adapter, "_has_search_tsv", False)
 
 
 @mcp.tool
