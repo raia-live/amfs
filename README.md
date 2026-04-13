@@ -65,6 +65,7 @@ pip install amfs-http-server        # REST API server
 pip install amfs-adapter-postgres   # Postgres backend
 pip install amfs-adapter-s3         # S3 backend
 pip install amfs-cli                # CLI tools
+pip install amfs-strands            # Strands Agents plugin
 ```
 
 Or run with Docker:
@@ -88,7 +89,7 @@ docker run -p 8080:8080 -v amfs-data:/data ghcr.io/raia-live/amfs
 | **Hybrid Search** | Full-text + semantic + recency + confidence in a single ranked result set. |
 | **MCP Server** | First-class support for Cursor, Claude Code, and any MCP client. [Setup →](https://raia-live.github.io/amfs/guides/mcp/) · [Cursor plugin](https://github.com/raia-live/cursor-plugin) |
 | **Connectors** | Ingest events from PagerDuty, GitHub, Slack, Jira — or [build your own](https://raia-live.github.io/amfs/guides/connectors/). |
-| **Python & TypeScript** | Same API in both languages. Plus [CrewAI](https://raia-live.github.io/amfs/guides/crewai/), LangGraph, LangChain, AutoGen. |
+| **Python & TypeScript** | Same API in both languages. Plus [Strands Agents](https://raia-live.github.io/amfs/guides/strands/), [CrewAI](https://raia-live.github.io/amfs/guides/crewai/), LangGraph, LangChain, AutoGen. |
 
 ## Architecture
 
@@ -122,6 +123,8 @@ AMFS is open source under [Apache 2.0](LICENSE). The OSS edition gives you the f
 **[AMFS Pro](https://raia-live.github.io/amfs/editions/)** unlocks the full Git model: branching, merge, pull requests, access control, tags, rollback, cherry-pick, and fork. Plus multi-tenant SaaS isolation, immutable decision traces, automated pattern detection, an intelligence layer, and a web dashboard.
 
 Think of it this way: OSS gives you a single-branch repo with full history. Pro gives you GitHub.
+
+**Stripe, hosted billing, and the proprietary control-plane service** are implemented in the private SenseLab **`amfs-internal`** repository, not in this open-source tree.
 
 **[Full comparison →](https://raia-live.github.io/amfs/editions/)**
 

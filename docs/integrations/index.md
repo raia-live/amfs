@@ -37,6 +37,27 @@ See the [SaaS Connection Guide](/amfs/guides/saas/) for detailed setup instructi
 
 ---
 
+## Strands Agents
+
+Add persistent memory to Strands agents as a plugin:
+
+```bash
+pip install amfs-strands
+```
+
+```python
+from strands import Agent
+from amfs import AgentMemory
+from amfs_strands import AMFSPlugin
+
+mem = AgentMemory(agent_id="strands-agent")
+agent = Agent(plugins=[AMFSPlugin(mem)])
+```
+
+The plugin gives your Strands agents read, write, search, and recall tools — plus automatic causal tracing via hooks. See the [full guide](/amfs/guides/strands/) for details.
+
+---
+
 ## CrewAI
 
 Add AMFS tools to your CrewAI agents:

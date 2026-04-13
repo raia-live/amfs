@@ -1,4 +1,4 @@
-"""Integration tests for CrewAI, LangChain, LangGraph, and AutoGen AMFS wrappers.
+"""Integration tests for CrewAI, LangChain, LangGraph, AutoGen, and Strands AMFS wrappers.
 
 Tests each framework wrapper against a real FilesystemAdapter-backed AgentMemory.
 No LLM or API key required — validates the memory plumbing end-to-end.
@@ -20,6 +20,13 @@ try:
     _HAS_CREWAI = True
 except ImportError:
     _HAS_CREWAI = False
+
+try:
+    from strands.plugins import Plugin as _StrandsPlugin  # noqa: F401
+
+    _HAS_STRANDS = True
+except ImportError:
+    _HAS_STRANDS = False
 
 
 # ---------------------------------------------------------------------------
@@ -352,3 +359,133 @@ class TestCrossFrameworkSharing:
             lc_mem.close()
             ag_mem.close()
             observer.close()
+
+
+# ---------------------------------------------------------------------------
+# Strands Agents — AMFSPlugin
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _HAS_STRANDS, reason="strands-agents not installed")
+class TestStrandsPlugin:
+    """Test AMFSPlugin tools (requires strands-agents)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mem: AgentMemory) -> None:
+        from amfs_strands import AMFSPlugin
+
+        self.plugin = AMFSPlugin(mem)
+        self.mem = mem
+
+    def test_plugin_has_name(self) -> None:
+        assert self.plugin.name == "amfs-memory"
+
+    def test_write_and_read(self) -> None:
+        result = self.plugin.amfs_write("svc", "config", '{"retries": 3}')
+        assert "v1" in result
+
+        read_result = self.plugin.amfs_read("svc", "config")
+        data = json.loads(read_result)
+        assert data["value"] == {"retries": 3}
+
+    def test_read_not_found(self) -> None:
+        result = self.plugin.amfs_read("nope", "nada")
+        assert "No entry found" in result
+
+    def test_write_with_confidence(self) -> None:
+        result = self.plugin.amfs_write("svc", "risk", '"high"', confidence=0.7)
+        assert "confidence=0.7" in result
+
+    def test_write_belief_type(self) -> None:
+        result = self.plugin.amfs_write(
+            "svc", "hypothesis", '"might work"', memory_type="belief"
+        )
+        assert "v1" in result
+        entry = self.mem.read("svc", "hypothesis")
+        assert entry is not None
+        assert entry.memory_type.value == "belief"
+
+    def test_search(self) -> None:
+        self.plugin.amfs_write("svc", "pattern-retry", '"exponential backoff"')
+        self.plugin.amfs_write("svc", "pattern-circuit", '"breaker"')
+        result = self.plugin.amfs_search(entity_path="svc")
+        parsed = json.loads(result)
+        assert len(parsed) >= 2
+
+    def test_search_empty(self) -> None:
+        result = self.plugin.amfs_search(entity_path="nonexistent")
+        assert "No entries found" in result
+
+    def test_list(self) -> None:
+        self.plugin.amfs_write("svc", "k1", '"v1"')
+        self.plugin.amfs_write("svc", "k2", '"v2"')
+        result = json.loads(self.plugin.amfs_list("svc"))
+        assert len(result) == 2
+        keys = {e["key"] for e in result}
+        assert keys == {"k1", "k2"}
+
+    def test_list_empty(self) -> None:
+        result = self.plugin.amfs_list("empty-path")
+        assert "No entries found" in result
+
+    def test_recall_own_entries(self) -> None:
+        self.mem.write("svc", "my-note", "agent's own note")
+        result = self.plugin.amfs_recall("svc", "my-note")
+        data = json.loads(result)
+        assert data["value"] == "agent's own note"
+
+    def test_recall_not_found(self) -> None:
+        result = self.plugin.amfs_recall("svc", "nonexistent")
+        assert "No personal memory" in result
+
+    def test_record_context(self) -> None:
+        result = self.plugin.amfs_record_context(
+            "api-call", "Got 200 from /users", source="http"
+        )
+        assert "Context recorded" in result
+
+
+@pytest.mark.skipif(not _HAS_STRANDS, reason="strands-agents not installed")
+class TestStrandsStandaloneTool:
+    """Test the standalone amfs_memory tool."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mem: AgentMemory, monkeypatch: pytest.MonkeyPatch) -> None:
+        import amfs_strands.tools as tools_mod
+
+        monkeypatch.setattr(tools_mod, "_memory_instance", mem)
+
+    def test_store_and_retrieve(self) -> None:
+        from amfs_strands import amfs_memory
+
+        result = amfs_memory(
+            action="store", entity_path="test", key="greeting", value='"hello"'
+        )
+        assert "Stored" in result
+
+        result = amfs_memory(action="retrieve", entity_path="test", key="greeting")
+        data = json.loads(result)
+        assert data["value"] == "hello"
+
+    def test_list(self) -> None:
+        from amfs_strands import amfs_memory
+
+        amfs_memory(action="store", entity_path="test", key="a", value='"1"')
+        amfs_memory(action="store", entity_path="test", key="b", value='"2"')
+        result = amfs_memory(action="list", entity_path="test")
+        parsed = json.loads(result)
+        assert len(parsed) == 2
+
+    def test_search(self) -> None:
+        from amfs_strands import amfs_memory
+
+        amfs_memory(action="store", entity_path="test", key="item", value='"data"')
+        result = amfs_memory(action="search", entity_path="test")
+        parsed = json.loads(result)
+        assert len(parsed) >= 1
+
+    def test_unknown_action(self) -> None:
+        from amfs_strands import amfs_memory
+
+        result = amfs_memory(action="delete")
+        assert "Unknown action" in result
