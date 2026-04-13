@@ -174,9 +174,21 @@ class AdapterABC(ABC):
     def search(self, query: SearchQuery) -> list[MemoryEntry]:
         """Search entries with rich filters. Default: filter over list().
 
-        Adapters may override with optimised implementations (e.g. SQL WHERE).
+        When ``query.query`` is set **and** ``recall_config`` is *not* set,
+        performs case-insensitive substring matching against key, value
+        (stringified), and entity_path **before** applying sort and limit —
+        so text filtering is never silently truncated.
+
+        When ``recall_config`` is set the query text is intended for semantic
+        scoring in the SDK layer, so the adapter skips substring filtering
+        to avoid pre-emptively discarding valid candidates.
+
+        Adapters may override with optimised implementations (e.g. SQL WHERE
+        with tsvector FTS).
         """
         entries = self.list(query.entity_path)
+        use_text_filter = query.query and query.recall_config is None
+        query_lower = query.query.lower() if use_text_filter else None
         results: list[MemoryEntry] = []
         for entry in entries:
             if entry.confidence < query.min_confidence:
@@ -188,6 +200,12 @@ class AdapterABC(ABC):
             if query.since is not None and entry.provenance.written_at < query.since:
                 continue
             if query.pattern_ref is not None and query.pattern_ref not in entry.provenance.pattern_refs:
+                continue
+            if query_lower is not None and not (
+                query_lower in entry.key.lower()
+                or query_lower in str(entry.value).lower()
+                or query_lower in entry.entity_path.lower()
+            ):
                 continue
             results.append(entry)
 
