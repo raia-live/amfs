@@ -15,6 +15,7 @@ from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker
 from amfs_core.exceptions import StaleWriteError
 from amfs_core.lifecycle import LifecycleManager
 from amfs_core.models import (
+    Commit,
     ConflictPolicy,
     DecisionTrace,
     ErrorEvent,
@@ -499,6 +500,131 @@ class AgentMemory:
     def stats(self) -> MemoryStats:
         """Aggregate statistics about current memory state."""
         return self._adapter.stats()
+
+    def verify(self, entity_path: str | None = None) -> dict:
+        """Verify content integrity of stored entries.
+
+        Checks that each entry's ``content_hash`` matches its value and
+        that ``integrity_chain`` links are consistent across versions.
+        Returns an IntegrityReport dict with ``total_checked``, ``valid``,
+        ``corrupted``, and ``chain_breaks``.
+        """
+        return self._adapter.verify_integrity(entity_path, branch=self._branch)
+
+    # ------------------------------------------------------------------
+    # Atomic commits / transactions
+    # ------------------------------------------------------------------
+
+    def transaction(self, message: str = "") -> "TransactionContext":
+        """Create an atomic transaction that groups multiple writes.
+
+        Usage::
+
+            with mem.transaction("update configs") as tx:
+                tx.write("repo/svc", "key1", {"data": 1})
+                tx.write("repo/svc", "key2", {"data": 2})
+            # all writes committed atomically on exit
+        """
+        from amfs_core.transaction import TransactionBuffer
+
+        buf = TransactionBuffer(
+            agent_id=self.agent_id,
+            session_id=self._tagger._session_id,
+            branch=self._branch,
+            namespace=self._config.namespace,
+        )
+        buf.set_message(message)
+        return TransactionContext(buf, self._adapter, self._tagger)
+
+    def commit_log(self, *, limit: int = 50) -> list[Commit]:
+        """Retrieve the commit log for the current branch, newest first."""
+        return self._adapter.list_commits(
+            branch=self._branch,
+            limit=limit,
+            namespace=self._config.namespace,
+        )
+
+    def get_commit(self, commit_id: str) -> Commit | None:
+        """Retrieve a single commit by ID."""
+        return self._adapter.get_commit(commit_id)
+
+    def common_ancestor(self, commit_a_id: str, commit_b_id: str) -> str | None:
+        """Find the most recent common ancestor of two commits."""
+        from amfs_core.dag import find_common_ancestor
+
+        return find_common_ancestor(
+            commit_a_id,
+            commit_b_id,
+            self._adapter.get_commit,
+        )
+
+    # ------------------------------------------------------------------
+    # Agent binding
+    # ------------------------------------------------------------------
+
+    def set_profile(
+        self,
+        description: str = "",
+        *,
+        default_branch: str | None = None,
+        auto_context_paths: list[str] | None = None,
+        tags: list[str] | None = None,
+    ) -> None:
+        """Set this agent's profile (description, defaults, tags)."""
+        from amfs_core.models import AgentProfile
+
+        profile = AgentProfile(
+            description=description,
+            default_branch=default_branch or self._branch,
+            auto_context_paths=auto_context_paths or [],
+            tags=tags or [],
+        )
+        self._adapter.update_agent_profile(
+            self.agent_id, profile, namespace=self._config.namespace,
+        )
+
+    def declare_capability(
+        self,
+        name: str,
+        description: str = "",
+        entity_paths: list[str] | None = None,
+    ) -> None:
+        """Declare a capability for this agent."""
+        from amfs_core.models import AgentCapability
+
+        agent = self._adapter.get_agent(self.agent_id, self._config.namespace)
+        existing = list(agent.capabilities) if agent else []
+        existing = [c for c in existing if c.name != name]
+        existing.append(AgentCapability(
+            name=name,
+            description=description,
+            entity_paths=entity_paths or [],
+        ))
+        self._adapter.update_agent_capabilities(
+            self.agent_id, existing, namespace=self._config.namespace,
+        )
+
+    def set_contracts(self, contracts: list[dict]) -> None:
+        """Set memory contracts for this agent."""
+        from amfs_core.models import MemoryContract
+
+        parsed = [MemoryContract.model_validate(c) for c in contracts]
+        self._adapter.update_agent_contracts(
+            self.agent_id, parsed, namespace=self._config.namespace,
+        )
+
+    def discover_agents(
+        self,
+        *,
+        capability: str | None = None,
+        entity_path: str | None = None,
+    ) -> list:
+        """Discover other agents by capability or entity path."""
+        return self._adapter.discover_agents(
+            capability=capability,
+            entity_path=entity_path,
+            namespace=self._config.namespace,
+        )
 
     # ------------------------------------------------------------------
     # Diff & patch
@@ -1275,3 +1401,33 @@ class MemoryScope:
 
     def info(self) -> ScopeInfo:
         return self._memory.info(self._entity_path)
+
+
+class TransactionContext:
+    """Context manager wrapping a TransactionBuffer for use with ``with`` statements."""
+
+    def __init__(self, buffer: Any, adapter: Any, tagger: Any) -> None:
+        self._buffer = buffer
+        self._adapter = adapter
+        self._tagger = tagger
+        self._committed = False
+        self.commit: Commit | None = None
+        self.entries: list[MemoryEntry] = []
+
+    def write(self, entity_path: str, key: str, value: Any, **kwargs: Any) -> None:
+        self._buffer.write(entity_path, key, value, **kwargs)
+
+    def set_message(self, message: str) -> None:
+        self._buffer.set_message(message)
+
+    @property
+    def pending_count(self) -> int:
+        return self._buffer.pending_count
+
+    def __enter__(self) -> "TransactionContext":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if exc_type is None and not self._committed and self._buffer.pending_count > 0:
+            self.commit, self.entries = self._buffer.flush(self._adapter, self._tagger)
+            self._committed = True

@@ -9,13 +9,17 @@ from typing import Callable
 from amfs_core.embedder import EmbedderABC, cosine_similarity
 from amfs_core.models import (
     Agent,
+    AgentCapability,
+    AgentProfile,
     Branch,
     BranchAccess,
+    Commit,
     DecisionTrace,
     DiffEntry,
     Event,
     GraphEdge,
     GraphNeighborQuery,
+    MemoryContract,
     MemoryEntry,
     MemoryStats,
     MergeResult,
@@ -238,6 +242,54 @@ class AdapterABC(ABC):
             newest_entry_at=newest,
         )
 
+    # ── Content integrity ────────────────────────────────────────────────
+
+    def verify_integrity(
+        self,
+        entity_path: str | None = None,
+        *,
+        branch: str = "main",
+    ) -> dict:
+        """Verify content hashes and integrity chains for stored entries.
+
+        Returns an IntegrityReport dict with total_checked, valid, corrupted,
+        orphaned, and chain_breaks. Default implementation loads entries via
+        list() and delegates to ``amfs_core.hashing.verify_entries``.
+        """
+        from amfs_core.hashing import verify_entries
+
+        entries = self.list(entity_path, include_superseded=True)
+        report = verify_entries(entries)
+        return report.to_dict()
+
+    # ── Atomic commits ────────────────────────────────────────────────
+
+    def write_batch(self, entries: list[MemoryEntry]) -> list[MemoryEntry]:
+        """Persist multiple entries atomically.
+
+        Default implementation writes each entry sequentially — adapter
+        subclasses should override with a true atomic batch when possible.
+        """
+        return [self.write(e) for e in entries]
+
+    def save_commit(self, commit: "Commit") -> None:
+        """Persist a commit object. Default is a no-op for adapters that
+        don't support commit storage yet."""
+
+    def get_commit(self, commit_id: str) -> "Commit | None":
+        """Retrieve a commit by its ID. Returns None if not found."""
+        return None
+
+    def list_commits(
+        self,
+        *,
+        branch: str = "main",
+        limit: int = 50,
+        namespace: str = "default",
+    ) -> "list[Commit]":
+        """List commits, newest first."""
+        return []
+
     # ── Recall tracking ─────────────────────────────────────────────────
 
     def increment_recall_count(
@@ -289,6 +341,68 @@ class AdapterABC(ABC):
     def list_agents(self, namespace: str = "default") -> list[Agent]:
         """Return all registered agents in a namespace."""
         return []
+
+    def update_agent_profile(
+        self,
+        agent_id: str,
+        profile: "AgentProfile",
+        namespace: str = "default",
+    ) -> Agent:
+        """Update an agent's profile. Default merges into stub."""
+        agent = self.ensure_agent(agent_id, namespace)
+        return agent.model_copy(update={"profile": profile})
+
+    def update_agent_capabilities(
+        self,
+        agent_id: str,
+        capabilities: "list[AgentCapability]",
+        namespace: str = "default",
+    ) -> Agent:
+        """Update an agent's declared capabilities."""
+        agent = self.ensure_agent(agent_id, namespace)
+        return agent.model_copy(update={"capabilities": capabilities})
+
+    def update_agent_contracts(
+        self,
+        agent_id: str,
+        contracts: "list[MemoryContract]",
+        namespace: str = "default",
+    ) -> Agent:
+        """Update an agent's memory contracts."""
+        agent = self.ensure_agent(agent_id, namespace)
+        return agent.model_copy(update={"contracts": contracts})
+
+    def discover_agents(
+        self,
+        *,
+        capability: str | None = None,
+        entity_path: str | None = None,
+        namespace: str = "default",
+    ) -> list[Agent]:
+        """Discover agents by capability or entity path.
+
+        Filters the agent list by matching capability name or
+        entity_path overlap. Default implementation does simple matching.
+        """
+        agents = self.list_agents(namespace)
+        results = []
+        for agent in agents:
+            if capability:
+                if not any(c.name == capability for c in agent.capabilities):
+                    continue
+            if entity_path:
+                has_path = any(
+                    entity_path.startswith(c_ep) or c_ep.startswith(entity_path)
+                    for cap in agent.capabilities
+                    for c_ep in cap.entity_paths
+                )
+                if not has_path and not any(
+                    p.startswith(entity_path) or entity_path.startswith(p)
+                    for p in (agent.profile.auto_context_paths if agent.profile else [])
+                ):
+                    continue
+            results.append(agent)
+        return results
 
     # ── Event log / timeline ───────────────────────────────────────────
 

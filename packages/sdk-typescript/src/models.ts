@@ -50,6 +50,29 @@ export interface MemoryEntry {
   ttlAt: string | null;
   artifactRefs?: ArtifactRef[];
   shared: boolean;
+  contentHash: string | null;
+  integrityChain: string | null;
+  commitId: string | null;
+}
+
+export interface CommitEntry {
+  entityPath: string;
+  key: string;
+  version: number;
+  contentHash: string | null;
+}
+
+export interface Commit {
+  id: string;
+  message: string;
+  authorAgentId: string;
+  sessionId: string | null;
+  entries: CommitEntry[];
+  treeHash: string | null;
+  parentIds: string[];
+  branch: string;
+  createdAt: string;
+  namespace: string;
 }
 
 export interface OutcomeRecord {
@@ -59,6 +82,29 @@ export interface OutcomeRecord {
   committedAt: string; // ISO 8601
   causalEntryKeys: string[];
   agentId: string;
+}
+
+export interface AgentProfile {
+  description: string;
+  defaultBranch: string;
+  autoContextPaths: string[];
+  tags: string[];
+}
+
+export interface AgentCapability {
+  name: string;
+  description: string;
+  entityPaths: string[];
+}
+
+export interface MemoryContract {
+  entityPath: string;
+  keyPattern: string;
+  minConfidence: number;
+  maxConfidence: number;
+  requiredFields: string[];
+  ttlRequired: boolean;
+  description: string;
 }
 
 export interface FieldChange {

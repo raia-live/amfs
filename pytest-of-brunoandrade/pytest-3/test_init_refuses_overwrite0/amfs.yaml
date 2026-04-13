@@ -1,0 +1,10 @@
+# AMFS Configuration
+# Docs: https://github.com/raia-live/amfs
+
+namespace: default
+
+layers:
+  primary:
+    adapter: filesystem
+    options:
+      root: .amfs
