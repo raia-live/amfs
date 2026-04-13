@@ -56,11 +56,7 @@ Add to your project's `.cursor/mcp.json` (create the file if it doesn't exist):
 
 Replace `/absolute/path/to/amfs` with the actual path to your AMFS clone.
 
-Copy the agent rules file to teach Cursor when to use memory:
-
-```bash
-cp /path/to/amfs/.cursor/rules/amfs-memory.mdc /path/to/your/project/.cursor/rules/
-```
+The MCP server automatically sends agent instructions to Cursor when it connects — no separate rules file needed.
 
 ### Claude Code
 
@@ -229,7 +225,7 @@ Machine B (Claude Code/Alice):
 Make sure you've run `uv sync` in the AMFS directory and the path in your MCP config is correct.
 
 **Agent doesn't use memory tools**
-Ensure the agent rules file (`.cursor/rules/amfs-memory.mdc` or `CLAUDE.md`) is in your project.
+The MCP server embeds agent instructions automatically. Verify the server is connected in your IDE's MCP panel. For extra reinforcement, add `.cursor/rules/amfs-memory.mdc` or `CLAUDE.md` to your project.
 
 **Memory not persisting between sessions**
 Check that your `.amfs/` directory exists and isn't being cleared. For team sharing, verify Postgres connectivity.
