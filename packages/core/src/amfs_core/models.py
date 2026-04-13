@@ -554,6 +554,15 @@ class BranchAccess(BaseModel):
     granted_at: datetime | None = None
 
 
+class FieldChange(BaseModel):
+    """A single field-level change within a JSON value (RFC 6901 path)."""
+
+    path: str
+    operation: str  # "add", "remove", "replace"
+    old_value: Any = None
+    new_value: Any = None
+
+
 class DiffEntry(BaseModel):
     """One entry's difference between a branch and its parent."""
 
@@ -565,6 +574,17 @@ class DiffEntry(BaseModel):
     branch_confidence: float | None = None
     parent_confidence: float | None = None
     branch_shared: bool | None = None
+    field_changes: list[FieldChange] = Field(default_factory=list)
+
+
+class MemoryPatch(BaseModel):
+    """A serializable set of field-level changes that can be applied to entries."""
+
+    entity_path: str
+    key: str
+    changes: list[FieldChange] = Field(default_factory=list)
+    source_version: int | None = None
+    target_version: int | None = None
 
 
 class MergeConflict(BaseModel):

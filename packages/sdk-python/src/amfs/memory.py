@@ -501,6 +501,74 @@ class AgentMemory:
         return self._adapter.stats()
 
     # ------------------------------------------------------------------
+    # Diff & patch
+    # ------------------------------------------------------------------
+
+    def diff(
+        self,
+        entity_path: str,
+        key: str,
+        old_version: int | None = None,
+    ) -> dict:
+        """Compute a structural diff for a key.
+
+        If old_version is specified, diffs between that version and current.
+        Otherwise diffs between the two most recent versions.
+        """
+        from amfs_core.diff import diff_entries
+
+        entries = [
+            e for e in self._adapter.list(entity_path, include_superseded=True)
+            if e.key == key
+        ]
+        entries.sort(key=lambda e: e.version)
+
+        if len(entries) < 2:
+            return {"diff_type": "no_diff", "reason": "fewer than 2 versions"}
+
+        if old_version is not None:
+            old = next((e for e in entries if e.version == old_version), None)
+        else:
+            old = entries[-2]
+        new = entries[-1]
+
+        if old is None:
+            return {"diff_type": "no_diff", "reason": "old version not found"}
+
+        diff = diff_entries(old, new)
+        return diff.model_dump(mode="json")
+
+    def create_patch(
+        self,
+        entity_path: str,
+        key: str,
+        source_version: int | None = None,
+    ) -> dict:
+        """Create a serializable patch between two versions."""
+        from amfs_core.diff import create_patch
+
+        entries = [
+            e for e in self._adapter.list(entity_path, include_superseded=True)
+            if e.key == key
+        ]
+        entries.sort(key=lambda e: e.version)
+
+        if len(entries) < 2:
+            return {"error": "fewer than 2 versions"}
+
+        if source_version is not None:
+            old = next((e for e in entries if e.version == source_version), None)
+        else:
+            old = entries[-2]
+        new = entries[-1]
+
+        if old is None:
+            return {"error": "source version not found"}
+
+        patch = create_patch(old, new)
+        return patch.model_dump(mode="json")
+
+    # ------------------------------------------------------------------
     # Knowledge graph
     # ------------------------------------------------------------------
 

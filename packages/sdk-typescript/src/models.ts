@@ -61,6 +61,21 @@ export interface OutcomeRecord {
   agentId: string;
 }
 
+export interface FieldChange {
+  path: string;
+  operation: "add" | "remove" | "replace";
+  oldValue?: unknown;
+  newValue?: unknown;
+}
+
+export interface MemoryPatch {
+  entityPath: string;
+  key: string;
+  changes: FieldChange[];
+  sourceVersion: number | null;
+  targetVersion: number | null;
+}
+
 export interface ScopeInfo {
   path: string;
   entryCount: number;
