@@ -656,6 +656,12 @@ class PostgresAdapter(AdapterABC):
         if use_fts:
             conditions.append("search_tsv @@ plainto_tsquery('english', %s)")
             params.append(query.query)
+        elif query.query and query.recall_config is None:
+            conditions.append(
+                "(key ILIKE %s OR entity_path ILIKE %s OR value::text ILIKE %s)"
+            )
+            like_pattern = f"%{query.query}%"
+            params.extend([like_pattern, like_pattern, like_pattern])
 
         order_map = {
             "confidence": "confidence DESC",
