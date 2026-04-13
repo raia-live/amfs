@@ -1,6 +1,6 @@
 [project]
 name = "amfs-adapter-s3"
-version = "0.1.0"
+version = "0.1.1"
 description = "AMFS adapter for S3-compatible object storage"
 requires-python = ">=3.11"
 license = "Apache-2.0"
