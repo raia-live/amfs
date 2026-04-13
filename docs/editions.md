@@ -127,6 +127,30 @@ AMFS is GitHub for agent memory, split into two layers. The open-source core giv
 | Branch-aware read/write/list/search (`branch` parameter) | Yes | Yes |
 | Timeline API endpoint per agent | Yes | Yes |
 | MCP `amfs_timeline` tool | Yes | Yes |
+| **Content Integrity** | | |
+| SHA-256 content hashing on every write | Yes | Yes |
+| Integrity chain linking across versions | Yes | Yes |
+| `verify()` SDK + `amfs verify` CLI + `amfs_verify` MCP tool | Yes | Yes |
+| Cryptographic signing + tamper-evident audit | — | Yes |
+| **Atomic Multi-Key Commits** | | |
+| Transaction buffer (`transaction()` context manager) | Yes | Yes |
+| Commit model with ID, message, tree hash, parent linking | Yes | Yes |
+| `commit_log()`, `get_commit()`, `amfs_commit_batch`, `amfs log` | Yes | Yes |
+| Commit revert + dashboard commit grouping | — | Yes |
+| **DAG Versioning** | | |
+| Parent commit linking and common ancestor computation | Yes | Yes |
+| Branch HEAD/base commit tracking | Yes | Yes |
+| `amfs_merge_base` MCP tool, `POST /api/v1/merge-base` | Yes | Yes |
+| Cherry-pick + Sacred Timeline DAG upgrade | — | Yes |
+| **Agent-Memory Binding** | | |
+| Agent profiles, capabilities, and memory contracts | Yes | Yes |
+| Agent discovery by capability or entity path | Yes | Yes |
+| Auto-computed capabilities + violation alerts | — | Yes |
+| **Rich Diff & Patch** | | |
+| Structural JSON diff with field-level changes (RFC 6901 paths) | Yes | Yes |
+| Memory patches (create + apply) | Yes | Yes |
+| `amfs_diff` MCP tool + HTTP diff/patch endpoints | Yes | Yes |
+| Rich structural diffs in dashboard Branches/PRs | — | Yes |
 | **Memory Branching (Pro)** | | |
 | Create / close / list branches | — | Yes |
 | Diff branch vs. main | — | Yes |
