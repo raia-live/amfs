@@ -61,6 +61,29 @@ export interface OutcomeRecord {
   agentId: string;
 }
 
+export interface AgentProfile {
+  description: string;
+  defaultBranch: string;
+  autoContextPaths: string[];
+  tags: string[];
+}
+
+export interface AgentCapability {
+  name: string;
+  description: string;
+  entityPaths: string[];
+}
+
+export interface MemoryContract {
+  entityPath: string;
+  keyPattern: string;
+  minConfidence: number;
+  maxConfidence: number;
+  requiredFields: string[];
+  ttlRequired: boolean;
+  description: string;
+}
+
 export interface ScopeInfo {
   path: string;
   entryCount: number;

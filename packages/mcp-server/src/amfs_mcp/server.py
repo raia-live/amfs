@@ -1004,6 +1004,101 @@ def amfs_timeline(
     }, default=str)
 
 
+@mcp.tool
+def amfs_set_profile(
+    description: str = "",
+    tags: list[str] | None = None,
+    auto_context_paths: list[str] | None = None,
+) -> str:
+    """Set your agent profile — description, tags, and auto-context paths.
+
+    The profile helps other agents discover you and understand your role.
+
+    Args:
+        description: What this agent does (e.g. "Manages auth configuration")
+        tags: Searchable tags (e.g. ["auth", "security", "backend"])
+        auto_context_paths: Entity paths to auto-load on session start
+    """
+    mem = _get_memory()
+    mem.set_profile(description, tags=tags, auto_context_paths=auto_context_paths)
+    return json.dumps({"status": "ok", "agent_id": mem.agent_id})
+
+
+@mcp.tool
+def amfs_declare_capability(
+    name: str,
+    description: str = "",
+    entity_paths: list[str] | None = None,
+) -> str:
+    """Declare a capability this agent has.
+
+    Capabilities help other agents discover who knows about what.
+
+    Args:
+        name: Short capability name (e.g. "database-migrations")
+        description: What this capability means
+        entity_paths: Which entity paths this capability covers
+    """
+    mem = _get_memory()
+    mem.declare_capability(name, description, entity_paths)
+    return json.dumps({"status": "ok", "capability": name})
+
+
+@mcp.tool
+def amfs_discover_agents(
+    capability: str | None = None,
+    entity_path: str | None = None,
+) -> str:
+    """Discover other agents by capability or entity path.
+
+    Use this to find which agents know about a topic or work on a codebase area.
+
+    Args:
+        capability: Filter by capability name
+        entity_path: Filter by entity path relevance
+    """
+    mem = _get_memory()
+    agents = mem.discover_agents(capability=capability, entity_path=entity_path)
+    return json.dumps({
+        "agents": [a.model_dump(mode="json") for a in agents],
+        "count": len(agents),
+    }, default=str)
+
+
+@mcp.tool
+def amfs_set_contract(
+    entity_path: str,
+    key_pattern: str = "*",
+    min_confidence: float = 0.0,
+    required_fields: list[str] | None = None,
+    ttl_required: bool = False,
+    description: str = "",
+) -> str:
+    """Set a memory contract — enforce schema/confidence expectations on writes.
+
+    Contracts define what quality and structure is expected for memory
+    entries matching a given entity_path and key pattern.
+
+    Args:
+        entity_path: The entity path this contract applies to
+        key_pattern: Glob pattern for keys (default "*" matches all)
+        min_confidence: Minimum confidence required
+        required_fields: Fields that must be present in the value (if dict)
+        ttl_required: Whether a TTL must be set
+        description: Human-readable description of this contract
+    """
+    mem = _get_memory()
+    mem.set_contracts([{
+        "entity_path": entity_path,
+        "key_pattern": key_pattern,
+        "min_confidence": min_confidence,
+        "required_fields": required_fields or [],
+        "ttl_required": ttl_required,
+        "description": description,
+    }])
+    return json.dumps({"status": "ok", "entity_path": entity_path, "key_pattern": key_pattern})
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────────────────────────────

@@ -501,6 +501,74 @@ class AgentMemory:
         return self._adapter.stats()
 
     # ------------------------------------------------------------------
+    # Agent binding
+    # ------------------------------------------------------------------
+
+    def set_profile(
+        self,
+        description: str = "",
+        *,
+        default_branch: str | None = None,
+        auto_context_paths: list[str] | None = None,
+        tags: list[str] | None = None,
+    ) -> None:
+        """Set this agent's profile (description, defaults, tags)."""
+        from amfs_core.models import AgentProfile
+
+        profile = AgentProfile(
+            description=description,
+            default_branch=default_branch or self._branch,
+            auto_context_paths=auto_context_paths or [],
+            tags=tags or [],
+        )
+        self._adapter.update_agent_profile(
+            self.agent_id, profile, namespace=self._config.namespace,
+        )
+
+    def declare_capability(
+        self,
+        name: str,
+        description: str = "",
+        entity_paths: list[str] | None = None,
+    ) -> None:
+        """Declare a capability for this agent."""
+        from amfs_core.models import AgentCapability
+
+        agent = self._adapter.get_agent(self.agent_id, self._config.namespace)
+        existing = list(agent.capabilities) if agent else []
+        existing = [c for c in existing if c.name != name]
+        existing.append(AgentCapability(
+            name=name,
+            description=description,
+            entity_paths=entity_paths or [],
+        ))
+        self._adapter.update_agent_capabilities(
+            self.agent_id, existing, namespace=self._config.namespace,
+        )
+
+    def set_contracts(self, contracts: list[dict]) -> None:
+        """Set memory contracts for this agent."""
+        from amfs_core.models import MemoryContract
+
+        parsed = [MemoryContract.model_validate(c) for c in contracts]
+        self._adapter.update_agent_contracts(
+            self.agent_id, parsed, namespace=self._config.namespace,
+        )
+
+    def discover_agents(
+        self,
+        *,
+        capability: str | None = None,
+        entity_path: str | None = None,
+    ) -> list:
+        """Discover other agents by capability or entity path."""
+        return self._adapter.discover_agents(
+            capability=capability,
+            entity_path=entity_path,
+            namespace=self._config.namespace,
+        )
+
+    # ------------------------------------------------------------------
     # Knowledge graph
     # ------------------------------------------------------------------
 
