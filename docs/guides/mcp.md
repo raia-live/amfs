@@ -136,12 +136,7 @@ Add to your project's `.cursor/mcp.json`:
 }
 ```
 
-Then copy the agent rules to teach Cursor when to use memory:
-
-```bash
-cp /path/to/amfs/.cursor/rules/amfs-memory.mdc \
-   /path/to/your/project/.cursor/rules/
-```
+The MCP server automatically sends agent instructions to Cursor when it connects — no separate rules file needed.
 
 ### Claude Code
 
@@ -163,11 +158,7 @@ Add to `~/.claude/claude_desktop_config.json`:
 }
 ```
 
-Copy the agent instructions to your project:
-
-```bash
-cp /path/to/amfs/CLAUDE.md /path/to/your/project/
-```
+The MCP server automatically sends agent instructions to Claude Code when it connects. For additional customization, you can optionally copy `CLAUDE.md` to your project root.
 
 ---
 
@@ -313,7 +304,7 @@ Use **kebab-case role/domain names** that persist across conversations about the
 
 If continuing work a previous agent started, **use the same name** to build on their knowledge.
 
-The agent rules (`amfs-memory.mdc` / `CLAUDE.md`) already instruct agents to do this automatically.
+The MCP server's built-in instructions already instruct agents to do this automatically.
 
 ### Default Identity (Auto-Detection)
 
@@ -377,7 +368,7 @@ Machine B (Claude Code / Alice):
 Run `uv sync` in the AMFS directory and verify the path in your MCP config.
 
 **Agent doesn't use memory tools**
-Ensure the rules file (`.cursor/rules/amfs-memory.mdc` or `CLAUDE.md`) is in your project.
+The MCP server embeds agent instructions automatically. If agents still don't use memory tools, verify the MCP server is connected (check for "amfs" in your IDE's MCP panel). For extra reinforcement, you can add `.cursor/rules/amfs-memory.mdc` or `CLAUDE.md` to your project.
 
 **Memory not persisting**
 Check that `.amfs/` exists. For Postgres, verify the DSN and network connectivity.

@@ -44,7 +44,48 @@ from amfs_mcp.agent_id import detect_agent_id, detect_platform
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP(name="amfs")
+_INSTRUCTIONS = """\
+You have access to AMFS (Agent Memory File System) — persistent memory that survives across sessions, agents, and machines. Use it to build institutional knowledge over time.
+
+## MANDATORY FIRST STEP: Set Your Identity
+
+You MUST call `amfs_set_identity` before doing anything else. Without it, all your work is attributed to a generic default.
+
+```
+amfs_set_identity("<role-name>", "<one-line description of current task>")
+```
+
+Use kebab-case role/domain names that persist across conversations (e.g. "dashboard-agent", "api-agent"). If continuing work a previous agent started, use the same name.
+
+## Workflow
+
+1. **Get briefed**: `amfs_briefing(entity_path="<repo>/<module>")` for compiled knowledge, then `amfs_recall` / `amfs_search` for specifics.
+2. **Read & explore**: `amfs_read` for known keys, `amfs_search(query="...")` for text search, `amfs_retrieve` for semantic retrieval, `amfs_graph_neighbors` for related entities.
+3. **Record decisions as they happen**: `amfs_record_context("user-decision", "User chose X over Y", source="chat")`.
+4. **Write knowledge**: `amfs_write("<repo>/<module>", "task-summary-<desc>", "<what and why>")`. Use `memory_type="belief"` for hypotheses, `"experience"` for actions taken.
+5. **Commit outcomes**: `amfs_commit_outcome("<ref>", "success")` after completing significant work. This snapshots the full decision trace.
+
+## Entity Naming
+
+Use `{repo}/{service-or-module}` paths (e.g. `myapp/auth`, `amfs/core-engine`).
+
+## Key Patterns
+
+- **Patterns**: `amfs_write(..., "pattern-<name>", "...", pattern_refs=["related-key"])`
+- **Risks**: `amfs_write(..., "risk-<name>", "...", confidence=0.8, memory_type="belief")`
+- **Cross-agent reads**: `amfs_read_from("<agent_id>", ...)` for tracked knowledge transfer.
+- **Browse past traces**: `amfs_list_traces(entity_path="...", limit=5)` before making similar decisions.
+
+## Confidence Scale
+
+- 1.0 = verified fact | 0.7-0.9 = high confidence | 0.4-0.6 = hypothesis | < 0.4 = speculative
+
+## Quality Feedback
+
+`amfs_write` responses include a `quality` score. If below 0.8, review `issues` and rewrite with more detail.
+"""
+
+mcp = FastMCP(name="amfs", instructions=_INSTRUCTIONS)
 
 # ---------------------------------------------------------------------------
 # Quality evaluation
