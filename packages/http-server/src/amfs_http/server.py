@@ -466,6 +466,21 @@ async def get_stats(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Integrity verification
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/v1/verify")
+async def verify_integrity(
+    body: dict[str, Any] = {},
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    entity_path = body.get("entity_path")
+    return mem.verify(entity_path)
+
+
+# ──────────────────────────────────────────────────────────────────────
 # History
 # ──────────────────────────────────────────────────────────────────────
 

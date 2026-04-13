@@ -50,6 +50,8 @@ export interface MemoryEntry {
   ttlAt: string | null;
   artifactRefs?: ArtifactRef[];
   shared: boolean;
+  contentHash: string | null;
+  integrityChain: string | null;
 }
 
 export interface OutcomeRecord {

@@ -500,6 +500,16 @@ class AgentMemory:
         """Aggregate statistics about current memory state."""
         return self._adapter.stats()
 
+    def verify(self, entity_path: str | None = None) -> dict:
+        """Verify content integrity of stored entries.
+
+        Checks that each entry's ``content_hash`` matches its value and
+        that ``integrity_chain`` links are consistent across versions.
+        Returns an IntegrityReport dict with ``total_checked``, ``valid``,
+        ``corrupted``, and ``chain_breaks``.
+        """
+        return self._adapter.verify_integrity(entity_path, branch=self._branch)
+
     # ------------------------------------------------------------------
     # Knowledge graph
     # ------------------------------------------------------------------

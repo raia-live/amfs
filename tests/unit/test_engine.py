@@ -140,6 +140,23 @@ class TestCoWEngine:
         written = engine.write("svc-a", "key-1", "val", ttl_at=ttl)
         assert written.ttl_at == ttl
 
+    def test_write_sets_content_hash(self) -> None:
+        from amfs_core.hashing import content_hash
+
+        engine, _ = self._make_engine()
+        written = engine.write("svc-a", "key-1", {"data": 42})
+        assert written.content_hash is not None
+        assert written.content_hash == content_hash({"data": 42})
+
+    def test_write_sets_integrity_chain(self) -> None:
+        engine, _ = self._make_engine()
+        w1 = engine.write("svc-a", "key-1", "first")
+        assert w1.integrity_chain is not None
+
+        w2 = engine.write("svc-a", "key-1", "second")
+        assert w2.integrity_chain is not None
+        assert w2.integrity_chain != w1.integrity_chain
+
     def test_read_delegates(self) -> None:
         engine, _ = self._make_engine()
         engine.write("svc-a", "key-1", {"hello": "world"})

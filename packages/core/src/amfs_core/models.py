@@ -145,6 +145,8 @@ class MemoryEntry(BaseModel):
     memory_type: MemoryType = MemoryType.FACT
     shared: bool = True
     branch: str = "main"
+    content_hash: str | None = None
+    integrity_chain: str | None = None
 
     def effective_confidence(self, *, decay_half_life_days: float | None = None) -> float:
         """Confidence adjusted for four-signal decay: time, memory type, outcomes, and access frequency.
