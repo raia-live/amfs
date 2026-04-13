@@ -1004,6 +1004,241 @@ def amfs_timeline(
     }, default=str)
 
 
+@mcp.tool
+def amfs_verify(
+    entity_path: str | None = None,
+) -> str:
+    """Verify the content integrity of your memory store.
+
+    Checks that stored content hashes match actual values, and that
+    integrity chains link correctly across entry versions. Use this
+    to detect corruption or tampering.
+
+    Args:
+        entity_path: Optional scope — verify only entries under this path.
+                     If omitted, verifies all entries.
+
+    Returns a report with total_checked, valid count, and any corrupted
+    entries or chain breaks found.
+    """
+    mem = _get_memory()
+    report = mem.verify(entity_path)
+    return json.dumps(report, default=str)
+
+
+@mcp.tool
+def amfs_commit_batch(
+    writes: list[dict[str, Any]],
+    message: str = "",
+) -> str:
+    """Atomically write multiple memory entries as a single commit.
+
+    All writes succeed or fail together — no partial updates. Each write
+    in the batch is a dict with at least "entity_path", "key", "value",
+    and optionally "confidence", "memory_type", "pattern_refs", "shared".
+
+    Args:
+        writes: List of write operations, each a dict with entity_path, key, value
+        message: Commit message describing what these changes represent
+
+    Example:
+        amfs_commit_batch([
+            {"entity_path": "myapp/auth", "key": "session-config", "value": "{}"},
+            {"entity_path": "myapp/auth", "key": "token-ttl", "value": "3600"}
+        ], message="Update auth configuration")
+    """
+    mem = _get_memory()
+    with mem.transaction(message) as tx:
+        for w in writes:
+            ep = w["entity_path"]
+            key = w["key"]
+            raw_value = w.get("value", "")
+            parsed_value: Any = raw_value
+            if isinstance(raw_value, str):
+                try:
+                    parsed_value = json.loads(raw_value)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            kwargs: dict[str, Any] = {}
+            if "confidence" in w:
+                kwargs["confidence"] = w["confidence"]
+            if "memory_type" in w:
+                type_map = {"fact": MemoryType.FACT, "belief": MemoryType.BELIEF, "experience": MemoryType.EXPERIENCE}
+                kwargs["memory_type"] = type_map.get(str(w["memory_type"]).lower(), MemoryType.FACT)
+            if "shared" in w:
+                kwargs["shared"] = w["shared"]
+            if "pattern_refs" in w:
+                kwargs["pattern_refs"] = w["pattern_refs"]
+
+            tx.write(ep, key, parsed_value, **kwargs)
+
+    return json.dumps({
+        "commit_id": tx.commit.id if tx.commit else None,
+        "message": message,
+        "entries_written": len(writes),
+    }, default=str)
+
+
+@mcp.tool
+def amfs_commit_log(
+    limit: int = 20,
+) -> str:
+    """View the commit log — atomic groups of writes with messages.
+
+    Shows commits newest first, including the entries that were part
+    of each commit.
+
+    Args:
+        limit: Maximum number of commits to return (default 20)
+    """
+    mem = _get_memory()
+    commits = mem.commit_log(limit=limit)
+    return json.dumps({
+        "commits": [c.model_dump(mode="json") for c in commits],
+        "count": len(commits),
+    }, default=str)
+
+
+@mcp.tool
+def amfs_merge_base(
+    commit_a: str,
+    commit_b: str,
+) -> str:
+    """Find the common ancestor of two commits (merge-base).
+
+    Given two commit IDs, walks the DAG to find the most recent
+    commit that is an ancestor of both.
+
+    Args:
+        commit_a: First commit ID
+        commit_b: Second commit ID
+    """
+    mem = _get_memory()
+    ancestor = mem.common_ancestor(commit_a, commit_b)
+    return json.dumps({
+        "ancestor_commit_id": ancestor,
+        "commit_a": commit_a,
+        "commit_b": commit_b,
+    })
+
+
+@mcp.tool
+def amfs_set_profile(
+    description: str = "",
+    tags: list[str] | None = None,
+    auto_context_paths: list[str] | None = None,
+) -> str:
+    """Set your agent profile — description, tags, and auto-context paths.
+
+    The profile helps other agents discover you and understand your role.
+
+    Args:
+        description: What this agent does (e.g. "Manages auth configuration")
+        tags: Searchable tags (e.g. ["auth", "security", "backend"])
+        auto_context_paths: Entity paths to auto-load on session start
+    """
+    mem = _get_memory()
+    mem.set_profile(description, tags=tags, auto_context_paths=auto_context_paths)
+    return json.dumps({"status": "ok", "agent_id": mem.agent_id})
+
+
+@mcp.tool
+def amfs_declare_capability(
+    name: str,
+    description: str = "",
+    entity_paths: list[str] | None = None,
+) -> str:
+    """Declare a capability this agent has.
+
+    Capabilities help other agents discover who knows about what.
+
+    Args:
+        name: Short capability name (e.g. "database-migrations")
+        description: What this capability means
+        entity_paths: Which entity paths this capability covers
+    """
+    mem = _get_memory()
+    mem.declare_capability(name, description, entity_paths)
+    return json.dumps({"status": "ok", "capability": name})
+
+
+@mcp.tool
+def amfs_discover_agents(
+    capability: str | None = None,
+    entity_path: str | None = None,
+) -> str:
+    """Discover other agents by capability or entity path.
+
+    Use this to find which agents know about a topic or work on a codebase area.
+
+    Args:
+        capability: Filter by capability name
+        entity_path: Filter by entity path relevance
+    """
+    mem = _get_memory()
+    agents = mem.discover_agents(capability=capability, entity_path=entity_path)
+    return json.dumps({
+        "agents": [a.model_dump(mode="json") for a in agents],
+        "count": len(agents),
+    }, default=str)
+
+
+@mcp.tool
+def amfs_set_contract(
+    entity_path: str,
+    key_pattern: str = "*",
+    min_confidence: float = 0.0,
+    required_fields: list[str] | None = None,
+    ttl_required: bool = False,
+    description: str = "",
+) -> str:
+    """Set a memory contract — enforce schema/confidence expectations on writes.
+
+    Contracts define what quality and structure is expected for memory
+    entries matching a given entity_path and key pattern.
+
+    Args:
+        entity_path: The entity path this contract applies to
+        key_pattern: Glob pattern for keys (default "*" matches all)
+        min_confidence: Minimum confidence required
+        required_fields: Fields that must be present in the value (if dict)
+        ttl_required: Whether a TTL must be set
+        description: Human-readable description of this contract
+    """
+    mem = _get_memory()
+    mem.set_contracts([{
+        "entity_path": entity_path,
+        "key_pattern": key_pattern,
+        "min_confidence": min_confidence,
+        "required_fields": required_fields or [],
+        "ttl_required": ttl_required,
+        "description": description,
+    }])
+    return json.dumps({"status": "ok", "entity_path": entity_path, "key_pattern": key_pattern})
+
+
+@mcp.tool
+def amfs_diff(
+    entity_path: str,
+    key: str,
+    old_version: int | None = None,
+) -> str:
+    """Compute a structural diff for a memory entry between versions.
+
+    Shows field-level changes (add/remove/replace) with JSON Pointer paths.
+    If old_version is not specified, diffs between the two most recent versions.
+
+    Args:
+        entity_path: The entity path (e.g. "repo/service")
+        key: The key to diff
+        old_version: Optional version to diff from (defaults to previous version)
+    """
+    mem = _get_memory()
+    result = mem.diff(entity_path, key, old_version)
+    return json.dumps(result, default=str)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────────────────────────────

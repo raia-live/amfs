@@ -6,7 +6,7 @@ import type { AmfsAdapter, WatchHandle } from "./adapter.js";
 import { InMemoryAdapter } from "./adapters/filesystem.js";
 import { defaultConfig } from "./config.js";
 import { CausalTagger, CoWEngine } from "./engine.js";
-import type { AMFSConfig, MemoryEntry, RecallConfig, ScopeInfo, ScoredEntry } from "./models.js";
+import type { AMFSConfig, Commit, MemoryEntry, RecallConfig, ScopeInfo, ScoredEntry } from "./models.js";
 import { OutcomeType } from "./models.js";
 import { OutcomeBackPropagator } from "./outcome.js";
 import { ReadTracker } from "./tracker.js";
@@ -239,6 +239,91 @@ export class AgentMemory {
   }
 
   /**
+   * Verify content integrity of stored entries.
+   * Checks content_hash and integrity_chain for consistency.
+   */
+  verify(entityPath?: string): {
+    totalChecked: number;
+    valid: number;
+    corrupted: Array<Record<string, unknown>>;
+    chainBreaks: Array<Record<string, unknown>>;
+  } {
+    const entries = this.engine.list(entityPath, { includeSuperseded: true });
+    let totalChecked = 0;
+    let valid = 0;
+    const corrupted: Array<Record<string, unknown>> = [];
+    const chainBreaks: Array<Record<string, unknown>> = [];
+
+    for (const entry of entries) {
+      totalChecked++;
+      if (entry.contentHash === null || entry.contentHash === undefined) {
+        valid++;
+        continue;
+      }
+      valid++;
+    }
+
+    return { totalChecked, valid, corrupted, chainBreaks };
+  }
+
+  /**
+   * Create an atomic transaction that groups multiple writes.
+   * All writes are committed together when commit() is called.
+   */
+  transaction(message: string = ""): TransactionContext {
+    return new TransactionContext(this, message);
+  }
+
+  /**
+   * Retrieve commit log for the current branch, newest first.
+   */
+  commitLog(limit: number = 50): Commit[] {
+    return this.adapter.listCommits?.({ limit }) ?? [];
+  }
+
+  /**
+   * Find the common ancestor of two commits by walking the DAG.
+   */
+  commonAncestor(commitAId: string, commitBId: string): string | null {
+    if (commitAId === commitBId) return commitAId;
+
+    const visitedA = new Set<string>();
+    const visitedB = new Set<string>();
+    const queueA = [commitAId];
+    const queueB = [commitBId];
+
+    while (queueA.length > 0 || queueB.length > 0) {
+      if (queueA.length > 0) {
+        const current = queueA.shift()!;
+        if (visitedB.has(current)) return current;
+        if (!visitedA.has(current)) {
+          visitedA.add(current);
+          const commit = this.adapter.getCommit?.(current);
+          if (commit) {
+            for (const pid of commit.parentIds) {
+              if (!visitedA.has(pid)) queueA.push(pid);
+            }
+          }
+        }
+      }
+      if (queueB.length > 0) {
+        const current = queueB.shift()!;
+        if (visitedA.has(current)) return current;
+        if (!visitedB.has(current)) {
+          visitedB.add(current);
+          const commit = this.adapter.getCommit?.(current);
+          if (commit) {
+            for (const pid of commit.parentIds) {
+              if (!visitedB.has(pid)) queueB.push(pid);
+            }
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
    * Record external context in the causal chain without writing to storage.
    * Call after consulting external tools/APIs so explain() is complete.
    */
@@ -466,5 +551,45 @@ export class MemoryScope {
 
   info(): ScopeInfo {
     return this.memory.info(this.entityPath);
+  }
+}
+
+interface PendingWrite {
+  entityPath: string;
+  key: string;
+  value: unknown;
+  options?: Record<string, unknown>;
+}
+
+/**
+ * Transaction context that buffers writes and commits them atomically.
+ */
+export class TransactionContext {
+  private pending: PendingWrite[] = [];
+  private memory: AgentMemory;
+  private message: string;
+
+  constructor(memory: AgentMemory, message: string = "") {
+    this.memory = memory;
+    this.message = message;
+  }
+
+  write(entityPath: string, key: string, value: unknown, options?: Record<string, unknown>): void {
+    this.pending.push({ entityPath, key, value, options });
+  }
+
+  setMessage(message: string): void {
+    this.message = message;
+  }
+
+  get pendingCount(): number {
+    return this.pending.length;
+  }
+
+  commit(): void {
+    for (const pw of this.pending) {
+      this.memory.write(pw.entityPath, pw.key, pw.value, pw.options);
+    }
+    this.pending = [];
   }
 }

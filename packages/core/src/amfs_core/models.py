@@ -145,6 +145,9 @@ class MemoryEntry(BaseModel):
     memory_type: MemoryType = MemoryType.FACT
     shared: bool = True
     branch: str = "main"
+    content_hash: str | None = None
+    integrity_chain: str | None = None
+    commit_id: str | None = None
 
     def effective_confidence(self, *, decay_half_life_days: float | None = None) -> float:
         """Confidence adjusted for four-signal decay: time, memory type, outcomes, and access frequency.
@@ -291,6 +294,37 @@ class DecisionTrace(BaseModel):
     session_started_at: datetime | None = None
     session_ended_at: datetime | None = None
     session_duration_ms: float | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    namespace: str = "default"
+
+
+# ── Atomic commits ───────────────────────────────────────────────────
+
+
+class CommitEntry(BaseModel):
+    """A single key-write within an atomic commit."""
+
+    entity_path: str
+    key: str
+    version: int
+    content_hash: str | None = None
+
+
+class Commit(BaseModel):
+    """An atomic group of writes across multiple keys.
+
+    Mirrors a git commit: unique id, author, message, tree hash, and
+    parent pointer(s) for DAG traversal.
+    """
+
+    id: str
+    message: str = ""
+    author_agent_id: str
+    session_id: str | None = None
+    entries: list[CommitEntry] = Field(default_factory=list)
+    tree_hash: str | None = None
+    parent_ids: list[str] = Field(default_factory=list)
+    branch: str = "main"
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     namespace: str = "default"
 
@@ -481,6 +515,39 @@ class EventType(str, Enum):
     SNAPSHOT_RECOVERED = "snapshot_recovered"
 
 
+class AgentProfile(BaseModel):
+    """Declarative profile describing an agent's role and defaults."""
+
+    description: str = ""
+    default_branch: str = "main"
+    auto_context_paths: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+
+
+class AgentCapability(BaseModel):
+    """A declared capability or domain of expertise for an agent."""
+
+    name: str
+    description: str = ""
+    entity_paths: list[str] = Field(default_factory=list)
+
+
+class MemoryContract(BaseModel):
+    """A contract specifying expectations for entries an agent writes.
+
+    Contracts are validated at write time to enforce schema, TTL, and
+    confidence expectations.
+    """
+
+    entity_path: str
+    key_pattern: str = "*"
+    min_confidence: float = 0.0
+    max_confidence: float = 1.0
+    required_fields: list[str] = Field(default_factory=list)
+    ttl_required: bool = False
+    description: str = ""
+
+
 class Agent(BaseModel):
     """Registered agent — auto-created on first write."""
 
@@ -491,6 +558,9 @@ class Agent(BaseModel):
     created_at: datetime | None = None
     last_active_at: datetime | None = None
     entry_count: int = 0
+    profile: AgentProfile | None = None
+    capabilities: list[AgentCapability] = Field(default_factory=list)
+    contracts: list[MemoryContract] = Field(default_factory=list)
 
 
 class Event(BaseModel):
@@ -532,6 +602,8 @@ class Branch(BaseModel):
     merged_at: datetime | None = None
     merged_by: str | None = None
     created_at: datetime | None = None
+    head_commit_id: str | None = None
+    base_commit_id: str | None = None
 
 
 class BranchAccessPermission(str, Enum):
@@ -554,6 +626,15 @@ class BranchAccess(BaseModel):
     granted_at: datetime | None = None
 
 
+class FieldChange(BaseModel):
+    """A single field-level change within a JSON value (RFC 6901 path)."""
+
+    path: str
+    operation: str  # "add", "remove", "replace"
+    old_value: Any = None
+    new_value: Any = None
+
+
 class DiffEntry(BaseModel):
     """One entry's difference between a branch and its parent."""
 
@@ -565,6 +646,17 @@ class DiffEntry(BaseModel):
     branch_confidence: float | None = None
     parent_confidence: float | None = None
     branch_shared: bool | None = None
+    field_changes: list[FieldChange] = Field(default_factory=list)
+
+
+class MemoryPatch(BaseModel):
+    """A serializable set of field-level changes that can be applied to entries."""
+
+    entity_path: str
+    key: str
+    changes: list[FieldChange] = Field(default_factory=list)
+    source_version: int | None = None
+    target_version: int | None = None
 
 
 class MergeConflict(BaseModel):

@@ -1,0 +1,28 @@
+{
+  "amfs_version": "0.2.0",
+  "entity_path": "svc-a",
+  "key": "k2",
+  "version": 1,
+  "value": {
+    "x": 2
+  },
+  "provenance": {
+    "agent_id": "snap-agent",
+    "session_id": "sess-c47bbd79",
+    "written_at": "2026-04-10T13:03:10.724018Z",
+    "pattern_refs": []
+  },
+  "confidence": 1.0,
+  "outcome_count": 0,
+  "recall_count": 0,
+  "priority_score": null,
+  "tier": 3,
+  "importance_score": null,
+  "importance_dimensions": null,
+  "ttl_at": null,
+  "embedding": null,
+  "artifact_refs": [],
+  "memory_type": "fact",
+  "shared": true,
+  "branch": "main"
+}
