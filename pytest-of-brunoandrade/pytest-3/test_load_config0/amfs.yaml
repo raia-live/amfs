@@ -1,0 +1,6 @@
+namespace: prod
+layers:
+  primary:
+    adapter: filesystem
+    options:
+      root: /data/.amfs

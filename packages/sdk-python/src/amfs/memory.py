@@ -15,6 +15,7 @@ from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker
 from amfs_core.exceptions import StaleWriteError
 from amfs_core.lifecycle import LifecycleManager
 from amfs_core.models import (
+    Commit,
     ConflictPolicy,
     DecisionTrace,
     ErrorEvent,
@@ -509,6 +510,43 @@ class AgentMemory:
         ``corrupted``, and ``chain_breaks``.
         """
         return self._adapter.verify_integrity(entity_path, branch=self._branch)
+
+    # ------------------------------------------------------------------
+    # Atomic commits / transactions
+    # ------------------------------------------------------------------
+
+    def transaction(self, message: str = "") -> "TransactionContext":
+        """Create an atomic transaction that groups multiple writes.
+
+        Usage::
+
+            with mem.transaction("update configs") as tx:
+                tx.write("repo/svc", "key1", {"data": 1})
+                tx.write("repo/svc", "key2", {"data": 2})
+            # all writes committed atomically on exit
+        """
+        from amfs_core.transaction import TransactionBuffer
+
+        buf = TransactionBuffer(
+            agent_id=self.agent_id,
+            session_id=self._tagger._session_id,
+            branch=self._branch,
+            namespace=self._config.namespace,
+        )
+        buf.set_message(message)
+        return TransactionContext(buf, self._adapter, self._tagger)
+
+    def commit_log(self, *, limit: int = 50) -> list[Commit]:
+        """Retrieve the commit log for the current branch, newest first."""
+        return self._adapter.list_commits(
+            branch=self._branch,
+            limit=limit,
+            namespace=self._config.namespace,
+        )
+
+    def get_commit(self, commit_id: str) -> Commit | None:
+        """Retrieve a single commit by ID."""
+        return self._adapter.get_commit(commit_id)
 
     # ------------------------------------------------------------------
     # Knowledge graph
@@ -1217,3 +1255,33 @@ class MemoryScope:
 
     def info(self) -> ScopeInfo:
         return self._memory.info(self._entity_path)
+
+
+class TransactionContext:
+    """Context manager wrapping a TransactionBuffer for use with ``with`` statements."""
+
+    def __init__(self, buffer: Any, adapter: Any, tagger: Any) -> None:
+        self._buffer = buffer
+        self._adapter = adapter
+        self._tagger = tagger
+        self._committed = False
+        self.commit: Commit | None = None
+        self.entries: list[MemoryEntry] = []
+
+    def write(self, entity_path: str, key: str, value: Any, **kwargs: Any) -> None:
+        self._buffer.write(entity_path, key, value, **kwargs)
+
+    def set_message(self, message: str) -> None:
+        self._buffer.set_message(message)
+
+    @property
+    def pending_count(self) -> int:
+        return self._buffer.pending_count
+
+    def __enter__(self) -> "TransactionContext":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if exc_type is None and not self._committed and self._buffer.pending_count > 0:
+            self.commit, self.entries = self._buffer.flush(self._adapter, self._tagger)
+            self._committed = True

@@ -11,6 +11,7 @@ from amfs_core.models import (
     Agent,
     Branch,
     BranchAccess,
+    Commit,
     DecisionTrace,
     DiffEntry,
     Event,
@@ -257,6 +258,34 @@ class AdapterABC(ABC):
         entries = self.list(entity_path, include_superseded=True)
         report = verify_entries(entries)
         return report.to_dict()
+
+    # ── Atomic commits ────────────────────────────────────────────────
+
+    def write_batch(self, entries: list[MemoryEntry]) -> list[MemoryEntry]:
+        """Persist multiple entries atomically.
+
+        Default implementation writes each entry sequentially — adapter
+        subclasses should override with a true atomic batch when possible.
+        """
+        return [self.write(e) for e in entries]
+
+    def save_commit(self, commit: "Commit") -> None:
+        """Persist a commit object. Default is a no-op for adapters that
+        don't support commit storage yet."""
+
+    def get_commit(self, commit_id: str) -> "Commit | None":
+        """Retrieve a commit by its ID. Returns None if not found."""
+        return None
+
+    def list_commits(
+        self,
+        *,
+        branch: str = "main",
+        limit: int = 50,
+        namespace: str = "default",
+    ) -> "list[Commit]":
+        """List commits, newest first."""
+        return []
 
     # ── Recall tracking ─────────────────────────────────────────────────
 

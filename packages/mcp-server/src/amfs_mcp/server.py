@@ -1026,6 +1026,80 @@ def amfs_verify(
     return json.dumps(report, default=str)
 
 
+@mcp.tool
+def amfs_commit_batch(
+    writes: list[dict[str, Any]],
+    message: str = "",
+) -> str:
+    """Atomically write multiple memory entries as a single commit.
+
+    All writes succeed or fail together — no partial updates. Each write
+    in the batch is a dict with at least "entity_path", "key", "value",
+    and optionally "confidence", "memory_type", "pattern_refs", "shared".
+
+    Args:
+        writes: List of write operations, each a dict with entity_path, key, value
+        message: Commit message describing what these changes represent
+
+    Example:
+        amfs_commit_batch([
+            {"entity_path": "myapp/auth", "key": "session-config", "value": "{}"},
+            {"entity_path": "myapp/auth", "key": "token-ttl", "value": "3600"}
+        ], message="Update auth configuration")
+    """
+    mem = _get_memory()
+    with mem.transaction(message) as tx:
+        for w in writes:
+            ep = w["entity_path"]
+            key = w["key"]
+            raw_value = w.get("value", "")
+            parsed_value: Any = raw_value
+            if isinstance(raw_value, str):
+                try:
+                    parsed_value = json.loads(raw_value)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            kwargs: dict[str, Any] = {}
+            if "confidence" in w:
+                kwargs["confidence"] = w["confidence"]
+            if "memory_type" in w:
+                type_map = {"fact": MemoryType.FACT, "belief": MemoryType.BELIEF, "experience": MemoryType.EXPERIENCE}
+                kwargs["memory_type"] = type_map.get(str(w["memory_type"]).lower(), MemoryType.FACT)
+            if "shared" in w:
+                kwargs["shared"] = w["shared"]
+            if "pattern_refs" in w:
+                kwargs["pattern_refs"] = w["pattern_refs"]
+
+            tx.write(ep, key, parsed_value, **kwargs)
+
+    return json.dumps({
+        "commit_id": tx.commit.id if tx.commit else None,
+        "message": message,
+        "entries_written": len(writes),
+    }, default=str)
+
+
+@mcp.tool
+def amfs_commit_log(
+    limit: int = 20,
+) -> str:
+    """View the commit log — atomic groups of writes with messages.
+
+    Shows commits newest first, including the entries that were part
+    of each commit.
+
+    Args:
+        limit: Maximum number of commits to return (default 20)
+    """
+    mem = _get_memory()
+    commits = mem.commit_log(limit=limit)
+    return json.dumps({
+        "commits": [c.model_dump(mode="json") for c in commits],
+        "count": len(commits),
+    }, default=str)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────────────────────────────

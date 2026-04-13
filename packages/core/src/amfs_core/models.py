@@ -147,6 +147,7 @@ class MemoryEntry(BaseModel):
     branch: str = "main"
     content_hash: str | None = None
     integrity_chain: str | None = None
+    commit_id: str | None = None
 
     def effective_confidence(self, *, decay_half_life_days: float | None = None) -> float:
         """Confidence adjusted for four-signal decay: time, memory type, outcomes, and access frequency.
@@ -293,6 +294,37 @@ class DecisionTrace(BaseModel):
     session_started_at: datetime | None = None
     session_ended_at: datetime | None = None
     session_duration_ms: float | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    namespace: str = "default"
+
+
+# ── Atomic commits ───────────────────────────────────────────────────
+
+
+class CommitEntry(BaseModel):
+    """A single key-write within an atomic commit."""
+
+    entity_path: str
+    key: str
+    version: int
+    content_hash: str | None = None
+
+
+class Commit(BaseModel):
+    """An atomic group of writes across multiple keys.
+
+    Mirrors a git commit: unique id, author, message, tree hash, and
+    parent pointer(s) for DAG traversal.
+    """
+
+    id: str
+    message: str = ""
+    author_agent_id: str
+    session_id: str | None = None
+    entries: list[CommitEntry] = Field(default_factory=list)
+    tree_hash: str | None = None
+    parent_ids: list[str] = Field(default_factory=list)
+    branch: str = "main"
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     namespace: str = "default"
 

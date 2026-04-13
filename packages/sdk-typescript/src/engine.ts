@@ -80,6 +80,7 @@ export class CoWEngine {
       shared: options?.shared ?? true,
       contentHash: null,
       integrityChain: null,
+      commitId: null,
     };
 
     return this.adapter.write(entry);

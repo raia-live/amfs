@@ -13,6 +13,7 @@ from amfs_core.exceptions import AdapterError, EntryNotFoundError, VersionConfli
 from amfs_core.lock import AdvisoryLock
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
+    Commit,
     MemoryEntry,
     OutcomeRecord,
 )
@@ -99,6 +100,93 @@ class FilesystemAdapter(AdapterABC):
             os.rename(tmp_path, final_path)
 
         return entry
+
+    # ------------------------------------------------------------------
+    # write_batch (atomic multi-key write)
+    # ------------------------------------------------------------------
+
+    def write_batch(self, entries: list[MemoryEntry]) -> list[MemoryEntry]:
+        sort_keys = sorted(
+            range(len(entries)),
+            key=lambda i: (entries[i].entity_path, entries[i].key),
+        )
+        locks = []
+        try:
+            for idx in sort_keys:
+                e = entries[idx]
+                key_dir = self._layout.key_dir(e.entity_path, e.key)
+                key_dir.mkdir(parents=True, exist_ok=True)
+                lk = AdvisoryLock(self._layout.lock_path(e.entity_path, e.key))
+                lk.acquire()
+                locks.append(lk)
+
+            written: list[MemoryEntry] = [None] * len(entries)  # type: ignore[list-item]
+            for idx in sort_keys:
+                e = entries[idx]
+                layout = self._layout
+                current_version = layout.current_version_number(e.entity_path, e.key)
+                new_version = current_version + 1
+                e = e.model_copy(update={"version": new_version})
+
+                old_current = layout.current_version_file(e.entity_path, e.key)
+                if old_current is not None:
+                    superseded = old_current.with_name(
+                        old_current.name.replace("_current.json", "_superseded.json")
+                    )
+                    old_current.rename(superseded)
+
+                tmp_path = layout.tmp_file(e.entity_path, e.key, new_version)
+                final_path = layout.version_file(e.entity_path, e.key, new_version, current=True)
+                data = e.model_dump(mode="json")
+                tmp_path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+                os.rename(tmp_path, final_path)
+                written[idx] = e
+        finally:
+            for lk in reversed(locks):
+                lk.release()
+        return written
+
+    # ------------------------------------------------------------------
+    # commit storage
+    # ------------------------------------------------------------------
+
+    def _commits_dir(self) -> Path:
+        d = self._layout._root / "_commits"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def save_commit(self, commit: Commit) -> None:
+        path = self._commits_dir() / f"{commit.id}.json"
+        data = commit.model_dump(mode="json")
+        path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+
+    def get_commit(self, commit_id: str) -> Commit | None:
+        path = self._commits_dir() / f"{commit_id}.json"
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return Commit.model_validate(data)
+
+    def list_commits(
+        self,
+        *,
+        branch: str = "main",
+        limit: int = 50,
+        namespace: str = "default",
+    ) -> list[Commit]:
+        commits_dir = self._commits_dir()
+        commits: list[Commit] = []
+        for f in sorted(commits_dir.glob("*.json"), reverse=True):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                c = Commit.model_validate(data)
+                if c.branch == branch and c.namespace == namespace:
+                    commits.append(c)
+                    if len(commits) >= limit:
+                        break
+            except Exception:
+                logger.warning("Skipping unreadable commit: %s", f)
+        return commits
 
     # ------------------------------------------------------------------
     # list
