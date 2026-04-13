@@ -1218,6 +1218,27 @@ def amfs_set_contract(
     return json.dumps({"status": "ok", "entity_path": entity_path, "key_pattern": key_pattern})
 
 
+@mcp.tool
+def amfs_diff(
+    entity_path: str,
+    key: str,
+    old_version: int | None = None,
+) -> str:
+    """Compute a structural diff for a memory entry between versions.
+
+    Shows field-level changes (add/remove/replace) with JSON Pointer paths.
+    If old_version is not specified, diffs between the two most recent versions.
+
+    Args:
+        entity_path: The entity path (e.g. "repo/service")
+        key: The key to diff
+        old_version: Optional version to diff from (defaults to previous version)
+    """
+    mem = _get_memory()
+    result = mem.diff(entity_path, key, old_version)
+    return json.dumps(result, default=str)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────────────────────────────

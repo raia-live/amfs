@@ -605,6 +605,37 @@ async def discover_agents(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Diff & patch
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/v1/diff")
+async def compute_diff(
+    body: dict[str, Any],
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    return mem.diff(
+        body["entity_path"],
+        body["key"],
+        body.get("old_version"),
+    )
+
+
+@app.post("/api/v1/patches")
+async def create_patch(
+    body: dict[str, Any],
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    return mem.create_patch(
+        body["entity_path"],
+        body["key"],
+        body.get("source_version"),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
 # History
 # ──────────────────────────────────────────────────────────────────────
 
