@@ -18,6 +18,7 @@ export interface AgentMemoryOptions {
 }
 
 export interface SearchOptions {
+  query?: string;
   entityPath?: string;
   entityPaths?: string[];
   minConfidence?: number;
@@ -150,8 +151,19 @@ export class AgentMemory {
         );
       }
 
+      const queryLower =
+        options?.query && !options?.recallConfig
+          ? options.query.toLowerCase()
+          : undefined;
+
       for (const entry of entries) {
         if (!entry.shared && entry.provenance.agentId !== this.agentId) continue;
+        if (
+          queryLower &&
+          !entry.key.toLowerCase().includes(queryLower) &&
+          !String(entry.value).toLowerCase().includes(queryLower) &&
+          !entry.entityPath.toLowerCase().includes(queryLower)
+        ) continue;
         const ek = `${entry.entityPath}/${entry.key}`;
         if (!seenKeys.has(ek)) {
           seenKeys.add(ek);
