@@ -13,6 +13,7 @@ from amfs_core.models import (
     AgentProfile,
     Branch,
     BranchAccess,
+    Commit,
     DecisionTrace,
     DiffEntry,
     Event,
@@ -240,6 +241,54 @@ class AdapterABC(ABC):
             oldest_entry_at=oldest,
             newest_entry_at=newest,
         )
+
+    # ── Content integrity ────────────────────────────────────────────────
+
+    def verify_integrity(
+        self,
+        entity_path: str | None = None,
+        *,
+        branch: str = "main",
+    ) -> dict:
+        """Verify content hashes and integrity chains for stored entries.
+
+        Returns an IntegrityReport dict with total_checked, valid, corrupted,
+        orphaned, and chain_breaks. Default implementation loads entries via
+        list() and delegates to ``amfs_core.hashing.verify_entries``.
+        """
+        from amfs_core.hashing import verify_entries
+
+        entries = self.list(entity_path, include_superseded=True)
+        report = verify_entries(entries)
+        return report.to_dict()
+
+    # ── Atomic commits ────────────────────────────────────────────────
+
+    def write_batch(self, entries: list[MemoryEntry]) -> list[MemoryEntry]:
+        """Persist multiple entries atomically.
+
+        Default implementation writes each entry sequentially — adapter
+        subclasses should override with a true atomic batch when possible.
+        """
+        return [self.write(e) for e in entries]
+
+    def save_commit(self, commit: "Commit") -> None:
+        """Persist a commit object. Default is a no-op for adapters that
+        don't support commit storage yet."""
+
+    def get_commit(self, commit_id: str) -> "Commit | None":
+        """Retrieve a commit by its ID. Returns None if not found."""
+        return None
+
+    def list_commits(
+        self,
+        *,
+        branch: str = "main",
+        limit: int = 50,
+        namespace: str = "default",
+    ) -> "list[Commit]":
+        """List commits, newest first."""
+        return []
 
     # ── Recall tracking ─────────────────────────────────────────────────
 

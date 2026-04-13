@@ -466,6 +466,84 @@ async def get_stats(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Integrity verification
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/v1/verify")
+async def verify_integrity(
+    body: dict[str, Any] = {},
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    entity_path = body.get("entity_path")
+    return mem.verify(entity_path)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Atomic commits
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/v1/commits")
+async def create_commit(
+    body: dict[str, Any],
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    writes = body.get("writes", [])
+    message = body.get("message", "")
+    with mem.transaction(message) as tx:
+        for w in writes:
+            tx.write(w["entity_path"], w["key"], w.get("value"))
+    return {
+        "commit_id": tx.commit.id if tx.commit else None,
+        "message": message,
+        "entries_written": len(writes),
+    }
+
+
+@app.get("/api/v1/commits")
+async def list_commits(
+    limit: int = Query(50, ge=1, le=500),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    commits = mem.commit_log(limit=limit)
+    return {
+        "commits": [json.loads(json.dumps(c.model_dump(mode="json"), default=str)) for c in commits],
+        "count": len(commits),
+    }
+
+
+@app.get("/api/v1/commits/{commit_id}")
+async def get_commit(
+    commit_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    commit = mem.get_commit(commit_id)
+    if commit is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Commit not found")
+    return json.loads(json.dumps(commit.model_dump(mode="json"), default=str))
+
+
+@app.post("/api/v1/merge-base")
+async def merge_base(
+    body: dict[str, Any],
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    mem = _get_memory()
+    ancestor = mem.common_ancestor(body["commit_a"], body["commit_b"])
+    return {
+        "ancestor_commit_id": ancestor,
+        "commit_a": body["commit_a"],
+        "commit_b": body["commit_b"],
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Agent binding
 # ──────────────────────────────────────────────────────────────────────
 

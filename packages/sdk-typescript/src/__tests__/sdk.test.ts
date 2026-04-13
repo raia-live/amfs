@@ -32,6 +32,9 @@ function makeEntry(overrides?: Partial<MemoryEntry>): MemoryEntry {
     outcomeCount: 0,
     ttlAt: null,
     shared: true,
+    contentHash: null,
+    integrityChain: null,
+    commitId: null,
     ...overrides,
   };
 }
