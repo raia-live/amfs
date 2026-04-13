@@ -566,6 +566,8 @@ class Branch(BaseModel):
     merged_at: datetime | None = None
     merged_by: str | None = None
     created_at: datetime | None = None
+    head_commit_id: str | None = None
+    base_commit_id: str | None = None
 
 
 class BranchAccessPermission(str, Enum):
