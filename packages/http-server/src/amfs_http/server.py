@@ -1705,6 +1705,72 @@ async def recover_snapshot(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Rollback
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/v1/rollback")
+async def rollback(
+    body: dict[str, Any],
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Rollback an agent's memory to a specific event or timestamp.
+
+    Accepts either ``target_event_id`` (looks up the event to get its
+    timestamp and agent) or ``target_timestamp`` + ``agent_id``.
+    """
+    mem = _get_memory()
+    target_event_id = body.get("target_event_id")
+    target_timestamp = body.get("target_timestamp")
+    agent_id = body.get("agent_id")
+
+    if target_event_id:
+        event = mem._adapter.get_event(target_event_id, mem.namespace)
+        if event is None:
+            raise HTTPException(status_code=404, detail="Event not found")
+        timestamp = event.created_at
+        agent_id = agent_id or event.agent_id
+    elif target_timestamp:
+        if not agent_id:
+            raise HTTPException(
+                status_code=400,
+                detail="agent_id is required when using target_timestamp",
+            )
+        timestamp = datetime.fromisoformat(target_timestamp)
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide target_event_id or target_timestamp",
+        )
+
+    count = mem._adapter.rollback_to_timestamp(
+        agent_id, "main", timestamp, mem.namespace,
+    )
+
+    try:
+        mem._adapter.log_event(Event(
+            namespace=mem.namespace,
+            agent_id=agent_id,
+            branch="main",
+            event_type=EventType.ROLLBACK,
+            summary=f"Rolled back to {timestamp.isoformat()}",
+            details={
+                "rolled_back_to": timestamp.isoformat(),
+                "entries_restored": count,
+                "source_event_id": target_event_id,
+            },
+        ))
+    except Exception:
+        logger.debug("Failed to log rollback event", exc_info=True)
+
+    return {
+        "entries_restored": count,
+        "rolled_back_to": timestamp.isoformat(),
+        "agent_id": agent_id,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Agent-scoped branches & pull requests
 # ──────────────────────────────────────────────────────────────────────
 

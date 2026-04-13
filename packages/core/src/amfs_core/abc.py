@@ -423,6 +423,10 @@ class AdapterABC(ABC):
         """Return events on an agent's timeline. Default returns empty list."""
         return []
 
+    def get_event(self, event_id: str, namespace: str = "default") -> Event | None:
+        """Retrieve a single event by ID. Default returns None."""
+        return None
+
     # ── Branch management (Pro) ───────────────────────────────────────
 
     def create_branch(self, branch: Branch) -> Branch:
