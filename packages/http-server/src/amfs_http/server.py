@@ -1726,6 +1726,11 @@ async def rollback(
 
     if target_event_id:
         event = mem._adapter.get_event(target_event_id, mem.namespace)
+        if event is None and agent_id:
+            for e in mem._adapter.list_events(agent_id, mem.namespace, limit=10000):
+                if e.id == target_event_id:
+                    event = e
+                    break
         if event is None:
             raise HTTPException(status_code=404, detail="Event not found")
         timestamp = event.created_at
