@@ -1665,6 +1665,22 @@ class PostgresAdapter(AdapterABC):
 
         return [self._row_to_event(r) for r in rows]
 
+    def get_event(self, event_id: str, namespace: str = "default") -> Event | None:
+        sql = """
+            SELECT id, namespace, agent_id, branch, event_type,
+                   summary, details, actor_agent_id, created_at
+            FROM amfs_events
+            WHERE id = %s AND namespace = %s
+            LIMIT 1
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (event_id, namespace))
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_event(row)
+
     @staticmethod
     def _row_to_event(row: dict[str, Any]) -> Event:
         details = row.get("details") or {}
