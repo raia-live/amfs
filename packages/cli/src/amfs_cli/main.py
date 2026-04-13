@@ -5,6 +5,7 @@ from __future__ import annotations
 import typer
 
 from amfs_cli.init import init_command
+from amfs_cli.log import log_command
 from amfs_cli.login import login_command
 from amfs_cli.recall import recall_command
 from amfs_cli.search import search_command
@@ -31,6 +32,7 @@ app.command(name="search", help="Search memory entries")(search_command)
 app.command(name="recall", help="Recall an agent-scoped entry")(recall_command)
 app.command(name="stats", help="Show memory statistics")(stats_command)
 app.command(name="status", help="Show config and connection health")(status_command)
+app.command(name="log", help="Show commit history")(log_command)
 app.command(name="verify", help="Verify content integrity of memory entries")(verify_command)
 app.command(name="watch", help="Live-stream memory changes (SSE)")(watch_command)
 app.add_typer(snapshot_app, name="snapshot", help="Export and restore memory snapshots")
