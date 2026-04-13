@@ -36,14 +36,14 @@ class CortexWorker:
         debounce_ms: int = 3000,
         use_advisory_lock: bool = True,
         drift_threshold: float = 0.0,
-        periodic_recompile_s: float = 300.0,
+        catchup_interval_s: float = 300.0,
     ) -> None:
         self._dsn = dsn
         self._compiler = compiler
         self._debounce_ms = debounce_ms
         self._use_advisory_lock = use_advisory_lock
         self._drift_threshold = drift_threshold
-        self._periodic_recompile_s = periodic_recompile_s
+        self._catchup_interval_s = catchup_interval_s
         self._pending: dict[str, float] = {}
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -52,7 +52,7 @@ class CortexWorker:
         self._drift_skipped = 0
         self._started_at: float | None = None
         self._last_event_at: float | None = None
-        self._last_full_recompile: float = 0.0
+        self._last_catchup: float = 0.0
         self._activity_log: deque[dict[str, Any]] = deque(maxlen=_ACTIVITY_LOG_MAX)
         self._outcome_wiring: Any = None
         self._hot_tracker: Any = None
@@ -132,9 +132,6 @@ class CortexWorker:
 
             logger.info("Cortex worker active — listening for events")
 
-            self._compiler.recompile_all()
-            self._last_full_recompile = time.monotonic()
-
             conn.execute("LISTEN amfs_write")
             conn.execute("LISTEN amfs_outcome")
 
@@ -143,12 +140,17 @@ class CortexWorker:
             )
             recompile_thread.start()
 
+            catchup_thread = threading.Thread(
+                target=self._catchup_missing_digests, daemon=True, name="cortex-catchup"
+            )
+            catchup_thread.start()
+
             while not self._stop.is_set():
                 for notify in conn.notifies(timeout=5.0):
                     if self._stop.is_set():
                         break
                     self._handle_notify(notify)
-                self._maybe_periodic_recompile()
+                self._maybe_catchup()
 
         finally:
             conn.close()
@@ -177,8 +179,7 @@ class CortexWorker:
                 break
             if self._try_acquire_lock(conn):
                 logger.info("Standby worker promoted to active")
-                self._compiler.recompile_all()
-                self._last_full_recompile = time.monotonic()
+
                 conn.execute("LISTEN amfs_write")
                 conn.execute("LISTEN amfs_outcome")
 
@@ -187,12 +188,17 @@ class CortexWorker:
                 )
                 recompile_thread.start()
 
+                catchup_thread = threading.Thread(
+                    target=self._catchup_missing_digests, daemon=True, name="cortex-catchup"
+                )
+                catchup_thread.start()
+
                 while not self._stop.is_set():
                     for notify in conn.notifies(timeout=5.0):
                         if self._stop.is_set():
                             break
                         self._handle_notify(notify)
-                    self._maybe_periodic_recompile()
+                    self._maybe_catchup()
                 break
 
     def _handle_notify(self, notify) -> None:
@@ -249,30 +255,72 @@ class CortexWorker:
         if self._pro_forwarder:
             self._pro_forwarder.enqueue({"channel": channel, **payload})
 
-    def _maybe_periodic_recompile(self) -> None:
-        """Trigger a full recompile if enough time has passed since the last one.
+    def _catchup_missing_digests(self) -> None:
+        """Find agents/entities that have entries but no digest, queue them.
 
-        Acts as a safety net for environments where NOTIFY events can be lost
-        (Cloud Run scale-to-zero, connection poolers, connection drops).
+        Unlike recompile_all(), this only targets scopes that are completely
+        missing a digest. It queues them through the normal debounce pipeline
+        so they compile one at a time without blocking the event loop.
         """
-        if self._periodic_recompile_s <= 0:
-            return
-        elapsed = time.monotonic() - self._last_full_recompile
-        if elapsed < self._periodic_recompile_s:
-            return
-
-        logger.info("Periodic recompile triggered (%.0fs since last)", elapsed)
         try:
-            count = self._compiler.recompile_all()
-            self._last_full_recompile = time.monotonic()
+            adapter = self._compiler._adapter
+            branch = self._compiler._branch
+            namespace = self._compiler._namespace
+
+            entries = adapter.list(branch=branch)
+            entity_paths: set[str] = set()
+            agent_ids: set[str] = set()
+
+            for entry in entries:
+                entity_paths.add(entry.entity_path)
+                aid = entry.provenance.agent_id
+                if not aid.startswith(("webhook/", "external/")):
+                    agent_ids.add(aid)
+
+            existing_digests = adapter.list_digests(namespace=namespace)
+            existing_scopes: set[str] = set()
+            for d in existing_digests:
+                existing_scopes.add(f"{d.digest_type.value}:{d.scope}")
+
+            queued = 0
+            for aid in agent_ids:
+                if f"agent_brief:{aid}" not in existing_scopes:
+                    with self._lock:
+                        self._pending[f"agent:{aid}@{branch}"] = time.monotonic()
+                    queued += 1
+
+            for ep in entity_paths:
+                if f"entity:{ep}" not in existing_scopes:
+                    with self._lock:
+                        self._pending[f"entity:{ep}@{branch}"] = time.monotonic()
+                    queued += 1
+
+            self._last_catchup = time.monotonic()
+
+            if queued > 0:
+                logger.info("Catchup: queued %d missing digests for compilation", queued)
+            else:
+                logger.info("Catchup: all %d agents and %d entities have digests",
+                            len(agent_ids), len(entity_paths))
+
             self._activity_log.append({
-                "type": "periodic_recompile",
-                "digests_compiled": count,
-                "interval_s": round(elapsed),
+                "type": "catchup_scan",
+                "missing_scopes": queued,
+                "total_agents": len(agent_ids),
+                "total_entities": len(entity_paths),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
         except Exception:
-            logger.exception("Periodic recompile failed")
+            logger.exception("Catchup scan failed")
+
+    def _maybe_catchup(self) -> None:
+        """Periodically scan for missing digests as a lightweight safety net."""
+        if self._catchup_interval_s <= 0:
+            return
+        elapsed = time.monotonic() - self._last_catchup
+        if elapsed < self._catchup_interval_s:
+            return
+        self._catchup_missing_digests()
 
     def _recompile_loop(self) -> None:
         """Background thread that recompiles debounced pending digests."""
