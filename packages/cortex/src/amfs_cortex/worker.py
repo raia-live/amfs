@@ -132,9 +132,6 @@ class CortexWorker:
 
             logger.info("Cortex worker active — listening for events")
 
-            self._compiler.recompile_all()
-            self._last_full_recompile = time.monotonic()
-
             conn.execute("LISTEN amfs_write")
             conn.execute("LISTEN amfs_outcome")
 
@@ -142,6 +139,11 @@ class CortexWorker:
                 target=self._recompile_loop, daemon=True, name="cortex-recompile"
             )
             recompile_thread.start()
+
+            init_thread = threading.Thread(
+                target=self._initial_recompile, daemon=True, name="cortex-init-recompile"
+            )
+            init_thread.start()
 
             while not self._stop.is_set():
                 for notify in conn.notifies(timeout=5.0):
@@ -177,8 +179,7 @@ class CortexWorker:
                 break
             if self._try_acquire_lock(conn):
                 logger.info("Standby worker promoted to active")
-                self._compiler.recompile_all()
-                self._last_full_recompile = time.monotonic()
+
                 conn.execute("LISTEN amfs_write")
                 conn.execute("LISTEN amfs_outcome")
 
@@ -186,6 +187,11 @@ class CortexWorker:
                     target=self._recompile_loop, daemon=True, name="cortex-recompile"
                 )
                 recompile_thread.start()
+
+                init_thread = threading.Thread(
+                    target=self._initial_recompile, daemon=True, name="cortex-init-recompile"
+                )
+                init_thread.start()
 
                 while not self._stop.is_set():
                     for notify in conn.notifies(timeout=5.0):
@@ -248,6 +254,25 @@ class CortexWorker:
 
         if self._pro_forwarder:
             self._pro_forwarder.enqueue({"channel": channel, **payload})
+
+    def _initial_recompile(self) -> None:
+        """Run initial full recompile in a background thread.
+
+        This runs separately so the main event loop can start processing
+        NOTIFY events immediately instead of blocking for minutes while
+        LLM-based compilation runs for every agent.
+        """
+        try:
+            count = self._compiler.recompile_all()
+            self._last_full_recompile = time.monotonic()
+            logger.info("Initial recompile complete: %d digests", count)
+            self._activity_log.append({
+                "type": "initial_recompile",
+                "digests_compiled": count,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:
+            logger.exception("Initial recompile failed")
 
     def _maybe_periodic_recompile(self) -> None:
         """Trigger a full recompile if enough time has passed since the last one.
