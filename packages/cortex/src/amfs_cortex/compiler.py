@@ -6,7 +6,7 @@ import hashlib
 import logging
 from typing import TYPE_CHECKING, Protocol
 
-from amfs_core.models import Digest, DigestType
+from amfs_core.models import Digest, DigestType, Event, EventType
 
 if TYPE_CHECKING:
     from amfs_postgres.adapter import PostgresAdapter
@@ -81,8 +81,37 @@ class DigestCompiler:
             digest.branch = b
             self._adapter.upsert_digest(digest)
             logger.debug("Compiled %s digest for %s (branch=%s)", kind, scope, b)
+            self._log_brief_compiled(digest, kind, scope, b)
 
         return digest
+
+    def _log_brief_compiled(self, digest: Digest, kind: str, scope: str, branch: str) -> None:
+        """Log a brief_compiled timeline event for the relevant agent(s)."""
+        try:
+            agent_ids: list[str] = []
+            if kind == "agent":
+                agent_ids = [scope]
+            elif digest.source_agents:
+                agent_ids = digest.source_agents
+
+            for aid in agent_ids:
+                self._adapter.log_event(Event(
+                    namespace=self._namespace,
+                    agent_id=aid,
+                    branch=branch,
+                    event_type=EventType.BRIEF_COMPILED,
+                    summary=f"Compiled {kind} digest for {scope}",
+                    details={
+                        "digest_type": digest.digest_type.value,
+                        "scope": scope,
+                        "entry_count": digest.entry_count,
+                        "entities_written": list(
+                            digest.summary.get("top_entities", {}).keys()
+                        ) if isinstance(digest.summary.get("top_entities"), dict) else [],
+                    },
+                ))
+        except Exception:
+            logger.debug("Failed to log brief_compiled event for %s:%s", kind, scope, exc_info=True)
 
     def recompile_all(self, *, branch: str | None = None) -> int:
         """Recompile all digests from scratch. Returns count of digests compiled."""
