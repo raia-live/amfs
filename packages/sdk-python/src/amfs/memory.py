@@ -45,6 +45,62 @@ from amfs.factory import create_adapter_from_config
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Lightweight digest scoring — used when amfs_cortex is not installed but the
+# adapter supports list_digests (e.g. PostgresAdapter used directly by the MCP
+# server without the full Cortex package).
+# ---------------------------------------------------------------------------
+
+def _score_digests(
+    digests: list,
+    *,
+    entity_path: str | None = None,
+    agent_id: str | None = None,
+    limit: int = 10,
+) -> list:
+    """Rank digests by relevance to entity_path / agent_id."""
+    from amfs_core.models import DigestType
+
+    now = datetime.now(timezone.utc)
+    scored: list[tuple[float, Any]] = []
+
+    for d in digests:
+        score = 0.0
+
+        if entity_path:
+            if d.digest_type == DigestType.ENTITY and d.scope == entity_path:
+                score += 100.0
+            elif d.digest_type == DigestType.CONNECTION_MAP and d.scope == entity_path:
+                score += 80.0
+            elif d.digest_type == DigestType.SOURCE:
+                if entity_path in d.summary.get("entities_touched", []):
+                    score += 60.0
+            elif d.digest_type == DigestType.AGENT_BRIEF:
+                if entity_path in d.summary.get("entities_written", []):
+                    score += 40.0
+
+        if agent_id:
+            if d.digest_type == DigestType.AGENT_BRIEF and d.scope == agent_id:
+                score += 100.0
+            elif d.digest_type == DigestType.ENTITY:
+                if agent_id in d.summary.get("agents", []):
+                    score += 50.0
+
+        if score == 0:
+            continue
+
+        age_hours = max((now - d.compiled_at).total_seconds() / 3600, 0.01)
+        score += min(10.0 / age_hours, 20.0)
+        score += min(d.entry_count * 0.5, 15.0)
+        score += d.anticipation_score * 30.0
+
+        d.staleness_ms = int((now - d.compiled_at).total_seconds() * 1000)
+        scored.append((score, d))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [d for _, d in scored[:limit]]
+
+
 class AgentMemory:
     """High-level API for agents to read, write, and observe shared memory.
 
@@ -1226,8 +1282,13 @@ class AgentMemory:
         """Get a ranked briefing of compiled knowledge digests.
 
         Returns pre-compiled Digest objects from the Cortex, ranked by
-        relevance to the given entity or agent context. If no Cortex is
-        running, returns an empty list.
+        relevance to the given entity or agent context.
+
+        Resolution order:
+        1. Adapter-native ``briefing()`` (e.g. HttpAdapter proxy)
+        2. ``amfs_cortex.BriefingService`` (full Cortex scoring)
+        3. Inline scoring via adapter ``list_digests()`` (fallback when
+           amfs_cortex is not installed but adapter has digest access)
 
         Args:
             entity_path: Focus on digests relevant to this entity.
@@ -1248,20 +1309,37 @@ class AgentMemory:
                 limit=limit,
             )
 
+        resolved_agent = agent_id or self.agent_id
+        resolved_branch = branch or self._branch
+
         try:
             from amfs_cortex.briefing import BriefingService
         except ImportError:
+            pass
+        else:
+            service = BriefingService(
+                adapter=self._adapter,
+                namespace=self.namespace,
+            )
+            return service.briefing(
+                entity_path=entity_path,
+                agent_id=resolved_agent,
+                limit=limit,
+                branch=resolved_branch,
+            )
+
+        # Fallback: amfs_cortex not installed but adapter supports list_digests
+        # (e.g. PostgresAdapter used directly). Apply inline relevance scoring
+        # so the MCP server doesn't silently return empty briefings.
+        list_digests_fn = getattr(self._adapter, "list_digests", None)
+        if not callable(list_digests_fn):
             return []
 
-        service = BriefingService(
-            adapter=self._adapter,
-            namespace=self.namespace,
-        )
-        return service.briefing(
+        return _score_digests(
+            list_digests_fn(namespace=self.namespace, branch=resolved_branch),
             entity_path=entity_path,
-            agent_id=agent_id or self.agent_id,
+            agent_id=resolved_agent,
             limit=limit,
-            branch=branch or self._branch,
         )
 
     # ------------------------------------------------------------------
