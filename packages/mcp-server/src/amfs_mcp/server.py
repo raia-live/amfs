@@ -57,17 +57,38 @@ amfs_set_identity("<role-name>", "<one-line description of current task>")
 
 Use kebab-case role/domain names that persist across conversations (e.g. "dashboard-agent", "api-agent"). If continuing work a previous agent started, use the same name.
 
+## Operations Cost
+
+Every operation has a cost — be deliberate:
+- **Read** (1 op): `amfs_read`, `amfs_search`, `amfs_list`, `amfs_recall`, `amfs_briefing`, `amfs_retrieve`
+- **Write** (2 ops): `amfs_write`, `amfs_record_context`
+- **Commit** (FREE): `amfs_commit_outcome` — always commit, never skip
+
 ## Workflow
 
-1. **Get briefed**: `amfs_briefing(entity_path="<repo>/<module>")` for compiled knowledge, then `amfs_recall` / `amfs_search` for specifics.
+1. **Get briefed**: `amfs_briefing(entity_path="<repo>/<module>")` — one briefing (1 op) replaces many individual reads. Always start here.
 2. **Read & explore**: `amfs_read` for known keys, `amfs_search(query="...")` for text search, `amfs_retrieve` for semantic retrieval, `amfs_graph_neighbors` for related entities.
-3. **Record decisions as they happen**: `amfs_record_context("user-decision", "User chose X over Y", source="chat")`.
+3. **Record decisions as they happen**: `amfs_record_context("user-decision", "User chose X over Y", source="chat")`. Only record meaningful decisions — not every micro-step.
 4. **Write knowledge**: `amfs_write("<repo>/<module>", "task-summary-<desc>", "<what and why>")`. Use `memory_type="belief"` for hypotheses, `"experience"` for actions taken.
-5. **Commit outcomes**: `amfs_commit_outcome("<ref>", "success")` after completing significant work. This snapshots the full decision trace.
+5. **Commit outcomes**: `amfs_commit_outcome("<ref>", "success")` after completing significant work. This is FREE and snapshots the full decision trace.
+
+## What to Save (worth 2 ops)
+
+- Decisions with rationale (why X over Y)
+- Discovered patterns reusable across sessions
+- Risks, bugs, or gotchas that would trip up future agents
+- Task summaries after completing significant work
+- External tool outputs worth preserving
+
+## What NOT to Save (waste of ops)
+
+- Trivial changes the IDE/VCS already tracks ("added a comment", "renamed variable")
+- Anything recomputable from the current codebase in under 5 seconds
+- Transient debug output or one-sentence entries (too low signal for 2 ops)
 
 ## Entity Naming
 
-Use `{repo}/{service-or-module}` paths (e.g. `myapp/auth`, `amfs/core-engine`).
+Use `{repo}/{service-or-module}` paths (e.g. `myapp/auth`, `amfs/core-engine`). Avoid generic paths like `project` or `code`.
 
 ## Key Patterns
 
@@ -79,10 +100,19 @@ Use `{repo}/{service-or-module}` paths (e.g. `myapp/auth`, `amfs/core-engine`).
 ## Confidence Scale
 
 - 1.0 = verified fact | 0.7-0.9 = high confidence | 0.4-0.6 = hypothesis | < 0.4 = speculative
+- Beliefs should have confidence < 0.9 — if you're sure enough for 0.9+, it's a fact.
+
+## Avoid These
+
+- Writing every file edit — only write knowledge, not changelogs
+- Forgetting `amfs_commit_outcome` — it's free and preserves the decision trace
+- Generic entity paths like `project` — use `{repo}/{module}`
+- Setting confidence=1.0 on beliefs — beliefs are hypotheses, keep < 0.9
+- Skipping `amfs_briefing` — one briefing replaces many individual reads
 
 ## Quality Feedback
 
-`amfs_write` responses include a `quality` score. If below 0.8, review `issues` and rewrite with more detail.
+`amfs_write` responses include a `quality` score. If below 0.8, review `issues` and rewrite with more detail. Use `pattern_refs` to link related entries.
 """
 
 mcp = FastMCP(name="amfs", instructions=_INSTRUCTIONS)
