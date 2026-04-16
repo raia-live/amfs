@@ -362,6 +362,46 @@ Machine B (Claude Code / Alice):
 
 ---
 
+## Guide Your Agents
+
+The MCP server auto-injects basic instructions into every connected agent. For deeper guidance on memory hygiene — what to save, what to skip, cost-conscious patterns, and anti-patterns — install the **AMFS Agent Memory Guide** in your project.
+
+The guide teaches agents to follow a four-phase session lifecycle (identify, get briefed, work, commit), be cost-conscious with read/write operations, and produce high-quality, well-structured memory entries.
+
+### Cursor
+
+Copy the skill into your project:
+
+```bash
+# From the AMFS repo
+cp -r packages/agent-guide/cursor/ .cursor/skills/amfs-memory/
+```
+
+Or if using the [Cursor plugin](https://github.com/raia-live/cursor-plugin), the skill is included automatically.
+
+### Claude Code / Claude Desktop
+
+Copy the guide into your project root as `CLAUDE.md`:
+
+```bash
+# From the AMFS repo
+cp packages/agent-guide/AGENT_MEMORY_GUIDE.md CLAUDE.md
+```
+
+Or append it to an existing `CLAUDE.md`:
+
+```bash
+cat packages/agent-guide/AGENT_MEMORY_GUIDE.md >> CLAUDE.md
+```
+
+### Codex / Other Agents
+
+Paste the contents of [`AGENT_MEMORY_GUIDE.md`](https://github.com/raia-live/amfs/blob/main/packages/agent-guide/AGENT_MEMORY_GUIDE.md) into your agent's system prompt or instructions configuration.
+
+The guide is a single self-contained markdown document that works with any agent framework (LangChain, CrewAI, Strands, custom).
+
+---
+
 ## Troubleshooting
 
 **"amfs-mcp-server not found"**
