@@ -389,6 +389,24 @@ class PostgresAdapter(AdapterABC):
             ON amfs_team_members (namespace, email)
             WHERE removed_at IS NOT NULL
         """)
+        # Tenant isolation for digests — account_id scoping
+        cur.execute("""
+            ALTER TABLE amfs_digests
+            ADD COLUMN IF NOT EXISTS account_id UUID
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_digests DROP CONSTRAINT IF EXISTS uq_digest
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_digests
+            ADD CONSTRAINT uq_digest
+            UNIQUE (namespace, branch, digest_type, scope, account_id)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_digests_account
+            ON amfs_digests (account_id)
+            WHERE account_id IS NOT NULL
+        """)
 
     def _detect_optional_columns(self) -> None:
         """Check whether optional columns (embedding, search_tsv) exist.
@@ -1452,15 +1470,24 @@ class PostgresAdapter(AdapterABC):
 
     # ── Digest storage (Memory Cortex) ──────────────────────────────
 
+    def _get_current_account_id(self) -> str | None:
+        """Read the current tenant account ID from thread-local context."""
+        try:
+            from amfs_postgres.tenant_context import get_request_tenant_account_id
+            return get_request_tenant_account_id()
+        except ImportError:
+            return None
+
     def upsert_digest(self, digest: Digest) -> None:
         """Insert or update a compiled digest."""
         branch = digest.branch or "main"
+        account_id = self._get_current_account_id()
         with self._pool.connection() as conn:
             conn.execute(
                 """INSERT INTO amfs_digests
                    (namespace, branch, digest_type, scope, summary, entry_count,
-                    source_agents, anticipation_score, compiled_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    source_agents, anticipation_score, compiled_at, account_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT ON CONSTRAINT uq_digest
                    DO UPDATE SET summary = EXCLUDED.summary,
                                  entry_count = EXCLUDED.entry_count,
@@ -1477,6 +1504,7 @@ class PostgresAdapter(AdapterABC):
                     digest.source_agents,
                     digest.anticipation_score,
                     digest.compiled_at,
+                    account_id,
                 ),
             )
 
@@ -1488,14 +1516,25 @@ class PostgresAdapter(AdapterABC):
         branch: str = "main",
     ) -> Digest | None:
         """Read a single digest by type and scope."""
+        account_id = self._get_current_account_id()
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                row = cur.execute(
-                    """SELECT * FROM amfs_digests
-                       WHERE namespace = %s AND branch = %s
-                         AND digest_type = %s AND scope = %s""",
-                    (namespace, branch, digest_type.value, scope),
-                ).fetchone()
+                if account_id:
+                    row = cur.execute(
+                        """SELECT * FROM amfs_digests
+                           WHERE namespace = %s AND branch = %s
+                             AND digest_type = %s AND scope = %s
+                             AND account_id = %s""",
+                        (namespace, branch, digest_type.value, scope, account_id),
+                    ).fetchone()
+                else:
+                    row = cur.execute(
+                        """SELECT * FROM amfs_digests
+                           WHERE namespace = %s AND branch = %s
+                             AND digest_type = %s AND scope = %s
+                             AND account_id IS NULL""",
+                        (namespace, branch, digest_type.value, scope),
+                    ).fetchone()
         return self._row_to_digest(row) if row else None
 
     def list_digests(
@@ -1505,21 +1544,33 @@ class PostgresAdapter(AdapterABC):
         branch: str = "main",
     ) -> list[Digest]:
         """List digests, optionally filtered by type and branch."""
+        account_id = self._get_current_account_id()
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
+                if account_id:
+                    account_filter = "AND account_id = %s"
+                    base_params: list[Any] = [namespace, branch]
+                    extra_params: list[Any] = [account_id]
+                else:
+                    account_filter = "AND account_id IS NULL"
+                    base_params = [namespace, branch]
+                    extra_params = []
+
                 if digest_type:
                     rows = cur.execute(
-                        """SELECT * FROM amfs_digests
+                        f"""SELECT * FROM amfs_digests
                            WHERE namespace = %s AND branch = %s AND digest_type = %s
+                           {account_filter}
                            ORDER BY compiled_at DESC""",
-                        (namespace, branch, digest_type.value),
+                        (*base_params, digest_type.value, *extra_params),
                     ).fetchall()
                 else:
                     rows = cur.execute(
-                        """SELECT * FROM amfs_digests
+                        f"""SELECT * FROM amfs_digests
                            WHERE namespace = %s AND branch = %s
+                           {account_filter}
                            ORDER BY compiled_at DESC""",
-                        (namespace, branch),
+                        (*base_params, *extra_params),
                     ).fetchall()
         return [self._row_to_digest(r) for r in rows]
 

@@ -458,7 +458,8 @@ CREATE TABLE IF NOT EXISTS amfs_digests (
     anticipation_score NUMERIC(6,4) DEFAULT 0.0,
     compiled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     branch TEXT NOT NULL DEFAULT 'main',
-    CONSTRAINT uq_digest UNIQUE (namespace, branch, digest_type, scope)
+    account_id UUID,
+    CONSTRAINT uq_digest UNIQUE (namespace, branch, digest_type, scope, account_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_digests_type ON amfs_digests(digest_type);
