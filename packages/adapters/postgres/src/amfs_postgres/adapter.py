@@ -415,6 +415,19 @@ class PostgresAdapter(AdapterABC):
             ON amfs_team_members (namespace, email)
             WHERE removed_at IS NOT NULL
         """)
+        # Agent profile persistence
+        cur.execute("""
+            ALTER TABLE amfs_agents
+            ADD COLUMN IF NOT EXISTS profile JSONB
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_agents
+            ADD COLUMN IF NOT EXISTS capabilities JSONB DEFAULT '[]'::jsonb
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_agents
+            ADD COLUMN IF NOT EXISTS contracts JSONB DEFAULT '[]'::jsonb
+        """)
         # Tenant isolation — account_id scoping on optional tables.
         # These tables are created by separate migration files and may not
         # exist in minimal test environments, so guard with IF EXISTS.
@@ -1737,20 +1750,23 @@ class PostgresAdapter(AdapterABC):
 
     # ── Agent registration (Pro) ────────────────────────────────────────
 
+    _AGENT_COLUMNS = """id, namespace, agent_id, display_name,
+                    created_at, last_active_at, entry_count,
+                    profile, capabilities, contracts"""
+
     def ensure_agent(self, agent_id: str, namespace: str = "default") -> Agent:
         account_id = self._get_current_account_id()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     INSERT INTO amfs_agents (namespace, agent_id, account_id)
                     VALUES (%s, %s, %s)
                     ON CONFLICT ON CONSTRAINT uq_agent DO UPDATE
                         SET last_active_at = NOW(),
                             entry_count = amfs_agents.entry_count + 1,
                             account_id = COALESCE(amfs_agents.account_id, EXCLUDED.account_id)
-                    RETURNING id, namespace, agent_id, display_name,
-                              created_at, last_active_at, entry_count
+                    RETURNING {self._AGENT_COLUMNS}
                     """,
                     (namespace, agent_id, account_id),
                 )
@@ -1769,8 +1785,7 @@ class PostgresAdapter(AdapterABC):
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    SELECT id, namespace, agent_id, display_name,
-                           created_at, last_active_at, entry_count
+                    SELECT {self._AGENT_COLUMNS}
                     FROM amfs_agents
                     WHERE namespace = %s AND agent_id = %s {account_filter}
                     """,
@@ -1791,8 +1806,7 @@ class PostgresAdapter(AdapterABC):
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    SELECT id, namespace, agent_id, display_name,
-                           created_at, last_active_at, entry_count
+                    SELECT {self._AGENT_COLUMNS}
                     FROM amfs_agents
                     WHERE namespace = %s {account_filter}
                     ORDER BY last_active_at DESC
@@ -1804,6 +1818,17 @@ class PostgresAdapter(AdapterABC):
 
     @staticmethod
     def _row_to_agent(row: dict[str, Any]) -> Agent:
+        from amfs_core.models import AgentProfile, AgentCapability, MemoryContract
+
+        profile_raw = row.get("profile")
+        profile = AgentProfile.model_validate(profile_raw) if profile_raw else None
+
+        caps_raw = row.get("capabilities") or []
+        capabilities = [AgentCapability.model_validate(c) for c in caps_raw]
+
+        contracts_raw = row.get("contracts") or []
+        contracts = [MemoryContract.model_validate(c) for c in contracts_raw]
+
         return Agent(
             id=str(row["id"]),
             namespace=row["namespace"],
@@ -1812,7 +1837,75 @@ class PostgresAdapter(AdapterABC):
             created_at=row["created_at"],
             last_active_at=row["last_active_at"],
             entry_count=row.get("entry_count", 0),
+            profile=profile,
+            capabilities=capabilities,
+            contracts=contracts,
         )
+
+    def update_agent_profile(
+        self,
+        agent_id: str,
+        profile: Any,
+        namespace: str = "default",
+    ) -> Agent:
+        self.ensure_agent(agent_id, namespace)
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE amfs_agents
+                    SET profile = %s
+                    WHERE namespace = %s AND agent_id = %s
+                    RETURNING {self._AGENT_COLUMNS}
+                    """,
+                    (json.dumps(profile.model_dump()), namespace, agent_id),
+                )
+                row = cur.fetchone()
+        return self._row_to_agent(row)
+
+    def update_agent_capabilities(
+        self,
+        agent_id: str,
+        capabilities: list[Any],
+        namespace: str = "default",
+    ) -> Agent:
+        self.ensure_agent(agent_id, namespace)
+        caps_json = json.dumps([c.model_dump() for c in capabilities])
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE amfs_agents
+                    SET capabilities = %s
+                    WHERE namespace = %s AND agent_id = %s
+                    RETURNING {self._AGENT_COLUMNS}
+                    """,
+                    (caps_json, namespace, agent_id),
+                )
+                row = cur.fetchone()
+        return self._row_to_agent(row)
+
+    def update_agent_contracts(
+        self,
+        agent_id: str,
+        contracts: list[Any],
+        namespace: str = "default",
+    ) -> Agent:
+        self.ensure_agent(agent_id, namespace)
+        contracts_json = json.dumps([c.model_dump() for c in contracts])
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE amfs_agents
+                    SET contracts = %s
+                    WHERE namespace = %s AND agent_id = %s
+                    RETURNING {self._AGENT_COLUMNS}
+                    """,
+                    (contracts_json, namespace, agent_id),
+                )
+                row = cur.fetchone()
+        return self._row_to_agent(row)
 
     # ── Event log / timeline (Pro) ────────────────────────────────────
 

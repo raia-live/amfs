@@ -205,6 +205,9 @@ CREATE TABLE IF NOT EXISTS amfs_agents (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_active_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     entry_count INTEGER DEFAULT 0,
+    profile JSONB,
+    capabilities JSONB DEFAULT '[]'::jsonb,
+    contracts JSONB DEFAULT '[]'::jsonb,
     CONSTRAINT uq_agent UNIQUE (namespace, agent_id)
 );
 
