@@ -84,6 +84,13 @@ class LifecycleManager:
                 archived = self.sweep()
                 if archived:
                     logger.info("TTL sweep archived %d entries", len(archived))
-            except Exception:
-                logger.exception("Error during TTL sweep")
+            except Exception as exc:
+                msg = str(exc)
+                if "401" in msg or "Unauthorized" in msg:
+                    logger.error(
+                        "TTL sweep failed with 401 Unauthorized — check that "
+                        "AMFS_API_KEY is set correctly in your MCP server env."
+                    )
+                else:
+                    logger.exception("Error during TTL sweep")
             self._stop_event.wait(timeout=self._interval)

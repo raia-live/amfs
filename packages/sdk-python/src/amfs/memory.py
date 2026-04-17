@@ -585,7 +585,7 @@ class AgentMemory:
 
         buf = TransactionBuffer(
             agent_id=self.agent_id,
-            session_id=self._tagger._session_id,
+            session_id=self._tagger.session_id,
             branch=self._branch,
             namespace=self._config.namespace,
         )
