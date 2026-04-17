@@ -543,7 +543,12 @@ async def get_agent_profile(
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    """Return an agent's profile, stats, and registration info."""
+    """Return an agent's profile, stats, and registration info.
+
+    When no explicit profile has been registered, synthesises one from the
+    agent's actual activity — entity paths become auto-inferred capabilities
+    and memory-type distribution is included.
+    """
     mem = _get_memory()
     agent = mem._adapter.get_agent(agent_id, namespace=mem.namespace)
 
@@ -568,13 +573,104 @@ async def get_agent_profile(
         "decisionTraces": len(traces),
         "lastActive": last_active.isoformat() if last_active else None,
     }
+
     if agent:
-        result["profile"] = agent.profile.model_dump() if agent.profile else {}
-        result["capabilities"] = [c.model_dump() for c in agent.capabilities]
-        result["contracts"] = [c.model_dump() for c in agent.contracts]
+        profile = agent.profile
+        capabilities = agent.capabilities
+        contracts = agent.contracts
+
+        if not profile and not capabilities and entries:
+            profile, capabilities = _synthesize_agent_profile(
+                agent_id, entries, traces,
+            )
+
+        result["profile"] = profile.model_dump() if profile else {}
+        result["capabilities"] = [c.model_dump() for c in capabilities]
+        result["contracts"] = [c.model_dump() for c in contracts]
         result["displayName"] = agent.display_name
         result["createdAt"] = agent.created_at.isoformat() if agent.created_at else None
     return result
+
+
+def _synthesize_agent_profile(
+    agent_id: str,
+    entries: list,
+    traces: list,
+) -> tuple:
+    """Build an AgentProfile and capabilities from observed activity."""
+    from amfs_core.models import AgentProfile, AgentCapability, MemoryType
+    from collections import Counter
+
+    entities_touched = {e.entity_path for e in entries}
+    memory_types: Counter[str] = Counter()
+    key_prefixes: Counter[str] = Counter()
+    for e in entries:
+        mt = e.memory_type if hasattr(e, "memory_type") and e.memory_type else MemoryType.FACT
+        memory_types[mt.value if hasattr(mt, "value") else str(mt)] += 1
+        prefix = e.key.split("-")[0] if "-" in e.key else e.key
+        key_prefixes[prefix] += 1
+
+    top_prefixes = [p for p, _ in key_prefixes.most_common(5)]
+    type_summary = ", ".join(
+        f"{count} {mtype}" for mtype, count in memory_types.most_common()
+    )
+    desc_parts = []
+    if type_summary:
+        desc_parts.append(f"Writes: {type_summary}.")
+    if entities_touched:
+        desc_parts.append(
+            f"Active across {len(entities_touched)} "
+            f"entit{'y' if len(entities_touched) == 1 else 'ies'}."
+        )
+    if traces:
+        desc_parts.append(f"{len(traces)} decision trace(s) recorded.")
+
+    profile = AgentProfile(
+        description=" ".join(desc_parts),
+        auto_context_paths=sorted(entities_touched)[:10],
+        tags=_infer_tags(agent_id, top_prefixes, memory_types),
+    )
+
+    capabilities = []
+    entity_groups: dict[str, list[str]] = {}
+    for ep in sorted(entities_touched):
+        group = ep.split("/")[0] if "/" in ep else ep
+        entity_groups.setdefault(group, []).append(ep)
+
+    for group, paths in entity_groups.items():
+        capabilities.append(AgentCapability(
+            name=group,
+            description=f"Works on {len(paths)} entit{'y' if len(paths) == 1 else 'ies'} under {group}/",
+            entity_paths=paths[:10],
+        ))
+
+    return profile, capabilities
+
+
+def _infer_tags(
+    agent_id: str,
+    key_prefixes: list[str],
+    memory_types: "Counter",
+) -> list[str]:
+    """Derive a small set of tags from the agent's activity."""
+    tags: list[str] = []
+    prefix_tag_map = {
+        "task": "task-executor",
+        "pattern": "pattern-detector",
+        "risk": "risk-assessor",
+        "decision": "decision-maker",
+        "action": "action-logger",
+    }
+    for prefix in key_prefixes:
+        if prefix in prefix_tag_map and prefix_tag_map[prefix] not in tags:
+            tags.append(prefix_tag_map[prefix])
+
+    if memory_types.get("belief", 0) > memory_types.get("fact", 0):
+        tags.append("hypothesis-driven")
+    if memory_types.get("experience", 0) > 0:
+        tags.append("experiential")
+
+    return tags[:5]
 
 
 @app.put("/api/v1/agents/{agent_id:path}/profile")

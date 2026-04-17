@@ -343,14 +343,29 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
 
     mem = _get_memory()
 
-    # Log identity change for debugging — but do NOT write to _system/agents.
-    # Writing system metadata as regular memory entries pollutes agent stats
-    # (entry counts, entity lists) and creates ghost agents on the dashboard.
-    # Agent identity is already tracked via provenance on every real entry.
     logger.info(
         "Identity set: %s → %s (session=%s, platform=%s, description=%s)",
         old_identity, name, mem.session_id, detect_platform(), description or "",
     )
+
+    # Register / update the agent profile with the description so it
+    # shows up on the dashboard.  This is a fire-and-forget best-effort
+    # call — identity setting always succeeds even if profile update fails.
+    if description:
+        try:
+            from amfs_core.models import AgentProfile
+
+            current_agent = mem._adapter.get_agent(name, namespace=mem.namespace)
+            existing = current_agent.profile if current_agent else None
+            profile = AgentProfile(
+                description=description,
+                default_branch=existing.default_branch if existing else "main",
+                auto_context_paths=existing.auto_context_paths if existing else [],
+                tags=existing.tags if existing else [],
+            )
+            mem._adapter.update_agent_profile(name, profile, namespace=mem.namespace)
+        except Exception:
+            logger.debug("Could not update agent profile for %s", name, exc_info=True)
 
     result: dict[str, Any] = {
         "previous_identity": old_identity,

@@ -299,6 +299,20 @@ class HttpAdapter(AdapterABC):
         # Return a stub so AgentMemory.__init__ doesn't hit the ABC no-op.
         return Agent(agent_id=agent_id, namespace=namespace)
 
+    def update_agent_profile(
+        self,
+        agent_id: str,
+        profile: Any,
+        namespace: str = "default",
+    ) -> Agent:
+        from urllib.parse import quote
+        resp = self._client.put(
+            f"/api/v1/agents/{quote(agent_id, safe='')}/profile",
+            json=profile.model_dump(),
+        )
+        resp.raise_for_status()
+        return Agent.model_validate(resp.json())
+
     def list_digests(
         self,
         digest_type: Any = None,
