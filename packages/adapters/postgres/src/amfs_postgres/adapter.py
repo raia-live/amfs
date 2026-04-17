@@ -86,7 +86,11 @@ class _SingleConnectionPool:
 
 
 class _TenantRLSConnection:
-    """Applies ``amfs.current_account_id`` when a request-scoped tenant is set."""
+    """Applies ``amfs.current_account_id`` when a request-scoped tenant is set.
+
+    Always resets the GUC on checkout to prevent stale tenant context
+    from a previous pooled-connection user leaking across requests.
+    """
 
     def __init__(self, inner_ctx: Any) -> None:
         self._inner_ctx = inner_ctx
@@ -96,12 +100,14 @@ class _TenantRLSConnection:
 
         conn = self._inner_ctx.__enter__()
         tid = get_request_tenant_account_id()
-        if tid:
-            with conn.cursor() as cur:
+        with conn.cursor() as cur:
+            if tid:
                 cur.execute(
                     "SELECT set_config('amfs.current_account_id', %s, false)",
                     (tid,),
                 )
+            else:
+                cur.execute("RESET amfs.current_account_id")
         return conn
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
@@ -424,6 +430,25 @@ class PostgresAdapter(AdapterABC):
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_kg_account
             ON amfs_knowledge_graph (account_id)
+            WHERE account_id IS NOT NULL
+        """)
+        # Tenant isolation for events and agents
+        cur.execute("""
+            ALTER TABLE amfs_events
+            ADD COLUMN IF NOT EXISTS account_id UUID
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_account
+            ON amfs_events (account_id)
+            WHERE account_id IS NOT NULL
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_agents
+            ADD COLUMN IF NOT EXISTS account_id UUID
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_agents_account
+            ON amfs_agents (account_id)
             WHERE account_id IS NOT NULL
         """)
 
@@ -1649,50 +1674,66 @@ class PostgresAdapter(AdapterABC):
     # ── Agent registration (Pro) ────────────────────────────────────────
 
     def ensure_agent(self, agent_id: str, namespace: str = "default") -> Agent:
+        account_id = self._get_current_account_id()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO amfs_agents (namespace, agent_id)
-                    VALUES (%s, %s)
+                    INSERT INTO amfs_agents (namespace, agent_id, account_id)
+                    VALUES (%s, %s, %s)
                     ON CONFLICT ON CONSTRAINT uq_agent DO UPDATE
                         SET last_active_at = NOW(),
-                            entry_count = amfs_agents.entry_count + 1
+                            entry_count = amfs_agents.entry_count + 1,
+                            account_id = COALESCE(amfs_agents.account_id, EXCLUDED.account_id)
                     RETURNING id, namespace, agent_id, display_name,
                               created_at, last_active_at, entry_count
                     """,
-                    (namespace, agent_id),
+                    (namespace, agent_id, account_id),
                 )
                 row = cur.fetchone()
         return self._row_to_agent(row)
 
     def get_agent(self, agent_id: str, namespace: str = "default") -> Agent | None:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT id, namespace, agent_id, display_name,
                            created_at, last_active_at, entry_count
                     FROM amfs_agents
-                    WHERE namespace = %s AND agent_id = %s
+                    WHERE namespace = %s AND agent_id = %s {account_filter}
                     """,
-                    (namespace, agent_id),
+                    (namespace, agent_id, *acct_params),
                 )
                 row = cur.fetchone()
         return self._row_to_agent(row) if row else None
 
     def list_agents(self, namespace: str = "default") -> list[Agent]:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT id, namespace, agent_id, display_name,
                            created_at, last_active_at, entry_count
                     FROM amfs_agents
-                    WHERE namespace = %s
+                    WHERE namespace = %s {account_filter}
                     ORDER BY last_active_at DESC
                     """,
-                    (namespace,),
+                    (namespace, *acct_params),
                 )
                 rows = cur.fetchall()
         return [self._row_to_agent(r) for r in rows]
@@ -1712,14 +1753,15 @@ class PostgresAdapter(AdapterABC):
     # ── Event log / timeline (Pro) ────────────────────────────────────
 
     def log_event(self, event: Event) -> Event:
+        account_id = self._get_current_account_id()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO amfs_events
                         (namespace, agent_id, branch, event_type,
-                         summary, details, actor_agent_id, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                         summary, details, actor_agent_id, created_at, account_id)
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
                     RETURNING id, created_at
                     """,
                     (
@@ -1731,6 +1773,7 @@ class PostgresAdapter(AdapterABC):
                         json.dumps(event.details, default=str),
                         event.actor_agent_id,
                         event.created_at,
+                        account_id,
                     ),
                 )
                 row = cur.fetchone()
@@ -1748,6 +1791,11 @@ class PostgresAdapter(AdapterABC):
     ) -> list[Event]:
         conditions = ["namespace = %s", "agent_id = %s"]
         params: list[Any] = [namespace, agent_id]
+
+        account_id = self._get_current_account_id()
+        if account_id:
+            conditions.append("account_id = %s")
+            params.append(account_id)
 
         if branch is not None:
             conditions.append("branch = %s")
