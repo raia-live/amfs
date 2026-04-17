@@ -86,7 +86,11 @@ class _SingleConnectionPool:
 
 
 class _TenantRLSConnection:
-    """Applies ``amfs.current_account_id`` when a request-scoped tenant is set."""
+    """Applies ``amfs.current_account_id`` when a request-scoped tenant is set.
+
+    Always resets the GUC on checkout to prevent stale tenant context
+    from a previous pooled-connection user leaking across requests.
+    """
 
     def __init__(self, inner_ctx: Any) -> None:
         self._inner_ctx = inner_ctx
@@ -96,12 +100,14 @@ class _TenantRLSConnection:
 
         conn = self._inner_ctx.__enter__()
         tid = get_request_tenant_account_id()
-        if tid:
-            with conn.cursor() as cur:
+        with conn.cursor() as cur:
+            if tid:
                 cur.execute(
                     "SELECT set_config('amfs.current_account_id', %s, false)",
                     (tid,),
                 )
+            else:
+                cur.execute("RESET amfs.current_account_id")
         return conn
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
@@ -389,23 +395,117 @@ class PostgresAdapter(AdapterABC):
             ON amfs_team_members (namespace, email)
             WHERE removed_at IS NOT NULL
         """)
-        # Tenant isolation for digests — account_id scoping
+        # Tenant isolation — account_id scoping on optional tables.
+        # These tables are created by separate migration files and may not
+        # exist in minimal test environments, so guard with IF EXISTS.
         cur.execute("""
-            ALTER TABLE amfs_digests
-            ADD COLUMN IF NOT EXISTS account_id UUID
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_name = 'amfs_digests') THEN
+                    ALTER TABLE amfs_digests
+                        ADD COLUMN IF NOT EXISTS account_id UUID;
+                    ALTER TABLE amfs_digests
+                        DROP CONSTRAINT IF EXISTS uq_digest;
+                    ALTER TABLE amfs_digests
+                        ADD CONSTRAINT uq_digest
+                        UNIQUE (namespace, branch, digest_type, scope, account_id);
+                    CREATE INDEX IF NOT EXISTS idx_digests_account
+                        ON amfs_digests (account_id) WHERE account_id IS NOT NULL;
+                END IF;
+            END $$
         """)
         cur.execute("""
-            ALTER TABLE amfs_digests DROP CONSTRAINT IF EXISTS uq_digest
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_name = 'amfs_knowledge_graph') THEN
+                    ALTER TABLE amfs_knowledge_graph
+                        ADD COLUMN IF NOT EXISTS account_id UUID;
+                    ALTER TABLE amfs_knowledge_graph
+                        DROP CONSTRAINT IF EXISTS uq_graph_edge;
+                    ALTER TABLE amfs_knowledge_graph
+                        ADD CONSTRAINT uq_graph_edge
+                        UNIQUE (namespace, branch, source_entity, relation, target_entity, account_id);
+                    CREATE INDEX IF NOT EXISTS idx_kg_account
+                        ON amfs_knowledge_graph (account_id) WHERE account_id IS NOT NULL;
+                END IF;
+            END $$
         """)
         cur.execute("""
-            ALTER TABLE amfs_digests
-            ADD CONSTRAINT uq_digest
-            UNIQUE (namespace, branch, digest_type, scope, account_id)
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_name = 'amfs_events') THEN
+                    ALTER TABLE amfs_events
+                        ADD COLUMN IF NOT EXISTS account_id UUID;
+                    CREATE INDEX IF NOT EXISTS idx_events_account
+                        ON amfs_events (account_id) WHERE account_id IS NOT NULL;
+                END IF;
+            END $$
         """)
         cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_digests_account
-            ON amfs_digests (account_id)
-            WHERE account_id IS NOT NULL
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_name = 'amfs_agents') THEN
+                    ALTER TABLE amfs_agents
+                        ADD COLUMN IF NOT EXISTS account_id UUID;
+                    CREATE INDEX IF NOT EXISTS idx_agents_account
+                        ON amfs_agents (account_id) WHERE account_id IS NOT NULL;
+                END IF;
+            END $$
+        """)
+        cur.execute("""
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_name = 'amfs_branches') THEN
+                    ALTER TABLE amfs_branches
+                        ADD COLUMN IF NOT EXISTS account_id UUID;
+                    CREATE INDEX IF NOT EXISTS idx_branches_account
+                        ON amfs_branches (account_id) WHERE account_id IS NOT NULL;
+                END IF;
+            END $$
+        """)
+        cur.execute("""
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_name = 'amfs_tags') THEN
+                    ALTER TABLE amfs_tags
+                        ADD COLUMN IF NOT EXISTS account_id UUID;
+                    CREATE INDEX IF NOT EXISTS idx_tags_account
+                        ON amfs_tags (account_id) WHERE account_id IS NOT NULL;
+                END IF;
+            END $$
+        """)
+        cur.execute("""
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_name = 'amfs_pull_requests') THEN
+                    ALTER TABLE amfs_pull_requests
+                        ADD COLUMN IF NOT EXISTS account_id UUID;
+                    CREATE INDEX IF NOT EXISTS idx_prs_account
+                        ON amfs_pull_requests (account_id) WHERE account_id IS NOT NULL;
+                END IF;
+            END $$
+        """)
+        cur.execute("""
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_name = 'amfs_branch_access') THEN
+                    ALTER TABLE amfs_branch_access
+                        ADD COLUMN IF NOT EXISTS account_id UUID;
+                    CREATE INDEX IF NOT EXISTS idx_branch_access_account
+                        ON amfs_branch_access (account_id) WHERE account_id IS NOT NULL;
+                END IF;
+            END $$
+        """)
+        cur.execute("""
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_name = 'amfs_pr_reviews') THEN
+                    ALTER TABLE amfs_pr_reviews
+                        ADD COLUMN IF NOT EXISTS account_id UUID;
+                    CREATE INDEX IF NOT EXISTS idx_pr_reviews_account
+                        ON amfs_pr_reviews (account_id) WHERE account_id IS NOT NULL;
+                END IF;
+            END $$
         """)
 
     def _detect_optional_columns(self) -> None:
@@ -822,6 +922,7 @@ class PostgresAdapter(AdapterABC):
         branch: str = "main",
     ) -> GraphEdge:
         provenance_json = json.dumps(edge.provenance) if edge.provenance else None
+        account_id = self._get_current_account_id()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -829,9 +930,9 @@ class PostgresAdapter(AdapterABC):
                     INSERT INTO amfs_knowledge_graph
                         (namespace, branch, source_entity, source_type, relation,
                          target_entity, target_type, confidence, evidence_count,
-                         first_seen, last_seen, provenance)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (namespace, branch, source_entity, relation, target_entity)
+                         first_seen, last_seen, provenance, account_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (namespace, branch, source_entity, relation, target_entity, account_id)
                     DO UPDATE SET
                         evidence_count = amfs_knowledge_graph.evidence_count + 1,
                         last_seen = NOW(),
@@ -848,6 +949,7 @@ class PostgresAdapter(AdapterABC):
                         edge.confidence, edge.evidence_count,
                         edge.first_seen, edge.last_seen,
                         provenance_json,
+                        account_id,
                     ),
                 )
                 row = cur.fetchone()
@@ -877,6 +979,14 @@ class PostgresAdapter(AdapterABC):
         if query.depth <= 1:
             return self._graph_neighbors_single(query, namespace=namespace, branch=branch)
 
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = "AND account_id IS NULL"
+            acct_params = []
+
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 direction_clause = self._graph_direction_seed(query.direction)
@@ -887,6 +997,7 @@ class PostgresAdapter(AdapterABC):
                         SELECT *, 1 AS depth FROM amfs_knowledge_graph
                         WHERE namespace = %s AND branch = %s
                           AND confidence >= %s
+                          {account_filter}
                           AND ({direction_clause})
                         UNION ALL
                         SELECT g.*, gw.depth + 1
@@ -895,6 +1006,7 @@ class PostgresAdapter(AdapterABC):
                         WHERE gw.depth < %s
                           AND g.namespace = %s AND g.branch = %s
                           AND g.confidence >= %s
+                          {account_filter}
                     )
                     SELECT * FROM graph_walk
                     ORDER BY depth, confidence DESC
@@ -902,8 +1014,10 @@ class PostgresAdapter(AdapterABC):
                     """,
                     (
                         namespace, branch, query.min_confidence,
+                        *acct_params,
                         *entity_params,
                         query.depth, namespace, branch, query.min_confidence,
+                        *acct_params,
                         query.limit,
                     ),
                 )
@@ -920,6 +1034,13 @@ class PostgresAdapter(AdapterABC):
     ) -> list[GraphEdge]:
         conditions = ["namespace = %s", "branch = %s", "confidence >= %s"]
         params: list[Any] = [namespace, branch, query.min_confidence]
+
+        account_id = self._get_current_account_id()
+        if account_id:
+            conditions.append("account_id = %s")
+            params.append(account_id)
+        else:
+            conditions.append("account_id IS NULL")
 
         direction_clause = self._graph_direction_seed(query.direction)
         conditions.append(f"({direction_clause})")
@@ -980,6 +1101,13 @@ class PostgresAdapter(AdapterABC):
         conditions = ["namespace = %s", "branch = %s"]
         params: list[Any] = [namespace, branch]
 
+        account_id = self._get_current_account_id()
+        if account_id:
+            conditions.append("account_id = %s")
+            params.append(account_id)
+        else:
+            conditions.append("account_id IS NULL")
+
         if entity is not None:
             prefix = entity + "/%"
             conditions.append(
@@ -1016,32 +1144,40 @@ class PostgresAdapter(AdapterABC):
         namespace: str = "default",
         branch: str = "main",
     ) -> dict:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = "AND account_id IS NULL"
+            acct_params = []
+
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         COUNT(*) as total_edges,
                         COUNT(DISTINCT source_entity) + COUNT(DISTINCT target_entity) as approx_nodes,
                         AVG(confidence) as avg_confidence,
                         AVG(evidence_count) as avg_evidence
                     FROM amfs_knowledge_graph
-                    WHERE namespace = %s AND branch = %s
+                    WHERE namespace = %s AND branch = %s {account_filter}
                     """,
-                    (namespace, branch),
+                    (namespace, branch, *acct_params),
                 )
                 row = cur.fetchone()
                 if not row:
                     return {}
 
                 cur.execute(
-                    """
+                    f"""
                     SELECT relation, COUNT(*) as cnt
                     FROM amfs_knowledge_graph
-                    WHERE namespace = %s AND branch = %s
+                    WHERE namespace = %s AND branch = %s {account_filter}
                     GROUP BY relation ORDER BY cnt DESC
                     """,
-                    (namespace, branch),
+                    (namespace, branch, *acct_params),
                 )
                 relation_counts = {r["relation"]: r["cnt"] for r in cur.fetchall()}
 
@@ -1594,50 +1730,66 @@ class PostgresAdapter(AdapterABC):
     # ── Agent registration (Pro) ────────────────────────────────────────
 
     def ensure_agent(self, agent_id: str, namespace: str = "default") -> Agent:
+        account_id = self._get_current_account_id()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO amfs_agents (namespace, agent_id)
-                    VALUES (%s, %s)
+                    INSERT INTO amfs_agents (namespace, agent_id, account_id)
+                    VALUES (%s, %s, %s)
                     ON CONFLICT ON CONSTRAINT uq_agent DO UPDATE
                         SET last_active_at = NOW(),
-                            entry_count = amfs_agents.entry_count + 1
+                            entry_count = amfs_agents.entry_count + 1,
+                            account_id = COALESCE(amfs_agents.account_id, EXCLUDED.account_id)
                     RETURNING id, namespace, agent_id, display_name,
                               created_at, last_active_at, entry_count
                     """,
-                    (namespace, agent_id),
+                    (namespace, agent_id, account_id),
                 )
                 row = cur.fetchone()
         return self._row_to_agent(row)
 
     def get_agent(self, agent_id: str, namespace: str = "default") -> Agent | None:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT id, namespace, agent_id, display_name,
                            created_at, last_active_at, entry_count
                     FROM amfs_agents
-                    WHERE namespace = %s AND agent_id = %s
+                    WHERE namespace = %s AND agent_id = %s {account_filter}
                     """,
-                    (namespace, agent_id),
+                    (namespace, agent_id, *acct_params),
                 )
                 row = cur.fetchone()
         return self._row_to_agent(row) if row else None
 
     def list_agents(self, namespace: str = "default") -> list[Agent]:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT id, namespace, agent_id, display_name,
                            created_at, last_active_at, entry_count
                     FROM amfs_agents
-                    WHERE namespace = %s
+                    WHERE namespace = %s {account_filter}
                     ORDER BY last_active_at DESC
                     """,
-                    (namespace,),
+                    (namespace, *acct_params),
                 )
                 rows = cur.fetchall()
         return [self._row_to_agent(r) for r in rows]
@@ -1657,14 +1809,15 @@ class PostgresAdapter(AdapterABC):
     # ── Event log / timeline (Pro) ────────────────────────────────────
 
     def log_event(self, event: Event) -> Event:
+        account_id = self._get_current_account_id()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO amfs_events
                         (namespace, agent_id, branch, event_type,
-                         summary, details, actor_agent_id, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                         summary, details, actor_agent_id, created_at, account_id)
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
                     RETURNING id, created_at
                     """,
                     (
@@ -1676,6 +1829,7 @@ class PostgresAdapter(AdapterABC):
                         json.dumps(event.details, default=str),
                         event.actor_agent_id,
                         event.created_at,
+                        account_id,
                     ),
                 )
                 row = cur.fetchone()
@@ -1693,6 +1847,11 @@ class PostgresAdapter(AdapterABC):
     ) -> list[Event]:
         conditions = ["namespace = %s", "agent_id = %s"]
         params: list[Any] = [namespace, agent_id]
+
+        account_id = self._get_current_account_id()
+        if account_id:
+            conditions.append("account_id = %s")
+            params.append(account_id)
 
         if branch is not None:
             conditions.append("branch = %s")
@@ -1762,14 +1921,15 @@ class PostgresAdapter(AdapterABC):
     # ── Branch management (Pro) ───────────────────────────────────────
 
     def create_branch(self, branch: Branch) -> Branch:
+        account_id = self._get_current_account_id()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO amfs_branches
                         (namespace, name, parent_branch, branched_at,
-                         created_by, description, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                         created_by, description, status, account_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id, created_at
                     """,
                     (
@@ -1780,6 +1940,7 @@ class PostgresAdapter(AdapterABC):
                         branch.created_by,
                         branch.description,
                         branch.status.value if isinstance(branch.status, BranchStatus) else branch.status,
+                        account_id,
                     ),
                 )
                 row = cur.fetchone()
@@ -1789,14 +1950,21 @@ class PostgresAdapter(AdapterABC):
         })
 
     def get_branch(self, name: str, namespace: str = "default") -> Branch | None:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT * FROM amfs_branches
-                    WHERE namespace = %s AND name = %s
+                    WHERE namespace = %s AND name = %s {account_filter}
                     """,
-                    (namespace, name),
+                    (namespace, name, *acct_params),
                 )
                 row = cur.fetchone()
         return self._row_to_branch(row) if row else None
@@ -1806,6 +1974,12 @@ class PostgresAdapter(AdapterABC):
     ) -> list[Branch]:
         conditions = ["namespace = %s"]
         params: list[Any] = [namespace]
+
+        account_id = self._get_current_account_id()
+        if account_id:
+            conditions.append("account_id = %s")
+            params.append(account_id)
+
         if status is not None:
             conditions.append("status = %s")
             params.append(status)
@@ -1825,16 +1999,23 @@ class PostgresAdapter(AdapterABC):
         return [self._row_to_branch(r) for r in rows]
 
     def close_branch(self, name: str, namespace: str = "default") -> Branch:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     UPDATE amfs_branches
                     SET status = 'closed'
-                    WHERE namespace = %s AND name = %s
+                    WHERE namespace = %s AND name = %s {account_filter}
                     RETURNING *
                     """,
-                    (namespace, name),
+                    (namespace, name, *acct_params),
                 )
                 row = cur.fetchone()
         if row is None:
@@ -2075,18 +2256,20 @@ class PostgresAdapter(AdapterABC):
     # ── Branch access control (Pro) ───────────────────────────────────
 
     def grant_branch_access(self, access: BranchAccess) -> BranchAccess:
+        account_id = self._get_current_account_id()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO amfs_branch_access
                         (namespace, branch_name, grantee_type, grantee_id,
-                         permission, granted_by)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                         permission, granted_by, account_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT ON CONSTRAINT uq_branch_access DO UPDATE
                         SET permission = EXCLUDED.permission,
                             granted_by = EXCLUDED.granted_by,
-                            granted_at = NOW()
+                            granted_at = NOW(),
+                            account_id = COALESCE(amfs_branch_access.account_id, EXCLUDED.account_id)
                     RETURNING id, granted_at
                     """,
                     (
@@ -2096,6 +2279,7 @@ class PostgresAdapter(AdapterABC):
                         access.grantee_id,
                         access.permission.value if isinstance(access.permission, BranchAccessPermission) else access.permission,
                         access.granted_by,
+                        account_id,
                     ),
                 )
                 row = cur.fetchone()
@@ -2108,28 +2292,44 @@ class PostgresAdapter(AdapterABC):
         self, branch_name: str, grantee_type: str, grantee_id: str,
         namespace: str = "default",
     ) -> None:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
         with self._pool.connection() as conn:
             conn.execute(
-                """
+                f"""
                 DELETE FROM amfs_branch_access
                 WHERE namespace = %s AND branch_name = %s
                   AND grantee_type = %s AND grantee_id = %s
+                  {account_filter}
                 """,
-                (namespace, branch_name, grantee_type, grantee_id),
+                (namespace, branch_name, grantee_type, grantee_id, *acct_params),
             )
 
     def list_branch_access(
         self, branch_name: str, namespace: str = "default"
     ) -> list[BranchAccess]:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT * FROM amfs_branch_access
                     WHERE namespace = %s AND branch_name = %s
+                    {account_filter}
                     ORDER BY granted_at DESC
                     """,
-                    (namespace, branch_name),
+                    (namespace, branch_name, *acct_params),
                 )
                 rows = cur.fetchall()
         return [self._row_to_branch_access(r) for r in rows]
@@ -2137,12 +2337,20 @@ class PostgresAdapter(AdapterABC):
     def check_branch_access(
         self, branch_name: str, api_key_id: str, namespace: str = "default"
     ) -> str | None:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND ba.account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT ba.permission FROM amfs_branch_access ba
                     WHERE ba.namespace = %s AND ba.branch_name = %s
+                      {account_filter}
                       AND (
                         (ba.grantee_type = 'api_key' AND ba.grantee_id = %s)
                         OR (ba.grantee_type = 'team' AND ba.grantee_id IN (
@@ -2154,7 +2362,7 @@ class PostgresAdapter(AdapterABC):
                       )
                     LIMIT 1
                     """,
-                    (namespace, branch_name, api_key_id, api_key_id, namespace),
+                    (namespace, branch_name, *acct_params, api_key_id, api_key_id, namespace),
                 )
                 row = cur.fetchone()
         return row["permission"] if row else None
@@ -2179,17 +2387,18 @@ class PostgresAdapter(AdapterABC):
     # ── Tags / Snapshots (Pro) ────────────────────────────────────────
 
     def create_tag(self, tag: Tag) -> Tag:
+        account_id = self._get_current_account_id()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO amfs_tags
-                        (namespace, name, branch, tagged_at, description, created_by, event_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        (namespace, name, branch, tagged_at, description, created_by, event_id, account_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id, created_at
                     """,
                     (tag.namespace, tag.name, tag.branch, tag.tagged_at,
-                     tag.description, tag.created_by, tag.event_id),
+                     tag.description, tag.created_by, tag.event_id, account_id),
                 )
                 row = cur.fetchone()
         return tag.model_copy(update={
@@ -2198,11 +2407,18 @@ class PostgresAdapter(AdapterABC):
         })
 
     def get_tag(self, name: str, namespace: str = "default") -> Tag | None:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT * FROM amfs_tags WHERE namespace = %s AND name = %s",
-                    (namespace, name),
+                    f"SELECT * FROM amfs_tags WHERE namespace = %s AND name = %s {account_filter}",
+                    (namespace, name, *acct_params),
                 )
                 row = cur.fetchone()
         return self._row_to_tag(row) if row else None
@@ -2212,6 +2428,12 @@ class PostgresAdapter(AdapterABC):
     ) -> list[Tag]:
         conditions = ["namespace = %s"]
         params: list[Any] = [namespace]
+
+        account_id = self._get_current_account_id()
+        if account_id:
+            conditions.append("account_id = %s")
+            params.append(account_id)
+
         if branch is not None:
             conditions.append("branch = %s")
             params.append(branch)
@@ -2226,10 +2448,17 @@ class PostgresAdapter(AdapterABC):
         return [self._row_to_tag(r) for r in rows]
 
     def delete_tag(self, name: str, namespace: str = "default") -> None:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
         with self._pool.connection() as conn:
             conn.execute(
-                "DELETE FROM amfs_tags WHERE namespace = %s AND name = %s",
-                (namespace, name),
+                f"DELETE FROM amfs_tags WHERE namespace = %s AND name = %s {account_filter}",
+                (namespace, name, *acct_params),
             )
 
     @staticmethod
@@ -2249,19 +2478,20 @@ class PostgresAdapter(AdapterABC):
     # ── Pull Requests (Pro) ─────────────────────────────────────────────
 
     def create_pull_request(self, pr: PullRequest) -> PullRequest:
+        account_id = self._get_current_account_id()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO amfs_pull_requests
                         (namespace, title, description, source_branch,
-                         target_branch, status, created_by)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                         target_branch, status, created_by, account_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id, created_at, updated_at
                     """,
                     (pr.namespace, pr.title, pr.description, pr.source_branch,
                      pr.target_branch, pr.status.value if isinstance(pr.status, PullRequestStatus) else pr.status,
-                     pr.created_by),
+                     pr.created_by, account_id),
                 )
                 row = cur.fetchone()
         return pr.model_copy(update={
@@ -2271,11 +2501,18 @@ class PostgresAdapter(AdapterABC):
         })
 
     def get_pull_request(self, pr_id: str, namespace: str = "default") -> PullRequest | None:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT * FROM amfs_pull_requests WHERE id = %s::uuid AND namespace = %s",
-                    (pr_id, namespace),
+                    f"SELECT * FROM amfs_pull_requests WHERE id = %s::uuid AND namespace = %s {account_filter}",
+                    (pr_id, namespace, *acct_params),
                 )
                 row = cur.fetchone()
         return self._row_to_pr(row) if row else None
@@ -2285,6 +2522,12 @@ class PostgresAdapter(AdapterABC):
     ) -> list[PullRequest]:
         conditions = ["namespace = %s"]
         params: list[Any] = [namespace]
+
+        account_id = self._get_current_account_id()
+        if account_id:
+            conditions.append("account_id = %s")
+            params.append(account_id)
+
         if status:
             conditions.append("status = %s")
             params.append(status)
@@ -2312,11 +2555,17 @@ class PostgresAdapter(AdapterABC):
             params.append(by)
 
         params.extend([pr_id, namespace])
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            params.append(account_id)
+        else:
+            account_filter = ""
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""UPDATE amfs_pull_requests SET {', '.join(updates)}
-                        WHERE id = %s::uuid AND namespace = %s RETURNING *""",
+                        WHERE id = %s::uuid AND namespace = %s {account_filter} RETURNING *""",
                     params,
                 )
                 row = cur.fetchone()
@@ -2325,18 +2574,19 @@ class PostgresAdapter(AdapterABC):
         return self._row_to_pr(row)
 
     def add_pr_review(self, review: PRReview) -> PRReview:
+        account_id = self._get_current_account_id()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO amfs_pr_reviews
-                        (namespace, pr_id, reviewer, status, comment, entry_path)
-                    VALUES (%s, %s::uuid, %s, %s, %s, %s)
+                        (namespace, pr_id, reviewer, status, comment, entry_path, account_id)
+                    VALUES (%s, %s::uuid, %s, %s, %s, %s, %s)
                     RETURNING id, created_at
                     """,
                     (review.namespace, review.pr_id, review.reviewer,
                      review.status.value if isinstance(review.status, PRReviewStatus) else review.status,
-                     review.comment, review.entry_path),
+                     review.comment, review.entry_path, account_id),
                 )
                 row = cur.fetchone()
         return review.model_copy(update={
@@ -2345,11 +2595,18 @@ class PostgresAdapter(AdapterABC):
         })
 
     def list_pr_reviews(self, pr_id: str, namespace: str = "default") -> list[PRReview]:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT * FROM amfs_pr_reviews WHERE pr_id = %s::uuid AND namespace = %s ORDER BY created_at",
-                    (pr_id, namespace),
+                    f"SELECT * FROM amfs_pr_reviews WHERE pr_id = %s::uuid AND namespace = %s {account_filter} ORDER BY created_at",
+                    (pr_id, namespace, *acct_params),
                 )
                 rows = cur.fetchall()
         results: list[PRReview] = []
