@@ -257,6 +257,7 @@ CREATE TABLE IF NOT EXISTS amfs_branches (
     merged_at TIMESTAMPTZ,
     merged_by TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    account_id UUID,
     CONSTRAINT uq_branch_name UNIQUE (namespace, name),
     CONSTRAINT chk_branch_status CHECK (status IN ('active', 'merged', 'closed'))
 );
@@ -277,6 +278,7 @@ CREATE TABLE IF NOT EXISTS amfs_branch_access (
     permission TEXT NOT NULL DEFAULT 'read',
     granted_by TEXT NOT NULL,
     granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    account_id UUID,
     CONSTRAINT uq_branch_access UNIQUE (namespace, branch_name, grantee_type, grantee_id),
     CONSTRAINT chk_grantee_type CHECK (grantee_type IN ('user', 'team', 'api_key')),
     CONSTRAINT chk_permission CHECK (permission IN ('read', 'read_write'))
@@ -295,6 +297,7 @@ CREATE TABLE IF NOT EXISTS amfs_tags (
     description TEXT,
     created_by TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    account_id UUID,
     CONSTRAINT uq_tag_name UNIQUE (namespace, name)
 );
 
@@ -318,6 +321,7 @@ CREATE TABLE IF NOT EXISTS amfs_pull_requests (
     closed_at TIMESTAMPTZ,
     closed_by TEXT,
     merge_strategy TEXT,
+    account_id UUID,
     CONSTRAINT chk_pr_status CHECK (status IN ('open', 'approved', 'merged', 'closed'))
 );
 
@@ -333,6 +337,7 @@ CREATE TABLE IF NOT EXISTS amfs_pr_reviews (
     comment TEXT,
     entry_path TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    account_id UUID,
     CONSTRAINT chk_review_status CHECK (status IN ('approved', 'changes_requested', 'commented'))
 );
 
