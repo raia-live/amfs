@@ -2621,7 +2621,11 @@ async def list_detected_patterns(
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """List previously detected patterns from the database."""
-    from amfs_patterns.detector import PATTERN_CATEGORIES, PATTERN_METADATA
+    try:
+        from amfs_patterns.detector import PATTERN_CATEGORIES, PATTERN_METADATA
+    except ImportError:
+        PATTERN_CATEGORIES = {}
+        PATTERN_METADATA = {}
 
     pool = _get_db_pool()
     if pool is None:

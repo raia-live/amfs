@@ -237,21 +237,24 @@ class PostgresAdapter(AdapterABC):
             ADD COLUMN IF NOT EXISTS default_branch TEXT
         """)
         cur.execute("""
-            ALTER TABLE amfs_detected_patterns
-            ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'collaboration'
-        """)
-        cur.execute("""
-            ALTER TABLE amfs_detected_patterns DROP CONSTRAINT IF EXISTS chk_pattern_type
-        """)
-        cur.execute("""
-            ALTER TABLE amfs_detected_patterns ADD CONSTRAINT chk_pattern_type CHECK (
-                pattern_type IN (
-                    'knowledge_conflict', 'stale_knowledge', 'orphaned_branch',
-                    'redundant_writes', 'single_point_of_knowledge', 'passive_consumer',
-                    'unreviewed_changes', 'recurring_failure',
-                    'hot_entity', 'stale_cluster', 'confidence_drift'
-                )
-            )
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_name = 'amfs_detected_patterns') THEN
+                    ALTER TABLE amfs_detected_patterns
+                        ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'collaboration';
+                    ALTER TABLE amfs_detected_patterns
+                        DROP CONSTRAINT IF EXISTS chk_pattern_type;
+                    ALTER TABLE amfs_detected_patterns
+                        ADD CONSTRAINT chk_pattern_type CHECK (
+                            pattern_type IN (
+                                'knowledge_conflict', 'stale_knowledge', 'orphaned_branch',
+                                'redundant_writes', 'single_point_of_knowledge', 'passive_consumer',
+                                'unreviewed_changes', 'recurring_failure',
+                                'hot_entity', 'stale_cluster', 'confidence_drift'
+                            )
+                        );
+                END IF;
+            END $$
         """)
         cur.execute("""
             CREATE OR REPLACE FUNCTION amfs_notify_write() RETURNS TRIGGER AS $$
