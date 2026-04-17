@@ -395,61 +395,62 @@ class PostgresAdapter(AdapterABC):
             ON amfs_team_members (namespace, email)
             WHERE removed_at IS NOT NULL
         """)
-        # Tenant isolation for digests — account_id scoping
+        # Tenant isolation — account_id scoping on optional tables.
+        # These tables are created by separate migration files and may not
+        # exist in minimal test environments, so guard with IF EXISTS.
         cur.execute("""
-            ALTER TABLE amfs_digests
-            ADD COLUMN IF NOT EXISTS account_id UUID
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_name = 'amfs_digests') THEN
+                    ALTER TABLE amfs_digests
+                        ADD COLUMN IF NOT EXISTS account_id UUID;
+                    ALTER TABLE amfs_digests
+                        DROP CONSTRAINT IF EXISTS uq_digest;
+                    ALTER TABLE amfs_digests
+                        ADD CONSTRAINT uq_digest
+                        UNIQUE (namespace, branch, digest_type, scope, account_id);
+                    CREATE INDEX IF NOT EXISTS idx_digests_account
+                        ON amfs_digests (account_id) WHERE account_id IS NOT NULL;
+                END IF;
+            END $$
         """)
         cur.execute("""
-            ALTER TABLE amfs_digests DROP CONSTRAINT IF EXISTS uq_digest
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_name = 'amfs_knowledge_graph') THEN
+                    ALTER TABLE amfs_knowledge_graph
+                        ADD COLUMN IF NOT EXISTS account_id UUID;
+                    ALTER TABLE amfs_knowledge_graph
+                        DROP CONSTRAINT IF EXISTS uq_graph_edge;
+                    ALTER TABLE amfs_knowledge_graph
+                        ADD CONSTRAINT uq_graph_edge
+                        UNIQUE (namespace, branch, source_entity, relation, target_entity, account_id);
+                    CREATE INDEX IF NOT EXISTS idx_kg_account
+                        ON amfs_knowledge_graph (account_id) WHERE account_id IS NOT NULL;
+                END IF;
+            END $$
         """)
         cur.execute("""
-            ALTER TABLE amfs_digests
-            ADD CONSTRAINT uq_digest
-            UNIQUE (namespace, branch, digest_type, scope, account_id)
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_name = 'amfs_events') THEN
+                    ALTER TABLE amfs_events
+                        ADD COLUMN IF NOT EXISTS account_id UUID;
+                    CREATE INDEX IF NOT EXISTS idx_events_account
+                        ON amfs_events (account_id) WHERE account_id IS NOT NULL;
+                END IF;
+            END $$
         """)
         cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_digests_account
-            ON amfs_digests (account_id)
-            WHERE account_id IS NOT NULL
-        """)
-        # Tenant isolation for knowledge graph — account_id scoping
-        cur.execute("""
-            ALTER TABLE amfs_knowledge_graph
-            ADD COLUMN IF NOT EXISTS account_id UUID
-        """)
-        cur.execute("""
-            ALTER TABLE amfs_knowledge_graph
-            DROP CONSTRAINT IF EXISTS uq_graph_edge
-        """)
-        cur.execute("""
-            ALTER TABLE amfs_knowledge_graph
-            ADD CONSTRAINT uq_graph_edge
-            UNIQUE (namespace, branch, source_entity, relation, target_entity, account_id)
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_kg_account
-            ON amfs_knowledge_graph (account_id)
-            WHERE account_id IS NOT NULL
-        """)
-        # Tenant isolation for events and agents
-        cur.execute("""
-            ALTER TABLE amfs_events
-            ADD COLUMN IF NOT EXISTS account_id UUID
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_events_account
-            ON amfs_events (account_id)
-            WHERE account_id IS NOT NULL
-        """)
-        cur.execute("""
-            ALTER TABLE amfs_agents
-            ADD COLUMN IF NOT EXISTS account_id UUID
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_agents_account
-            ON amfs_agents (account_id)
-            WHERE account_id IS NOT NULL
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_name = 'amfs_agents') THEN
+                    ALTER TABLE amfs_agents
+                        ADD COLUMN IF NOT EXISTS account_id UUID;
+                    CREATE INDEX IF NOT EXISTS idx_agents_account
+                        ON amfs_agents (account_id) WHERE account_id IS NOT NULL;
+                END IF;
+            END $$
         """)
 
     def _detect_optional_columns(self) -> None:
