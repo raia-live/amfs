@@ -88,8 +88,12 @@ class _SingleConnectionPool:
 class _TenantRLSConnection:
     """Applies ``amfs.current_account_id`` when a request-scoped tenant is set.
 
-    Always resets the GUC on checkout to prevent stale tenant context
-    from a previous pooled-connection user leaking across requests.
+    Always sets the GUC on every checkout:
+    - When a tenant is present: sets the real account UUID (RLS filters to that tenant).
+    - When no tenant is present: sets empty string which, via NULLIF in RLS
+      policies, evaluates to NULL — matching zero rows. This prevents stale
+      tenant context from a previous pooled-connection user leaking across
+      requests.
     """
 
     def __init__(self, inner_ctx: Any) -> None:
@@ -101,15 +105,10 @@ class _TenantRLSConnection:
         conn = self._inner_ctx.__enter__()
         tid = get_request_tenant_account_id()
         with conn.cursor() as cur:
-            if tid:
-                cur.execute(
-                    "SELECT set_config('amfs.current_account_id', %s, false)",
-                    (tid,),
-                )
-            else:
-                cur.execute(
-                    "SELECT set_config('amfs.current_account_id', '', false)"
-                )
+            cur.execute(
+                "SELECT set_config('amfs.current_account_id', %s, false)",
+                (tid if tid else "",),
+            )
         return conn
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
@@ -268,7 +267,8 @@ class PostgresAdapter(AdapterABC):
                         'key', NEW.key,
                         'version', NEW.version,
                         'agent_id', NEW.agent_id,
-                        'branch', NEW.branch
+                        'branch', NEW.branch,
+                        'account_id', NEW.account_id
                     )::TEXT);
                 END IF;
                 RETURN NEW;
@@ -295,6 +295,14 @@ class PostgresAdapter(AdapterABC):
         cur.execute("""
             ALTER TABLE amfs_memory_entries
             ADD COLUMN IF NOT EXISTS importance_dimensions JSONB
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_memory_entries
+            ADD COLUMN IF NOT EXISTS account_id UUID
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_outcomes
+            ADD COLUMN IF NOT EXISTS account_id UUID
         """)
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_entries_hot

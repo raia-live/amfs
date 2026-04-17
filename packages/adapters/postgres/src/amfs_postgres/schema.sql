@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS amfs_memory_entries (
     shared BOOLEAN NOT NULL DEFAULT TRUE,
     artifact_refs JSONB DEFAULT '[]',
     superseded_at TIMESTAMPTZ,
+    account_id UUID,
     CONSTRAINT uq_entry_version UNIQUE (namespace, entity_path, key, version)
 );
 
@@ -45,7 +46,8 @@ CREATE TABLE IF NOT EXISTS amfs_outcomes (
     causal_confidence NUMERIC(5,4) DEFAULT 1.0,
     committed_at TIMESTAMPTZ NOT NULL,
     causal_entry_keys TEXT[] DEFAULT '{}',
-    agent_id TEXT NOT NULL
+    agent_id TEXT NOT NULL,
+    account_id UUID
 );
 
 CREATE TABLE IF NOT EXISTS amfs_decision_traces (
@@ -438,7 +440,8 @@ BEGIN
             'key', NEW.key,
             'version', NEW.version,
             'agent_id', NEW.agent_id,
-            'branch', NEW.branch
+            'branch', NEW.branch,
+            'account_id', NEW.account_id
         )::TEXT);
     END IF;
     RETURN NEW;
