@@ -297,6 +297,14 @@ class PostgresAdapter(AdapterABC):
             ADD COLUMN IF NOT EXISTS importance_dimensions JSONB
         """)
         cur.execute("""
+            ALTER TABLE amfs_memory_entries
+            ADD COLUMN IF NOT EXISTS account_id UUID
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_outcomes
+            ADD COLUMN IF NOT EXISTS account_id UUID
+        """)
+        cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_entries_hot
             ON amfs_memory_entries (namespace, entity_path)
             WHERE tier = 1 AND superseded_at IS NULL
