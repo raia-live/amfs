@@ -16,7 +16,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from amfs_cortex.compiler import DigestCompiler
@@ -27,7 +27,13 @@ _ACTIVITY_LOG_MAX = 200
 
 
 class CortexWorker:
-    """Event-driven streaming worker that keeps digests warm."""
+    """Event-driven streaming worker that keeps digests warm.
+
+    When ``tenant_provider`` is set, the worker iterates per-tenant so that
+    RLS-protected tables (``amfs_memory_entries``) are accessible.  Each
+    tenant's entries are read under that tenant's context, and compiled
+    digests are written with the correct ``account_id``.
+    """
 
     def __init__(
         self,
@@ -37,6 +43,7 @@ class CortexWorker:
         use_advisory_lock: bool = True,
         drift_threshold: float = 0.0,
         catchup_interval_s: float = 300.0,
+        tenant_provider: Callable[[], list[str]] | None = None,
     ) -> None:
         self._dsn = dsn
         self._compiler = compiler
@@ -45,6 +52,8 @@ class CortexWorker:
         self._drift_threshold = drift_threshold
         self._catchup_interval_s = catchup_interval_s
         self._pending: dict[str, float] = {}
+        self._scope_tenant: dict[str, str] = {}
+        self._tenant_provider = tenant_provider
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._events_processed = 0
@@ -218,16 +227,23 @@ class CortexWorker:
             entity_path = payload.get("entity_path", "")
             agent_id = payload.get("agent_id", "")
             branch = payload.get("branch", "main")
+            account_id = payload.get("account_id") or None
             if entity_path:
+                scope_key = f"entity:{entity_path}@{branch}"
                 with self._lock:
-                    self._pending[f"entity:{entity_path}@{branch}"] = time.monotonic()
+                    self._pending[scope_key] = time.monotonic()
+                    if account_id:
+                        self._scope_tenant[scope_key] = account_id
             if agent_id:
                 with self._lock:
                     if agent_id.startswith(("webhook/", "external/")):
                         source = agent_id.split("/", 1)[1]
-                        self._pending[f"source:{source}@{branch}"] = time.monotonic()
+                        scope_key = f"source:{source}@{branch}"
                     else:
-                        self._pending[f"agent:{agent_id}@{branch}"] = time.monotonic()
+                        scope_key = f"agent:{agent_id}@{branch}"
+                    self._pending[scope_key] = time.monotonic()
+                    if account_id:
+                        self._scope_tenant[scope_key] = account_id
 
                 if self._hot_tracker:
                     self._hot_tracker.record_activity(agent_id, entity_path, "write")
@@ -261,57 +277,91 @@ class CortexWorker:
         Unlike recompile_all(), this only targets scopes that are completely
         missing a digest. It queues them through the normal debounce pipeline
         so they compile one at a time without blocking the event loop.
+
+        When a ``tenant_provider`` is configured, iterates per-tenant so that
+        RLS-protected entries are visible.
         """
         try:
-            adapter = self._compiler._adapter
-            branch = self._compiler._branch
-            namespace = self._compiler._namespace
+            tenant_ids = self._tenant_provider() if self._tenant_provider else [None]
+            total_queued = 0
+            total_agents = 0
+            total_entities = 0
 
-            entries = adapter.list(branch=branch)
-            entity_paths: set[str] = set()
-            agent_ids: set[str] = set()
-
-            for entry in entries:
-                entity_paths.add(entry.entity_path)
-                aid = entry.provenance.agent_id
-                if not aid.startswith(("webhook/", "external/")):
-                    agent_ids.add(aid)
-
-            existing_digests = adapter.list_digests(namespace=namespace)
-            existing_scopes: set[str] = set()
-            for d in existing_digests:
-                existing_scopes.add(f"{d.digest_type.value}:{d.scope}")
-
-            queued = 0
-            for aid in agent_ids:
-                if f"agent_brief:{aid}" not in existing_scopes:
-                    with self._lock:
-                        self._pending[f"agent:{aid}@{branch}"] = time.monotonic()
-                    queued += 1
-
-            for ep in entity_paths:
-                if f"entity:{ep}" not in existing_scopes:
-                    with self._lock:
-                        self._pending[f"entity:{ep}@{branch}"] = time.monotonic()
-                    queued += 1
+            for tid in tenant_ids:
+                self._set_tenant_context(tid)
+                try:
+                    queued, n_agents, n_entities = self._catchup_for_current_tenant()
+                    total_queued += queued
+                    total_agents += n_agents
+                    total_entities += n_entities
+                finally:
+                    self._set_tenant_context(None)
 
             self._last_catchup = time.monotonic()
 
-            if queued > 0:
-                logger.info("Catchup: queued %d missing digests for compilation", queued)
+            if total_queued > 0:
+                logger.info("Catchup: queued %d missing digests for compilation", total_queued)
             else:
                 logger.info("Catchup: all %d agents and %d entities have digests",
-                            len(agent_ids), len(entity_paths))
+                            total_agents, total_entities)
 
             self._activity_log.append({
                 "type": "catchup_scan",
-                "missing_scopes": queued,
-                "total_agents": len(agent_ids),
-                "total_entities": len(entity_paths),
+                "missing_scopes": total_queued,
+                "total_agents": total_agents,
+                "total_entities": total_entities,
+                "tenants_scanned": len(tenant_ids),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
         except Exception:
             logger.exception("Catchup scan failed")
+
+    def _catchup_for_current_tenant(self) -> tuple[int, int, int]:
+        """Scan for missing digests under the currently-set tenant context.
+
+        Returns (queued_count, agent_count, entity_count).
+        """
+        adapter = self._compiler._adapter
+        branch = self._compiler._branch
+        namespace = self._compiler._namespace
+
+        tid = self._get_tenant_context()
+
+        entries = adapter.list(branch=branch)
+        entity_paths: set[str] = set()
+        agent_ids: set[str] = set()
+
+        for entry in entries:
+            entity_paths.add(entry.entity_path)
+            aid = entry.provenance.agent_id
+            if not aid.startswith(("webhook/", "external/")):
+                agent_ids.add(aid)
+
+        existing_digests = adapter.list_digests(namespace=namespace)
+        existing_scopes: set[str] = set()
+        for d in existing_digests:
+            existing_scopes.add(f"{d.digest_type.value}:{d.scope}")
+
+        queued = 0
+        for aid in agent_ids:
+            if f"agent_brief:{aid}" not in existing_scopes:
+                scope_key = f"agent:{aid}@{branch}"
+                with self._lock:
+                    self._pending[scope_key] = time.monotonic()
+                    if tid:
+                        self._scope_tenant[scope_key] = tid
+                queued += 1
+
+        for ep in entity_paths:
+            if f"entity:{ep}" not in existing_scopes:
+                scope_key = f"entity:{ep}@{branch}"
+                with self._lock:
+                    self._pending[scope_key] = time.monotonic()
+                    if tid:
+                        self._scope_tenant[scope_key] = tid
+                queued += 1
+
+        return queued, len(agent_ids), len(entity_paths)
 
     def _maybe_catchup(self) -> None:
         """Periodically scan for missing digests as a lightweight safety net."""
@@ -332,6 +382,7 @@ class CortexWorker:
         """Recompile all digests that have been pending longer than debounce."""
         now = time.monotonic()
         ready: list[str] = []
+        ready_tenants: dict[str, str | None] = {}
 
         with self._lock:
             for scope, ts in list(self._pending.items()):
@@ -339,6 +390,7 @@ class CortexWorker:
                     ready.append(scope)
             for scope in ready:
                 del self._pending[scope]
+                ready_tenants[scope] = self._scope_tenant.pop(scope, None)
 
         for scope_with_branch in ready:
             if "@" in scope_with_branch:
@@ -346,10 +398,11 @@ class CortexWorker:
             else:
                 scope, branch = scope_with_branch, "main"
 
-            if self._drift_threshold > 0 and not self._should_recompile(scope_with_branch, scope, branch):
-                continue
-
+            tid = ready_tenants.get(scope_with_branch)
+            self._set_tenant_context(tid)
             try:
+                if self._drift_threshold > 0 and not self._should_recompile(scope_with_branch, scope, branch):
+                    continue
                 t0 = time.monotonic()
                 result = self._compiler.compile(scope, branch=branch)
                 elapsed_ms = round((time.monotonic() - t0) * 1000)
@@ -375,6 +428,8 @@ class CortexWorker:
                     "branch": branch,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
+            finally:
+                self._set_tenant_context(None)
 
     def _should_recompile(self, scope_with_branch: str, scope: str, branch: str) -> bool:
         """Check whether the scope has drifted enough to warrant recompilation."""
@@ -397,6 +452,30 @@ class CortexWorker:
             return False
 
         return True
+
+    def _set_tenant_context(self, account_id: str | None) -> None:
+        """Set or clear the thread-local tenant context for RLS."""
+        try:
+            from amfs_postgres.tenant_context import (
+                clear_tls_tenant_account_id,
+                set_tls_tenant_account_id,
+            )
+
+            if account_id:
+                set_tls_tenant_account_id(account_id)
+            else:
+                clear_tls_tenant_account_id()
+        except ImportError:
+            pass
+
+    def _get_tenant_context(self) -> str | None:
+        """Read the current thread-local tenant context."""
+        try:
+            from amfs_postgres.tenant_context import get_request_tenant_account_id
+
+            return get_request_tenant_account_id()
+        except ImportError:
+            return None
 
     def _record_throughput(self) -> None:
         """Track per-minute event throughput."""

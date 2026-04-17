@@ -3473,6 +3473,31 @@ def _parse_args() -> argparse.Namespace:
 _cortex_worker = None
 
 
+def _make_tenant_provider(dsn: str):
+    """Build a tenant_provider callback for the Cortex worker.
+
+    Returns a callable that queries the ``accounts`` table (Pro/SaaS only)
+    for all tenant UUIDs.  Falls back to ``[None]`` for OSS deployments
+    that don't have the ``accounts`` table.
+    """
+
+    def _provider() -> list:
+        try:
+            import psycopg
+
+            with psycopg.connect(dsn, autocommit=True) as conn:
+                rows = conn.execute(
+                    "SELECT id::text FROM accounts"
+                ).fetchall()
+                if rows:
+                    return [r[0] for r in rows]
+        except Exception:
+            pass
+        return [None]
+
+    return _provider
+
+
 def main() -> None:
     """Run the AMFS HTTP server via uvicorn."""
     global _cortex_worker
@@ -3504,10 +3529,12 @@ def main() -> None:
                     strategies=strategies or None,
                     namespace=namespace,
                 )
+                tenant_provider = _make_tenant_provider(dsn)
                 _cortex_worker = CortexWorker(
                     dsn=dsn,
                     compiler=compiler,
                     use_advisory_lock=False,
+                    tenant_provider=tenant_provider,
                 )
 
                 try:

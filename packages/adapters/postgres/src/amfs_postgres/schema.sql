@@ -438,7 +438,8 @@ BEGIN
             'key', NEW.key,
             'version', NEW.version,
             'agent_id', NEW.agent_id,
-            'branch', NEW.branch
+            'branch', NEW.branch,
+            'account_id', NEW.account_id
         )::TEXT);
     END IF;
     RETURN NEW;
