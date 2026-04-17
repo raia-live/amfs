@@ -171,6 +171,12 @@ def _get_adapter() -> AdapterABC:
             from amfs_adapter_http import HttpAdapter
 
             api_key = os.environ.get("AMFS_API_KEY", "")
+            if not api_key:
+                logger.warning(
+                    "AMFS_HTTP_URL is set but AMFS_API_KEY is empty or missing. "
+                    "API requests will likely fail with 401 Unauthorized. "
+                    "Set AMFS_API_KEY in your MCP server env configuration."
+                )
             logger.info(
                 "AMFS HTTP adapter mode — routing through %s", http_url
             )
