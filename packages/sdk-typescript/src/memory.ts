@@ -626,7 +626,7 @@ export class AgentMemory {
     path: string,
     body?: Record<string, unknown>
   ): Promise<Record<string, unknown>> {
-    const adapter = this.adapter as Record<string, unknown>;
+    const adapter = this.adapter as unknown as Record<string, unknown>;
     const baseUrl = adapter._baseUrl ?? adapter.baseUrl;
     if (typeof baseUrl !== "string") {
       throw new Error("Room operations require the HTTP adapter (set AMFS_HTTP_URL)");
