@@ -227,11 +227,18 @@ class PostgresAdapter(AdapterABC):
             ADD COLUMN IF NOT EXISTS branch TEXT NOT NULL DEFAULT 'main'
         """)
         cur.execute("""
-            ALTER TABLE amfs_digests DROP CONSTRAINT IF EXISTS uq_digest
+            ALTER TABLE amfs_digests
+            ADD COLUMN IF NOT EXISTS account_id UUID
         """)
         cur.execute("""
-            ALTER TABLE amfs_digests
-            ADD CONSTRAINT uq_digest UNIQUE (namespace, branch, digest_type, scope)
+            DO $$ BEGIN
+                ALTER TABLE amfs_digests DROP CONSTRAINT IF EXISTS uq_digest;
+                ALTER TABLE amfs_digests
+                    ADD CONSTRAINT uq_digest
+                    UNIQUE (namespace, branch, digest_type, scope, account_id);
+            EXCEPTION WHEN others THEN
+                RAISE NOTICE 'uq_digest constraint migration skipped: %', SQLERRM;
+            END $$
         """)
         cur.execute("""
             ALTER TABLE amfs_api_keys
@@ -412,20 +419,8 @@ class PostgresAdapter(AdapterABC):
         # These tables are created by separate migration files and may not
         # exist in minimal test environments, so guard with IF EXISTS.
         cur.execute("""
-            DO $$ BEGIN
-                IF EXISTS (SELECT 1 FROM information_schema.tables
-                           WHERE table_name = 'amfs_digests') THEN
-                    ALTER TABLE amfs_digests
-                        ADD COLUMN IF NOT EXISTS account_id UUID;
-                    ALTER TABLE amfs_digests
-                        DROP CONSTRAINT IF EXISTS uq_digest;
-                    ALTER TABLE amfs_digests
-                        ADD CONSTRAINT uq_digest
-                        UNIQUE (namespace, branch, digest_type, scope, account_id);
-                    CREATE INDEX IF NOT EXISTS idx_digests_account
-                        ON amfs_digests (account_id) WHERE account_id IS NOT NULL;
-                END IF;
-            END $$
+            CREATE INDEX IF NOT EXISTS idx_digests_account
+                ON amfs_digests (account_id) WHERE account_id IS NOT NULL
         """)
         cur.execute("""
             DO $$ BEGIN
@@ -1637,7 +1632,7 @@ class PostgresAdapter(AdapterABC):
                    (namespace, branch, digest_type, scope, summary, entry_count,
                     source_agents, anticipation_score, compiled_at, account_id)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                   ON CONFLICT ON CONSTRAINT uq_digest
+                   ON CONFLICT (namespace, branch, digest_type, scope, account_id)
                    DO UPDATE SET summary = EXCLUDED.summary,
                                  entry_count = EXCLUDED.entry_count,
                                  source_agents = EXCLUDED.source_agents,
