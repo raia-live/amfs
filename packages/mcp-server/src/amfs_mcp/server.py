@@ -113,6 +113,19 @@ Use `{repo}/{service-or-module}` paths (e.g. `myapp/auth`, `amfs/core-engine`). 
 ## Quality Feedback
 
 `amfs_write` responses include a `quality` score. If below 0.8, review `issues` and rewrite with more detail. Use `pattern_refs` to link related entries.
+
+## Rooms (Pro — collaborative entities)
+
+If available, rooms let multiple users' agents collaborate on a shared entity:
+
+1. **Discover rooms**: `amfs_my_rooms()` — see rooms you own or are invited to
+2. **Join a room**: `amfs_room_join(room_id)` — triggers auto-briefing with room history
+3. **Read & write normally**: entries on room entities are shared with all members
+4. **Check updates**: `amfs_room_updates(room_id, since="...")` — poll for new activity between tasks
+5. **Get room details**: `amfs_room_info(room_id)` — members, settings, discussion status
+6. **Leave when done**: `amfs_room_leave(room_id)` — knowledge snapshot preserved in your memory
+
+Room writes auto-propagate to all members. Cross-user reads through rooms are logged on both agent timelines.
 """
 
 mcp = FastMCP(name="amfs", instructions=_INSTRUCTIONS)

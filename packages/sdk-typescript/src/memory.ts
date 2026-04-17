@@ -519,6 +519,135 @@ export class AgentMemory {
   clearReadLog(): void {
     this.readTracker.clear();
   }
+
+  // ── Room operations (Pro — requires HTTP adapter with rooms backend) ──
+
+  /** Join a room. The user owning this agent must have an accepted invite. */
+  async roomJoin(roomId: string): Promise<Record<string, unknown>> {
+    return this._roomRequest("POST", `/api/v1/rooms/${roomId}/agents`, {
+      agent_id: this.agentId,
+    });
+  }
+
+  /** Leave a room. Knowledge snapshots are preserved in private memory. */
+  async roomLeave(roomId: string): Promise<Record<string, unknown>> {
+    return this._roomRequest("DELETE", `/api/v1/rooms/${roomId}/agents/${this.agentId}`);
+  }
+
+  /** List rooms this agent's user owns or is invited to. */
+  async myRooms(): Promise<Record<string, unknown>[]> {
+    const result = await this._roomRequest("GET", "/api/v1/rooms");
+    return Array.isArray(result) ? result : (result as Record<string, unknown>).rooms as Record<string, unknown>[] ?? [];
+  }
+
+  /** Get room details including members, settings, and discussion status. */
+  async roomInfo(roomId: string): Promise<Record<string, unknown>> {
+    return this._roomRequest("GET", `/api/v1/rooms/${roomId}`);
+  }
+
+  /** Get recent room activity (writes, joins, discussions, negotiations). */
+  async roomUpdates(roomId: string, options?: { since?: string }): Promise<Record<string, unknown>> {
+    const params = options?.since ? `?since=${options.since}` : "";
+    return this._roomRequest("GET", `/api/v1/rooms/${roomId}/activity${params}`);
+  }
+
+  // -- Discussions --
+
+  async roomDiscuss(
+    roomId: string,
+    content: string,
+    options?: { messageType?: string; addressedTo?: string }
+  ): Promise<Record<string, unknown>> {
+    return this._roomRequest("POST", `/api/v1/rooms/${roomId}/discussions`, {
+      agent_id: this.agentId,
+      content,
+      message_type: options?.messageType ?? "message",
+      addressed_to: options?.addressedTo ?? null,
+    });
+  }
+
+  async roomDiscussions(
+    roomId: string,
+    options?: { limit?: number; since?: string }
+  ): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams();
+    if (options?.limit) params.set("limit", String(options.limit));
+    if (options?.since) params.set("since", options.since);
+    const qs = params.toString();
+    return this._roomRequest("GET", `/api/v1/rooms/${roomId}/discussions${qs ? `?${qs}` : ""}`);
+  }
+
+  // -- Negotiations --
+
+  async negotiateCreate(
+    roomId: string,
+    title: string,
+    options?: { description?: string; maxRounds?: number }
+  ): Promise<Record<string, unknown>> {
+    return this._roomRequest("POST", `/api/v1/rooms/${roomId}/negotiations`, {
+      title,
+      description: options?.description ?? null,
+      agent_id: this.agentId,
+      max_rounds: options?.maxRounds ?? 10,
+    });
+  }
+
+  async negotiatePropose(
+    roomId: string,
+    sessionId: string,
+    options?: { action?: string; proposal?: Record<string, unknown>; rationale?: string }
+  ): Promise<Record<string, unknown>> {
+    return this._roomRequest("POST", `/api/v1/rooms/${roomId}/negotiations/${sessionId}/propose`, {
+      agent_id: this.agentId,
+      action: options?.action ?? "propose",
+      proposal: options?.proposal ?? {},
+      rationale: options?.rationale ?? null,
+    });
+  }
+
+  async negotiateRespond(
+    roomId: string,
+    sessionId: string,
+    action: string,
+    options?: { rationale?: string }
+  ): Promise<Record<string, unknown>> {
+    return this.negotiatePropose(roomId, sessionId, {
+      action,
+      rationale: options?.rationale,
+    });
+  }
+
+  async negotiateStatus(roomId: string, sessionId: string): Promise<Record<string, unknown>> {
+    return this._roomRequest("GET", `/api/v1/rooms/${roomId}/negotiations/${sessionId}`);
+  }
+
+  private async _roomRequest(
+    method: string,
+    path: string,
+    body?: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    const adapter = this.adapter as unknown as Record<string, unknown>;
+    const baseUrl = adapter._baseUrl ?? adapter.baseUrl;
+    if (typeof baseUrl !== "string") {
+      throw new Error("Room operations require the HTTP adapter (set AMFS_HTTP_URL)");
+    }
+    const url = `${baseUrl.replace(/\/$/, "")}${path}`;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const apiKey = adapter._apiKey ?? adapter.apiKey;
+    if (typeof apiKey === "string") {
+      headers["Authorization"] = `Bearer ${apiKey}`;
+    }
+
+    const resp = await fetch(url, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!resp.ok) {
+      throw new Error(`Room API error: ${resp.status} ${resp.statusText}`);
+    }
+    return resp.json() as Promise<Record<string, unknown>>;
+  }
 }
 
 /**
