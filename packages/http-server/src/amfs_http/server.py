@@ -1114,15 +1114,52 @@ async def get_usage(
     top_agents = sorted(st.agents.items(), key=lambda x: x[1], reverse=True)[:10]
     top_entities = sorted(st.entities.items(), key=lambda x: x[1], reverse=True)[:10]
 
+    api_key_count = 0
+    requests_today = 0
+    requests_this_month = 0
+    pool = _get_db_pool()
+    ns = _get_namespace()
+
+    if pool is not None:
+        try:
+            with pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT count(*) AS cnt FROM amfs_api_keys WHERE namespace = %s AND active = true",
+                        (ns,),
+                    )
+                    row = cur.fetchone()
+                    api_key_count = row["cnt"] if row else 0
+
+                    cur.execute(
+                        """SELECT count(*) AS cnt FROM amfs_audit_log
+                           WHERE namespace = %s
+                             AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC')""",
+                        (ns,),
+                    )
+                    row = cur.fetchone()
+                    requests_today = row["cnt"] if row else 0
+
+                    cur.execute(
+                        """SELECT count(*) AS cnt FROM amfs_audit_log
+                           WHERE namespace = %s
+                             AND created_at >= date_trunc('month', now() AT TIME ZONE 'UTC')""",
+                        (ns,),
+                    )
+                    row = cur.fetchone()
+                    requests_this_month = row["cnt"] if row else 0
+        except Exception:
+            pass
+
     return {
-        "requestsToday": 0,
-        "requestsThisMonth": 0,
+        "requestsToday": requests_today,
+        "requestsThisMonth": requests_this_month,
         "peakRpm": 0,
         "avgLatencyMs": 0,
         "quotas": [
             {"label": "Memory entries", "current": st.total_entries, "limit": 0},
             {"label": "Decision traces", "current": len(outcomes), "limit": 0},
-            {"label": "API keys", "current": 0, "limit": 0},
+            {"label": "API keys", "current": api_key_count, "limit": 0},
             {"label": "Users", "current": st.total_agents, "limit": 0},
         ],
         "topAgents": [
