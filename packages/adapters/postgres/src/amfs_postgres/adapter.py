@@ -237,7 +237,7 @@ class PostgresAdapter(AdapterABC):
                     ADD CONSTRAINT uq_digest
                     UNIQUE (namespace, branch, digest_type, scope, account_id);
             EXCEPTION WHEN others THEN
-                RAISE NOTICE 'uq_digest constraint migration skipped: %%', SQLERRM;
+                RAISE NOTICE 'uq_digest constraint migration skipped: %', SQLERRM;
             END $$
         """)
         cur.execute("""
