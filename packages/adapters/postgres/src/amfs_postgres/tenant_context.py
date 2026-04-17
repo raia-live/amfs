@@ -9,7 +9,7 @@ _tls = threading.local()
 
 def set_tls_tenant_account_id(account_id: str | None) -> None:
     """Called from HTTP middleware before handling a request."""
-    _tls.account_id = account_id
+    _tls.account_id = account_id or None
 
 
 def clear_tls_tenant_account_id() -> None:

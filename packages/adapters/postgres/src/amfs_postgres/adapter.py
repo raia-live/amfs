@@ -107,7 +107,9 @@ class _TenantRLSConnection:
                     (tid,),
                 )
             else:
-                cur.execute("RESET amfs.current_account_id")
+                cur.execute(
+                    "SELECT set_config('amfs.current_account_id', '', false)"
+                )
         return conn
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
