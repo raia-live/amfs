@@ -538,7 +538,46 @@ async def merge_base(
 # ──────────────────────────────────────────────────────────────────────
 
 
-@app.put("/api/v1/agents/{agent_id}/profile")
+@app.get("/api/v1/agents/{agent_id:path}/profile")
+async def get_agent_profile(
+    agent_id: str,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Return an agent's profile, stats, and registration info."""
+    mem = _get_memory()
+    agent = mem._adapter.get_agent(agent_id, namespace=mem.namespace)
+
+    entries = [
+        e for e in mem.list()
+        if e.provenance.agent_id == agent_id
+        and not e.entity_path.startswith("_system/")
+    ]
+    entities_touched = {e.entity_path for e in entries}
+    last_active = max(
+        (e.provenance.written_at for e in entries),
+        default=None,
+    )
+    traces = mem._adapter.list_traces(agent_id=agent_id, limit=10000)
+
+    result: dict[str, Any] = {
+        "agentId": agent_id,
+        "entriesWritten": len(entries),
+        "entitiesTouched": len(entities_touched),
+        "entityPaths": sorted(entities_touched),
+        "totalReads": sum(len(t.causal_entries) for t in traces),
+        "decisionTraces": len(traces),
+        "lastActive": last_active.isoformat() if last_active else None,
+    }
+    if agent:
+        result["profile"] = agent.profile.model_dump() if agent.profile else {}
+        result["capabilities"] = [c.model_dump() for c in agent.capabilities]
+        result["contracts"] = [c.model_dump() for c in agent.contracts]
+        result["displayName"] = agent.display_name
+        result["createdAt"] = agent.created_at.isoformat() if agent.created_at else None
+    return result
+
+
+@app.put("/api/v1/agents/{agent_id:path}/profile")
 async def update_agent_profile(
     agent_id: str,
     body: dict[str, Any],
@@ -552,7 +591,7 @@ async def update_agent_profile(
     return json.loads(json.dumps(agent.model_dump(mode="json"), default=str))
 
 
-@app.put("/api/v1/agents/{agent_id}/capabilities")
+@app.put("/api/v1/agents/{agent_id:path}/capabilities")
 async def update_agent_capabilities(
     agent_id: str,
     body: dict[str, Any],
@@ -566,7 +605,7 @@ async def update_agent_capabilities(
     return json.loads(json.dumps(agent.model_dump(mode="json"), default=str))
 
 
-@app.put("/api/v1/agents/{agent_id}/contracts")
+@app.put("/api/v1/agents/{agent_id:path}/contracts")
 async def update_agent_contracts(
     agent_id: str,
     body: dict[str, Any],
@@ -1180,7 +1219,7 @@ async def list_agents(
     return {"agents": agents}
 
 
-@app.get("/api/v1/agents/{agent_id}/memory-graph")
+@app.get("/api/v1/agents/{agent_id:path}/memory-graph")
 async def agent_memory_graph(
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
@@ -1272,7 +1311,7 @@ async def agent_memory_graph(
     }
 
 
-@app.get("/api/v1/agents/{agent_id}/cross-agent-reads")
+@app.get("/api/v1/agents/{agent_id:path}/cross-agent-reads")
 async def agent_cross_reads(
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
@@ -1318,7 +1357,7 @@ async def agent_cross_reads(
     }
 
 
-@app.get("/api/v1/agents/{agent_id}/recall/{entity_path:path}/{key}")
+@app.get("/api/v1/agents/{agent_id:path}/recall/{entity_path:path}/{key}")
 async def agent_recall(
     agent_id: str,
     entity_path: str,
@@ -1343,7 +1382,7 @@ async def agent_recall(
     return _entry_to_response(entry)
 
 
-@app.get("/api/v1/agents/{agent_id}/entries")
+@app.get("/api/v1/agents/{agent_id:path}/entries")
 async def agent_entries(
     agent_id: str,
     entity_path: str | None = Query(None),
@@ -1359,7 +1398,7 @@ async def agent_entries(
     }
 
 
-@app.get("/api/v1/agents/{agent_id}/read-from/{source_agent_id}/{entity_path:path}/{key}")
+@app.get("/api/v1/agents/{agent_id:path}/read-from/{source_agent_id}/{entity_path:path}/{key}")
 async def agent_read_from(
     agent_id: str,
     source_agent_id: str,
@@ -1377,7 +1416,7 @@ async def agent_read_from(
     return _entry_to_response(matching[0])
 
 
-@app.get("/api/v1/agents/{agent_id}/activity")
+@app.get("/api/v1/agents/{agent_id:path}/activity")
 async def agent_activity(
     agent_id: str,
     limit: int = Query(100),
@@ -1435,7 +1474,7 @@ async def agent_activity(
     return {"agentId": agent_id, "timeline": timeline}
 
 
-@app.get("/api/v1/agents/{agent_id}/timeline")
+@app.get("/api/v1/agents/{agent_id:path}/timeline")
 async def agent_timeline(
     agent_id: str,
     event_type: str | None = Query(None),
@@ -1532,7 +1571,7 @@ async def upsert_graph_edge_endpoint(
 SNAPSHOT_ENTITY = "_system/agent-snapshots"
 
 
-@app.post("/api/v1/agents/{agent_id}/snapshots")
+@app.post("/api/v1/agents/{agent_id:path}/snapshots")
 async def create_snapshot(
     agent_id: str,
     req: CreateSnapshotRequest,
@@ -1588,7 +1627,7 @@ async def create_snapshot(
     }
 
 
-@app.get("/api/v1/agents/{agent_id}/snapshots")
+@app.get("/api/v1/agents/{agent_id:path}/snapshots")
 async def list_snapshots(
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
@@ -1614,7 +1653,7 @@ async def list_snapshots(
     return {"snapshots": snapshots, "count": len(snapshots)}
 
 
-@app.get("/api/v1/agents/{agent_id}/snapshots/{snapshot_id}")
+@app.get("/api/v1/agents/{agent_id:path}/snapshots/{snapshot_id}")
 async def get_snapshot(
     agent_id: str,
     snapshot_id: str,
@@ -1630,7 +1669,7 @@ async def get_snapshot(
     return val
 
 
-@app.delete("/api/v1/agents/{agent_id}/snapshots/{snapshot_id}")
+@app.delete("/api/v1/agents/{agent_id:path}/snapshots/{snapshot_id}")
 async def delete_snapshot(
     agent_id: str,
     snapshot_id: str,
@@ -1646,7 +1685,7 @@ async def delete_snapshot(
     return {"deleted": True, "id": snapshot_id}
 
 
-@app.post("/api/v1/agents/{agent_id}/snapshots/{snapshot_id}/recover")
+@app.post("/api/v1/agents/{agent_id:path}/snapshots/{snapshot_id}/recover")
 async def recover_snapshot(
     agent_id: str,
     snapshot_id: str,
@@ -1770,7 +1809,7 @@ async def rollback(
 # ──────────────────────────────────────────────────────────────────────
 
 
-@app.get("/api/v1/agents/{agent_id}/branches")
+@app.get("/api/v1/agents/{agent_id:path}/branches")
 async def agent_branches(
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
@@ -1793,7 +1832,7 @@ async def agent_branches(
     }
 
 
-@app.get("/api/v1/agents/{agent_id}/pull-requests")
+@app.get("/api/v1/agents/{agent_id:path}/pull-requests")
 async def agent_pull_requests(
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
