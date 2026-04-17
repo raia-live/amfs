@@ -178,6 +178,13 @@ except ImportError:
     pass
 
 try:
+    from amfs_rooms import mount_rooms
+    mount_rooms(app, get_memory=_get_memory, db_pool=_get_db_pool())
+    logger.info("Room endpoints mounted")
+except ImportError:
+    pass
+
+try:
     from amfs_tenant.http_deps import mount_scope_enforcement
     mount_scope_enforcement(app)
 except ImportError:

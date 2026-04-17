@@ -1416,6 +1416,198 @@ class AgentMemory:
         self._read_tracker.clear()
 
     # ------------------------------------------------------------------
+    # Room operations (Pro — requires HTTP adapter with rooms backend)
+    # ------------------------------------------------------------------
+
+    def room_join(self, room_id: str) -> dict[str, Any]:
+        """Join a room. The user owning this agent must have an accepted invite.
+
+        Returns membership details and a briefing of room history.
+        """
+        return self._room_request("POST", f"/api/v1/rooms/{room_id}/agents", {
+            "agent_id": self.agent_id,
+        })
+
+    def room_leave(self, room_id: str) -> dict[str, Any]:
+        """Leave a room. Knowledge snapshots are preserved in private memory."""
+        return self._room_request("DELETE", f"/api/v1/rooms/{room_id}/agents/{self.agent_id}")
+
+    def my_rooms(self) -> list[dict[str, Any]]:
+        """List rooms this agent's user owns or is invited to."""
+        result = self._room_request("GET", "/api/v1/rooms")
+        if isinstance(result, list):
+            return result
+        return result.get("rooms", []) if isinstance(result, dict) else []
+
+    def room_info(self, room_id: str) -> dict[str, Any]:
+        """Get room details including members, settings, and discussion status."""
+        return self._room_request("GET", f"/api/v1/rooms/{room_id}")
+
+    def room_updates(
+        self, room_id: str, *, since: str | None = None
+    ) -> dict[str, Any]:
+        """Get recent room activity (writes, joins, discussions, negotiations).
+
+        Args:
+            room_id: UUID of the room
+            since: ISO timestamp — only return events after this time
+        """
+        params = f"?since={since}" if since else ""
+        return self._room_request("GET", f"/api/v1/rooms/{room_id}/activity{params}")
+
+    # ------------------------------------------------------------------
+    # Room: Discussions
+    # ------------------------------------------------------------------
+
+    def room_discuss(
+        self,
+        room_id: str,
+        content: str,
+        *,
+        message_type: str = "message",
+        addressed_to: str | None = None,
+    ) -> dict[str, Any]:
+        """Post a discussion message in a room.
+
+        Args:
+            room_id: UUID of the room
+            content: Message text
+            message_type: One of 'message', 'question', 'answer', 'proposal', 'summary'
+            addressed_to: Optional agent_id to address the message to
+        """
+        return self._room_request("POST", f"/api/v1/rooms/{room_id}/discussions", {
+            "agent_id": self.agent_id,
+            "content": content,
+            "message_type": message_type,
+            "addressed_to": addressed_to,
+        })
+
+    def room_discussions(
+        self,
+        room_id: str,
+        *,
+        limit: int = 50,
+        since: str | None = None,
+    ) -> dict[str, Any]:
+        """List discussion messages in a room.
+
+        Args:
+            room_id: UUID of the room
+            limit: Max messages to return
+            since: ISO timestamp — only messages after this time
+        """
+        params = f"?limit={limit}"
+        if since:
+            params += f"&since={since}"
+        return self._room_request("GET", f"/api/v1/rooms/{room_id}/discussions{params}")
+
+    # ------------------------------------------------------------------
+    # Room: Negotiations
+    # ------------------------------------------------------------------
+
+    def negotiate_create(
+        self,
+        room_id: str,
+        title: str,
+        *,
+        description: str | None = None,
+        max_rounds: int = 10,
+    ) -> dict[str, Any]:
+        """Create a new negotiation session in a room.
+
+        Args:
+            room_id: UUID of the room
+            title: Topic of negotiation
+            description: Detailed description of what needs to be decided
+            max_rounds: Maximum rounds before timeout
+        """
+        return self._room_request("POST", f"/api/v1/rooms/{room_id}/negotiations", {
+            "title": title,
+            "description": description,
+            "agent_id": self.agent_id,
+            "max_rounds": max_rounds,
+        })
+
+    def negotiate_propose(
+        self,
+        room_id: str,
+        session_id: str,
+        *,
+        action: str = "propose",
+        proposal: dict[str, Any] | None = None,
+        rationale: str | None = None,
+    ) -> dict[str, Any]:
+        """Submit a proposal or response in a negotiation.
+
+        Args:
+            room_id: UUID of the room
+            session_id: UUID of the negotiation session
+            action: 'propose', 'counter', 'accept', 'reject', 'abstain'
+            proposal: JSON-serializable dict with values for each issue
+            rationale: Reasoning for this action
+        """
+        return self._room_request("POST", f"/api/v1/rooms/{room_id}/negotiations/{session_id}/propose", {
+            "agent_id": self.agent_id,
+            "action": action,
+            "proposal": proposal or {},
+            "rationale": rationale,
+        })
+
+    def negotiate_respond(
+        self,
+        room_id: str,
+        session_id: str,
+        *,
+        action: str,
+        rationale: str | None = None,
+    ) -> dict[str, Any]:
+        """Respond to the current proposal (accept/reject/counter).
+
+        Args:
+            room_id: UUID of the room
+            session_id: UUID of the negotiation session
+            action: 'accept', 'reject', 'counter', 'abstain'
+            rationale: Your reasoning
+        """
+        return self.negotiate_propose(
+            room_id, session_id, action=action, rationale=rationale,
+        )
+
+    def negotiate_status(
+        self,
+        room_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Get the current state of a negotiation session.
+
+        Args:
+            room_id: UUID of the room
+            session_id: UUID of the negotiation session
+        """
+        return self._room_request("GET", f"/api/v1/rooms/{room_id}/negotiations/{session_id}")
+
+    def _room_request(self, method: str, path: str, body: dict | None = None) -> Any:
+        """Send a request to the rooms API via the HTTP adapter."""
+        adapter = self._adapter
+        if hasattr(adapter, "_base_url") and hasattr(adapter, "_session"):
+            import requests
+            url = f"{adapter._base_url.rstrip('/')}{path}"
+            headers = getattr(adapter, "_headers", {})
+            if method == "GET":
+                resp = adapter._session.get(url, headers=headers)
+            elif method == "POST":
+                resp = adapter._session.post(url, json=body or {}, headers=headers)
+            elif method == "DELETE":
+                resp = adapter._session.delete(url, headers=headers)
+            else:
+                resp = adapter._session.request(method, url, json=body, headers=headers)
+            resp.raise_for_status()
+            return resp.json()
+        raise NotImplementedError(
+            "Room operations require the HTTP adapter (set AMFS_HTTP_URL)"
+        )
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 

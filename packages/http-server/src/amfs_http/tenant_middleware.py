@@ -41,6 +41,14 @@ def apply_tenant_headers_from_request(request: Request) -> None:
         logger.warning("Invalid X-AMFS-Dashboard-Account-Id header")
         return
     set_tls_tenant_account_id(raw)
+    request.state.account_id = UUID(raw)
+
+    user_id_raw = request.headers.get("X-AMFS-Dashboard-User-Id")
+    if user_id_raw:
+        try:
+            request.state.user_id = UUID(user_id_raw)
+        except ValueError:
+            logger.warning("Invalid X-AMFS-Dashboard-User-Id header")
 
 
 def clear_tenant_headers() -> None:
