@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS amfs_knowledge_graph (
     last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     provenance JSONB,
     branch TEXT NOT NULL DEFAULT 'main',
-    CONSTRAINT uq_graph_edge UNIQUE (namespace, branch, source_entity, relation, target_entity)
+    account_id UUID,
+    CONSTRAINT uq_graph_edge UNIQUE (namespace, branch, source_entity, relation, target_entity, account_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_kg_source ON amfs_knowledge_graph (namespace, source_entity);

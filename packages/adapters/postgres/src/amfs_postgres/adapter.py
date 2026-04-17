@@ -407,6 +407,25 @@ class PostgresAdapter(AdapterABC):
             ON amfs_digests (account_id)
             WHERE account_id IS NOT NULL
         """)
+        # Tenant isolation for knowledge graph — account_id scoping
+        cur.execute("""
+            ALTER TABLE amfs_knowledge_graph
+            ADD COLUMN IF NOT EXISTS account_id UUID
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_knowledge_graph
+            DROP CONSTRAINT IF EXISTS uq_graph_edge
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_knowledge_graph
+            ADD CONSTRAINT uq_graph_edge
+            UNIQUE (namespace, branch, source_entity, relation, target_entity, account_id)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_kg_account
+            ON amfs_knowledge_graph (account_id)
+            WHERE account_id IS NOT NULL
+        """)
 
     def _detect_optional_columns(self) -> None:
         """Check whether optional columns (embedding, search_tsv) exist.
@@ -822,6 +841,7 @@ class PostgresAdapter(AdapterABC):
         branch: str = "main",
     ) -> GraphEdge:
         provenance_json = json.dumps(edge.provenance) if edge.provenance else None
+        account_id = self._get_current_account_id()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -829,9 +849,9 @@ class PostgresAdapter(AdapterABC):
                     INSERT INTO amfs_knowledge_graph
                         (namespace, branch, source_entity, source_type, relation,
                          target_entity, target_type, confidence, evidence_count,
-                         first_seen, last_seen, provenance)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (namespace, branch, source_entity, relation, target_entity)
+                         first_seen, last_seen, provenance, account_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (namespace, branch, source_entity, relation, target_entity, account_id)
                     DO UPDATE SET
                         evidence_count = amfs_knowledge_graph.evidence_count + 1,
                         last_seen = NOW(),
@@ -848,6 +868,7 @@ class PostgresAdapter(AdapterABC):
                         edge.confidence, edge.evidence_count,
                         edge.first_seen, edge.last_seen,
                         provenance_json,
+                        account_id,
                     ),
                 )
                 row = cur.fetchone()
@@ -877,6 +898,14 @@ class PostgresAdapter(AdapterABC):
         if query.depth <= 1:
             return self._graph_neighbors_single(query, namespace=namespace, branch=branch)
 
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = "AND account_id IS NULL"
+            acct_params = []
+
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 direction_clause = self._graph_direction_seed(query.direction)
@@ -887,6 +916,7 @@ class PostgresAdapter(AdapterABC):
                         SELECT *, 1 AS depth FROM amfs_knowledge_graph
                         WHERE namespace = %s AND branch = %s
                           AND confidence >= %s
+                          {account_filter}
                           AND ({direction_clause})
                         UNION ALL
                         SELECT g.*, gw.depth + 1
@@ -895,6 +925,7 @@ class PostgresAdapter(AdapterABC):
                         WHERE gw.depth < %s
                           AND g.namespace = %s AND g.branch = %s
                           AND g.confidence >= %s
+                          {account_filter}
                     )
                     SELECT * FROM graph_walk
                     ORDER BY depth, confidence DESC
@@ -902,8 +933,10 @@ class PostgresAdapter(AdapterABC):
                     """,
                     (
                         namespace, branch, query.min_confidence,
+                        *acct_params,
                         *entity_params,
                         query.depth, namespace, branch, query.min_confidence,
+                        *acct_params,
                         query.limit,
                     ),
                 )
@@ -920,6 +953,13 @@ class PostgresAdapter(AdapterABC):
     ) -> list[GraphEdge]:
         conditions = ["namespace = %s", "branch = %s", "confidence >= %s"]
         params: list[Any] = [namespace, branch, query.min_confidence]
+
+        account_id = self._get_current_account_id()
+        if account_id:
+            conditions.append("account_id = %s")
+            params.append(account_id)
+        else:
+            conditions.append("account_id IS NULL")
 
         direction_clause = self._graph_direction_seed(query.direction)
         conditions.append(f"({direction_clause})")
@@ -980,6 +1020,13 @@ class PostgresAdapter(AdapterABC):
         conditions = ["namespace = %s", "branch = %s"]
         params: list[Any] = [namespace, branch]
 
+        account_id = self._get_current_account_id()
+        if account_id:
+            conditions.append("account_id = %s")
+            params.append(account_id)
+        else:
+            conditions.append("account_id IS NULL")
+
         if entity is not None:
             prefix = entity + "/%"
             conditions.append(
@@ -1016,32 +1063,40 @@ class PostgresAdapter(AdapterABC):
         namespace: str = "default",
         branch: str = "main",
     ) -> dict:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = "AND account_id IS NULL"
+            acct_params = []
+
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         COUNT(*) as total_edges,
                         COUNT(DISTINCT source_entity) + COUNT(DISTINCT target_entity) as approx_nodes,
                         AVG(confidence) as avg_confidence,
                         AVG(evidence_count) as avg_evidence
                     FROM amfs_knowledge_graph
-                    WHERE namespace = %s AND branch = %s
+                    WHERE namespace = %s AND branch = %s {account_filter}
                     """,
-                    (namespace, branch),
+                    (namespace, branch, *acct_params),
                 )
                 row = cur.fetchone()
                 if not row:
                     return {}
 
                 cur.execute(
-                    """
+                    f"""
                     SELECT relation, COUNT(*) as cnt
                     FROM amfs_knowledge_graph
-                    WHERE namespace = %s AND branch = %s
+                    WHERE namespace = %s AND branch = %s {account_filter}
                     GROUP BY relation ORDER BY cnt DESC
                     """,
-                    (namespace, branch),
+                    (namespace, branch, *acct_params),
                 )
                 relation_counts = {r["relation"]: r["cnt"] for r in cur.fetchall()}
 
