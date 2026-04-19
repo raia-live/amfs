@@ -539,7 +539,7 @@ class PostgresAdapter(AdapterABC):
                     ADD CONSTRAINT uq_entry_version
                     UNIQUE (namespace, entity_path, key, version, account_id);
             EXCEPTION WHEN others THEN
-                RAISE NOTICE 'uq_entry_version migration skipped: %%', SQLERRM;
+                RAISE NOTICE 'uq_entry_version migration skipped: %', SQLERRM;
             END $$
         """)
         cur.execute("""
@@ -553,7 +553,7 @@ class PostgresAdapter(AdapterABC):
                         UNIQUE (namespace, agent_id, account_id);
                 END IF;
             EXCEPTION WHEN others THEN
-                RAISE NOTICE 'uq_agent migration skipped: %%', SQLERRM;
+                RAISE NOTICE 'uq_agent migration skipped: %', SQLERRM;
             END $$
         """)
         cur.execute("""
@@ -567,7 +567,7 @@ class PostgresAdapter(AdapterABC):
                         UNIQUE (namespace, name, account_id);
                 END IF;
             EXCEPTION WHEN others THEN
-                RAISE NOTICE 'uq_branch_name migration skipped: %%', SQLERRM;
+                RAISE NOTICE 'uq_branch_name migration skipped: %', SQLERRM;
             END $$
         """)
         cur.execute("""
@@ -581,7 +581,7 @@ class PostgresAdapter(AdapterABC):
                         UNIQUE (namespace, name, account_id);
                 END IF;
             EXCEPTION WHEN others THEN
-                RAISE NOTICE 'uq_tag_name migration skipped: %%', SQLERRM;
+                RAISE NOTICE 'uq_tag_name migration skipped: %', SQLERRM;
             END $$
         """)
         cur.execute("""
@@ -595,7 +595,7 @@ class PostgresAdapter(AdapterABC):
                         UNIQUE (namespace, branch_name, grantee_type, grantee_id, account_id);
                 END IF;
             EXCEPTION WHEN others THEN
-                RAISE NOTICE 'uq_branch_access migration skipped: %%', SQLERRM;
+                RAISE NOTICE 'uq_branch_access migration skipped: %', SQLERRM;
             END $$
         """)
 
