@@ -5,7 +5,9 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
 ## Available MCP Tools
 
 ### Identity
-- `amfs_set_identity(name, description?)` — set your agent identity for this conversation. Call first.
+- `amfs_set_identity(name, description?)` — set your agent identity. Persisted to disk (sticky) — survives process restarts. Call first.
+- `amfs_whoami()` — check which identity is active and where it came from (in-process, sticky file, or auto-detected)
+- `amfs_reset_identity()` — clear the sticky identity and revert to auto-detection
 
 ### Brain tools (agent-scoped)
 - `amfs_recall(entity_path, key)` — recall YOUR OWN memory for a key (what do I know about this?)
@@ -37,6 +39,10 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
 ```
 amfs_set_identity("<role-name>", "<one-line description of current task>")
 ```
+
+**Sticky identity**: Once set, the identity is saved to `~/.amfs/.identity` and automatically restored in future sessions — even across process restarts (e.g. Claude Desktop). You only need to call `amfs_set_identity` again to change roles or update the description.
+
+Use `amfs_whoami()` to check the active identity. Use `amfs_reset_identity()` to clear it.
 
 **Naming rules:**
 - Use **kebab-case role/domain names** that persist across conversations about the same topic.

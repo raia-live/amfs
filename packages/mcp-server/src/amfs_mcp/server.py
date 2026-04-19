@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
@@ -56,6 +57,11 @@ amfs_set_identity("<role-name>", "<one-line description of current task>")
 ```
 
 Use kebab-case role/domain names that persist across conversations (e.g. "dashboard-agent", "api-agent"). If continuing work a previous agent started, use the same name.
+
+**Sticky identity**: Once set, your identity persists across sessions automatically. You only need to call `amfs_set_identity` if you want to change to a different role or update your description.
+
+- `amfs_whoami()` — check which identity is active and where it came from
+- `amfs_reset_identity()` — clear the sticky identity and revert to auto-detection
 
 ## Operations Cost
 
@@ -156,6 +162,12 @@ def _get_quality_evaluator() -> MemoryQualityEvaluator:
 # but a separate AgentMemory per identity — each with its own CausalTagger,
 # ReadTracker, and session_id.  A staleness guard prevents rapid cross-
 # conversation identity switches from clobbering each other.
+#
+# Sticky identity: the last identity set via amfs_set_identity() is
+# persisted to ~/.amfs/.identity so it survives process restarts
+# (e.g. Claude Desktop spawns a fresh MCP process per conversation).
+# The user only needs to call set_identity once; subsequent sessions
+# auto-restore it until the user explicitly changes it.
 # ---------------------------------------------------------------------------
 
 _adapter: AdapterABC | None = None
@@ -164,6 +176,34 @@ _active_identity: str | None = None
 _last_activity: float = 0.0
 
 _IDENTITY_COOLDOWN_SECONDS = 30
+
+
+def _identity_file() -> Path:
+    """Path to the sticky identity file."""
+    return Path.home() / ".amfs" / ".identity"
+
+
+def _save_sticky_identity(name: str) -> None:
+    """Persist the active identity to disk so it survives process restarts."""
+    try:
+        path = _identity_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(name, encoding="utf-8")
+    except OSError:
+        logger.debug("Could not save sticky identity to %s", _identity_file(), exc_info=True)
+
+
+def _load_sticky_identity() -> str | None:
+    """Load the previously set identity from disk, if it exists."""
+    try:
+        path = _identity_file()
+        if path.is_file():
+            name = path.read_text(encoding="utf-8").strip()
+            if name:
+                return name
+    except OSError:
+        logger.debug("Could not read sticky identity from %s", _identity_file(), exc_info=True)
+    return None
 
 
 def _get_adapter() -> AdapterABC:
@@ -214,9 +254,17 @@ def _get_memory() -> AgentMemory:
 
     Each identity gets its own AgentMemory instance (own CausalTagger,
     ReadTracker, session_id) while sharing the underlying adapter.
+
+    Resolution order: in-process global → sticky file → auto-detect.
     """
-    global _last_activity
+    global _active_identity, _last_activity
     _last_activity = time.monotonic()
+
+    if _active_identity is None:
+        sticky = _load_sticky_identity()
+        if sticky:
+            _active_identity = sticky
+            logger.info("Restored sticky identity: %s", sticky)
 
     name = _active_identity or detect_agent_id()
 
@@ -291,6 +339,11 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
 
     Without this, all your work is attributed to a generic default identity.
 
+    **Sticky identity**: Once set, the identity is saved to disk and automatically
+    restored in future sessions. You only need to call this again to change roles
+    or update the description. If the identity is already active (from a previous
+    session or the same session), this is a no-op.
+
     MANDATORY WORKFLOW — follow this order every session:
     1. amfs_set_identity(name, description)  ← you are here
     2. amfs_briefing(entity_path="repo/module")  ← get compiled context before starting work
@@ -326,6 +379,7 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
             "identity": name,
             "session_id": mem.session_id,
             "status": "already_active",
+            "sticky": True,
         }, default=str)
 
     # Guard: reject if a *different* identity was recently active
@@ -353,6 +407,7 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
     old_identity = _active_identity or detect_agent_id()
     _active_identity = name
     _last_activity = now
+    _save_sticky_identity(name)
 
     mem = _get_memory()
 
@@ -384,10 +439,54 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
         "previous_identity": old_identity,
         "new_identity": name,
         "session_id": mem.session_id,
+        "sticky": True,
+        "hint": "Identity saved — it will be auto-restored in future sessions.",
     }
     if description:
         result["description"] = description
     return json.dumps(result, default=str)
+
+
+@mcp.tool
+def amfs_whoami() -> str:
+    """Show the current active identity and whether it was restored from disk.
+
+    Useful for debugging identity issues or confirming which agent name
+    is being used for reads/writes.
+    """
+    sticky = _load_sticky_identity()
+    return json.dumps({
+        "active_identity": _active_identity,
+        "sticky_identity": sticky,
+        "detected_identity": detect_agent_id(),
+        "effective_identity": _active_identity or sticky or detect_agent_id(),
+        "platform": detect_platform(),
+        "identity_file": str(_identity_file()),
+    })
+
+
+@mcp.tool
+def amfs_reset_identity() -> str:
+    """Clear the sticky identity so it reverts to auto-detection.
+
+    After calling this, the identity will fall back to environment-based
+    detection (e.g. "cursor/username", "claude-code/username") until
+    amfs_set_identity is called again.
+    """
+    global _active_identity
+    old = _active_identity
+    _active_identity = None
+    try:
+        path = _identity_file()
+        if path.is_file():
+            path.unlink()
+    except OSError:
+        logger.debug("Could not remove sticky identity file", exc_info=True)
+    return json.dumps({
+        "previous_identity": old,
+        "current_identity": detect_agent_id(),
+        "sticky_cleared": True,
+    })
 
 
 @mcp.tool

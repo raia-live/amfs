@@ -16,6 +16,10 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
 amfs_set_identity("<role-name>", "<one-line description of current task>")
 ```
 
+**Sticky identity**: Once set, the identity is saved to `~/.amfs/.identity` and automatically restored in future sessions — even across process restarts (e.g. Claude Desktop). You only need to call `amfs_set_identity` again to change roles or update the description.
+
+Use `amfs_whoami()` to check the active identity. Use `amfs_reset_identity()` to clear it.
+
 **Naming rules:**
 - Use **kebab-case role/domain names** that persist across conversations about the same topic.
 - Good: `"dashboard-agent"`, `"stripe-agent"`, `"api-agent"`, `"infra-agent"`, `"mcp-agent"`
