@@ -152,21 +152,22 @@ def _get_memory() -> AgentMemory:
     ttl_sweep_interval = float(ttl_interval_str) if ttl_interval_str else 300.0
 
     logger.info("AMFS HTTP server starting — agent_id=%s", agent_id)
-    _memory = AgentMemory(
+    mem = AgentMemory(
         agent_id=agent_id,
         config_path=None,
         adapter=None,
         ttl_sweep_interval=ttl_sweep_interval,
     )
 
-    _memory._config = config
+    mem._config = config
     from amfs.factory import create_adapter_from_config
 
     adapter = create_adapter_from_config(config)
-    _memory._adapter = adapter
-    _memory._engine._adapter = adapter
-    _memory._propagator._adapter = adapter
+    mem._adapter = adapter
+    mem._engine._adapter = adapter
+    mem._propagator._adapter = adapter
 
+    _memory = mem
     return _memory
 
 

@@ -531,53 +531,89 @@ class PostgresAdapter(AdapterABC):
 
         # Multi-tenant unique constraints: include account_id so different
         # tenants can have entries/agents/branches/tags with the same names.
-        # Use plain SQL (no DO $$ EXCEPTION block) so failures are visible
-        # rather than silently swallowed by PL/pgSQL subtransaction rollback.
-        cur.execute("""
-            ALTER TABLE amfs_memory_entries
-                DROP CONSTRAINT IF EXISTS uq_entry_version
-        """)
-        cur.execute("""
-            ALTER TABLE amfs_memory_entries
-                ADD CONSTRAINT uq_entry_version
-                UNIQUE (namespace, entity_path, key, version, account_id)
-        """)
-        cur.execute("""
-            DO $$ BEGIN
-                IF EXISTS (SELECT 1 FROM information_schema.tables
-                           WHERE table_name = 'amfs_agents') THEN
-                    EXECUTE 'ALTER TABLE amfs_agents DROP CONSTRAINT IF EXISTS uq_agent';
-                    EXECUTE 'ALTER TABLE amfs_agents ADD CONSTRAINT uq_agent UNIQUE (namespace, agent_id, account_id)';
-                END IF;
-            END $$
-        """)
-        cur.execute("""
-            DO $$ BEGIN
-                IF EXISTS (SELECT 1 FROM information_schema.tables
-                           WHERE table_name = 'amfs_branches') THEN
-                    EXECUTE 'ALTER TABLE amfs_branches DROP CONSTRAINT IF EXISTS uq_branch_name';
-                    EXECUTE 'ALTER TABLE amfs_branches ADD CONSTRAINT uq_branch_name UNIQUE (namespace, name, account_id)';
-                END IF;
-            END $$
-        """)
-        cur.execute("""
-            DO $$ BEGIN
-                IF EXISTS (SELECT 1 FROM information_schema.tables
-                           WHERE table_name = 'amfs_tags') THEN
-                    EXECUTE 'ALTER TABLE amfs_tags DROP CONSTRAINT IF EXISTS uq_tag_name';
-                    EXECUTE 'ALTER TABLE amfs_tags ADD CONSTRAINT uq_tag_name UNIQUE (namespace, name, account_id)';
-                END IF;
-            END $$
-        """)
-        cur.execute("""
-            DO $$ BEGIN
-                IF EXISTS (SELECT 1 FROM information_schema.tables
-                           WHERE table_name = 'amfs_branch_access') THEN
-                    EXECUTE 'ALTER TABLE amfs_branch_access DROP CONSTRAINT IF EXISTS uq_branch_access';
-                    EXECUTE 'ALTER TABLE amfs_branch_access ADD CONSTRAINT uq_branch_access UNIQUE (namespace, branch_name, grantee_type, grantee_id, account_id)';
-                END IF;
-            END $$
-        """)
+        #
+        # Each DROP+ADD pair runs inside an explicit transaction (BEGIN/COMMIT)
+        # so that if ADD fails, the DROP is rolled back and the old constraint
+        # stays in place.  The pool uses autocommit=True, so without an
+        # explicit transaction each statement would commit immediately.
+        _CONSTRAINT_MIGRATIONS: list[tuple[str, str, str, list[str]]] = [
+            (
+                "amfs_memory_entries",
+                "uq_entry_version",
+                "UNIQUE (namespace, entity_path, key, version, account_id)",
+                ["namespace", "entity_path", "key", "version", "account_id"],
+            ),
+            (
+                "amfs_agents",
+                "uq_agent",
+                "UNIQUE (namespace, agent_id, account_id)",
+                ["namespace", "agent_id", "account_id"],
+            ),
+            (
+                "amfs_branches",
+                "uq_branch_name",
+                "UNIQUE (namespace, name, account_id)",
+                ["namespace", "name", "account_id"],
+            ),
+            (
+                "amfs_tags",
+                "uq_tag_name",
+                "UNIQUE (namespace, name, account_id)",
+                ["namespace", "name", "account_id"],
+            ),
+            (
+                "amfs_branch_access",
+                "uq_branch_access",
+                "UNIQUE (namespace, branch_name, grantee_type, grantee_id, account_id)",
+                ["namespace", "branch_name", "grantee_type", "grantee_id", "account_id"],
+            ),
+        ]
+        for table, cname, cdef, cols in _CONSTRAINT_MIGRATIONS:
+            try:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = 'public' AND table_name = %s",
+                    (table,),
+                )
+                if cur.fetchone() is None:
+                    continue
+
+                col_list = ", ".join(cols)
+                null_clause = " AND ".join(f"{c} IS NOT NULL" for c in cols)
+
+                cur.execute(f"""
+                    DELETE FROM "{table}" a USING (
+                        SELECT ctid, ROW_NUMBER() OVER (
+                            PARTITION BY {col_list} ORDER BY ctid
+                        ) AS rn
+                        FROM "{table}"
+                        WHERE {null_clause}
+                    ) b
+                    WHERE a.ctid = b.ctid AND b.rn > 1
+                """)
+                if cur.rowcount and cur.rowcount > 0:
+                    logger.warning(
+                        "Removed %d duplicate rows from %s before adding %s",
+                        cur.rowcount, table, cname,
+                    )
+
+                cur.execute("BEGIN")
+                cur.execute(
+                    f'ALTER TABLE "{table}" DROP CONSTRAINT IF EXISTS {cname}'
+                )
+                cur.execute(
+                    f'ALTER TABLE "{table}" ADD CONSTRAINT {cname} {cdef}'
+                )
+                cur.execute("COMMIT")
+            except Exception as exc:
+                try:
+                    cur.execute("ROLLBACK")
+                except Exception:
+                    pass
+                logger.warning(
+                    "Constraint migration %s.%s failed (non-fatal): %s",
+                    table, cname, exc,
+                )
 
     def _detect_optional_columns(self) -> None:
         """Check whether optional columns (embedding, search_tsv) exist.
