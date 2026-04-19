@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS amfs_memory_entries (
     artifact_refs JSONB DEFAULT '[]',
     superseded_at TIMESTAMPTZ,
     account_id UUID,
-    CONSTRAINT uq_entry_version UNIQUE (namespace, entity_path, key, version)
+    CONSTRAINT uq_entry_version UNIQUE (namespace, entity_path, key, version, account_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_entries_current
@@ -263,7 +263,7 @@ CREATE TABLE IF NOT EXISTS amfs_branches (
     merged_by TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     account_id UUID,
-    CONSTRAINT uq_branch_name UNIQUE (namespace, name),
+    CONSTRAINT uq_branch_name UNIQUE (namespace, name, account_id),
     CONSTRAINT chk_branch_status CHECK (status IN ('active', 'merged', 'closed'))
 );
 
@@ -284,7 +284,7 @@ CREATE TABLE IF NOT EXISTS amfs_branch_access (
     granted_by TEXT NOT NULL,
     granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     account_id UUID,
-    CONSTRAINT uq_branch_access UNIQUE (namespace, branch_name, grantee_type, grantee_id),
+    CONSTRAINT uq_branch_access UNIQUE (namespace, branch_name, grantee_type, grantee_id, account_id),
     CONSTRAINT chk_grantee_type CHECK (grantee_type IN ('user', 'team', 'api_key')),
     CONSTRAINT chk_permission CHECK (permission IN ('read', 'read_write'))
 );
@@ -303,7 +303,7 @@ CREATE TABLE IF NOT EXISTS amfs_tags (
     created_by TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     account_id UUID,
-    CONSTRAINT uq_tag_name UNIQUE (namespace, name)
+    CONSTRAINT uq_tag_name UNIQUE (namespace, name, account_id)
 );
 
 -- ──────────────────────────────────────────────────────────────────────
