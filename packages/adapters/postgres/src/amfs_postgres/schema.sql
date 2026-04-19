@@ -208,7 +208,7 @@ CREATE TABLE IF NOT EXISTS amfs_agents (
     profile JSONB,
     capabilities JSONB DEFAULT '[]'::jsonb,
     contracts JSONB DEFAULT '[]'::jsonb,
-    CONSTRAINT uq_agent UNIQUE (namespace, agent_id, account_id)
+    CONSTRAINT uq_agent UNIQUE (namespace, agent_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_agents_namespace
