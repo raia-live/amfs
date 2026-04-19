@@ -531,71 +531,51 @@ class PostgresAdapter(AdapterABC):
 
         # Multi-tenant unique constraints: include account_id so different
         # tenants can have entries/agents/branches/tags with the same names.
+        # Use plain SQL (no DO $$ EXCEPTION block) so failures are visible
+        # rather than silently swallowed by PL/pgSQL subtransaction rollback.
         cur.execute("""
-            DO $$ BEGIN
-                ALTER TABLE amfs_memory_entries
-                    DROP CONSTRAINT IF EXISTS uq_entry_version;
-                ALTER TABLE amfs_memory_entries
-                    ADD CONSTRAINT uq_entry_version
-                    UNIQUE (namespace, entity_path, key, version, account_id);
-            EXCEPTION WHEN others THEN
-                RAISE NOTICE 'uq_entry_version migration skipped: %', SQLERRM;
-            END $$
+            ALTER TABLE amfs_memory_entries
+                DROP CONSTRAINT IF EXISTS uq_entry_version
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_memory_entries
+                ADD CONSTRAINT uq_entry_version
+                UNIQUE (namespace, entity_path, key, version, account_id)
         """)
         cur.execute("""
             DO $$ BEGIN
                 IF EXISTS (SELECT 1 FROM information_schema.tables
                            WHERE table_name = 'amfs_agents') THEN
-                    ALTER TABLE amfs_agents
-                        DROP CONSTRAINT IF EXISTS uq_agent;
-                    ALTER TABLE amfs_agents
-                        ADD CONSTRAINT uq_agent
-                        UNIQUE (namespace, agent_id, account_id);
+                    EXECUTE 'ALTER TABLE amfs_agents DROP CONSTRAINT IF EXISTS uq_agent';
+                    EXECUTE 'ALTER TABLE amfs_agents ADD CONSTRAINT uq_agent UNIQUE (namespace, agent_id, account_id)';
                 END IF;
-            EXCEPTION WHEN others THEN
-                RAISE NOTICE 'uq_agent migration skipped: %', SQLERRM;
             END $$
         """)
         cur.execute("""
             DO $$ BEGIN
                 IF EXISTS (SELECT 1 FROM information_schema.tables
                            WHERE table_name = 'amfs_branches') THEN
-                    ALTER TABLE amfs_branches
-                        DROP CONSTRAINT IF EXISTS uq_branch_name;
-                    ALTER TABLE amfs_branches
-                        ADD CONSTRAINT uq_branch_name
-                        UNIQUE (namespace, name, account_id);
+                    EXECUTE 'ALTER TABLE amfs_branches DROP CONSTRAINT IF EXISTS uq_branch_name';
+                    EXECUTE 'ALTER TABLE amfs_branches ADD CONSTRAINT uq_branch_name UNIQUE (namespace, name, account_id)';
                 END IF;
-            EXCEPTION WHEN others THEN
-                RAISE NOTICE 'uq_branch_name migration skipped: %', SQLERRM;
             END $$
         """)
         cur.execute("""
             DO $$ BEGIN
                 IF EXISTS (SELECT 1 FROM information_schema.tables
                            WHERE table_name = 'amfs_tags') THEN
-                    ALTER TABLE amfs_tags
-                        DROP CONSTRAINT IF EXISTS uq_tag_name;
-                    ALTER TABLE amfs_tags
-                        ADD CONSTRAINT uq_tag_name
-                        UNIQUE (namespace, name, account_id);
+                    EXECUTE 'ALTER TABLE amfs_tags DROP CONSTRAINT IF EXISTS uq_tag_name';
+                    EXECUTE 'ALTER TABLE amfs_tags ADD CONSTRAINT uq_tag_name UNIQUE (namespace, name, account_id)';
                 END IF;
-            EXCEPTION WHEN others THEN
-                RAISE NOTICE 'uq_tag_name migration skipped: %', SQLERRM;
             END $$
         """)
         cur.execute("""
             DO $$ BEGIN
                 IF EXISTS (SELECT 1 FROM information_schema.tables
                            WHERE table_name = 'amfs_branch_access') THEN
-                    ALTER TABLE amfs_branch_access
-                        DROP CONSTRAINT IF EXISTS uq_branch_access;
-                    ALTER TABLE amfs_branch_access
-                        ADD CONSTRAINT uq_branch_access
-                        UNIQUE (namespace, branch_name, grantee_type, grantee_id, account_id);
+                    EXECUTE 'ALTER TABLE amfs_branch_access DROP CONSTRAINT IF EXISTS uq_branch_access';
+                    EXECUTE 'ALTER TABLE amfs_branch_access ADD CONSTRAINT uq_branch_access UNIQUE (namespace, branch_name, grantee_type, grantee_id, account_id)';
                 END IF;
-            EXCEPTION WHEN others THEN
-                RAISE NOTICE 'uq_branch_access migration skipped: %', SQLERRM;
             END $$
         """)
 
