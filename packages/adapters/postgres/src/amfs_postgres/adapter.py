@@ -100,14 +100,28 @@ class _TenantRLSConnection:
         self._inner_ctx = inner_ctx
 
     def __enter__(self) -> Any:
-        from amfs_postgres.tenant_context import get_request_tenant_account_id
+        from amfs_postgres.tenant_context import (
+            get_request_tenant_account_id,
+            get_request_tenant_team_id,
+            get_request_is_account_admin,
+        )
 
         conn = self._inner_ctx.__enter__()
         tid = get_request_tenant_account_id()
+        team_id = get_request_tenant_team_id()
+        is_admin = get_request_is_account_admin()
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT set_config('amfs.current_account_id', %s, false)",
                 (tid if tid else "",),
+            )
+            cur.execute(
+                "SELECT set_config('amfs.current_team_id', %s, false)",
+                (team_id if team_id else "",),
+            )
+            cur.execute(
+                "SELECT set_config('amfs.is_account_admin', %s, false)",
+                ("true" if is_admin else "false",),
             )
         return conn
 
