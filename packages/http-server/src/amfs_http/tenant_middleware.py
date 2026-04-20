@@ -23,6 +23,8 @@ def apply_tenant_headers_from_request(request: Request) -> None:
     try:
         from amfs_postgres.tenant_context import (
             set_tls_tenant_account_id,
+            set_tls_tenant_team_id,
+            set_tls_is_account_admin,
         )
     except ImportError:
         return
@@ -43,6 +45,17 @@ def apply_tenant_headers_from_request(request: Request) -> None:
     set_tls_tenant_account_id(raw)
     request.state.account_id = UUID(raw)
 
+    team_raw = request.headers.get("X-AMFS-Dashboard-Team-Id")
+    if team_raw:
+        try:
+            UUID(team_raw)
+            set_tls_tenant_team_id(team_raw)
+        except ValueError:
+            logger.warning("Invalid X-AMFS-Dashboard-Team-Id header")
+
+    is_admin = request.headers.get("X-AMFS-Dashboard-Is-Admin") == "true"
+    set_tls_is_account_admin(is_admin)
+
     user_id_raw = request.headers.get("X-AMFS-Dashboard-User-Id")
     if user_id_raw:
         try:
@@ -53,7 +66,13 @@ def apply_tenant_headers_from_request(request: Request) -> None:
 
 def clear_tenant_headers() -> None:
     try:
-        from amfs_postgres.tenant_context import clear_tls_tenant_account_id
+        from amfs_postgres.tenant_context import (
+            clear_tls_tenant_account_id,
+            clear_tls_tenant_team_id,
+            clear_tls_is_account_admin,
+        )
     except ImportError:
         return
     clear_tls_tenant_account_id()
+    clear_tls_tenant_team_id()
+    clear_tls_is_account_admin()
