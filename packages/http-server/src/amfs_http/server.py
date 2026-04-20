@@ -180,7 +180,7 @@ except ImportError:
 
 try:
     from amfs_rooms import mount_rooms
-    mount_rooms(app, get_memory=_get_memory, db_pool=_get_db_pool)
+    mount_rooms(app, get_memory=_get_memory)
     logger.info("Room endpoints mounted")
 except ImportError:
     pass
