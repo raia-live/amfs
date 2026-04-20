@@ -1230,18 +1230,40 @@ def amfs_briefing(
         agent_id=agent_id,
         limit=limit,
     )
-    if not digests:
-        hint = (
-            "No compiled briefings yet. "
-            "Try amfs_my_rooms() to check for shared rooms with team knowledge, "
-            "or use amfs_search() / amfs_recall() to find existing memories. "
-            "Use amfs_write() to start building knowledge."
+    if digests:
+        return json.dumps(
+            [d.model_dump(mode="json") for d in digests],
+            default=str,
         )
-        return json.dumps({"status": "empty", "message": hint})
-    return json.dumps(
-        [d.model_dump(mode="json") for d in digests],
-        default=str,
+
+    # Fallback: if adapter.briefing() is unavailable (older amfs-adapter-http)
+    # or Cortex has no compiled digests yet, synthesize a summary from entries.
+    entries = mem.list(entity_path) if entity_path else []
+    if entries:
+        keys = [e.key for e in entries]
+        agents = sorted({e.provenance.agent_id for e in entries})
+        avg_conf = sum(e.confidence for e in entries) / len(entries)
+        return json.dumps({
+            "status": "synthesized",
+            "message": (
+                "No compiled Cortex digests available. "
+                "Showing a summary built from existing memory entries."
+            ),
+            "entity_path": entity_path,
+            "entry_count": len(entries),
+            "avg_confidence": round(avg_conf, 2),
+            "contributing_agents": agents,
+            "keys": keys,
+            "entries": [_serialize_entry(e) for e in entries[:limit]],
+        }, default=str)
+
+    hint = (
+        "No compiled briefings yet. "
+        "Try amfs_my_rooms() to check for shared rooms with team knowledge, "
+        "or use amfs_search() / amfs_recall() to find existing memories. "
+        "Use amfs_write() to start building knowledge."
     )
+    return json.dumps({"status": "empty", "message": hint})
 
 
 # ──────────────────────────────────────────────────────────────────────
