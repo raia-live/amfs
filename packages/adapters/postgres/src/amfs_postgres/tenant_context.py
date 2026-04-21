@@ -1,4 +1,9 @@
-"""Per-request tenant context for Postgres RLS (thread-local for HTTP server workers).
+"""Per-request tenant context for Postgres RLS.
+
+Uses ``contextvars.ContextVar`` so the tenant is properly isolated in
+both threaded (sync endpoints) and async (event-loop) contexts.
+Starlette/FastAPI creates a copy of the context for each request, so
+concurrent requests never interfere with each other's tenant.
 
 Stores account_id, team_id, and is_account_admin for two-layer tenancy:
   - account_id  -> amfs.current_account_id  (outer boundary)
@@ -8,54 +13,53 @@ Stores account_id, team_id, and is_account_admin for two-layer tenancy:
 
 from __future__ import annotations
 
-import threading
+from contextvars import ContextVar
 
-_tls = threading.local()
+_account_id_var: ContextVar[str | None] = ContextVar("amfs_account_id", default=None)
+_team_id_var: ContextVar[str | None] = ContextVar("amfs_team_id", default=None)
+_is_admin_var: ContextVar[bool] = ContextVar("amfs_is_admin", default=False)
 
 
 # -- account_id --
 
 def set_tls_tenant_account_id(account_id: str | None) -> None:
     """Called from HTTP middleware before handling a request."""
-    _tls.account_id = account_id or None
+    _account_id_var.set(account_id or None)
 
 
 def clear_tls_tenant_account_id() -> None:
     """Called from HTTP middleware after a request."""
-    if hasattr(_tls, "account_id"):
-        delattr(_tls, "account_id")
+    _account_id_var.set(None)
 
 
 def get_request_tenant_account_id() -> str | None:
     """Read by PostgresAdapter when checking out a connection."""
-    return getattr(_tls, "account_id", None)
+    return _account_id_var.get()
 
 
 # -- team_id --
 
 def set_tls_tenant_team_id(team_id: str | None) -> None:
-    _tls.team_id = team_id or None
+    _team_id_var.set(team_id or None)
 
 
 def clear_tls_tenant_team_id() -> None:
-    if hasattr(_tls, "team_id"):
-        delattr(_tls, "team_id")
+    _team_id_var.set(None)
 
 
 def get_request_tenant_team_id() -> str | None:
-    return getattr(_tls, "team_id", None)
+    return _team_id_var.get()
 
 
 # -- is_account_admin --
 
 def set_tls_is_account_admin(is_admin: bool) -> None:
-    _tls.is_account_admin = is_admin
+    _is_admin_var.set(is_admin)
 
 
 def clear_tls_is_account_admin() -> None:
-    if hasattr(_tls, "is_account_admin"):
-        delattr(_tls, "is_account_admin")
+    _is_admin_var.set(False)
 
 
 def get_request_is_account_admin() -> bool:
-    return getattr(_tls, "is_account_admin", False)
+    return _is_admin_var.get()
