@@ -298,13 +298,17 @@ async def whoami(
     and rate limit info. In OSS mode, returns basic auth status.
     """
     ctx = getattr(request.state, "tenant_ctx", None)
+    user_id = getattr(request.state, "user_id", None)
+    vis = _get_visibility_filter(request)
+
     if ctx is not None:
-        return {
+        result: dict[str, Any] = {
             "authenticated": True,
             "mode": "pro",
             "account_id": str(ctx.account_id),
             "actor_id": str(ctx.actor_id),
             "key_type": ctx.key_type.value if ctx.key_type else None,
+            "role": ctx.role.value if ctx.role else None,
             "scopes": [
                 {
                     "entity_path_pattern": s.entity_path_pattern,
@@ -314,10 +318,20 @@ async def whoami(
             ],
             "rate_limit_rpm": ctx.rate_limit_rpm,
             "is_admin": ctx.is_admin,
+            "user_id": str(user_id) if user_id else None,
+            "visibility_filter_active": vis is not None,
+            "visibility_filtering": vis is not None and vis.should_filter() if vis else False,
         }
+        if vis is not None and vis.should_filter():
+            try:
+                result["visible_agents"] = sorted(vis.get_visible_agent_ids())
+            except Exception:
+                result["visible_agents_error"] = True
+        return result
     return {
         "authenticated": _auth is not None,
         "mode": "oss",
+        "user_id": str(user_id) if user_id else None,
     }
 
 
