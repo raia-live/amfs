@@ -235,6 +235,43 @@ def _entry_to_response(entry: MemoryEntry) -> dict[str, Any]:
     return data
 
 
+def _get_visibility_filter(request: Request):
+    """Return the UserVisibilityFilter from request.state, or None."""
+    return getattr(request.state, "visibility_filter", None)
+
+
+def _ensure_agent_owner(
+    request: Request, agent_id: str, namespace: str = "default"
+) -> None:
+    """Link the agent to the API key's owner user in the Pro agents table.
+
+    This is a no-op when amfs_rooms is not installed or the request
+    has no tenant context.  The linkage lets the UserVisibilityFilter
+    discover which agents belong to which user.
+    """
+    ctx = getattr(request.state, "tenant_ctx", None)
+    user_id = getattr(request.state, "user_id", None)
+    if not ctx or not user_id:
+        return
+    try:
+        from amfs_rooms.visibility import ensure_agent_owner
+
+        mem = _get_memory()
+        pool = getattr(mem._adapter, "_pool", None)
+        if pool is not None:
+            ensure_agent_owner(
+                pool,
+                agent_id=agent_id,
+                owner_user_id=user_id,
+                account_id=ctx.account_id,
+                namespace=namespace,
+            )
+    except ImportError:
+        pass
+    except Exception:
+        logger.debug("Failed to ensure agent owner for %s", agent_id, exc_info=True)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Health
 # ──────────────────────────────────────────────────────────────────────
@@ -291,6 +328,7 @@ async def whoami(
 
 @app.get("/api/v1/entries/{entity_path:path}/{key}")
 async def read_entry(
+    request: Request,
     entity_path: str,
     key: str,
     branch: str = Query("main"),
@@ -300,6 +338,11 @@ async def read_entry(
     entry = mem.read(entity_path, key, branch=branch)
     if entry is None:
         return {"status": "not_found", "entity_path": entity_path, "key": key}
+
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter() and not vis.is_entry_visible(entry):
+        return {"status": "not_found", "entity_path": entity_path, "key": key}
+
     return _entry_to_response(entry)
 
 
@@ -362,6 +405,7 @@ async def write_entry(
             mem._adapter.ensure_agent(req.agent_id, mem.namespace)
         except Exception:
             pass
+        _ensure_agent_owner(request, req.agent_id, mem.namespace)
     try:
         entry = mem.write(
             req.entity_path,
@@ -407,6 +451,7 @@ async def write_entry(
 
 @app.get("/api/v1/entries")
 async def list_entries(
+    request: Request,
     entity_path: str | None = Query(None),
     branch: str = Query("main"),
     include_superseded: bool = Query(False),
@@ -414,6 +459,11 @@ async def list_entries(
 ) -> dict[str, Any]:
     mem = _get_memory()
     entries = mem.list(entity_path, branch=branch, include_superseded=include_superseded)
+
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter():
+        entries = vis.filter_entries(entries)
+
     return {"entries": [_entry_to_response(e) for e in entries]}
 
 
@@ -424,6 +474,7 @@ async def list_entries(
 
 @app.post("/api/v1/search")
 async def search_entries(
+    request: Request,
     req: SearchRequest,
     _auth: str | None = Depends(verify_api_key),
 ) -> list[dict[str, Any]]:
@@ -446,6 +497,10 @@ async def search_entries(
     except TypeError:
         results = mem._adapter.search(sq)
 
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter():
+        results = vis.filter_entries(results)
+
     return [_entry_to_response(e) for e in results]
 
 
@@ -456,9 +511,36 @@ async def search_entries(
 
 @app.get("/api/v1/stats")
 async def get_stats(
+    request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     mem = _get_memory()
+
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter():
+        entries = mem.list()
+        entries = vis.filter_entries(entries)
+
+        entity_set: set[str] = set()
+        agent_set: set[str] = set()
+        for e in entries:
+            entity_set.add(e.entity_path)
+            agent_set.add(e.provenance.agent_id)
+
+        return {
+            "total_entries": len(entries),
+            "total_entities": len(entity_set),
+            "total_agents": len(agent_set),
+            "oldest_entry": min(
+                (e.provenance.written_at for e in entries if e.provenance.written_at),
+                default=None,
+            ),
+            "newest_entry": max(
+                (e.provenance.written_at for e in entries if e.provenance.written_at),
+                default=None,
+            ),
+        }
+
     stats = mem.stats()
     return json.loads(json.dumps(stats.model_dump(mode="json"), default=str))
 
@@ -725,12 +807,18 @@ async def update_agent_contracts(
 
 @app.get("/api/v1/agents/discover")
 async def discover_agents(
+    request: Request,
     capability: str | None = Query(None),
     entity_path: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     mem = _get_memory()
     agents = mem.discover_agents(capability=capability, entity_path=entity_path)
+
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter():
+        agents = [a for a in agents if vis.is_agent_visible(a.agent_id)]
+
     return {
         "agents": [json.loads(json.dumps(a.model_dump(mode="json"), default=str)) for a in agents],
         "count": len(agents),
@@ -938,6 +1026,7 @@ async def commit_outcome(
             mem._adapter.ensure_agent(req.agent_id, mem.namespace)
         except Exception:
             pass
+        _ensure_agent_owner(request, req.agent_id, mem.namespace)
     try:
         entries = mem.commit_outcome(
             req.outcome_ref,
@@ -1283,11 +1372,17 @@ async def get_usage(
 
 @app.get("/api/v1/agents")
 async def list_agents(
+    request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """List all known agents with entry counts and last activity."""
     mem = _get_memory()
     entries = mem.list()
+
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter():
+        entries = vis.filter_entries(entries)
+
     agent_data: dict[str, dict[str, Any]] = {}
     for e in entries:
         if e.entity_path.startswith("_system/"):
