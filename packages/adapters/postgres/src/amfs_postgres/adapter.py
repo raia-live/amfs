@@ -629,6 +629,11 @@ class PostgresAdapter(AdapterABC):
                     table, cname, exc,
                 )
 
+        cur.execute("""
+            ALTER TABLE amfs_api_keys
+            ADD COLUMN IF NOT EXISTS created_by UUID
+        """)
+
     def _detect_optional_columns(self) -> None:
         """Check whether optional columns (embedding, search_tsv) exist.
 

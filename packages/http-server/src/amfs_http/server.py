@@ -2222,12 +2222,14 @@ async def create_api_key(
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     ns = _get_namespace()
 
+    user_id = getattr(request.state, "user_id", None)
+
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO amfs_api_keys
-                       (namespace, name, key_hash, prefix, key_type, scopes, rate_limit_rpm, expires_at)
-                   VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                       (namespace, name, key_hash, prefix, key_type, scopes, rate_limit_rpm, expires_at, created_by)
+                   VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
                    RETURNING id, created_at""",
                 (
                     ns,
@@ -2238,6 +2240,7 @@ async def create_api_key(
                     json.dumps(req.scopes),
                     req.rate_limit_rpm,
                     req.expires_at,
+                    str(user_id) if user_id else None,
                 ),
             )
             row = cur.fetchone()

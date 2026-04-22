@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS amfs_api_keys (
     rate_limit_rpm INTEGER DEFAULT 120,
     last_used TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    expires_at TIMESTAMPTZ
+    expires_at TIMESTAMPTZ,
+    created_by UUID
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_namespace
