@@ -18,6 +18,7 @@ from amfs_core.models import (
     ScoredEntry,
     SearchQuery,
     SemanticQuery,
+    SessionMetadata,
 )
 
 from amfs.memory import AgentMemory, MemoryScope
@@ -42,4 +43,5 @@ __all__ = [
     "ScoredEntry",
     "SearchQuery",
     "SemanticQuery",
+    "SessionMetadata",
 ]

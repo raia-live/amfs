@@ -35,6 +35,7 @@ from amfs_core.models import (
     ScoredEntry,
     SearchQuery,
     SemanticQuery,
+    SessionMetadata,
     TraceEntry,
 )
 from amfs_core.outcome import OutcomeBackPropagator
@@ -154,6 +155,7 @@ class AgentMemory:
         self._on_conflict = on_conflict
         self._importance_evaluator = importance_evaluator
         self._branch = "main"
+        self._session_metadata: SessionMetadata | None = None
 
         self._lifecycle: LifecycleManager | None = None
         if ttl_sweep_interval is not None:
@@ -173,6 +175,14 @@ class AgentMemory:
     @property
     def session_id(self) -> str:
         return self._tagger.session_id
+
+    @property
+    def session_metadata(self) -> SessionMetadata | None:
+        return self._session_metadata
+
+    @session_metadata.setter
+    def session_metadata(self, value: SessionMetadata | None) -> None:
+        self._session_metadata = value
 
     @property
     def namespace(self) -> str:
@@ -878,6 +888,7 @@ class AgentMemory:
             causal_entries=causal_trace_entries,
             external_contexts=ext_contexts,
             query_events=query_events,
+            session_metadata=self._session_metadata,
             session_started_at=session_started,
             session_ended_at=now,
             session_duration_ms=session_duration,

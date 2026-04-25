@@ -29,9 +29,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 
-from amfs import AgentMemory, MemoryType, OutcomeType
+from amfs import AgentMemory, MemoryType, OutcomeType, SessionMetadata
 from amfs.config import load_config_or_default
 from amfs_core.abc import AdapterABC
 from amfs_core.models import AMFSConfig, LayerConfig
@@ -53,10 +53,10 @@ You have access to AMFS (Agent Memory File System) — persistent memory that su
 You MUST call `amfs_set_identity` before doing anything else. Without it, all your work is attributed to a generic default.
 
 ```
-amfs_set_identity("<role-name>", "<one-line description of current task>")
+amfs_set_identity("<role-name>", "<one-line description of current task>", model="<your-model-name>")
 ```
 
-Use kebab-case role/domain names that persist across conversations (e.g. "dashboard-agent", "api-agent"). If continuing work a previous agent started, use the same name.
+Use kebab-case role/domain names that persist across conversations (e.g. "dashboard-agent", "api-agent"). If continuing work a previous agent started, use the same name. Always pass `model=` with your LLM model name (e.g. "claude-4-opus", "gpt-4o") — this is recorded in decision traces.
 
 **Sticky identity**: Once set, your identity persists across sessions automatically. You only need to call `amfs_set_identity` if you want to change to a different role or update your description.
 
@@ -174,6 +174,7 @@ _adapter: AdapterABC | None = None
 _memories: dict[str, AgentMemory] = {}
 _active_identity: str | None = None
 _last_activity: float = 0.0
+_session_metadata: SessionMetadata | None = None
 
 _IDENTITY_COOLDOWN_SECONDS = 30
 
@@ -321,6 +322,38 @@ def _resolve_config() -> AMFSConfig:
     return load_config_or_default()
 
 
+def _enrich_metadata_from_context(ctx: Context | None) -> None:
+    """Passively capture MCP client metadata from the FastMCP Context.
+
+    Called on tool invocations that have a Context parameter.  Merges
+    client_id and session_id from the MCP handshake into the module-level
+    SessionMetadata without overwriting fields the agent explicitly set.
+    """
+    global _session_metadata
+    if ctx is None:
+        return
+    try:
+        client_id = ctx.client_id
+        session_id = ctx.session_id if ctx.request_context else None
+    except Exception:
+        return
+
+    if client_id is None and session_id is None:
+        return
+
+    if _session_metadata is None:
+        _session_metadata = SessionMetadata()
+
+    if client_id and not _session_metadata.mcp_client_id:
+        _session_metadata.mcp_client_id = client_id
+    if session_id and not _session_metadata.mcp_session_id:
+        _session_metadata.mcp_session_id = session_id
+
+    mem = _memories.get(_active_identity or "")
+    if mem:
+        mem.session_metadata = _session_metadata
+
+
 def _serialize_entry(entry: Any) -> dict[str, Any]:
     """Convert a MemoryEntry to a JSON-safe dict for MCP responses."""
     data = entry.model_dump(mode="json")
@@ -334,7 +367,14 @@ def _serialize_entry(entry: Any) -> dict[str, Any]:
 
 
 @mcp.tool
-def amfs_set_identity(name: str, description: str | None = None) -> str:
+def amfs_set_identity(
+    name: str,
+    description: str | None = None,
+    model: str | None = None,
+    client_name: str | None = None,
+    tools_available: list[str] | None = None,
+    ctx: Context | None = None,
+) -> str:
     """Set the agent identity for this conversation. CALL THIS FIRST before any other AMFS tool.
 
     Without this, all your work is attributed to a generic default identity.
@@ -345,7 +385,7 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
     session or the same session), this is a no-op.
 
     MANDATORY WORKFLOW — follow this order every session:
-    1. amfs_set_identity(name, description)  ← you are here
+    1. amfs_set_identity(name, description, model)  ← you are here
     2. amfs_briefing(entity_path="repo/module")  ← get compiled context before starting work
     3. Do your work, calling amfs_write() for important discoveries, decisions, and patterns
     4. amfs_record_context() for external tool results and user decisions as they happen
@@ -365,21 +405,47 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
         name: Short, descriptive name (e.g. "dashboard-fixer", "auth-debugger",
               "mcp-integration"). Use kebab-case.
         description: Optional one-line description of what this agent is doing.
+        model: The LLM model you are running as (e.g. "claude-4-opus",
+               "gpt-4o", "claude-3.5-sonnet"). You know your own model name — pass it here.
+        client_name: The IDE or client platform (e.g. "cursor", "claude-code",
+                     "windsurf", "cline"). Auto-detected when possible.
+        tools_available: Optional list of tool names available to you in this session
+                         (e.g. ["Shell", "Read", "Write", "Grep"]). Helps AMFS understand
+                         what capabilities drove a decision.
 
-    Example: amfs_set_identity("tenant-isolation-agent", "Fixing RLS propagation for Pro tenancy")
+    Example: amfs_set_identity("tenant-isolation-agent", "Fixing RLS propagation for Pro tenancy", model="claude-4-opus")
     """
-    global _active_identity, _last_activity
+    global _active_identity, _last_activity, _session_metadata
     now = time.monotonic()
 
-    # Idempotent: same name is always a no-op
+    # Build / update session metadata from explicit params + MCP context
+    if model or client_name or tools_available:
+        if _session_metadata is None:
+            _session_metadata = SessionMetadata()
+        if model:
+            _session_metadata.model = model
+        if client_name:
+            _session_metadata.client_name = client_name
+        if tools_available:
+            _session_metadata.tools_available = tools_available
+
+    if _session_metadata is None:
+        _session_metadata = SessionMetadata()
+    _session_metadata.platform = detect_platform()
+
+    _enrich_metadata_from_context(ctx)
+
+    # Idempotent: same name is always a no-op (but still update metadata)
     if _active_identity == name:
         _last_activity = now
         mem = _get_memory()
+        mem.session_metadata = _session_metadata
         return json.dumps({
             "identity": name,
             "session_id": mem.session_id,
             "status": "already_active",
             "sticky": True,
+            "session_metadata": _session_metadata.model_dump(mode="json"),
         }, default=str)
 
     # Guard: reject if a *different* identity was recently active
@@ -410,30 +476,32 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
     _save_sticky_identity(name)
 
     mem = _get_memory()
+    mem.session_metadata = _session_metadata
 
     logger.info(
-        "Identity set: %s → %s (session=%s, platform=%s, description=%s)",
-        old_identity, name, mem.session_id, detect_platform(), description or "",
+        "Identity set: %s → %s (session=%s, platform=%s, model=%s, description=%s)",
+        old_identity, name, mem.session_id, detect_platform(),
+        model or "unknown", description or "",
     )
 
-    # Register / update the agent profile with the description so it
-    # shows up on the dashboard.  This is a fire-and-forget best-effort
-    # call — identity setting always succeeds even if profile update fails.
-    if description:
-        try:
-            from amfs_core.models import AgentProfile
+    # Register / update the agent profile with the description and session
+    # metadata so it shows up on the dashboard.  Fire-and-forget best-effort
+    # — identity setting always succeeds even if profile update fails.
+    try:
+        from amfs_core.models import AgentProfile
 
-            current_agent = mem._adapter.get_agent(name, namespace=mem.namespace)
-            existing = current_agent.profile if current_agent else None
-            profile = AgentProfile(
-                description=description,
-                default_branch=existing.default_branch if existing else "main",
-                auto_context_paths=existing.auto_context_paths if existing else [],
-                tags=existing.tags if existing else [],
-            )
-            mem._adapter.update_agent_profile(name, profile, namespace=mem.namespace)
-        except Exception:
-            logger.debug("Could not update agent profile for %s", name, exc_info=True)
+        current_agent = mem._adapter.get_agent(name, namespace=mem.namespace)
+        existing = current_agent.profile if current_agent else None
+        profile = AgentProfile(
+            description=description or (existing.description if existing else ""),
+            default_branch=existing.default_branch if existing else "main",
+            auto_context_paths=existing.auto_context_paths if existing else [],
+            tags=existing.tags if existing else [],
+            session_metadata=_session_metadata,
+        )
+        mem._adapter.update_agent_profile(name, profile, namespace=mem.namespace)
+    except Exception:
+        logger.debug("Could not update agent profile for %s", name, exc_info=True)
 
     result: dict[str, Any] = {
         "previous_identity": old_identity,
@@ -441,6 +509,7 @@ def amfs_set_identity(name: str, description: str | None = None) -> str:
         "session_id": mem.session_id,
         "sticky": True,
         "hint": "Identity saved — it will be auto-restored in future sessions.",
+        "session_metadata": _session_metadata.model_dump(mode="json"),
     }
     if description:
         result["description"] = description
@@ -455,14 +524,17 @@ def amfs_whoami() -> str:
     is being used for reads/writes.
     """
     sticky = _load_sticky_identity()
-    return json.dumps({
+    result: dict[str, Any] = {
         "active_identity": _active_identity,
         "sticky_identity": sticky,
         "detected_identity": detect_agent_id(),
         "effective_identity": _active_identity or sticky or detect_agent_id(),
         "platform": detect_platform(),
         "identity_file": str(_identity_file()),
-    })
+    }
+    if _session_metadata:
+        result["session_metadata"] = _session_metadata.model_dump(mode="json")
+    return json.dumps(result)
 
 
 @mcp.tool
