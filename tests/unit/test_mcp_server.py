@@ -319,12 +319,14 @@ class TestIdentityGuard:
         srv._active_identity = None
         srv._memories = {}
         srv._last_activity = 0.0
+        srv._session_metadata = None
         yield
         for m in srv._memories.values():
             m.close()
         srv._memories = {}
         srv._adapter = None
         srv._active_identity = None
+        srv._session_metadata = None
 
     def test_set_identity_creates_memory(self) -> None:
         import amfs_mcp.server as srv

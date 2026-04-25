@@ -367,7 +367,7 @@ def _serialize_entry(entry: Any) -> dict[str, Any]:
 
 
 @mcp.tool
-async def amfs_set_identity(
+def amfs_set_identity(
     name: str,
     description: str | None = None,
     model: str | None = None,
