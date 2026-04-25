@@ -291,6 +291,7 @@ class DecisionTrace(BaseModel):
     query_events: list[QueryEvent] = Field(default_factory=list)
     error_events: list[ErrorEvent] = Field(default_factory=list)
     state_diff: MemoryStateDiff | None = None
+    session_metadata: SessionMetadata | None = None
     session_started_at: datetime | None = None
     session_ended_at: datetime | None = None
     session_duration_ms: float | None = None
@@ -515,6 +516,22 @@ class EventType(str, Enum):
     SNAPSHOT_RECOVERED = "snapshot_recovered"
 
 
+class SessionMetadata(BaseModel):
+    """Metadata about the agent's runtime environment.
+
+    Captured once per session (typically via amfs_set_identity) and attached
+    to the AgentProfile and DecisionTrace so every trace records which model,
+    platform, and toolset produced the decisions.
+    """
+
+    model: str | None = None
+    client_name: str | None = None
+    platform: str | None = None
+    tools_available: list[str] = Field(default_factory=list)
+    mcp_client_id: str | None = None
+    mcp_session_id: str | None = None
+
+
 class AgentProfile(BaseModel):
     """Declarative profile describing an agent's role and defaults."""
 
@@ -522,6 +539,7 @@ class AgentProfile(BaseModel):
     default_branch: str = "main"
     auto_context_paths: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    session_metadata: SessionMetadata | None = None
 
 
 class AgentCapability(BaseModel):

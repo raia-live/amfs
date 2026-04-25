@@ -5,7 +5,7 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
 ## Available MCP Tools
 
 ### Identity
-- `amfs_set_identity(name, description?)` — set your agent identity. Persisted to disk (sticky) — survives process restarts. Call first.
+- `amfs_set_identity(name, description?, model?, client_name?, tools_available?)` — set your agent identity. Persisted to disk (sticky) — survives process restarts. Always pass `model=` with your LLM model name. Call first.
 - `amfs_whoami()` — check which identity is active and where it came from (in-process, sticky file, or auto-detected)
 - `amfs_reset_identity()` — clear the sticky identity and revert to auto-detection
 
@@ -37,8 +37,10 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
 > **You MUST call `amfs_set_identity` before doing anything else.** Without it, all your work is attributed to a generic default and you won't appear as a distinct agent on the AMFS dashboard.
 
 ```
-amfs_set_identity("<role-name>", "<one-line description of current task>")
+amfs_set_identity("<role-name>", "<one-line description of current task>", model="<your-model-name>")
 ```
+
+Always pass `model=` with your LLM model name (e.g. `"claude-4-opus"`, `"gpt-4o"`, `"claude-3.5-sonnet"`). This is recorded in decision traces so we know which model made each decision.
 
 **Sticky identity**: Once set, the identity is saved to `~/.amfs/.identity` and automatically restored in future sessions — even across process restarts (e.g. Claude Desktop). You only need to call `amfs_set_identity` again to change roles or update the description.
 
