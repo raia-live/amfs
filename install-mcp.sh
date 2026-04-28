@@ -1,0 +1,501 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# AMFS MCP Installer
+# One-line install: curl -sSL https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.sh | bash
+#
+# Flags:
+#   --client <name|all>   Skip auto-detect; configure a specific client (or "all")
+#   --api-key <key>       Use AMFS SaaS with this API key
+#   --api-url <url>       SaaS API URL (default: https://amfs-login.sense-lab.ai)
+#   --uninstall           Remove AMFS config from detected/specified clients
+#   -y, --yes             Skip confirmation prompts
+
+AMFS_DEFAULT_API_URL="https://amfs-login.sense-lab.ai"
+
+# ── Colours & helpers ────────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+info()    { printf "${BLUE}==> ${NC}%s\n" "$*"; }
+success() { printf "${GREEN}==> ${NC}%s\n" "$*"; }
+warn()    { printf "${YELLOW}==> ${NC}%s\n" "$*"; }
+error()   { printf "${RED}==> ${NC}%s\n" "$*" >&2; }
+fatal()   { error "$@"; exit 1; }
+
+# ── Parse arguments ──────────────────────────────────────────────────────────
+
+CLIENT_FLAG=""
+API_KEY=""
+API_URL=""
+UNINSTALL=false
+AUTO_YES=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --client)     CLIENT_FLAG="$2"; shift 2 ;;
+        --api-key)    API_KEY="$2"; shift 2 ;;
+        --api-url)    API_URL="$2"; shift 2 ;;
+        --uninstall)  UNINSTALL=true; shift ;;
+        -y|--yes)     AUTO_YES=true; shift ;;
+        -h|--help)
+            cat <<'USAGE'
+AMFS MCP Installer
+
+Usage:
+  curl -sSL https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.sh | bash
+  bash install-mcp.sh [OPTIONS]
+
+Options:
+  --client <name|all>   Configure a specific client: claude-desktop, cursor,
+                        claude-code, windsurf, vscode, or "all"
+  --api-key <key>       Connect to AMFS SaaS with this API key
+  --api-url <url>       SaaS API URL (default: https://amfs-login.sense-lab.ai)
+  --uninstall           Remove AMFS MCP config from clients
+  -y, --yes             Skip confirmation prompts
+  -h, --help            Show this help
+USAGE
+            exit 0
+            ;;
+        *) fatal "Unknown option: $1 (use --help for usage)" ;;
+    esac
+done
+
+# ── OS detection ─────────────────────────────────────────────────────────────
+
+detect_os() {
+    case "$(uname -s)" in
+        Darwin*) echo "macos" ;;
+        Linux*)  echo "linux" ;;
+        *)       echo "unknown" ;;
+    esac
+}
+
+OS="$(detect_os)"
+if [[ "$OS" == "unknown" ]]; then
+    fatal "Unsupported operating system: $(uname -s). This installer supports macOS and Linux."
+fi
+
+# ── Step 1: Ensure uv is installed ───────────────────────────────────────────
+
+ensure_uv() {
+    if command -v uv &>/dev/null; then
+        success "uv is already installed ($(uv --version))"
+        return 0
+    fi
+
+    info "uv not found — installing..."
+
+    if ! command -v curl &>/dev/null; then
+        fatal "curl is required to install uv. Please install curl and retry."
+    fi
+
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+
+    # Source the env file that uv's installer creates
+    if [[ -f "$HOME/.local/bin/env" ]]; then
+        # shellcheck disable=SC1091
+        . "$HOME/.local/bin/env"
+    elif [[ -f "$HOME/.cargo/env" ]]; then
+        # shellcheck disable=SC1091
+        . "$HOME/.cargo/env"
+    fi
+
+    export PATH="$HOME/.local/bin:$PATH"
+
+    if ! command -v uv &>/dev/null; then
+        fatal "uv was installed but could not be found on PATH. Try opening a new terminal and running this script again."
+    fi
+
+    success "uv installed successfully ($(uv --version))"
+}
+
+# ── Step 2: Pre-install amfs-mcp-server ──────────────────────────────────────
+
+ensure_amfs_mcp() {
+    info "Installing amfs-mcp-server..."
+    uvx --from amfs-mcp-server amfs-mcp-server --help &>/dev/null || true
+    success "amfs-mcp-server is ready"
+}
+
+# ── Client config paths ─────────────────────────────────────────────────────
+
+claude_desktop_config_path() {
+    if [[ "$OS" == "macos" ]]; then
+        echo "$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+    else
+        echo "$HOME/.config/Claude/claude_desktop_config.json"
+    fi
+}
+
+cursor_config_path() {
+    echo "$HOME/.cursor/mcp.json"
+}
+
+windsurf_config_path() {
+    echo "$HOME/.windsurf/mcp.json"
+}
+
+vscode_config_path() {
+    echo "$HOME/.vscode/mcp.json"
+}
+
+# ── Build MCP config JSON ───────────────────────────────────────────────────
+
+UVX_PATH=""
+
+resolve_uvx_path() {
+    if [[ -n "$UVX_PATH" ]]; then return; fi
+    UVX_PATH="$(command -v uvx 2>/dev/null || echo "uvx")"
+}
+
+build_mcp_json() {
+    resolve_uvx_path
+    local env_block="{}"
+
+    if [[ -n "$API_KEY" ]]; then
+        local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
+        env_block=$(cat <<ENVJSON
+{
+            "AMFS_HTTP_URL": "$url",
+            "AMFS_API_KEY": "$API_KEY"
+        }
+ENVJSON
+)
+    fi
+
+    cat <<MCPJSON
+{
+        "command": "$UVX_PATH",
+        "args": ["amfs-mcp-server"],
+        "env": $env_block
+    }
+MCPJSON
+}
+
+# ── JSON merge (portable, no jq dependency) ──────────────────────────────────
+
+inject_mcp_config() {
+    local config_file="$1"
+    local amfs_block
+    amfs_block="$(build_mcp_json)"
+
+    local dir
+    dir="$(dirname "$config_file")"
+    mkdir -p "$dir"
+
+    if [[ ! -f "$config_file" ]]; then
+        cat > "$config_file" <<NEWJSON
+{
+    "mcpServers": {
+        "amfs": $amfs_block
+    }
+}
+NEWJSON
+        return 0
+    fi
+
+    # File exists — use python (available on macOS and most Linux) for safe JSON merge
+    python3 -c "
+import json, sys
+
+config_path = sys.argv[1]
+amfs_block = json.loads(sys.argv[2])
+
+with open(config_path, 'r') as f:
+    try:
+        config = json.load(f)
+    except json.JSONDecodeError:
+        config = {}
+
+if 'mcpServers' not in config:
+    config['mcpServers'] = {}
+
+config['mcpServers']['amfs'] = amfs_block
+
+with open(config_path, 'w') as f:
+    json.dump(config, f, indent=4)
+    f.write('\n')
+" "$config_file" "$amfs_block"
+}
+
+remove_mcp_config() {
+    local config_file="$1"
+
+    if [[ ! -f "$config_file" ]]; then
+        return 0
+    fi
+
+    python3 -c "
+import json, sys
+
+config_path = sys.argv[1]
+
+with open(config_path, 'r') as f:
+    try:
+        config = json.load(f)
+    except json.JSONDecodeError:
+        sys.exit(0)
+
+if 'mcpServers' in config and 'amfs' in config['mcpServers']:
+    del config['mcpServers']['amfs']
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=4)
+        f.write('\n')
+" "$config_file"
+}
+
+# ── Client detection ─────────────────────────────────────────────────────────
+
+declare -a DETECTED_CLIENTS=()
+
+detect_clients() {
+    DETECTED_CLIENTS=()
+
+    local claude_path
+    claude_path="$(claude_desktop_config_path)"
+    local claude_dir
+    claude_dir="$(dirname "$claude_path")"
+    if [[ -d "$claude_dir" ]]; then
+        DETECTED_CLIENTS+=("claude-desktop")
+    fi
+
+    if [[ -d "$HOME/.cursor" ]]; then
+        DETECTED_CLIENTS+=("cursor")
+    fi
+
+    if command -v claude &>/dev/null; then
+        DETECTED_CLIENTS+=("claude-code")
+    fi
+
+    local windsurf_dir
+    windsurf_dir="$(dirname "$(windsurf_config_path)")"
+    if [[ -d "$windsurf_dir" ]]; then
+        DETECTED_CLIENTS+=("windsurf")
+    fi
+
+    if [[ -d "$HOME/.vscode" ]]; then
+        DETECTED_CLIENTS+=("vscode")
+    fi
+}
+
+# ── Configure a single client ────────────────────────────────────────────────
+
+configure_client() {
+    local client="$1"
+
+    case "$client" in
+        claude-desktop)
+            local path
+            path="$(claude_desktop_config_path)"
+            if $UNINSTALL; then
+                remove_mcp_config "$path"
+                success "Removed AMFS from Claude Desktop config"
+            else
+                inject_mcp_config "$path"
+                success "Configured Claude Desktop ($path)"
+            fi
+            ;;
+        cursor)
+            local path
+            path="$(cursor_config_path)"
+            if $UNINSTALL; then
+                remove_mcp_config "$path"
+                success "Removed AMFS from Cursor config"
+            else
+                inject_mcp_config "$path"
+                success "Configured Cursor ($path)"
+            fi
+            ;;
+        claude-code)
+            if $UNINSTALL; then
+                if command -v claude &>/dev/null; then
+                    claude mcp remove amfs 2>/dev/null || true
+                    success "Removed AMFS from Claude Code"
+                fi
+            else
+                if ! command -v claude &>/dev/null; then
+                    warn "Claude Code CLI (claude) not found on PATH — skipping"
+                    return 1
+                fi
+                resolve_uvx_path
+                local args=("mcp" "add" "amfs" "--" "$UVX_PATH" "amfs-mcp-server")
+                if [[ -n "$API_KEY" ]]; then
+                    local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
+                    args=("mcp" "add" "amfs" "-e" "AMFS_HTTP_URL=$url" "-e" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "amfs-mcp-server")
+                fi
+                claude "${args[@]}"
+                success "Configured Claude Code"
+            fi
+            ;;
+        windsurf)
+            local path
+            path="$(windsurf_config_path)"
+            if $UNINSTALL; then
+                remove_mcp_config "$path"
+                success "Removed AMFS from Windsurf config"
+            else
+                inject_mcp_config "$path"
+                success "Configured Windsurf ($path)"
+            fi
+            ;;
+        vscode)
+            local path
+            path="$(vscode_config_path)"
+            if $UNINSTALL; then
+                remove_mcp_config "$path"
+                success "Removed AMFS from VS Code config"
+            else
+                inject_mcp_config "$path"
+                success "Configured VS Code ($path)"
+            fi
+            ;;
+        *)
+            error "Unknown client: $client"
+            return 1
+            ;;
+    esac
+}
+
+# ── Interactive menu ─────────────────────────────────────────────────────────
+
+prompt_clients() {
+    detect_clients
+
+    if [[ ${#DETECTED_CLIENTS[@]} -eq 0 ]]; then
+        warn "No supported MCP clients detected."
+        echo ""
+        echo "You can manually add this to your MCP client config:"
+        echo ""
+        resolve_uvx_path
+        printf '  "amfs": '
+        build_mcp_json | sed 's/^/  /'
+        echo ""
+        return 1
+    fi
+
+    echo ""
+    printf "${BOLD}Detected MCP clients:${NC}\n"
+    echo ""
+    local i=1
+    for client in "${DETECTED_CLIENTS[@]}"; do
+        printf "  ${GREEN}%d)${NC} %s\n" "$i" "$client"
+        ((i++))
+    done
+    echo ""
+
+    if $AUTO_YES; then
+        info "Configuring all detected clients (--yes)"
+        for client in "${DETECTED_CLIENTS[@]}"; do
+            configure_client "$client" || true
+        done
+        return 0
+    fi
+
+    local action="Configure"
+    if $UNINSTALL; then action="Remove AMFS from"; fi
+
+    printf "${BOLD}$action all detected clients? [Y/n/list]:${NC} "
+    read -r answer </dev/tty 2>/dev/null || answer="y"
+
+    case "${answer,,}" in
+        ""|y|yes)
+            for client in "${DETECTED_CLIENTS[@]}"; do
+                configure_client "$client" || true
+            done
+            ;;
+        n|no)
+            info "Skipped client configuration."
+            echo ""
+            echo "You can manually add this to your MCP client config:"
+            echo ""
+            resolve_uvx_path
+            printf '  "amfs": '
+            build_mcp_json | sed 's/^/  /'
+            echo ""
+            ;;
+        *)
+            echo ""
+            printf "Enter client numbers separated by spaces (e.g. 1 3): "
+            read -r selections </dev/tty 2>/dev/null || selections=""
+            for sel in $selections; do
+                local idx=$((sel - 1))
+                if [[ $idx -ge 0 && $idx -lt ${#DETECTED_CLIENTS[@]} ]]; then
+                    configure_client "${DETECTED_CLIENTS[$idx]}" || true
+                else
+                    warn "Invalid selection: $sel"
+                fi
+            done
+            ;;
+    esac
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+main() {
+    echo ""
+    printf "${BOLD}AMFS MCP Installer${NC}\n"
+    echo "──────────────────"
+    echo ""
+
+    if $UNINSTALL; then
+        info "Uninstall mode"
+        if [[ -n "$CLIENT_FLAG" ]]; then
+            if [[ "$CLIENT_FLAG" == "all" ]]; then
+                detect_clients
+                for client in "${DETECTED_CLIENTS[@]}"; do
+                    configure_client "$client" || true
+                done
+            else
+                configure_client "$CLIENT_FLAG"
+            fi
+        else
+            prompt_clients
+        fi
+        echo ""
+        success "AMFS MCP config removed. Restart your IDE to apply."
+        return 0
+    fi
+
+    # Step 1: uv
+    ensure_uv
+    echo ""
+
+    # Step 2: amfs-mcp-server
+    ensure_amfs_mcp
+    echo ""
+
+    # Step 3: Configure clients
+    if [[ -n "$CLIENT_FLAG" ]]; then
+        if [[ "$CLIENT_FLAG" == "all" ]]; then
+            detect_clients
+            for client in "${DETECTED_CLIENTS[@]}"; do
+                configure_client "$client" || true
+            done
+        else
+            configure_client "$CLIENT_FLAG"
+        fi
+    else
+        prompt_clients || true
+    fi
+
+    echo ""
+    echo "──────────────────"
+    success "Done! Restart your IDE/app to connect to AMFS."
+    echo ""
+
+    if [[ -n "$API_KEY" ]]; then
+        info "Connected to AMFS SaaS (${API_URL:-$AMFS_DEFAULT_API_URL})"
+    else
+        info "Using local filesystem storage (~/.amfs/)"
+        echo "  To connect to AMFS SaaS, re-run with --api-key <key>"
+    fi
+    echo ""
+}
+
+main
