@@ -9,13 +9,55 @@ description: "Set up AMFS as shared memory for AI coding agents in Cursor and Cl
 # MCP Setup
 {: .no_toc }
 
-AMFS provides a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that gives AI coding agents persistent, shared memory. This guide covers setup for Cursor, Claude Code, and any MCP-compatible client.
+AMFS provides a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that gives AI coding agents persistent, shared memory. This guide covers setup for Cursor, Claude Code, Claude Desktop, and any MCP-compatible client.
 
 ## Table of Contents
 {: .no_toc .text-delta }
 
 1. TOC
 {:toc}
+
+---
+
+## Quick Install
+
+The fastest way to set up AMFS MCP — one command that installs everything and configures your IDE automatically:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.sh | bash
+```
+
+This will:
+1. Install [`uv`](https://docs.astral.sh/uv/) if you don't have it
+2. Install the `amfs-mcp-server` package
+3. Detect your installed MCP clients (Cursor, Claude Desktop, Claude Code, Windsurf, VS Code) and configure them
+
+### Connecting to AMFS SaaS
+
+Pass your API key to connect to hosted AMFS:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.sh | bash -s -- --api-key <your-key>
+```
+
+### Non-interactive / CI
+
+```bash
+# Configure a specific client
+curl -sSL ... | bash -s -- --client cursor
+curl -sSL ... | bash -s -- --client claude-desktop --api-key sk-xxx
+
+# Configure all detected clients without prompts
+curl -sSL ... | bash -s -- --client all -y
+
+# Uninstall
+curl -sSL ... | bash -s -- --uninstall
+```
+
+Supported `--client` values: `claude-desktop`, `cursor`, `claude-code`, `windsurf`, `vscode`, `all`.
+
+{: .note }
+Prefer the quick installer above. The manual sections below are for advanced setups or unsupported clients.
 
 ---
 
@@ -404,8 +446,12 @@ The guide is a single self-contained markdown document that works with any agent
 
 ## Troubleshooting
 
-**"amfs-mcp-server not found"**
-Run `uv sync` in the AMFS directory and verify the path in your MCP config.
+**"Could not attach to MCP server" / "No such file or directory" / "amfs-mcp-server not found"**
+This almost always means `uv`/`uvx` is not installed or not on your PATH. The easiest fix is the one-line installer:
+```bash
+curl -sSL https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.sh | bash
+```
+If you prefer to fix it manually: install [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), then restart your IDE. If `uv` is already installed but your IDE can't find it, use the full absolute path in your config (run `which uvx` to find it).
 
 **Agent doesn't use memory tools**
 The MCP server embeds agent instructions automatically. If agents still don't use memory tools, verify the MCP server is connected (check for "amfs" in your IDE's MCP panel). For extra reinforcement, you can add `.cursor/rules/amfs-memory.mdc` or `CLAUDE.md` to your project.

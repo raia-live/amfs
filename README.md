@@ -87,7 +87,7 @@ docker run -p 8080:8080 -v amfs-data:/data ghcr.io/raia-live/amfs
 | **Causal Explainability** | `explain()` shows exactly which memories and external contexts drove a decision. |
 | **Knowledge Graph** | Relationships between entities, agents, and outcomes auto-materialize from normal operations. |
 | **Hybrid Search** | Full-text + semantic + recency + confidence in a single ranked result set. |
-| **MCP Server** | First-class support for Cursor, Claude Code, and any MCP client. [Setup →](https://raia-live.github.io/amfs/guides/mcp/) · [Cursor plugin](https://github.com/raia-live/cursor-plugin) |
+| **MCP Server** | First-class support for Cursor, Claude Desktop, Claude Code, and any MCP client. One-line install: `curl -sSL .../install-mcp.sh \| bash`. [Setup →](https://raia-live.github.io/amfs/guides/mcp/) · [Cursor plugin](https://github.com/raia-live/cursor-plugin) |
 | **Connectors** | Ingest events from PagerDuty, GitHub, Slack, Jira — or [build your own](https://raia-live.github.io/amfs/guides/connectors/). |
 | **Python & TypeScript** | Same API in both languages. Plus [Strands Agents](https://raia-live.github.io/amfs/guides/strands/), [CrewAI](https://raia-live.github.io/amfs/guides/crewai/), LangGraph, LangChain, AutoGen. |
 
