@@ -1425,6 +1425,12 @@ async def list_agents(
         ):
             agent_data[aid]["first_seen"] = e.provenance.written_at
 
+    # Entry filtering allows room co-members' entries on shared entity
+    # paths, but the agents list must only show the user's own agents.
+    if vis is not None and vis.should_filter():
+        own = vis.get_user_agents()
+        agent_data = {aid: d for aid, d in agent_data.items() if aid in own}
+
     agent_registration: dict[str, dict[str, Any]] = {}
     known_agent_ids = list(agent_data.keys())
     if known_agent_ids:
