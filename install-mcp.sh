@@ -201,7 +201,7 @@ inject_mcp_config() {
         cat > "$config_file" <<NEWJSON
 {
     "mcpServers": {
-        "amfs": $amfs_block
+        "senselab": $amfs_block
     }
 }
 NEWJSON
@@ -224,7 +224,7 @@ with open(config_path, 'r') as f:
 if 'mcpServers' not in config:
     config['mcpServers'] = {}
 
-config['mcpServers']['amfs'] = amfs_block
+config['mcpServers']['senselab'] = amfs_block
 
 with open(config_path, 'w') as f:
     json.dump(config, f, indent=4)
@@ -250,8 +250,8 @@ with open(config_path, 'r') as f:
     except json.JSONDecodeError:
         sys.exit(0)
 
-if 'mcpServers' in config and 'amfs' in config['mcpServers']:
-    del config['mcpServers']['amfs']
+if 'mcpServers' in config and 'senselab' in config['mcpServers']:
+    del config['mcpServers']['senselab']
     with open(config_path, 'w') as f:
         json.dump(config, f, indent=4)
         f.write('\n')
@@ -323,7 +323,7 @@ configure_client() {
         claude-code)
             if $UNINSTALL; then
                 if command -v claude &>/dev/null; then
-                    claude mcp remove amfs 2>/dev/null || true
+                    claude mcp remove senselab 2>/dev/null || true
                     success "Removed AMFS from Claude Code"
                 fi
             else
@@ -334,10 +334,10 @@ configure_client() {
                 resolve_uvx_path
                 local pkg="amfs-mcp-server"
                 if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
-                local args=("mcp" "add" "amfs" "--" "$UVX_PATH" "$pkg")
+                local args=("mcp" "add" "senselab" "--" "$UVX_PATH" "$pkg")
                 if [[ -n "$API_KEY" ]]; then
                     local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
-                    args=("mcp" "add" "amfs" "-e" "AMFS_HTTP_URL=$url" "-e" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "$pkg")
+                    args=("mcp" "add" "senselab" "-e" "AMFS_HTTP_URL=$url" "-e" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "$pkg")
                 fi
                 claude "${args[@]}"
                 success "Configured Claude Code"
@@ -383,7 +383,7 @@ prompt_clients() {
         echo "You can manually add this to your MCP client config:"
         echo ""
         resolve_uvx_path
-        printf '  "amfs": '
+        printf '  "senselab": '
         build_mcp_json | sed 's/^/  /'
         echo ""
         return 1
@@ -426,7 +426,7 @@ prompt_clients() {
             echo "You can manually add this to your MCP client config:"
             echo ""
             resolve_uvx_path
-            printf '  "amfs": '
+            printf '  "senselab": '
             build_mcp_json | sed 's/^/  /'
             echo ""
             ;;
