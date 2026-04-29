@@ -644,6 +644,7 @@ async def merge_base(
 
 @app.get("/api/v1/agents/{agent_id:path}/profile")
 async def get_agent_profile(
+    request: Request,
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -653,6 +654,10 @@ async def get_agent_profile(
     agent's actual activity — entity paths become auto-inferred capabilities
     and memory-type distribution is included.
     """
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter() and not vis.is_agent_visible(agent_id):
+        raise HTTPException(status_code=404, detail="Agent not found")
+
     mem = _get_memory()
     agent = mem._adapter.get_agent(agent_id, namespace=mem.namespace)
 
@@ -1471,10 +1476,15 @@ async def list_agents(
 
 @app.get("/api/v1/agents/{agent_id:path}/memory-graph")
 async def agent_memory_graph(
+    request: Request,
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """All entries written by or read by this agent, grouped by entity."""
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter() and not vis.is_agent_visible(agent_id):
+        raise HTTPException(status_code=404, detail="Agent not found")
+
     mem = _get_memory()
     entries = mem.list()
     traces = mem._adapter.list_traces(agent_id=agent_id, limit=10000)
@@ -1563,10 +1573,15 @@ async def agent_memory_graph(
 
 @app.get("/api/v1/agents/{agent_id:path}/cross-agent-reads")
 async def agent_cross_reads(
+    request: Request,
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Which other agents' memory this agent has read."""
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter() and not vis.is_agent_visible(agent_id):
+        raise HTTPException(status_code=404, detail="Agent not found")
+
     mem = _get_memory()
     entries = mem.list()
     traces = mem._adapter.list_traces(agent_id=agent_id, limit=10000)
@@ -1609,6 +1624,7 @@ async def agent_cross_reads(
 
 @app.get("/api/v1/agents/{agent_id:path}/recall/{entity_path:path}/{key}")
 async def agent_recall(
+    request: Request,
     agent_id: str,
     entity_path: str,
     key: str,
@@ -1619,6 +1635,10 @@ async def agent_recall(
     Unlike the generic read endpoint, this returns only entries written
     by the specified agent — what that agent's brain actually knows.
     """
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter() and not vis.is_agent_visible(agent_id):
+        raise HTTPException(status_code=404, detail="Agent not found")
+
     mem = _get_memory()
     original_agent = mem._tagger.agent_id
     mem._tagger.agent_id = agent_id
@@ -1634,11 +1654,16 @@ async def agent_recall(
 
 @app.get("/api/v1/agents/{agent_id:path}/entries")
 async def agent_entries(
+    request: Request,
     agent_id: str,
     entity_path: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """List all entries written by a specific agent."""
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter() and not vis.is_agent_visible(agent_id):
+        raise HTTPException(status_code=404, detail="Agent not found")
+
     mem = _get_memory()
     entries = mem.search(entity_path=entity_path, agent_id=agent_id)
     return {
@@ -1650,6 +1675,7 @@ async def agent_entries(
 
 @app.get("/api/v1/agents/{agent_id:path}/read-from/{source_agent_id}/{entity_path:path}/{key}")
 async def agent_read_from(
+    request: Request,
     agent_id: str,
     source_agent_id: str,
     entity_path: str,
@@ -1657,6 +1683,11 @@ async def agent_read_from(
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Read a specific key from another agent's memory (cross-agent read)."""
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter() and not vis.is_agent_visible(source_agent_id):
+        return {"status": "not_found", "sourceAgentId": source_agent_id,
+                "entityPath": entity_path, "key": key}
+
     mem = _get_memory()
     entries = mem.search(entity_path=entity_path, agent_id=source_agent_id)
     matching = [e for e in entries if e.key == key]
@@ -1668,11 +1699,16 @@ async def agent_read_from(
 
 @app.get("/api/v1/agents/{agent_id:path}/activity")
 async def agent_activity(
+    request: Request,
     agent_id: str,
     limit: int = Query(100),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Timeline of writes, outcomes, reads, and other events for this agent."""
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter() and not vis.is_agent_visible(agent_id):
+        raise HTTPException(status_code=404, detail="Agent not found")
+
     mem = _get_memory()
     entries = [
         e for e in mem.list()
@@ -1726,6 +1762,7 @@ async def agent_activity(
 
 @app.get("/api/v1/agents/{agent_id:path}/timeline")
 async def agent_timeline(
+    request: Request,
     agent_id: str,
     event_type: str | None = Query(None),
     since: str | None = Query(None),
@@ -1734,6 +1771,10 @@ async def agent_timeline(
 ) -> dict[str, Any]:
     """Git-like event log for an agent — every write, outcome, and
     cross-agent read is recorded as an event on the agent's timeline."""
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter() and not vis.is_agent_visible(agent_id):
+        raise HTTPException(status_code=404, detail="Agent not found")
+
     mem = _get_memory()
     since_dt = datetime.fromisoformat(since) if since else None
     events = mem._adapter.list_events(
