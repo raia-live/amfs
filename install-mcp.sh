@@ -412,8 +412,9 @@ prompt_clients() {
 
     printf "${BOLD}$action all detected clients? [Y/n/list]:${NC} "
     read -r answer </dev/tty 2>/dev/null || answer="y"
+    answer="$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')"
 
-    case "${answer,,}" in
+    case "$answer" in
         ""|y|yes)
             for client in "${DETECTED_CLIENTS[@]}"; do
                 configure_client "$client" || true
