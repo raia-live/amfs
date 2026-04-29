@@ -473,12 +473,25 @@ async def list_entries(
 ) -> dict[str, Any]:
     mem = _get_memory()
     entries = mem.list(entity_path, branch=branch, include_superseded=include_superseded)
+    total_before = len(entries)
 
     vis = _get_visibility_filter(request)
     if vis is not None and vis.should_filter():
         entries = vis.filter_entries(entries)
 
-    return {"entries": [_entry_to_response(e) for e in entries]}
+    user_id = getattr(request.state, "user_id", None)
+    has_dash = bool(request.headers.get("x-amfs-dashboard-secret"))
+    return {
+        "entries": [_entry_to_response(e) for e in entries],
+        "_debug_visibility": {
+            "filter_exists": vis is not None,
+            "should_filter": vis.should_filter() if vis is not None else None,
+            "user_id": str(user_id) if user_id else None,
+            "has_dashboard_headers": has_dash,
+            "total_before": total_before,
+            "total_after": len(entries),
+        },
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────
