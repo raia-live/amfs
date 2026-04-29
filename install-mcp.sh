@@ -118,9 +118,15 @@ ensure_uv() {
 # ── Step 2: Pre-install amfs-mcp-server ──────────────────────────────────────
 
 ensure_amfs_mcp() {
-    info "Installing amfs-mcp-server..."
-    uvx --from amfs-mcp-server amfs-mcp-server --help &>/dev/null || true
-    success "amfs-mcp-server is ready"
+    if [[ -n "$API_KEY" ]]; then
+        info "Installing amfs-mcp-server-pro (SaaS)..."
+        uvx --from amfs-mcp-server-pro amfs-mcp-server-pro --help &>/dev/null || true
+        success "amfs-mcp-server-pro is ready"
+    else
+        info "Installing amfs-mcp-server..."
+        uvx --from amfs-mcp-server amfs-mcp-server --help &>/dev/null || true
+        success "amfs-mcp-server is ready"
+    fi
 }
 
 # ── Client config paths ─────────────────────────────────────────────────────
@@ -157,8 +163,10 @@ resolve_uvx_path() {
 build_mcp_json() {
     resolve_uvx_path
     local env_block="{}"
+    local pkg="amfs-mcp-server"
 
     if [[ -n "$API_KEY" ]]; then
+        pkg="amfs-mcp-server-pro"
         local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
         env_block=$(cat <<ENVJSON
 {
@@ -172,7 +180,7 @@ ENVJSON
     cat <<MCPJSON
 {
         "command": "$UVX_PATH",
-        "args": ["amfs-mcp-server"],
+        "args": ["$pkg"],
         "env": $env_block
     }
 MCPJSON
@@ -324,10 +332,12 @@ configure_client() {
                     return 1
                 fi
                 resolve_uvx_path
-                local args=("mcp" "add" "amfs" "--" "$UVX_PATH" "amfs-mcp-server")
+                local pkg="amfs-mcp-server"
+                if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
+                local args=("mcp" "add" "amfs" "--" "$UVX_PATH" "$pkg")
                 if [[ -n "$API_KEY" ]]; then
                     local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
-                    args=("mcp" "add" "amfs" "-e" "AMFS_HTTP_URL=$url" "-e" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "amfs-mcp-server")
+                    args=("mcp" "add" "amfs" "-e" "AMFS_HTTP_URL=$url" "-e" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "$pkg")
                 fi
                 claude "${args[@]}"
                 success "Configured Claude Code"
@@ -402,8 +412,9 @@ prompt_clients() {
 
     printf "${BOLD}$action all detected clients? [Y/n/list]:${NC} "
     read -r answer </dev/tty 2>/dev/null || answer="y"
+    answer="$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')"
 
-    case "${answer,,}" in
+    case "$answer" in
         ""|y|yes)
             for client in "${DETECTED_CLIENTS[@]}"; do
                 configure_client "$client" || true
