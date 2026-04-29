@@ -93,28 +93,7 @@ docker run -p 8080:8080 -v amfs-data:/data ghcr.io/raia-live/amfs
 
 ## Architecture
 
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│ Agent A      │     │ Agent B      │     │ Agent C      │
-│ (its brain)  │     │ (its brain)  │     │ (its brain)  │
-└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
-       │                   │                   │
-       └───────────┬───────┴───────────────────┘
-                   │
-       ┌───────────┴───────────┐
-       │ AgentMemory           │  ← Python / TypeScript SDK
-       │ (versioned, branched) │
-       └───────────┬───────────┘
-                   │
-       ┌───────────┴───────────┐
-       │ HTTP API / MCP Server │  ← REST + SSE / MCP stdio
-       └───────────┬───────────┘
-                   │
-     ┌─────────┬───┴────┬─────────┐
-     ▼         ▼        ▼         ▼
- Filesystem  Postgres   S3      Custom
-  Adapter    Adapter  Adapter   Adapter
-```
+![AMFS architecture diagram](docs/assets/amfs-architecture.png)
 
 ## OSS vs Pro
 
