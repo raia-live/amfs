@@ -3173,6 +3173,7 @@ async def graph_neighbors(
 
 @app.get("/api/v1/pro/graph/expertise")
 async def expertise_graph(
+    request: Request,
     agent_id: str | None = Query(None),
     limit_agents: int = Query(30, ge=1, le=200),
     limit_entities: int = Query(30, ge=1, le=200),
@@ -3187,6 +3188,14 @@ async def expertise_graph(
     mem = _get_memory()
     entries = mem.list()
 
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter():
+        entries = vis.filter_entries(entries)
+
+    visible_agents: set[str] | None = None
+    if vis is not None and vis.should_filter():
+        visible_agents = vis.get_user_agents()
+
     agent_entity_weights: dict[str, dict[str, int]] = {}
     agent_totals: dict[str, int] = {}
     entity_totals: dict[str, int] = {}
@@ -3194,6 +3203,8 @@ async def expertise_graph(
     for e in entries:
         aid = e.provenance.agent_id
         if agent_id and aid != agent_id:
+            continue
+        if visible_agents is not None and aid not in visible_agents:
             continue
         ep = e.entity_path
         agent_totals[aid] = agent_totals.get(aid, 0) + 1
