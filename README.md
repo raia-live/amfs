@@ -1,23 +1,35 @@
-# AMFS — Agent Memory File System
+<p align="center">
+  <img src="docs/assets/amfs-architecture.png" alt="SenseLab AMFS — Agent Management File System" width="700" />
+</p>
 
-[![Python Tests](https://github.com/raia-live/amfs/actions/workflows/test-python.yml/badge.svg)](https://github.com/raia-live/amfs/actions/workflows/test-python.yml)
-[![TypeScript Tests](https://github.com/raia-live/amfs/actions/workflows/test-typescript.yml/badge.svg)](https://github.com/raia-live/amfs/actions/workflows/test-typescript.yml)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+<h1 align="center">SenseLab AMFS — Agent Management File System</h1>
 
-**GitHub for agent memory.** Every agent gets a brain — its own repo of what it knows. Branch it, diff it, open a PR, review the changes, merge. Roll back to any point. The mental model is already in every developer's head.
+<p align="center">
+  <strong>Git for agent memory. Every agent gets a brain — version-controlled, diffable, reviewable.</strong>
+</p>
 
-**[Documentation](https://raia-live.github.io/amfs/)** · **[Roadmap](https://github.com/orgs/raia-live/projects/2)** · **[Contributing](https://raia-live.github.io/amfs/contributing/)**
+<p align="center">
+  <a href="https://github.com/raia-live/amfs/actions/workflows/test-python.yml"><img src="https://github.com/raia-live/amfs/actions/workflows/test-python.yml/badge.svg" alt="Python Tests" /></a>
+  <a href="https://github.com/raia-live/amfs/actions/workflows/test-typescript.yml"><img src="https://github.com/raia-live/amfs/actions/workflows/test-typescript.yml/badge.svg" alt="TypeScript Tests" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0" /></a>
+  <a href="https://pypi.org/project/amfs/"><img src="https://img.shields.io/pypi/v/amfs?color=green" alt="PyPI" /></a>
+  <a href="https://www.npmjs.com/package/@senselab-ai/amfs"><img src="https://img.shields.io/npm/v/@senselab-ai/amfs?color=green" alt="npm" /></a>
+</p>
 
-## The Problem
+<p align="center">
+  <a href="https://raia-live.github.io/amfs/">Documentation</a> · <a href="https://raia-live.github.io/amfs/getting-started/quickstart/">Quick Start</a> · <a href="https://github.com/orgs/raia-live/projects/2">Roadmap</a> · <a href="https://raia-live.github.io/amfs/contributing/">Contributing</a>
+</p>
 
-When agents share memory today, it's chaos — last write wins, no branching, no review, no rollback. It's like coding without Git. Every team that tried that eventually hit a wall. Agent teams are hitting that wall right now.
+---
+
+## Why AMFS?
+
+When agents share memory today, it's chaos — last write wins, no branching, no review, no rollback. It's like coding without Git.
 
 The solution isn't "better permissions" or "smarter retrieval." It's giving agents the same collaboration model developers already live in: **version control for knowledge**.
 
-## How AMFS Works
-
 ```
-Every developer knows this:          AMFS does the same for agent memory:
+You already know this:               AMFS does the same for agent memory:
 
   repo                                 agent brain
   ├── main branch                      ├── main (what the agent knows)
@@ -29,7 +41,7 @@ Every developer knows this:          AMFS does the same for agent memory:
   └── git revert                       └── rollback (restore to any point)
 ```
 
-Every write is a versioned commit. Every agent has provenance (who wrote what, when). Changes stay isolated on branches until the owner reviews the diff and merges. You can roll back to any point. You can fork an agent's entire brain to a new agent.
+Every write is a versioned commit. Every agent has provenance. Changes stay isolated on branches until reviewed. Roll back to any point. Fork an entire brain to a new agent.
 
 ## Quick Start
 
@@ -54,9 +66,9 @@ entry = mem.read("checkout-service", "retry-pattern")
 mem.commit_outcome("INC-1042", OutcomeType.CRITICAL_FAILURE)
 ```
 
-**[Full quick start guide →](https://raia-live.github.io/amfs/getting-started/quickstart/)**
+> **[Full quick start guide →](https://raia-live.github.io/amfs/getting-started/quickstart/)**
 
-## Install
+## Installation
 
 ```bash
 pip install amfs                    # Python SDK
@@ -74,46 +86,42 @@ Or run with Docker:
 docker run -p 8080:8080 -v amfs-data:/data ghcr.io/raia-live/amfs
 ```
 
-## What You Get
+## Features
 
-| | |
-|:--|:--|
-| **Git-like Timeline** | Every write, outcome, and cross-agent read is logged as an event. Full history, always. |
-| **Branching & PRs** | Create branches, diff changes, open pull requests, merge or discard. Pro feature — [details →](https://raia-live.github.io/amfs/editions/) |
-| **Rollback & Tags** | Create named snapshots. Roll back to any tag or event. Pro feature. |
-| **Access Control** | Grant read or read/write access per branch, per user, team, or API key. Pro feature. |
-| **Versioned Knowledge** | Copy-on-Write — every write creates a new version. Nothing is lost. `history()` to replay. |
+| Feature | Description |
+|:--------|:------------|
+| **Git-like Timeline** | Every write, outcome, and cross-agent read is logged. Full history, always. |
+| **Branching & PRs** | Create branches, diff changes, open pull requests, merge or discard. |
+| **Rollback & Tags** | Named snapshots. Restore to any tag or event. |
+| **Access Control** | Grant read or read/write per branch, user, team, or API key. |
+| **Versioned Knowledge** | Copy-on-Write — every write creates a new version. Nothing is lost. |
 | **Confidence & Outcomes** | Entries carry trust scores that evolve when deploys succeed or incidents happen. |
-| **Causal Explainability** | `explain()` shows exactly which memories and external contexts drove a decision. |
-| **Knowledge Graph** | Relationships between entities, agents, and outcomes auto-materialize from normal operations. |
+| **Causal Explainability** | `explain()` shows exactly which memories and contexts drove a decision. |
+| **Knowledge Graph** | Relationships auto-materialize from normal operations. |
 | **Hybrid Search** | Full-text + semantic + recency + confidence in a single ranked result set. |
-| **MCP Server** | First-class support for Cursor, Claude Desktop, Claude Code, and any MCP client. One-line install: `curl -sSL .../install-mcp.sh \| bash`. [Setup →](https://raia-live.github.io/amfs/guides/mcp/) · [Cursor plugin](https://github.com/raia-live/cursor-plugin) |
-| **Connectors** | Ingest events from PagerDuty, GitHub, Slack, Jira — or [build your own](https://raia-live.github.io/amfs/guides/connectors/). |
-| **Python & TypeScript** | Same API in both languages. Plus [Strands Agents](https://raia-live.github.io/amfs/guides/strands/), [CrewAI](https://raia-live.github.io/amfs/guides/crewai/), LangGraph, LangChain, AutoGen. |
+| **MCP Server** | First-class support for Cursor, Claude Desktop, Claude Code, and any MCP client. |
+| **Connectors** | PagerDuty, GitHub, Slack, Jira — or [build your own](https://raia-live.github.io/amfs/guides/connectors/). |
+| **Python & TypeScript** | Same API in both languages. Plus [Strands](https://raia-live.github.io/amfs/guides/strands/), [CrewAI](https://raia-live.github.io/amfs/guides/crewai/), LangGraph, LangChain, AutoGen. |
 
-## Architecture
+## MCP Integration
 
-![AMFS architecture diagram](docs/assets/amfs-architecture.png)
+One command to give any MCP-compatible client (Cursor, Claude Desktop, Claude Code) persistent agent memory:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.sh | bash
+```
+
+> **[MCP setup guide →](https://raia-live.github.io/amfs/guides/mcp/)** · **[Cursor plugin →](https://github.com/raia-live/cursor-plugin)**
 
 ## OSS vs Pro
 
-AMFS is open source under [Apache 2.0](LICENSE). The OSS edition gives you the full memory engine — versioned writes, confidence scoring, outcome feedback, causal traces, knowledge graph, hybrid search, git-like timeline on `main`, SDKs, adapters, HTTP API, MCP server, and CLI.
+AMFS is open source under [Apache 2.0](LICENSE). The OSS edition gives you the full memory engine — versioned writes, confidence scoring, outcome feedback, causal traces, knowledge graph, hybrid search, git-like timeline, SDKs, adapters, HTTP API, MCP server, and CLI.
 
-**[AMFS Pro](https://raia-live.github.io/amfs/editions/)** unlocks the full Git model: branching, merge, pull requests, access control, tags, rollback, cherry-pick, and fork. Plus multi-tenant SaaS isolation, immutable decision traces, automated pattern detection, an intelligence layer, and a web dashboard.
+**[AMFS Pro](https://raia-live.github.io/amfs/editions/)** unlocks the full Git model: branching, merge, pull requests, access control, tags, rollback, cherry-pick, fork, multi-tenant isolation, immutable decision traces, automated pattern detection, an intelligence layer, and a web dashboard.
 
-Think of it this way: OSS gives you a single-branch repo with full history. Pro gives you GitHub.
-
-**Stripe, hosted billing, and the proprietary control-plane service** are implemented in the private SenseLab **`amfs-internal`** repository, not in this open-source tree.
+> OSS = single-branch repo with full history. Pro = GitHub.
 
 **[Full comparison →](https://raia-live.github.io/amfs/editions/)**
-
-## Documentation
-
-**[raia-live.github.io/amfs](https://raia-live.github.io/amfs/)** — Getting started, core concepts, SDK guides, adapter docs, integrations, API reference, and more.
-
-## Roadmap
-
-Track what's been delivered and what's coming next on the **[AMFS Roadmap board](https://github.com/orgs/raia-live/projects/2)**.
 
 ## Development
 
@@ -123,8 +131,14 @@ uv pip install -e packages/core -e packages/adapters/filesystem -e packages/sdk-
 uv run pytest tests/ -v
 ```
 
-**[Contributing guide →](https://raia-live.github.io/amfs/contributing/)**
+> **[Contributing guide →](https://raia-live.github.io/amfs/contributing/)**
+
+## Community
+
+- [GitHub Discussions](https://github.com/raia-live/amfs/discussions) — questions, ideas, show & tell
+- [Roadmap](https://github.com/orgs/raia-live/projects/2) — what's shipped and what's next
+- [Issues](https://github.com/raia-live/amfs/issues) — bug reports and feature requests
 
 ## License
 
-[Apache License 2.0](LICENSE)
+[Apache License 2.0](LICENSE) — free for commercial use, modification, and distribution.
