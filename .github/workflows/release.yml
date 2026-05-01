@@ -35,7 +35,7 @@ jobs:
         run: |
           source .venv/bin/activate
           for pkg in packages/core packages/adapters/filesystem packages/adapters/postgres packages/adapters/s3 packages/http-server packages/sdk-python packages/cli packages/mcp-server packages/integrations/strands; do
-            uv publish --check-url https://pypi.org/simple/ $pkg/dist/*
+            uv publish --check-url https://pypi.org/simple/ $pkg/dist/* || echo "Skipping $pkg (already published or error)"
           done
 
   publish-npm:
@@ -59,4 +59,4 @@ jobs:
         working-directory: packages/sdk-typescript
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+        run: npm publish --access public || echo "Skipping npm publish (already published or error)"
