@@ -479,30 +479,7 @@ async def list_entries(
     if vis is not None and vis.should_filter():
         entries = vis.filter_entries(entries)
 
-    user_id = getattr(request.state, "user_id", None)
-    has_dash = bool(request.headers.get("x-amfs-dashboard-secret"))
-    debug: dict[str, Any] = {
-        "filter_exists": vis is not None,
-        "should_filter": vis.should_filter() if vis is not None else None,
-        "user_id": str(user_id) if user_id else None,
-        "has_dashboard_headers": has_dash,
-        "total_before": total_before,
-        "total_after": len(entries),
-    }
-    if vis is not None and vis.should_filter():
-        try:
-            debug["user_agents"] = sorted(vis.get_user_agents())
-        except Exception:
-            debug["user_agents_error"] = True
-        try:
-            rm = vis.get_room_map()
-            debug["room_map"] = {k: sorted(v) for k, v in rm.items()}
-        except Exception:
-            debug["room_map_error"] = True
-    return {
-        "entries": [_entry_to_response(e) for e in entries],
-        "_debug_visibility": debug,
-    }
+    return {"entries": [_entry_to_response(e) for e in entries]}
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -14,12 +14,19 @@ logger = logging.getLogger(__name__)
 def apply_tenant_headers_from_request(request: Request) -> None:
     """If proxy secret + account id headers match env, set thread-local tenant for DB RLS.
 
-    When valid dashboard proxy headers are present, they ALWAYS take
-    precedence — even if a prior middleware (e.g. Pro scope) already set
-    the thread-local tenant.  The dashboard proxy carries the actual
-    end-user's account ID, which must override whatever account the
-    service API key resolved to.
+    When the Pro scope-enforcement middleware (amfs_tenant) has already
+    resolved a TenantContext it also sets the thread-local RLS variables
+    to the API key's account — which is the account that actually owns
+    the stored entries.  Overriding those values with the dashboard
+    user's account/team headers would cause RLS to hide all entries
+    whenever the service API key's account differs from the logged-in
+    user's account (or when team IDs don't match).
+
+    So: skip entirely when tenant_ctx is already present.
     """
+    if getattr(request.state, "tenant_ctx", None) is not None:
+        return
+
     try:
         from amfs_postgres.tenant_context import (
             set_tls_tenant_account_id,
