@@ -54,16 +54,13 @@ def apply_tenant_headers_from_request(request: Request) -> bool:
     set_tls_tenant_account_id(raw)
     request.state.account_id = UUID(raw)
 
-    team_raw = request.headers.get("X-AMFS-Dashboard-Team-Id")
-    if team_raw:
-        try:
-            UUID(team_raw)
-            set_tls_tenant_team_id(team_raw)
-        except ValueError:
-            logger.warning("Invalid X-AMFS-Dashboard-Team-Id header")
-
-    is_admin = request.headers.get("X-AMFS-Dashboard-Is-Admin") == "true"
-    set_tls_is_account_admin(is_admin)
+    # Never propagate team_id from the dashboard user's session.
+    # The logged-in user's team can differ from the team that owns the
+    # agents and entries in the shared account (e.g. invited users).
+    # Setting a mismatched team_id causes RLS to hide all data.
+    # Per-user scoping is handled by UserVisibilityFilter, not team RLS.
+    set_tls_tenant_team_id(None)
+    set_tls_is_account_admin(False)
 
     user_id_raw = request.headers.get("X-AMFS-Dashboard-User-Id")
     if user_id_raw:
