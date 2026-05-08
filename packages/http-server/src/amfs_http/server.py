@@ -472,6 +472,18 @@ async def list_entries(
     include_superseded: bool = Query(False),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    try:
+        from amfs_postgres.tenant_context import get_request_tenant_account_id
+        _tls_acct = get_request_tenant_account_id()
+    except ImportError:
+        _tls_acct = "NO_MODULE"
+    _state_acct = getattr(request.state, "account_id", None)
+    _state_user = getattr(request.state, "user_id", None)
+    _has_ctx = getattr(request.state, "tenant_ctx", None) is not None
+    logger.warning(
+        "[TLS-DIAG] /entries tls_account=%s state_account=%s state_user=%s has_tenant_ctx=%s",
+        _tls_acct, _state_acct, _state_user, _has_ctx,
+    )
     mem = _get_memory()
     entries = mem.list(entity_path, branch=branch, include_superseded=include_superseded)
     total_before = len(entries)
@@ -1407,6 +1419,18 @@ async def list_agents(
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """List all known agents with entry counts and last activity."""
+    try:
+        from amfs_postgres.tenant_context import get_request_tenant_account_id
+        _tls_acct = get_request_tenant_account_id()
+    except ImportError:
+        _tls_acct = "NO_MODULE"
+    _state_acct = getattr(request.state, "account_id", None)
+    _state_user = getattr(request.state, "user_id", None)
+    _has_ctx = getattr(request.state, "tenant_ctx", None) is not None
+    logger.warning(
+        "[TLS-DIAG] /agents tls_account=%s state_account=%s state_user=%s has_tenant_ctx=%s",
+        _tls_acct, _state_acct, _state_user, _has_ctx,
+    )
     mem = _get_memory()
     entries = mem.list()
 

@@ -1,0 +1,16 @@
+{
+  "name": "amfs-ecomm-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "npx tsx run-demo.ts"
+  },
+  "dependencies": {
+    "@senselab-ai/amfs": "file:../packages/sdk-typescript"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.19",
+    "typescript": "^5.4"
+  }
+}

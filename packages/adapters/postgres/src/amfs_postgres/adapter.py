@@ -96,6 +96,8 @@ class _TenantRLSConnection:
       requests.
     """
 
+    _log_counter = 0
+
     def __init__(self, inner_ctx: Any) -> None:
         self._inner_ctx = inner_ctx
 
@@ -110,6 +112,15 @@ class _TenantRLSConnection:
         tid = get_request_tenant_account_id()
         team_id = get_request_tenant_team_id()
         is_admin = get_request_is_account_admin()
+
+        _TenantRLSConnection._log_counter += 1
+        if _TenantRLSConnection._log_counter <= 20 or not tid:
+            import logging as _logging
+            _logging.getLogger("amfs_postgres.adapter").warning(
+                "[RLS-CONN] account_id=%s team_id=%s is_admin=%s",
+                tid, team_id, is_admin,
+            )
+
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT set_config('amfs.current_account_id', %s, false)",
