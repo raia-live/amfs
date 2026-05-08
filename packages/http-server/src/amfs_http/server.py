@@ -479,6 +479,16 @@ async def list_entries(
     vis = _get_visibility_filter(request)
     if vis is not None and vis.should_filter():
         entries = vis.filter_entries(entries)
+        logger.warning(
+            "[ENTRIES] entity_path=%s mem.list=%d after_filter=%d user_agents=%s",
+            entity_path, total_before, len(entries),
+            sorted(vis.get_user_agents()) if vis else "N/A",
+        )
+    else:
+        logger.warning(
+            "[ENTRIES] entity_path=%s mem.list=%d NO_FILTER vis=%s",
+            entity_path, total_before, vis,
+        )
 
     return {"entries": [_entry_to_response(e) for e in entries]}
 
@@ -1402,7 +1412,17 @@ async def list_agents(
 
     vis = _get_visibility_filter(request)
     if vis is not None and vis.should_filter():
+        pre_filter = len(entries)
         entries = vis.filter_entries(entries)
+        logger.warning(
+            "[AGENTS] mem.list=%d after_entry_filter=%d user_agents=%s",
+            pre_filter, len(entries), sorted(vis.get_user_agents()),
+        )
+    else:
+        logger.warning(
+            "[AGENTS] mem.list=%d NO_FILTER vis=%s",
+            len(entries), vis,
+        )
 
     agent_data: dict[str, dict[str, Any]] = {}
     for e in entries:
@@ -1427,11 +1447,14 @@ async def list_agents(
         ):
             agent_data[aid]["first_seen"] = e.provenance.written_at
 
-    # Entry filtering allows room co-members' entries on shared entity
-    # paths, but the agents list must only show the user's own agents.
     if vis is not None and vis.should_filter():
         own = vis.get_user_agents()
+        before_own_filter = list(agent_data.keys())
         agent_data = {aid: d for aid, d in agent_data.items() if aid in own}
+        logger.warning(
+            "[AGENTS] own_filter: before=%s after=%s own_set=%s",
+            sorted(before_own_filter), sorted(agent_data.keys()), sorted(own),
+        )
 
     agent_registration: dict[str, dict[str, Any]] = {}
     known_agent_ids = list(agent_data.keys())
