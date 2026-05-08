@@ -11,7 +11,7 @@ from starlette.requests import Request
 logger = logging.getLogger(__name__)
 
 
-def apply_tenant_headers_from_request(request: Request) -> None:
+def apply_tenant_headers_from_request(request: Request) -> bool:
     """If proxy secret + account id headers match env, set thread-local tenant for DB RLS.
 
     When the Pro scope-enforcement middleware (amfs_tenant) has already
@@ -23,9 +23,11 @@ def apply_tenant_headers_from_request(request: Request) -> None:
     user's account (or when team IDs don't match).
 
     So: skip entirely when tenant_ctx is already present.
+
+    Returns True if this function set TLS variables (caller must clear them).
     """
     if getattr(request.state, "tenant_ctx", None) is not None:
-        return
+        return False
 
     try:
         from amfs_postgres.tenant_context import (
@@ -34,21 +36,21 @@ def apply_tenant_headers_from_request(request: Request) -> None:
             set_tls_is_account_admin,
         )
     except ImportError:
-        return
+        return False
 
     secret = os.environ.get("AMFS_DASHBOARD_PROXY_SECRET", "")
     if not secret:
-        return
+        return False
     if request.headers.get("X-AMFS-Dashboard-Secret") != secret:
-        return
+        return False
     raw = request.headers.get("X-AMFS-Dashboard-Account-Id")
     if not raw:
-        return
+        return False
     try:
         UUID(raw)
     except ValueError:
         logger.warning("Invalid X-AMFS-Dashboard-Account-Id header")
-        return
+        return False
     set_tls_tenant_account_id(raw)
     request.state.account_id = UUID(raw)
 
@@ -69,6 +71,8 @@ def apply_tenant_headers_from_request(request: Request) -> None:
             request.state.user_id = UUID(user_id_raw)
         except ValueError:
             logger.warning("Invalid X-AMFS-Dashboard-User-Id header")
+
+    return True
 
 
 def clear_tenant_headers() -> None:
