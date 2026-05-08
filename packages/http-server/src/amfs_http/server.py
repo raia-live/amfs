@@ -82,11 +82,12 @@ async def _dashboard_tenant_middleware(request: Request, call_next):
     """Optional X-AMFS-Dashboard-Account-Id + secret → amfs.current_account_id on DB connections."""
     from amfs_http.tenant_middleware import apply_tenant_headers_from_request, clear_tenant_headers
 
-    apply_tenant_headers_from_request(request)
+    did_set = apply_tenant_headers_from_request(request)
     try:
         return await call_next(request)
     finally:
-        clear_tenant_headers()
+        if did_set:
+            clear_tenant_headers()
 
 
 _memory: AgentMemory | None = None
