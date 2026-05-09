@@ -66,6 +66,8 @@ class ReadTracker:
         self._versions[entry.entry_key] = entry.version
         self._entries[entry.entry_key] = {
             "value": entry.value,
+            "confidence": entry.confidence,
+            "version": entry.version,
             "memory_type": entry.memory_type.value if hasattr(entry.memory_type, 'value') else str(entry.memory_type),
             "written_by": entry.provenance.agent_id,
         }

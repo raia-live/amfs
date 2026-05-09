@@ -855,18 +855,29 @@ class AgentMemory:
             if len(parts) != 2:
                 continue
             ep, k = parts
-            entry = self._adapter.read(ep, k)
-            if entry:
-                snapshot = self._read_tracker.entry_snapshot(ek)
+            snapshot = self._read_tracker.entry_snapshot(ek)
+            if snapshot:
                 causal_trace_entries.append(TraceEntry(
                     entity_path=ep, key=k,
-                    version=self._read_tracker.read_version(ek) or entry.version,
-                    confidence=entry.confidence,
-                    value=snapshot.get("value") if snapshot else None,
-                    memory_type=snapshot.get("memory_type") if snapshot else None,
-                    written_by=snapshot.get("written_by") if snapshot else None,
+                    version=self._read_tracker.read_version(ek) or snapshot.get("version", 1),
+                    confidence=snapshot.get("confidence", 1.0),
+                    value=snapshot.get("value"),
+                    memory_type=snapshot.get("memory_type"),
+                    written_by=snapshot.get("written_by"),
                     read_at=self._read_tracker._reads.get(ek),
                 ))
+            else:
+                entry = self._adapter.read(ep, k)
+                if entry:
+                    causal_trace_entries.append(TraceEntry(
+                        entity_path=ep, key=k,
+                        version=self._read_tracker.read_version(ek) or entry.version,
+                        confidence=entry.confidence,
+                        value=entry.value,
+                        memory_type=entry.memory_type.value if entry.memory_type else None,
+                        written_by=entry.written_by,
+                        read_at=self._read_tracker._reads.get(ek),
+                    ))
 
         ext_contexts = [
             ExternalContext(
@@ -931,24 +942,34 @@ class AgentMemory:
         except Exception:
             logger.debug("Failed to persist decision trace", exc_info=True)
 
-        try:
-            self._adapter.log_event(Event(
-                namespace=self.namespace,
-                agent_id=self.agent_id,
-                branch=self._branch,
-                event_type=EventType.OUTCOME,
-                summary=f"Committed outcome '{outcome_ref}' ({outcome_type.value})",
-                details={
-                    "outcome_ref": outcome_ref,
-                    "outcome_type": outcome_type.value,
-                    "causal_entries": len(causal_entry_keys),
-                    "entries_updated": len(updated),
-                },
-            ))
-        except Exception:
-            logger.debug("Failed to log outcome event", exc_info=True)
+        executor = _get_sdk_executor()
+        adapter = self._adapter
+        agent_id = self.agent_id
+        namespace = self.namespace
+        branch = self._branch
+        n_updated = len(updated)
+        n_causal = len(causal_entry_keys)
 
-        self._materialize_causal_edges(outcome_ref, outcome_type, causal_entry_keys)
+        def _bg_log_and_edges() -> None:
+            try:
+                adapter.log_event(Event(
+                    namespace=namespace,
+                    agent_id=agent_id,
+                    branch=branch,
+                    event_type=EventType.OUTCOME,
+                    summary=f"Committed outcome '{outcome_ref}' ({outcome_type.value})",
+                    details={
+                        "outcome_ref": outcome_ref,
+                        "outcome_type": outcome_type.value,
+                        "causal_entries": n_causal,
+                        "entries_updated": n_updated,
+                    },
+                ))
+            except Exception:
+                logger.debug("Failed to log outcome event", exc_info=True)
+            self._materialize_causal_edges(outcome_ref, outcome_type, causal_entry_keys)
+
+        executor.submit(_bg_log_and_edges)
 
         self._last_trace = trace
         return updated
