@@ -94,6 +94,7 @@ async def _dashboard_tenant_middleware(request: Request, call_next):
 _memory: AgentMemory | None = None
 _sse_manager = SSEManager()
 _bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="amfs-bg")
+_known_agents: set[str] = set()
 
 _immutable_trace_store = None
 try:
@@ -418,11 +419,14 @@ async def write_entry(
     original_agent = mem._tagger.agent_id if req.agent_id else None
     if req.agent_id:
         mem._tagger.agent_id = req.agent_id
-        try:
-            mem._adapter.ensure_agent(req.agent_id, mem.namespace)
-        except Exception:
-            pass
-        _ensure_agent_owner(request, req.agent_id, mem.namespace)
+        _agent_cache_key = f"{req.agent_id}:{mem.namespace}"
+        if _agent_cache_key not in _known_agents:
+            try:
+                mem._adapter.ensure_agent(req.agent_id, mem.namespace)
+                _known_agents.add(_agent_cache_key)
+            except Exception:
+                pass
+            _ensure_agent_owner(request, req.agent_id, mem.namespace)
     try:
         entry = mem.write(
             req.entity_path,
