@@ -14,12 +14,14 @@ Run directly::
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import logging
 import os
 import secrets
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -63,10 +65,36 @@ from amfs_http.sse import SSEManager
 
 logger = logging.getLogger(__name__)
 
+# ── Async adapter (hot-path, non-blocking) ──────────────────────────
+_async_adapter = None  # AsyncPostgresAdapter | None, set in lifespan
+
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):  # noqa: ARG001
+    """Open/close the async connection pool for hot-path DB access."""
+    global _async_adapter
+    dsn = os.environ.get("AMFS_POSTGRES_DSN")
+    if dsn and not os.environ.get("AMFS_HTTP_URL"):
+        try:
+            from amfs_postgres.async_adapter import AsyncPostgresAdapter
+            ns = os.environ.get("AMFS_NAMESPACE", "default")
+            _async_adapter = AsyncPostgresAdapter(dsn=dsn, namespace=ns)
+            await _async_adapter.open()
+            logger.info("Async Postgres adapter started (namespace=%s)", ns)
+        except Exception:
+            logger.warning("Failed to start async adapter — falling back to sync", exc_info=True)
+            _async_adapter = None
+    yield
+    if _async_adapter is not None:
+        await _async_adapter.close()
+        logger.info("Async Postgres adapter closed")
+
+
 app = FastAPI(
     title="AMFS HTTP API",
     description="Agent Memory File System — REST API with SSE support",
     version="0.1.0",
+    lifespan=_lifespan,
 )
 
 app.add_middleware(
@@ -352,8 +380,13 @@ async def read_entry(
     branch: str = Query("main"),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    mem = _get_memory()
-    entry = mem.read(entity_path, key, branch=branch)
+    if _async_adapter is not None:
+        entry = await _async_adapter.read(entity_path, key, branch=branch)
+        if entry is not None:
+            asyncio.create_task(_async_adapter.increment_recall_count(entity_path, key, branch=branch))
+    else:
+        mem = _get_memory()
+        entry = mem.read(entity_path, key, branch=branch)
     if entry is None:
         return {"status": "not_found", "entity_path": entity_path, "key": key}
 
@@ -419,103 +452,171 @@ async def write_entry(
     original_agent = mem._tagger.agent_id if req.agent_id else None
     if req.agent_id:
         mem._tagger.agent_id = req.agent_id
-        _agent_cache_key = f"{req.agent_id}:{mem.namespace}"
-        if _agent_cache_key not in _known_agents:
-            try:
-                mem._adapter.ensure_agent(req.agent_id, mem.namespace)
-                _known_agents.add(_agent_cache_key)
-            except Exception:
-                pass
-            _ensure_agent_owner(request, req.agent_id, mem.namespace)
+
     try:
-        entry = mem.write(
-            req.entity_path,
-            req.key,
-            req.value,
-            confidence=req.confidence,
-            pattern_refs=req.pattern_refs or None,
-            memory_type=mt,
-            shared=req.shared,
-            branch=req.branch,
-        )
+        if _async_adapter is not None:
+            _agent_ns = _async_adapter._namespace
+            if req.agent_id:
+                _agent_cache_key = f"{req.agent_id}:{_agent_ns}"
+                if _agent_cache_key not in _known_agents:
+                    try:
+                        await _async_adapter.ensure_agent(req.agent_id, _agent_ns)
+                        _known_agents.add(_agent_cache_key)
+                    except Exception:
+                        pass
+                    _ensure_agent_owner(request, req.agent_id, _agent_ns)
+
+            from amfs_core.models import Provenance
+            provenance = mem._tagger.tag(pattern_refs=req.pattern_refs or None)
+            entry_obj = MemoryEntry(
+                entity_path=req.entity_path,
+                key=req.key,
+                version=1,
+                value=req.value,
+                provenance=provenance,
+                confidence=req.confidence,
+                memory_type=mt,
+                shared=req.shared,
+                branch=req.branch,
+            )
+            entry = await _async_adapter.write(entry_obj)
+        else:
+            if req.agent_id:
+                _agent_cache_key = f"{req.agent_id}:{mem.namespace}"
+                if _agent_cache_key not in _known_agents:
+                    try:
+                        mem._adapter.ensure_agent(req.agent_id, mem.namespace)
+                        _known_agents.add(_agent_cache_key)
+                    except Exception:
+                        pass
+                    _ensure_agent_owner(request, req.agent_id, mem.namespace)
+            entry = mem.write(
+                req.entity_path,
+                req.key,
+                req.value,
+                confidence=req.confidence,
+                pattern_refs=req.pattern_refs or None,
+                memory_type=mt,
+                shared=req.shared,
+                branch=req.branch,
+            )
     finally:
         if original_agent is not None:
             mem._tagger.agent_id = original_agent
     _sse_manager.broadcast(entry)
 
-    _tenant_account_id: str | None = None
-    _tenant_team_id: str | None = None
-    _tenant_is_admin: bool = False
-    try:
-        from amfs_postgres.tenant_context import (
-            get_request_tenant_account_id,
-            get_request_tenant_team_id,
-            get_request_is_account_admin,
-        )
-        _tenant_account_id = get_request_tenant_account_id()
-        _tenant_team_id = get_request_tenant_team_id()
-        _tenant_is_admin = get_request_is_account_admin()
-    except ImportError:
-        pass
-
     _resource = f"{req.entity_path}/{req.key}"
     _ip = request.client.host if request.client else None
     _agent = entry.provenance.agent_id
     _ek = f"{entry.entity_path}/{entry.key}"
-    _ns = mem.namespace
+    _ns = _async_adapter._namespace if _async_adapter else mem.namespace
     _branch = entry.branch or "main"
     _confidence = entry.confidence
 
-    def _bg_write_side_effects() -> None:
+    if _async_adapter is not None:
+        async def _bg_async_side_effects() -> None:
+            try:
+                await _async_adapter.log_event(Event(
+                    namespace=_ns,
+                    agent_id=_agent,
+                    branch=_branch,
+                    event_type=EventType.WRITE,
+                    summary=f"Wrote {req.entity_path}/{req.key} v{entry.version}",
+                    details={
+                        "entity_path": req.entity_path,
+                        "key": req.key,
+                        "version": entry.version,
+                        "confidence": _confidence,
+                        "memory_type": mt.value,
+                        "shared": req.shared,
+                    },
+                ))
+            except Exception:
+                logger.debug("bg: Failed to log write event", exc_info=True)
+            try:
+                await _async_adapter.upsert_graph_edge(
+                    GraphEdge(
+                        source_entity=_agent,
+                        source_type="agent",
+                        relation="wrote",
+                        target_entity=_ek,
+                        target_type="entry",
+                        confidence=_confidence,
+                        provenance={"agent_id": _agent, "trigger": "write"},
+                    ),
+                    namespace=_ns,
+                    branch=_branch,
+                )
+            except Exception:
+                logger.debug("bg: Failed to materialize wrote edge", exc_info=True)
+
+        asyncio.create_task(_bg_async_side_effects())
+    else:
+        _tenant_account_id: str | None = None
+        _tenant_team_id: str | None = None
+        _tenant_is_admin: bool = False
         try:
             from amfs_postgres.tenant_context import (
-                set_tls_tenant_account_id,
-                set_tls_tenant_team_id,
-                set_tls_is_account_admin,
-                clear_tls_tenant_account_id,
-                clear_tls_tenant_team_id,
-                clear_tls_is_account_admin,
+                get_request_tenant_account_id,
+                get_request_tenant_team_id,
+                get_request_is_account_admin,
             )
-            set_tls_tenant_account_id(_tenant_account_id)
-            set_tls_tenant_team_id(_tenant_team_id)
-            set_tls_is_account_admin(_tenant_is_admin)
+            _tenant_account_id = get_request_tenant_account_id()
+            _tenant_team_id = get_request_tenant_team_id()
+            _tenant_is_admin = get_request_is_account_admin()
         except ImportError:
             pass
 
-        try:
-            _audit_log("memory.write", resource=_resource, ip_address=_ip)
-        except Exception:
-            logger.debug("bg: Failed to write audit log", exc_info=True)
-        try:
-            mem._adapter.upsert_graph_edge(
-                GraphEdge(
-                    source_entity=_agent,
-                    source_type="agent",
-                    relation="wrote",
-                    target_entity=_ek,
-                    target_type="entry",
-                    confidence=_confidence,
-                    provenance={"agent_id": _agent, "trigger": "write"},
-                ),
-                namespace=_ns,
-                branch=_branch,
-            )
-        except Exception:
-            logger.debug("bg: Failed to materialize wrote edge", exc_info=True)
-        finally:
+        def _bg_write_side_effects() -> None:
             try:
                 from amfs_postgres.tenant_context import (
+                    set_tls_tenant_account_id,
+                    set_tls_tenant_team_id,
+                    set_tls_is_account_admin,
                     clear_tls_tenant_account_id,
                     clear_tls_tenant_team_id,
                     clear_tls_is_account_admin,
                 )
-                clear_tls_tenant_account_id()
-                clear_tls_tenant_team_id()
-                clear_tls_is_account_admin()
+                set_tls_tenant_account_id(_tenant_account_id)
+                set_tls_tenant_team_id(_tenant_team_id)
+                set_tls_is_account_admin(_tenant_is_admin)
             except ImportError:
                 pass
 
-    _bg_executor.submit(_bg_write_side_effects)
+            try:
+                _audit_log("memory.write", resource=_resource, ip_address=_ip)
+            except Exception:
+                logger.debug("bg: Failed to write audit log", exc_info=True)
+            try:
+                mem._adapter.upsert_graph_edge(
+                    GraphEdge(
+                        source_entity=_agent,
+                        source_type="agent",
+                        relation="wrote",
+                        target_entity=_ek,
+                        target_type="entry",
+                        confidence=_confidence,
+                        provenance={"agent_id": _agent, "trigger": "write"},
+                    ),
+                    namespace=_ns,
+                    branch=_branch,
+                )
+            except Exception:
+                logger.debug("bg: Failed to materialize wrote edge", exc_info=True)
+            finally:
+                try:
+                    from amfs_postgres.tenant_context import (
+                        clear_tls_tenant_account_id,
+                        clear_tls_tenant_team_id,
+                        clear_tls_is_account_admin,
+                    )
+                    clear_tls_tenant_account_id()
+                    clear_tls_tenant_team_id()
+                    clear_tls_is_account_admin()
+                except ImportError:
+                    pass
+
+        _bg_executor.submit(_bg_write_side_effects)
 
     return _entry_to_response(entry)
 
@@ -540,8 +641,11 @@ async def list_entries(
         "[TLS-DIAG] /entries tls_account=%s state_account=%s state_user=%s has_tenant_ctx=%s",
         _tls_acct, _state_acct, _state_user, _has_ctx,
     )
-    mem = _get_memory()
-    entries = mem.list(entity_path, branch=branch, include_superseded=include_superseded)
+    if _async_adapter is not None:
+        entries = await _async_adapter.list(entity_path, branch=branch, include_superseded=include_superseded)
+    else:
+        mem = _get_memory()
+        entries = mem.list(entity_path, branch=branch, include_superseded=include_superseded)
     total_before = len(entries)
 
     vis = _get_visibility_filter(request)
@@ -572,7 +676,6 @@ async def search_entries(
     req: SearchRequest,
     _auth: str | None = Depends(verify_api_key),
 ) -> list[dict[str, Any]]:
-    mem = _get_memory()
     branch = getattr(req, "branch", "main") or "main"
     sq = SearchQuery(
         query=req.query,
@@ -586,10 +689,14 @@ async def search_entries(
         limit=req.limit,
         depth=req.depth,
     )
-    try:
-        results = mem._adapter.search(sq, branch=branch)
-    except TypeError:
-        results = mem._adapter.search(sq)
+    if _async_adapter is not None:
+        results = await _async_adapter.search(sq, branch=branch)
+    else:
+        mem = _get_memory()
+        try:
+            results = mem._adapter.search(sq, branch=branch)
+        except TypeError:
+            results = mem._adapter.search(sq)
 
     vis = _get_visibility_filter(request)
     if vis is not None and vis.should_filter():
