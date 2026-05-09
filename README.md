@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/amfs-architecture.png" alt="SenseLab AMFS — Agent Management File System" width="700" />
+  <img src="docs/assets/amfs-architecture.png" alt="SenseLab AMFS — Agent Memory File System" width="700" />
 </p>
 
 <h1 align="center">SenseLab AMFS — Agent Management File System</h1>
