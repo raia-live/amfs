@@ -9,6 +9,7 @@ synchronous.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from typing import Any, Callable
 
@@ -64,15 +65,23 @@ class HttpAdapter(AdapterABC):
 
     # ── helpers ────────────────────────────────────────────────────────
 
+    def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        max_retries = 4
+        for attempt in range(max_retries):
+            resp = self._client.request(method, path, **kwargs)
+            if resp.status_code == 429 and attempt < max_retries - 1:
+                wait = float(resp.headers.get("Retry-After", 2 ** attempt))
+                logger.debug("Rate limited on %s %s, retrying in %.1fs", method, path, wait)
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+
     def _get(self, path: str, **params: Any) -> Any:
-        resp = self._client.get(path, params={k: v for k, v in params.items() if v is not None})
-        resp.raise_for_status()
-        return resp.json()
+        return self._request("GET", path, params={k: v for k, v in params.items() if v is not None})
 
     def _post(self, path: str, body: dict[str, Any] | None = None) -> Any:
-        resp = self._client.post(path, json=body or {})
-        resp.raise_for_status()
-        return resp.json()
+        return self._request("POST", path, json=body or {})
 
     # ── required abstract methods ─────────────────────────────────────
 
