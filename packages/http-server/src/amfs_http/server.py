@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
@@ -92,6 +93,7 @@ async def _dashboard_tenant_middleware(request: Request, call_next):
 
 _memory: AgentMemory | None = None
 _sse_manager = SSEManager()
+_bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="amfs-bg")
 
 _immutable_trace_store = None
 try:
@@ -436,30 +438,80 @@ async def write_entry(
         if original_agent is not None:
             mem._tagger.agent_id = original_agent
     _sse_manager.broadcast(entry)
-    _audit_log(
-        "memory.write",
-        resource=f"{req.entity_path}/{req.key}",
-        ip_address=request.client.host if request.client else None,
-    )
 
+    _tenant_account_id: str | None = None
+    _tenant_team_id: str | None = None
+    _tenant_is_admin: bool = False
     try:
-        agent = entry.provenance.agent_id
-        ek = f"{entry.entity_path}/{entry.key}"
-        mem._adapter.upsert_graph_edge(
-            GraphEdge(
-                source_entity=agent,
-                source_type="agent",
-                relation="wrote",
-                target_entity=ek,
-                target_type="entry",
-                confidence=entry.confidence,
-                provenance={"agent_id": agent, "trigger": "write"},
-            ),
-            namespace=mem.namespace,
-            branch=entry.branch or "main",
+        from amfs_postgres.tenant_context import (
+            get_request_tenant_account_id,
+            get_request_tenant_team_id,
+            get_request_is_account_admin,
         )
-    except Exception:
-        logger.debug("Failed to materialize wrote edge", exc_info=True)
+        _tenant_account_id = get_request_tenant_account_id()
+        _tenant_team_id = get_request_tenant_team_id()
+        _tenant_is_admin = get_request_is_account_admin()
+    except ImportError:
+        pass
+
+    _resource = f"{req.entity_path}/{req.key}"
+    _ip = request.client.host if request.client else None
+    _agent = entry.provenance.agent_id
+    _ek = f"{entry.entity_path}/{entry.key}"
+    _ns = mem.namespace
+    _branch = entry.branch or "main"
+    _confidence = entry.confidence
+
+    def _bg_write_side_effects() -> None:
+        try:
+            from amfs_postgres.tenant_context import (
+                set_tls_tenant_account_id,
+                set_tls_tenant_team_id,
+                set_tls_is_account_admin,
+                clear_tls_tenant_account_id,
+                clear_tls_tenant_team_id,
+                clear_tls_is_account_admin,
+            )
+            set_tls_tenant_account_id(_tenant_account_id)
+            set_tls_tenant_team_id(_tenant_team_id)
+            set_tls_is_account_admin(_tenant_is_admin)
+        except ImportError:
+            pass
+
+        try:
+            _audit_log("memory.write", resource=_resource, ip_address=_ip)
+        except Exception:
+            logger.debug("bg: Failed to write audit log", exc_info=True)
+        try:
+            mem._adapter.upsert_graph_edge(
+                GraphEdge(
+                    source_entity=_agent,
+                    source_type="agent",
+                    relation="wrote",
+                    target_entity=_ek,
+                    target_type="entry",
+                    confidence=_confidence,
+                    provenance={"agent_id": _agent, "trigger": "write"},
+                ),
+                namespace=_ns,
+                branch=_branch,
+            )
+        except Exception:
+            logger.debug("bg: Failed to materialize wrote edge", exc_info=True)
+        finally:
+            try:
+                from amfs_postgres.tenant_context import (
+                    clear_tls_tenant_account_id,
+                    clear_tls_tenant_team_id,
+                    clear_tls_is_account_admin,
+                )
+                clear_tls_tenant_account_id()
+                clear_tls_tenant_team_id()
+                clear_tls_is_account_admin()
+            except ImportError:
+                pass
+
+    _bg_executor.submit(_bg_write_side_effects)
 
     return _entry_to_response(entry)
 
@@ -3790,6 +3842,12 @@ def _parse_args() -> argparse.Namespace:
         default=False,
         help="Run embedded Cortex worker in-process (for single-instance deployments)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=int(os.environ.get("AMFS_HTTP_WORKERS", "1")),
+        help="Number of uvicorn worker processes (default: 1, env: AMFS_HTTP_WORKERS)",
+    )
     return parser.parse_args()
 
 
@@ -3887,12 +3945,20 @@ def main() -> None:
         else:
             logger.warning("--with-cortex requires AMFS_POSTGRES_DSN")
 
-    logger.info("Starting AMFS HTTP server on %s:%d", args.host, args.port)
+    workers = args.workers
+    if args.reload and workers > 1:
+        logger.warning("--reload is incompatible with --workers > 1; forcing workers=1")
+        workers = 1
+
+    logger.info(
+        "Starting AMFS HTTP server on %s:%d (workers=%d)", args.host, args.port, workers
+    )
     uvicorn.run(
         "amfs_http.server:app",
         host=args.host,
         port=args.port,
         reload=args.reload,
+        workers=workers,
     )
 
 
