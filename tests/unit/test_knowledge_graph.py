@@ -54,6 +54,7 @@ def _make_memory(tmp_path: Path) -> AgentMemory:
 
 class TestMaterializerPatternRefs:
     def test_write_with_pattern_refs_calls_upsert(self, tmp_path: Path):
+        import time
         mem = _make_memory(tmp_path)
         mock_upsert = MagicMock(return_value=GraphEdge(
             source_entity="", source_type="", relation="",
@@ -63,6 +64,7 @@ class TestMaterializerPatternRefs:
 
         mem.write("svc/auth", "pattern-retry", "retry logic", pattern_refs=["pattern-circuit-breaker"])
 
+        time.sleep(0.2)
         assert mock_upsert.call_count >= 1
         edge_arg = mock_upsert.call_args_list[0][0][0]
         assert edge_arg.relation == "references"

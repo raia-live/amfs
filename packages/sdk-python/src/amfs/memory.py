@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -44,6 +46,20 @@ from amfs.config import load_config_or_default
 from amfs.factory import create_adapter_from_config
 
 logger = logging.getLogger(__name__)
+
+_sdk_bg_executor: ThreadPoolExecutor | None = None
+_sdk_bg_lock = threading.Lock()
+
+
+def _get_sdk_executor() -> ThreadPoolExecutor:
+    global _sdk_bg_executor
+    if _sdk_bg_executor is None:
+        with _sdk_bg_lock:
+            if _sdk_bg_executor is None:
+                _sdk_bg_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="amfs-sdk-bg"
+                )
+    return _sdk_bg_executor
 
 
 # ---------------------------------------------------------------------------
@@ -331,29 +347,44 @@ class AgentMemory:
         )
         self._read_tracker.record_write(entity_path, key, entry.version, entry.version == 1)
 
-        try:
-            self._adapter.log_event(Event(
-                namespace=self.namespace,
-                agent_id=self.agent_id,
-                branch=effective_branch,
-                event_type=EventType.WRITE,
-                summary=f"Wrote {entity_path}/{key} v{entry.version}",
-                details={
-                    "entity_path": entity_path,
-                    "key": key,
-                    "version": entry.version,
-                    "confidence": entry.confidence,
-                    "memory_type": entry.memory_type.value if hasattr(entry.memory_type, "value") else str(entry.memory_type),
-                    "shared": entry.shared,
-                },
-            ))
-        except Exception:
-            logger.debug("Failed to log write event", exc_info=True)
+        _adapter = self._adapter
+        _ns = self.namespace
+        _aid = self.agent_id
+        _ev_branch = effective_branch
+        _entry_version = entry.version
+        _entry_confidence = entry.confidence
+        _entry_mt = entry.memory_type.value if hasattr(entry.memory_type, "value") else str(entry.memory_type)
+        _entry_shared = entry.shared
+        _ep = entity_path
+        _k = key
+        _prefs = pattern_refs
 
-        if pattern_refs:
-            self._materialize_pattern_ref_edges(
-                entity_path, key, pattern_refs, effective_branch,
-            )
+        def _bg_log_and_edges() -> None:
+            try:
+                _adapter.log_event(Event(
+                    namespace=_ns,
+                    agent_id=_aid,
+                    branch=_ev_branch,
+                    event_type=EventType.WRITE,
+                    summary=f"Wrote {_ep}/{_k} v{_entry_version}",
+                    details={
+                        "entity_path": _ep,
+                        "key": _k,
+                        "version": _entry_version,
+                        "confidence": _entry_confidence,
+                        "memory_type": _entry_mt,
+                        "shared": _entry_shared,
+                    },
+                ))
+            except Exception:
+                logger.debug("Failed to log write event", exc_info=True)
+            if _prefs:
+                try:
+                    self._materialize_pattern_ref_edges(_ep, _k, _prefs, _ev_branch)
+                except Exception:
+                    logger.debug("Failed to materialize pattern ref edges", exc_info=True)
+
+        _get_sdk_executor().submit(_bg_log_and_edges)
 
         return entry
 
