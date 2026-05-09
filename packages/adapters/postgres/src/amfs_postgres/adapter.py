@@ -123,16 +123,10 @@ class _TenantRLSConnection:
 
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT set_config('amfs.current_account_id', %s, false)",
-                (tid if tid else "",),
-            )
-            cur.execute(
-                "SELECT set_config('amfs.current_team_id', %s, false)",
-                (team_id if team_id else "",),
-            )
-            cur.execute(
-                "SELECT set_config('amfs.is_account_admin', %s, false)",
-                ("true" if is_admin else "false",),
+                "SELECT set_config('amfs.current_account_id', %s, false),"
+                "       set_config('amfs.current_team_id', %s, false),"
+                "       set_config('amfs.is_account_admin', %s, false)",
+                (tid if tid else "", team_id if team_id else "", "true" if is_admin else "false"),
             )
         return conn
 
@@ -639,6 +633,16 @@ class PostgresAdapter(AdapterABC):
                     "Constraint migration %s.%s failed (non-fatal): %s",
                     table, cname, exc,
                 )
+
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_api_keys_hash_active
+            ON amfs_api_keys (key_hash) WHERE active = true
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_current_branch
+            ON amfs_memory_entries (namespace, branch, entity_path, key)
+            WHERE superseded_at IS NULL
+        """)
 
         cur.execute("""
             ALTER TABLE amfs_api_keys

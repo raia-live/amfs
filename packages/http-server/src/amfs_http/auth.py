@@ -5,6 +5,8 @@ import hashlib
 import logging
 import os
 import secrets
+import threading
+import time
 
 from fastapi import HTTPException, Security, status
 from fastapi.security import APIKeyHeader
@@ -12,6 +14,10 @@ from fastapi.security import APIKeyHeader
 logger = logging.getLogger(__name__)
 
 API_KEY_HEADER = APIKeyHeader(name="X-AMFS-API-Key", auto_error=False)
+
+_AUTH_CACHE_TTL = 120.0
+_auth_cache: dict[str, float] = {}
+_auth_cache_lock = threading.Lock()
 
 
 def get_api_keys() -> set[str]:
@@ -25,12 +31,22 @@ def _check_db_key(api_key: str) -> bool:
     """Check if an API key exists in amfs_api_keys table (active keys only).
 
     Keys are stored as SHA-256 hex digests, so we hash the incoming raw key
-    before comparing.
+    before comparing.  Results are cached in-process for ``_AUTH_CACHE_TTL``
+    seconds to avoid opening a new DB connection on every request.  Only
+    positive results are cached; revoked/invalid keys always hit the DB.
 
     Uses SECURITY DEFINER functions to bypass RLS — this connection does not
     set amfs.current_account_id, so direct table queries would return nothing
     when FORCE ROW LEVEL SECURITY is enabled.
     """
+    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    now = time.monotonic()
+
+    with _auth_cache_lock:
+        cached_at = _auth_cache.get(key_hash)
+        if cached_at is not None and (now - cached_at) < _AUTH_CACHE_TTL:
+            return True
+
     try:
         import psycopg
         from psycopg.rows import dict_row
@@ -38,8 +54,6 @@ def _check_db_key(api_key: str) -> bool:
         dsn = os.environ.get("AMFS_POSTGRES_DSN")
         if not dsn:
             return False
-
-        key_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
         with psycopg.connect(dsn, row_factory=dict_row) as conn:
             row = conn.execute(
@@ -51,7 +65,11 @@ def _check_db_key(api_key: str) -> bool:
                     "SELECT amfs_touch_api_key_usage(%s)",
                     (row["key_id"],),
                 )
-            return row is not None
+            if row is not None:
+                with _auth_cache_lock:
+                    _auth_cache[key_hash] = now
+                return True
+            return False
     except Exception:
         logger.debug("DB API key check failed (table may not exist)", exc_info=True)
         return False
