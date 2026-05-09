@@ -875,7 +875,7 @@ class AgentMemory:
                         confidence=entry.confidence,
                         value=entry.value,
                         memory_type=entry.memory_type.value if entry.memory_type else None,
-                        written_by=entry.written_by,
+                        written_by=entry.provenance.agent_id,
                         read_at=self._read_tracker._reads.get(ek),
                     ))
 

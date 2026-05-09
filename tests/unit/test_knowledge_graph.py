@@ -94,6 +94,8 @@ class TestMaterializerCausalEdges:
 
         mem.commit_outcome("deploy-v1", OutcomeType.SUCCESS)
 
+        time.sleep(0.3)
+
         informed_calls = [
             c for c in mock_upsert.call_args_list
             if c[0][0].relation == "informed"
