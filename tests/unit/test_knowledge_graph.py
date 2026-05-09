@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -93,6 +94,8 @@ class TestMaterializerCausalEdges:
         mem.read("svc/auth", "task-login")
 
         mem.commit_outcome("deploy-v1", OutcomeType.SUCCESS)
+
+        time.sleep(0.3)
 
         informed_calls = [
             c for c in mock_upsert.call_args_list
