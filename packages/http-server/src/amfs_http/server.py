@@ -380,12 +380,23 @@ async def read_entry(
     branch: str = Query("main"),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    mem = _get_memory()
     if _async_adapter is not None:
-        entry = await _async_adapter.read(entity_path, key, branch=branch)
+        try:
+            entry = await _async_adapter.read(entity_path, key, branch=branch)
+        except Exception:
+            logger.warning("Async read failed for %s/%s — falling back to sync", entity_path, key, exc_info=True)
+            entry = None
+        if entry is None:
+            entry = mem.read(entity_path, key, branch=branch)
+            if entry is not None:
+                logger.warning(
+                    "Async adapter missed entry %s/%s but sync found it — RLS context mismatch",
+                    entity_path, key,
+                )
         if entry is not None:
             asyncio.create_task(_async_adapter.increment_recall_count(entity_path, key, branch=branch))
     else:
-        mem = _get_memory()
         entry = mem.read(entity_path, key, branch=branch)
     if entry is None:
         return {"status": "not_found", "entity_path": entity_path, "key": key}
@@ -659,10 +670,22 @@ async def list_entries(
         "[TLS-DIAG] /entries tls_account=%s state_account=%s state_user=%s has_tenant_ctx=%s",
         _tls_acct, _state_acct, _state_user, _has_ctx,
     )
+    mem = _get_memory()
     if _async_adapter is not None:
-        entries = await _async_adapter.list(entity_path, branch=branch, include_superseded=include_superseded)
+        try:
+            entries = await _async_adapter.list(entity_path, branch=branch, include_superseded=include_superseded)
+        except Exception:
+            logger.warning("Async list failed for %s — falling back to sync", entity_path, exc_info=True)
+            entries = []
+        if not entries:
+            sync_entries = mem.list(entity_path, branch=branch, include_superseded=include_superseded)
+            if sync_entries:
+                logger.warning(
+                    "Async adapter returned 0 entries for %s but sync found %d — RLS context mismatch",
+                    entity_path, len(sync_entries),
+                )
+                entries = sync_entries
     else:
-        mem = _get_memory()
         entries = mem.list(entity_path, branch=branch, include_superseded=include_superseded)
     total_before = len(entries)
 
@@ -707,10 +730,25 @@ async def search_entries(
         limit=req.limit,
         depth=req.depth,
     )
+    mem = _get_memory()
     if _async_adapter is not None:
-        results = await _async_adapter.search(sq, branch=branch)
+        try:
+            results = await _async_adapter.search(sq, branch=branch)
+        except Exception:
+            logger.warning("Async search failed — falling back to sync", exc_info=True)
+            results = []
+        if not results:
+            try:
+                sync_results = mem._adapter.search(sq, branch=branch)
+            except TypeError:
+                sync_results = mem._adapter.search(sq)
+            if sync_results:
+                logger.warning(
+                    "Async search returned 0 results but sync found %d — RLS context mismatch",
+                    len(sync_results),
+                )
+                results = sync_results
     else:
-        mem = _get_memory()
         try:
             results = mem._adapter.search(sq, branch=branch)
         except TypeError:
