@@ -65,16 +65,23 @@ class _AsyncTenantRLSConnection:
         team_id = get_request_tenant_team_id()
         is_admin = get_request_is_account_admin()
 
+        guc_account = tid if tid else ""
+        guc_team = team_id if team_id else ""
+        guc_admin = "true" if is_admin else "false"
+
+        if not tid:
+            logger.warning(
+                "async pool checkout: tenant account_id is EMPTY "
+                "(tid=%r, team=%r, admin=%r) — RLS reads will return no rows",
+                tid, team_id, is_admin,
+            )
+
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT set_config('amfs.current_account_id', %s, false),"
                 "       set_config('amfs.current_team_id', %s, false),"
                 "       set_config('amfs.is_account_admin', %s, false)",
-                (
-                    tid if tid else "",
-                    team_id if team_id else "",
-                    "true" if is_admin else "false",
-                ),
+                (guc_account, guc_team, guc_admin),
             )
         return conn
 
