@@ -9,15 +9,18 @@ import { createWatchHandle } from "../adapter.js";
 export interface HttpAdapterOptions {
   url: string;
   apiKey?: string;
+  agentId?: string;
   headers?: Record<string, string>;
 }
 
 export class HttpAdapter implements AmfsAdapter {
   private readonly baseUrl: string;
   private readonly headers: Record<string, string>;
+  private readonly agentId: string | undefined;
 
   constructor(opts: HttpAdapterOptions) {
     this.baseUrl = opts.url.replace(/\/+$/, "");
+    this.agentId = opts.agentId;
     this.headers = {
       "Content-Type": "application/json",
       ...opts.headers,
@@ -75,7 +78,12 @@ export class HttpAdapter implements AmfsAdapter {
     value: unknown;
     confidence?: number;
     memoryType?: string;
+    agentId?: string;
+    shared?: boolean;
+    patternRefs?: string[];
+    branch?: string;
   }): Promise<MemoryEntry> {
+    const agentId = entry.agentId ?? this.agentId;
     return this.fetch<MemoryEntry>("/api/v1/entries", {
       method: "POST",
       body: JSON.stringify({
@@ -84,6 +92,10 @@ export class HttpAdapter implements AmfsAdapter {
         value: entry.value,
         confidence: entry.confidence ?? 1.0,
         memory_type: entry.memoryType ?? "fact",
+        ...(agentId ? { agent_id: agentId } : {}),
+        ...(entry.shared != null ? { shared: entry.shared } : {}),
+        ...(entry.patternRefs?.length ? { pattern_refs: entry.patternRefs } : {}),
+        ...(entry.branch ? { branch: entry.branch } : {}),
       }),
     });
   }
@@ -111,6 +123,8 @@ export class HttpAdapter implements AmfsAdapter {
     query?: string;
     entityPath?: string;
     minConfidence?: number;
+    agentId?: string;
+    sortBy?: string;
     limit?: number;
   }): Promise<MemoryEntry[]> {
     return this.fetch<MemoryEntry[]>("/api/v1/search", {
@@ -120,6 +134,8 @@ export class HttpAdapter implements AmfsAdapter {
         entity_path: query.entityPath,
         min_confidence: query.minConfidence ?? 0.0,
         limit: query.limit ?? 100,
+        ...(query.agentId ? { agent_id: query.agentId } : {}),
+        ...(query.sortBy ? { sort_by: query.sortBy } : {}),
       }),
     });
   }
@@ -181,12 +197,16 @@ export class HttpAdapter implements AmfsAdapter {
   async commitOutcomeAsync(record: {
     outcomeRef: string;
     outcomeType: string;
+    entityPath?: string;
+    causalEntryKeys?: string[];
   }): Promise<unknown> {
     return this.fetch("/api/v1/outcomes", {
       method: "POST",
       body: JSON.stringify({
         outcome_ref: record.outcomeRef,
         outcome_type: record.outcomeType,
+        ...(record.entityPath ? { entity_path: record.entityPath } : {}),
+        ...(record.causalEntryKeys?.length ? { causal_entry_keys: record.causalEntryKeys } : {}),
       }),
     });
   }
