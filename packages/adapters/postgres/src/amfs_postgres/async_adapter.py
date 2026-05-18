@@ -244,6 +244,7 @@ class AsyncPostgresAdapter:
 
     async def write(self, entry: MemoryEntry) -> MemoryEntry:
         branch = entry.branch or "main"
+        inserted_row = None
         async with self._pool.connection() as conn:
             async with conn.transaction():
                 async with conn.cursor() as cur:
@@ -326,9 +327,30 @@ class AsyncPostgresAdapter:
                         f"""
                         INSERT INTO amfs_memory_entries ({cols_sql})
                         VALUES ({placeholders})
+                        RETURNING id, account_id
                         """,
                         params,
                     )
+                    inserted_row = await cur.fetchone()
+
+        if inserted_row is None:
+            logger.error(
+                "async write: INSERT returned no row — entry not persisted "
+                "(entity_path=%s, key=%s, ns=%s)",
+                entry.entity_path, entry.key, self._namespace,
+            )
+            raise RuntimeError(
+                f"Write failed: INSERT did not persist for "
+                f"{entry.entity_path}/{entry.key}"
+            )
+
+        if inserted_row.get("account_id") is None:
+            logger.error(
+                "async write: INSERT persisted with NULL account_id — "
+                "entry will be invisible to RLS reads "
+                "(entity_path=%s, key=%s, id=%s)",
+                entry.entity_path, entry.key, inserted_row["id"],
+            )
 
         return entry.model_copy(update={"version": new_version})
 

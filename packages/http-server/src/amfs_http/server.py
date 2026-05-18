@@ -454,6 +454,7 @@ async def write_entry(
         mem._tagger.agent_id = req.agent_id
 
     try:
+        _used_async = False
         if _async_adapter is not None:
             _agent_ns = _async_adapter._namespace
             if req.agent_id:
@@ -479,8 +480,25 @@ async def write_entry(
                 shared=req.shared,
                 branch=req.branch,
             )
-            entry = await _async_adapter.write(entry_obj)
-        else:
+            try:
+                entry = await _async_adapter.write(entry_obj)
+                _used_async = True
+            except Exception:
+                logger.warning(
+                    "Async write failed for %s/%s — falling back to sync adapter",
+                    req.entity_path, req.key, exc_info=True,
+                )
+                entry = mem.write(
+                    req.entity_path,
+                    req.key,
+                    req.value,
+                    confidence=req.confidence,
+                    pattern_refs=req.pattern_refs or None,
+                    memory_type=mt,
+                    shared=req.shared,
+                    branch=req.branch,
+                )
+        if not _used_async and _async_adapter is None:
             if req.agent_id:
                 _agent_cache_key = f"{req.agent_id}:{mem.namespace}"
                 if _agent_cache_key not in _known_agents:
