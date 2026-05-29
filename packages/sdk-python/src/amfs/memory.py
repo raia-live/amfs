@@ -512,14 +512,15 @@ class AgentMemory:
                     seen_keys.add(entry.entry_key)
                     merged.append(entry)
 
-        sort_key: Callable[[MemoryEntry], Any]
-        if sort_by == "recency":
-            sort_key = lambda e: e.provenance.written_at
-        elif sort_by == "version":
-            sort_key = lambda e: e.version
-        else:
-            sort_key = lambda e: e.confidence
-        merged.sort(key=sort_key, reverse=True)
+        if sort_by != "priority":
+            sort_key: Callable[[MemoryEntry], Any]
+            if sort_by == "recency":
+                sort_key = lambda e: e.provenance.written_at
+            elif sort_by == "version":
+                sort_key = lambda e: e.version
+            else:
+                sort_key = lambda e: e.confidence
+            merged.sort(key=sort_key, reverse=True)
         entries = merged[:limit]
 
         self._read_tracker.record_query(

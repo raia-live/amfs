@@ -574,6 +574,7 @@ def amfs_write(
     memory_type: str = "fact",
     artifact_refs: list[dict[str, Any]] | None = None,
     shared: bool = True,
+    branch: str | None = None,
 ) -> str:
     """Write a memory entry with automatic provenance tracking.
 
@@ -600,6 +601,7 @@ def amfs_write(
         shared: If True (default), other agents can read this entry. If False,
             only the writing agent can access it — useful for internal reasoning,
             scratchpad notes, or sensitive context.
+        branch: Optional branch name to write to (defaults to "main").
 
     Example: amfs_write("checkout-service", "retry-pattern", '{"max_retries": 3}')
     Example private: amfs_write("checkout-service", "internal-notes", "...", shared=False)
@@ -621,16 +623,17 @@ def amfs_write(
         ArtifactRef.model_validate(r) for r in (artifact_refs or [])
     ]
 
-    entry = mem.write(
-        entity_path,
-        key,
-        parsed_value,
+    write_kwargs: dict[str, Any] = dict(
         confidence=confidence,
         pattern_refs=pattern_refs,
         memory_type=mt,
         artifact_refs=parsed_artifact_refs,
         shared=shared,
     )
+    if branch:
+        write_kwargs["branch"] = branch
+
+    entry = mem.write(entity_path, key, parsed_value, **write_kwargs)
 
     evaluator = _get_quality_evaluator()
     quality_report = None
@@ -688,7 +691,7 @@ def amfs_search(
         agent_id: Filter to entries from a specific agent
         since: Optional ISO timestamp to filter entries written after this time
         pattern_ref: Filter to entries tagged with this pattern reference
-        sort_by: Sort order — "confidence", "recency", or "version"
+        sort_by: Sort order — "confidence", "recency", "version", or "priority"
         limit: Maximum results to return
         depth: Tier depth (1=hot only, 2=hot+warm, 3=all tiers)
 
@@ -697,7 +700,10 @@ def amfs_search(
     from datetime import datetime as dt
 
     mem = _get_memory()
-    since_dt = dt.fromisoformat(since) if since else None
+    try:
+        since_dt = dt.fromisoformat(since) if since else None
+    except (ValueError, TypeError) as e:
+        return json.dumps({"error": f"Invalid 'since' timestamp: {e}"})
 
     results = mem.search(
         query=query,
@@ -904,7 +910,8 @@ def amfs_commit_outcome(
 
     Args:
         outcome_ref: Reference identifier (e.g. "INC-2047", "task-42", "PR-456")
-        outcome_type: One of "success", "minor_failure", "failure", "critical_failure"
+        outcome_type: One of "success", "minor_failure", "failure", "critical_failure",
+            "clean_deploy", "regression", "p2_incident", "p1_incident"
 
     Example: amfs_commit_outcome("task-42", "success")
     Example: amfs_commit_outcome("deploy-v2", "failure")
@@ -968,8 +975,11 @@ def amfs_history(
     from datetime import datetime as dt
 
     mem = _get_memory()
-    since_dt = dt.fromisoformat(since) if since else None
-    until_dt = dt.fromisoformat(until) if until else None
+    try:
+        since_dt = dt.fromisoformat(since) if since else None
+        until_dt = dt.fromisoformat(until) if until else None
+    except (ValueError, TypeError) as e:
+        return json.dumps({"error": f"Invalid timestamp: {e}"})
 
     versions = mem.history(entity_path, key, since=since_dt, until=until_dt)
     return json.dumps(
@@ -1156,12 +1166,15 @@ def amfs_list_traces(
     Example: amfs_list_traces(entity_path="checkout-service", limit=5)
     """
     mem = _get_memory()
-    traces = mem._adapter.list_traces(
-        entity_path=entity_path,
-        agent_id=agent_id,
-        outcome_type=outcome_type,
-        limit=limit,
-    )
+    try:
+        traces = mem._adapter.list_traces(
+            entity_path=entity_path,
+            agent_id=agent_id,
+            outcome_type=outcome_type,
+            limit=limit,
+        )
+    except Exception as e:
+        return json.dumps({"error": f"Could not list traces: {e}"})
     return json.dumps(
         [
             {
@@ -1195,7 +1208,10 @@ def amfs_get_trace(trace_id: str) -> str:
     Example: amfs_get_trace("abc123-def456")
     """
     mem = _get_memory()
-    trace = mem._adapter.get_trace(trace_id)
+    try:
+        trace = mem._adapter.get_trace(trace_id)
+    except Exception as e:
+        return json.dumps({"error": f"Could not retrieve trace: {e}"})
     if trace is None:
         return json.dumps({"status": "not_found", "trace_id": trace_id})
     return json.dumps(trace.model_dump(mode="json"), default=str)
@@ -1259,9 +1275,8 @@ def amfs_briefing(
 
     hint = (
         "No compiled briefings yet. "
-        "Try amfs_my_rooms() to check for shared rooms with team knowledge, "
-        "or use amfs_search() / amfs_recall() to find existing memories. "
-        "Use amfs_write() to start building knowledge."
+        "Use amfs_search() or amfs_recall() to find existing memories, "
+        "or amfs_write() to start building knowledge."
     )
     return json.dumps({"status": "empty", "message": hint})
 
@@ -1291,18 +1306,24 @@ def amfs_timeline(
     """
     from datetime import datetime as dt
     mem = _get_memory()
-    since_dt = dt.fromisoformat(since) if since else None
-    events = mem._adapter.list_events(
-        mem.agent_id,
-        mem._config.namespace,
-        event_type=event_type,
-        since=since_dt,
-        limit=limit,
-    )
-    return json.dumps({
-        "events": [e.model_dump(mode="json") for e in events],
-        "count": len(events),
-    }, default=str)
+    try:
+        since_dt = dt.fromisoformat(since) if since else None
+    except (ValueError, TypeError) as e:
+        return json.dumps({"error": f"Invalid 'since' timestamp: {e}"})
+    try:
+        events = mem._adapter.list_events(
+            mem.agent_id,
+            mem._config.namespace,
+            event_type=event_type,
+            since=since_dt,
+            limit=limit,
+        )
+        return json.dumps({
+            "events": [e.model_dump(mode="json") for e in events],
+            "count": len(events),
+        }, default=str)
+    except Exception as e:
+        return json.dumps({"error": f"Timeline unavailable: {e}"})
 
 
 @mcp.tool
@@ -1540,18 +1561,21 @@ def amfs_diff(
     return json.dumps(result, default=str)
 
 
-@mcp.tool()
+@mcp.tool
 def amfs_export_training_data(
     entity_paths: list[str] | None = None,
     min_confidence: float = 0.7,
     format: str = "sft",
     limit: int = 100,
-) -> dict:
+) -> str:
     """Export outcome-validated knowledge as a fine-tuning dataset.
 
     Generates training examples from decision traces in SFT, DPO, or
     Reward Model format. Only includes entries meeting the confidence
     threshold and linked to production outcomes.
+
+    Requires AMFS_HTTP_URL to be set and the amfs-pro-api package
+    installed on the server.
 
     Args:
         entity_paths: Filter to specific entities (exports all if omitted).
@@ -1559,23 +1583,127 @@ def amfs_export_training_data(
         format: Export format — "sft", "dpo", or "reward_model".
         limit: Maximum examples to generate.
 
-    Returns a dict with format, num_examples, and examples array.
+    Returns JSON with format, num_examples, and examples array.
     """
-    mem = _get_memory()
+    base_url = os.environ.get("AMFS_HTTP_URL")
+    if not base_url:
+        return json.dumps({"error": "AMFS_HTTP_URL not set — export requires an HTTP API connection"})
     try:
         import httpx
-        base_url = os.environ.get("AMFS_HTTP_URL", "http://localhost:8741")
-        params = {"format": format, "min_confidence": min_confidence, "limit": limit}
+        headers = {}
+        api_key = os.environ.get("AMFS_API_KEY", "")
+        if api_key:
+            headers["X-AMFS-API-Key"] = api_key
+        params: dict[str, Any] = {"format": format, "min_confidence": min_confidence, "limit": limit}
         if entity_paths:
             params["entity_path"] = entity_paths[0]
-        resp = httpx.get(f"{base_url}/api/v1/pro/export", params=params, timeout=30.0)
+        resp = httpx.get(f"{base_url}/api/v1/pro/export", params=params, headers=headers, timeout=30.0)
         if resp.status_code == 200:
-            return resp.json()
-        return {"error": f"Export endpoint returned {resp.status_code}", "detail": resp.text}
+            return json.dumps(resp.json(), default=str)
+        return json.dumps({"error": f"Export endpoint returned {resp.status_code}", "detail": resp.text})
     except ImportError:
-        return {"error": "httpx not installed — install it for export support"}
+        return json.dumps({"error": "httpx not installed — install it for export support"})
     except Exception as e:
-        return {"error": str(e)}
+        return json.dumps({"error": str(e)})
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Consolidation tools
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _http_api_call(method: str, path: str, *, params: dict | None = None, body: dict | None = None) -> str:
+    """Shared helper for tools that proxy to the AMFS HTTP API."""
+    base_url = os.environ.get("AMFS_HTTP_URL")
+    if not base_url:
+        return json.dumps({"error": "AMFS_HTTP_URL not set — this feature requires an HTTP API connection"})
+    try:
+        import httpx
+        headers: dict[str, str] = {}
+        api_key = os.environ.get("AMFS_API_KEY", "")
+        if api_key:
+            headers["X-AMFS-API-Key"] = api_key
+        if method == "GET":
+            resp = httpx.get(f"{base_url}{path}", params=params, headers=headers, timeout=30.0)
+        else:
+            resp = httpx.post(f"{base_url}{path}", params=params, json=body or {}, headers=headers, timeout=30.0)
+        if resp.status_code == 200:
+            return json.dumps(resp.json(), default=str)
+        return json.dumps({"error": f"API returned {resp.status_code}", "detail": resp.text})
+    except ImportError:
+        return json.dumps({"error": "httpx not installed — required for HTTP API features"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool
+def amfs_consolidation_status() -> str:
+    """Check the current memory consolidation status.
+
+    Returns metrics about automatic memory consolidation: how many entries
+    have been auto-archived, how many proposals are pending review, and
+    the overall health of the consolidation system.
+    """
+    return _http_api_call("GET", "/api/v1/cortex/consolidation/status")
+
+
+@mcp.tool
+def amfs_consolidation_proposals(
+    status: str = "pending",
+    limit: int = 20,
+) -> str:
+    """List memory consolidation proposals.
+
+    Consolidation proposals are created by the Cortex when it detects
+    opportunities to compress, merge, or archive memory entries. Tier B
+    proposals require human/agent review before merging.
+
+    Args:
+        status: Filter by proposal status — "pending", "approved", "rejected"
+        limit: Maximum proposals to return
+
+    Example: amfs_consolidation_proposals(status="pending")
+    """
+    return _http_api_call("GET", "/api/v1/cortex/consolidation/proposals",
+                          params={"status": status, "limit": limit})
+
+
+@mcp.tool
+def amfs_consolidation_candidates(
+    limit: int = 20,
+) -> str:
+    """List entries that are candidates for consolidation.
+
+    These are entries the Cortex has identified as potentially redundant,
+    superseded, or compressible. Review these to understand what the
+    consolidation system would act on.
+
+    Args:
+        limit: Maximum candidates to return
+    """
+    return _http_api_call("GET", "/api/v1/cortex/consolidation/candidates",
+                          params={"limit": limit})
+
+
+@mcp.tool
+def amfs_consolidate(
+    dry_run: bool = True,
+) -> str:
+    """Trigger a memory consolidation cycle.
+
+    Runs the Cortex consolidation strategy which:
+    - Tier A (automatic): archives superseded beliefs, prunes stale entries
+    - Tier B (proposals): creates consolidation proposals for convergent
+      knowledge and outcome rollups that need review
+
+    Args:
+        dry_run: If True (default), shows what would happen without making
+            changes. Set to False to actually run consolidation.
+
+    Example: amfs_consolidate(dry_run=True)
+    """
+    return _http_api_call("POST", "/api/v1/cortex/consolidate",
+                          body={"dry_run": dry_run})
 
 
 # ──────────────────────────────────────────────────────────────────────
