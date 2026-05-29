@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="docs/assets/amfs-architecture.png" alt="SenseLab AMFS — Agent Memory File System" width="700" />
+  <img src="docs/assets/amfs-architecture.png" alt="AMFS — Agent Memory File System" width="700" />
 </p>
 
-<h1 align="center">SenseLab AMFS — Agent Management File System</h1>
+<h1 align="center">AMFS — Agent Memory File System</h1>
 
 <p align="center">
-  <strong>Git for agent memory. Every agent gets a brain — version-controlled, diffable, reviewable.</strong>
+  <strong>The cognitive layer for multi-agent systems.<br/>Give your agents a shared brain.</strong>
 </p>
 
 <p align="center">
@@ -17,31 +17,34 @@
 </p>
 
 <p align="center">
-  <a href="https://raia-live.github.io/amfs/">Documentation</a> · <a href="https://raia-live.github.io/amfs/getting-started/quickstart/">Quick Start</a> · <a href="https://github.com/orgs/raia-live/projects/2">Roadmap</a> · <a href="https://raia-live.github.io/amfs/contributing/">Contributing</a>
+  <a href="https://www.sense-lab.ai">Website</a> · <a href="https://raia-live.github.io/amfs/">Docs</a> · <a href="https://raia-live.github.io/amfs/getting-started/quickstart/">Quick Start</a> · <a href="https://github.com/orgs/raia-live/projects/2">Roadmap</a> · <a href="https://raia-live.github.io/amfs/contributing/">Contributing</a>
 </p>
 
 ---
 
-## Why AMFS?
+## The Problem
 
-When agents share memory today, it's chaos — last write wins, no branching, no review, no rollback. It's like coding without Git.
+Your agents talk to LLMs. Why don't they talk to each other?
 
-The solution isn't "better permissions" or "smarter retrieval." It's giving agents the same collaboration model developers already live in: **version control for knowledge**.
+You have orchestration. You have tools. What you don't have is a place where agents **validate each other's findings**, **build on shared context**, and **learn from what actually happened in production**.
 
-```
-You already know this:               AMFS does the same for agent memory:
+<p align="center">
+  <img src="docs/assets/amfs-before-after.png" alt="Without vs. with a cognitive layer" width="700" />
+</p>
 
-  repo                                 agent brain
-  ├── main branch                      ├── main (what the agent knows)
-  ├── feature branch                   ├── experiment branch (isolated changes)
-  ├── pull request                     ├── pull request (review before merge)
-  ├── code review                      ├── diff (what changed in the branch)
-  ├── merge                            ├── merge (accept changes into main)
-  ├── git log                          ├── timeline (every operation logged)
-  └── git revert                       └── rollback (restore to any point)
-```
+## How AMFS Works
 
-Every write is a versioned commit. Every agent has provenance. Changes stay isolated on branches until reviewed. Roll back to any point. Fork an entire brain to a new agent.
+AMFS connects your agents across frameworks, sessions, and machines. They share knowledge, coordinate, and learn as a team.
+
+<p align="center">
+  <img src="docs/assets/amfs-how-it-works.png" alt="Discover → Handoff → Learn" width="700" />
+</p>
+
+**Discover** — Before acting, an agent queries AMFS for what the fleet already knows. Results come back ranked by confidence with full provenance — which agent wrote them, when, and how trustworthy they are.
+
+**Handoff** — A finding written by one agent is readable by every other agent within milliseconds. The Cursor agent on your laptop and the LangGraph pipeline in production share the same memory.
+
+**Learn** — When a deploy succeeds or an incident fires, AMFS records what the agent read, what it chose, and what happened. Confidence shifts based on real outcomes. Your training data writes itself.
 
 ## Quick Start
 
@@ -52,7 +55,7 @@ pip install amfs
 ```python
 from amfs import AgentMemory, OutcomeType
 
-mem = AgentMemory(agent_id="review-agent")
+mem = AgentMemory(agent_id="research-agent")
 
 # Agent discovers a pattern and commits it to memory
 mem.write("checkout-service", "retry-pattern",
@@ -62,22 +65,149 @@ mem.write("checkout-service", "retry-pattern",
 # Another agent reads it — the read is tracked automatically
 entry = mem.read("checkout-service", "retry-pattern")
 
-# When the deploy fails, confidence on related entries adjusts
-mem.commit_outcome("INC-1042", OutcomeType.CRITICAL_FAILURE)
+# Get a compiled briefing: everything the fleet knows about this entity
+briefing = mem.briefing("checkout-service")
+
+# When the deploy succeeds, confidence on related entries adjusts
+mem.commit_outcome("DEP-287", OutcomeType.SUCCESS)
+
+# Explain exactly which memories and contexts drove a decision
+trace = mem.explain("DEP-287")
 ```
 
 > **[Full quick start guide →](https://raia-live.github.io/amfs/getting-started/quickstart/)**
 
-## Installation
+## Works With Your Stack
+
+<p align="center">
+  <img src="docs/assets/amfs-integrations.png" alt="Cursor, Claude Code, CrewAI, LangGraph, LangChain, AutoGen, Strands, any MCP client" width="700" />
+</p>
+
+Drop AMFS into whatever you're already using. No rewrites. Your agents start sharing what they know.
+
+<details>
+<summary><strong>MCP — Cursor, Claude Desktop, Claude Code</strong></summary>
+
+One command to give any MCP-compatible client persistent agent memory:
 
 ```bash
-pip install amfs                    # Python SDK
-npm install @senselab-ai/amfs        # TypeScript SDK
-pip install amfs-http-server        # REST API server
-pip install amfs-adapter-postgres   # Postgres backend
-pip install amfs-adapter-s3         # S3 backend
-pip install amfs-cli                # CLI tools
-pip install amfs-strands            # Strands Agents plugin
+curl -sSL https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.sh | bash
+```
+
+Or add manually to your MCP config:
+
+```json
+{
+  "mcpServers": {
+    "amfs": {
+      "command": "python",
+      "args": ["-m", "amfs_mcp_server"],
+      "env": { "AMFS_API_KEY": "sk-your-key-here" }
+    }
+  }
+}
+```
+
+> **[MCP setup guide →](https://raia-live.github.io/amfs/guides/mcp/)** · **[Cursor plugin →](https://github.com/raia-live/cursor-plugin)**
+
+</details>
+
+<details>
+<summary><strong>Python SDK</strong></summary>
+
+```bash
+pip install amfs
+```
+
+```python
+from amfs import AgentMemory
+
+mem = AgentMemory(agent_id="my-agent")
+mem.write("my-service", "finding", "mutex pattern applied", confidence=0.91)
+briefing = mem.briefing("my-service")
+```
+
+</details>
+
+<details>
+<summary><strong>TypeScript SDK</strong></summary>
+
+```bash
+npm install @senselab-ai/amfs
+```
+
+```typescript
+import { HttpAdapter } from '@senselab-ai/amfs';
+
+const adapter = new HttpAdapter({ agentId: 'my-agent', apiKey: 'sk-...' });
+await adapter.writeAsync('my-service', 'finding', 'mutex pattern applied', { confidence: 0.91 });
+const briefing = await adapter.briefingAsync('my-service');
+```
+
+</details>
+
+<details>
+<summary><strong>Framework integrations — Strands, CrewAI, LangGraph, LangChain, AutoGen</strong></summary>
+
+```bash
+pip install amfs-strands       # AWS Strands Agents
+pip install amfs-crewai        # CrewAI
+pip install amfs-langgraph     # LangGraph
+pip install amfs-langchain     # LangChain
+pip install amfs-autogen       # AutoGen
+```
+
+> **[Integration guides →](https://raia-live.github.io/amfs/guides/)**
+
+</details>
+
+## Features
+
+| | Feature | What it does |
+|:--|:--------|:-------------|
+| 🧠 | **Confidence & Outcomes** | Entries carry trust scores that shift when deploys succeed or incidents fire. |
+| 🔍 | **Briefings** | One call returns everything the fleet knows about an entity — compiled, ranked, with provenance. |
+| 📊 | **Hybrid Search** | Full-text + semantic + recency + confidence in a single ranked result set. |
+| 🌳 | **Branching & PRs** | Create branches, diff changes, open pull requests, merge or discard — just like Git. |
+| ⏪ | **Rollback & Tags** | Named snapshots. Restore to any tag or event. |
+| 🔗 | **Knowledge Graph** | Relationships auto-materialize from normal operations. Query connections between entities. |
+| 📖 | **Causal Explainability** | `explain()` shows exactly which memories and contexts drove a decision. |
+| 🕐 | **Git-like Timeline** | Every write, outcome, and cross-agent read is logged. Full audit trail. |
+| 🔒 | **Access Control** | Grant read or read/write per branch, user, team, or API key. Multi-tenant isolation. |
+| 📦 | **Training Signal Output** | Export SFT/DPO datasets from real decision traces — not synthetic data. |
+| 🔌 | **MCP Server** | First-class support for Cursor, Claude Desktop, Claude Code, and any MCP client. |
+| 🧩 | **Connectors** | PagerDuty, GitHub, Slack, Jira — or [build your own](https://raia-live.github.io/amfs/guides/connectors/). |
+
+## Architecture
+
+AMFS is a monorepo with a layered architecture. Pick what you need:
+
+| Package | Install | Description |
+|:--------|:--------|:------------|
+| **Python SDK** | `pip install amfs` | Core client library — `AgentMemory` class |
+| **TypeScript SDK** | `npm install @senselab-ai/amfs` | TypeScript client with full async API |
+| **MCP Server** | `pip install amfs-mcp-server` | Model Context Protocol server for Cursor / Claude |
+| **HTTP Server** | `pip install amfs-http-server` | REST API server |
+| **Core Engine** | `pip install amfs-core` | Storage engine, versioning, timeline |
+| **CLI** | `pip install amfs-cli` | Command-line tools |
+
+**Storage adapters** — plug in your backend:
+
+| Adapter | Install |
+|:--------|:--------|
+| Filesystem (default) | `pip install amfs-adapter-filesystem` |
+| PostgreSQL | `pip install amfs-adapter-postgres` |
+| S3 | `pip install amfs-adapter-s3` |
+| HTTP (remote) | `pip install amfs-adapter-http` |
+
+**Integrations:**
+
+```bash
+pip install amfs-strands        # AWS Strands Agents
+pip install amfs-crewai         # CrewAI
+pip install amfs-langgraph      # LangGraph
+pip install amfs-langchain      # LangChain
+pip install amfs-autogen        # AutoGen
 ```
 
 Or run with Docker:
@@ -86,42 +216,15 @@ Or run with Docker:
 docker run -p 8080:8080 -v amfs-data:/data ghcr.io/raia-live/amfs
 ```
 
-## Features
-
-| Feature | Description |
-|:--------|:------------|
-| **Git-like Timeline** | Every write, outcome, and cross-agent read is logged. Full history, always. |
-| **Branching & PRs** | Create branches, diff changes, open pull requests, merge or discard. |
-| **Rollback & Tags** | Named snapshots. Restore to any tag or event. |
-| **Access Control** | Grant read or read/write per branch, user, team, or API key. |
-| **Versioned Knowledge** | Copy-on-Write — every write creates a new version. Nothing is lost. |
-| **Confidence & Outcomes** | Entries carry trust scores that evolve when deploys succeed or incidents happen. |
-| **Causal Explainability** | `explain()` shows exactly which memories and contexts drove a decision. |
-| **Knowledge Graph** | Relationships auto-materialize from normal operations. |
-| **Hybrid Search** | Full-text + semantic + recency + confidence in a single ranked result set. |
-| **MCP Server** | First-class support for Cursor, Claude Desktop, Claude Code, and any MCP client. |
-| **Connectors** | PagerDuty, GitHub, Slack, Jira — or [build your own](https://raia-live.github.io/amfs/guides/connectors/). |
-| **Python & TypeScript** | Same API in both languages. Plus [Strands](https://raia-live.github.io/amfs/guides/strands/), [CrewAI](https://raia-live.github.io/amfs/guides/crewai/), LangGraph, LangChain, AutoGen. |
-
-## MCP Integration
-
-One command to give any MCP-compatible client (Cursor, Claude Desktop, Claude Code) persistent agent memory:
-
-```bash
-curl -sSL https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.sh | bash
-```
-
-> **[MCP setup guide →](https://raia-live.github.io/amfs/guides/mcp/)** · **[Cursor plugin →](https://github.com/raia-live/cursor-plugin)**
-
 ## OSS vs Pro
 
 AMFS is open source under [Apache 2.0](LICENSE). The OSS edition gives you the full memory engine — versioned writes, confidence scoring, outcome feedback, causal traces, knowledge graph, hybrid search, git-like timeline, SDKs, adapters, HTTP API, MCP server, and CLI.
 
-**[AMFS Pro](https://raia-live.github.io/amfs/editions/)** unlocks the full Git model: branching, merge, pull requests, access control, tags, rollback, cherry-pick, fork, multi-tenant isolation, immutable decision traces, automated pattern detection, an intelligence layer, and a web dashboard.
+**[AMFS Pro](https://www.sense-lab.ai)** adds: branching, merge, pull requests, access control, tags, rollback, cherry-pick, fork, multi-tenant isolation, immutable decision traces, the intelligence layer (Cortex), and a web dashboard.
 
-> OSS = single-branch repo with full history. Pro = GitHub.
+> **OSS = single-branch repo with full history. Pro = GitHub.**
 
-**[Full comparison →](https://raia-live.github.io/amfs/editions/)**
+**[See plans & pricing →](https://www.sense-lab.ai)**
 
 ## Development
 
