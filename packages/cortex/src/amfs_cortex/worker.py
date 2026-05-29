@@ -43,6 +43,7 @@ class CortexWorker:
         use_advisory_lock: bool = True,
         drift_threshold: float = 0.0,
         catchup_interval_s: float = 300.0,
+        consolidation_interval_s: float = 21600.0,
         tenant_provider: Callable[[], list[str]] | None = None,
     ) -> None:
         self._dsn = dsn
@@ -51,6 +52,7 @@ class CortexWorker:
         self._use_advisory_lock = use_advisory_lock
         self._drift_threshold = drift_threshold
         self._catchup_interval_s = catchup_interval_s
+        self._consolidation_interval_s = consolidation_interval_s
         self._pending: dict[str, float] = {}
         self._scope_tenant: dict[str, str] = {}
         self._tenant_provider = tenant_provider
@@ -59,9 +61,11 @@ class CortexWorker:
         self._events_processed = 0
         self._digests_compiled = 0
         self._drift_skipped = 0
+        self._consolidation_runs = 0
         self._started_at: float | None = None
         self._last_event_at: float | None = None
         self._last_catchup: float = 0.0
+        self._last_consolidation: float = 0.0
         self._activity_log: deque[dict[str, Any]] = deque(maxlen=_ACTIVITY_LOG_MAX)
         self._outcome_wiring: Any = None
         self._hot_tracker: Any = None
@@ -88,6 +92,7 @@ class CortexWorker:
             "events_processed": self._events_processed,
             "digests_compiled": self._digests_compiled,
             "drift_skipped": self._drift_skipped,
+            "consolidation_runs": self._consolidation_runs,
             "pending_scopes": len(self._pending),
             "uptime_seconds": round(time.monotonic() - self._started_at, 1) if self._started_at else 0,
             "last_event_ago_ms": round((time.monotonic() - self._last_event_at) * 1000) if self._last_event_at else None,
@@ -160,6 +165,7 @@ class CortexWorker:
                         break
                     self._handle_notify(notify)
                 self._maybe_catchup()
+                self._maybe_consolidate()
 
         finally:
             conn.close()
@@ -208,6 +214,7 @@ class CortexWorker:
                             break
                         self._handle_notify(notify)
                     self._maybe_catchup()
+                    self._maybe_consolidate()
                 break
 
     def _handle_notify(self, notify) -> None:
@@ -268,8 +275,48 @@ class CortexWorker:
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
 
+            self._queue_trace_mining(payload)
+
         if self._pro_forwarder:
             self._pro_forwarder.enqueue({"channel": channel, **payload})
+
+    def _queue_trace_mining(self, payload: dict[str, Any]) -> None:
+        """Queue trace-pattern recompilation for entities affected by an outcome.
+
+        When an outcome is committed the trace's causal entries identify
+        which entities were involved.  We queue ``trace:<entity_path>``
+        scopes through the normal debounce pipeline so the
+        TracePatternExtractor runs after the dust settles.
+        """
+        entity_paths: set[str] = set()
+
+        for entry in payload.get("causal_entries", []):
+            ep = entry.get("entity_path", "") if isinstance(entry, dict) else ""
+            if ep:
+                entity_paths.add(ep)
+
+        if not entity_paths:
+            ep = payload.get("entity_path", "")
+            if ep:
+                entity_paths.add(ep)
+
+        branch = payload.get("branch", "main")
+        account_id = payload.get("account_id") or None
+
+        with self._lock:
+            for ep in entity_paths:
+                scope_key = f"trace:{ep}@{branch}"
+                self._pending[scope_key] = time.monotonic()
+                if account_id:
+                    self._scope_tenant[scope_key] = account_id
+
+        if entity_paths:
+            self._activity_log.append({
+                "type": "trace_mining_queued",
+                "entity_paths": sorted(entity_paths),
+                "branch": branch,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
 
     def _catchup_missing_digests(self) -> None:
         """Find agents/entities that have entries but no digest, queue them.
@@ -371,6 +418,58 @@ class CortexWorker:
         if elapsed < self._catchup_interval_s:
             return
         self._catchup_missing_digests()
+
+    def _maybe_consolidate(self) -> None:
+        """Periodically run Tier A consolidation (auto-safe operations)."""
+        if self._consolidation_interval_s <= 0:
+            return
+        elapsed = time.monotonic() - self._last_consolidation
+        if elapsed < self._consolidation_interval_s:
+            return
+        self._run_consolidation()
+
+    def _run_consolidation(self) -> None:
+        """Execute Tier A consolidation across all tenants."""
+        try:
+            from amfs_cortex.consolidator import ConsolidationStrategy
+
+            adapter = self._compiler._adapter
+            namespace = self._compiler._namespace
+            branch = self._compiler._branch
+
+            tenant_ids = self._tenant_provider() if self._tenant_provider else [None]
+            total_archived = 0
+
+            for tid in tenant_ids:
+                self._set_tenant_context(tid)
+                try:
+                    strategy = ConsolidationStrategy(adapter, namespace=namespace)
+                    report = strategy.run(branch=branch)
+                    total_archived += report.auto_archived
+                finally:
+                    self._set_tenant_context(None)
+
+            self._last_consolidation = time.monotonic()
+            self._consolidation_runs += 1
+
+            self._activity_log.append({
+                "type": "consolidation_run",
+                "auto_archived": total_archived,
+                "tenants_scanned": len(tenant_ids),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+            if total_archived > 0:
+                logger.info(
+                    "Consolidation: archived %d entries across %d tenants",
+                    total_archived, len(tenant_ids),
+                )
+        except Exception:
+            logger.exception("Consolidation run failed")
+            self._activity_log.append({
+                "type": "consolidation_error",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
 
     def _recompile_loop(self) -> None:
         """Background thread that recompiles debounced pending digests."""

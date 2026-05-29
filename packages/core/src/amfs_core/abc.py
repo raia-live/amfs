@@ -209,7 +209,12 @@ class AdapterABC(ABC):
                 continue
             results.append(entry)
 
-        if query.sort_by == "confidence":
+        if query.sort_by == "priority":
+            from amfs_core.tiering import PriorityScorer
+            scorer = PriorityScorer()
+            scores = scorer.score_batch(results)
+            results.sort(key=lambda e: scores.get(e.entry_key, 0.0), reverse=True)
+        elif query.sort_by == "confidence":
             results.sort(key=lambda e: e.confidence, reverse=True)
         elif query.sort_by == "recency":
             results.sort(key=lambda e: e.provenance.written_at, reverse=True)

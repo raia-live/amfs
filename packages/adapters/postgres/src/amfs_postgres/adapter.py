@@ -928,11 +928,17 @@ class PostgresAdapter(AdapterABC):
             "version": "version DESC",
         }
 
-        if use_fts and query.sort_by == "confidence":
+        use_priority_sort = query.sort_by == "priority"
+        if use_priority_sort:
+            order = "confidence DESC"
+            fetch_limit = min(query.limit * 3, 1000)
+        elif use_fts and query.sort_by == "confidence":
             order = "ts_rank(search_tsv, plainto_tsquery('english', %s)) DESC, confidence DESC"
             params.append(query.query)
+            fetch_limit = query.limit
         else:
             order = order_map.get(query.sort_by, "confidence DESC")
+            fetch_limit = query.limit
 
         where = " AND ".join(conditions)
         sql = f"""
@@ -941,14 +947,23 @@ class PostgresAdapter(AdapterABC):
             ORDER BY {order}
             LIMIT %s
         """
-        params.append(query.limit)
+        params.append(fetch_limit)
 
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
 
-        return [self._row_to_entry(r) for r in rows]
+        entries = [self._row_to_entry(r) for r in rows]
+
+        if use_priority_sort:
+            from amfs_core.tiering import PriorityScorer
+            scorer = PriorityScorer()
+            scores = scorer.score_batch(entries)
+            entries.sort(key=lambda e: scores.get(e.entry_key, 0.0), reverse=True)
+            entries = entries[: query.limit]
+
+        return entries
 
     # ------------------------------------------------------------------
     # semantic_search (pgvector cosine similarity)

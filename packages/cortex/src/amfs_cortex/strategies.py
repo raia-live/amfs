@@ -6,10 +6,13 @@ Generates both structured data and a human-readable narrative.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from amfs_core.models import Digest, DigestType
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from amfs_postgres.adapter import PostgresAdapter
@@ -409,6 +412,27 @@ class RuleBasedStrategy:
             compiled_at=datetime.now(timezone.utc),
             namespace=namespace,
         )
+
+    def compile_trace_patterns(
+        self, entity_path: str, adapter: "PostgresAdapter", namespace: str, branch: str = "main",
+    ) -> Digest | None:
+        """Delegate to TracePatternExtractor for rule-based pattern mining.
+
+        Also persists extracted pattern entries as first-class memories so
+        they appear in search results and briefings.
+        """
+        from amfs_cortex.trace_miner import TracePatternExtractor
+        extractor = TracePatternExtractor(adapter, namespace=namespace)
+
+        pattern_entries = extractor.extract_patterns(entity_path, branch=branch)
+        for entry in pattern_entries:
+            try:
+                entry.branch = branch
+                adapter.write(entry)
+            except Exception:
+                logger.debug("Failed to persist pattern entry %s", entry.key, exc_info=True)
+
+        return extractor.compile_trace_digest(entity_path, branch=branch)
 
     def compile_connection_map(
         self, entity_path: str, adapter: "PostgresAdapter", namespace: str, branch: str = "main",

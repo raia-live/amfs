@@ -3866,6 +3866,191 @@ async def cortex_recompile(
     return {"recompiled": count}
 
 
+# ------------------------------------------------------------------
+# Consolidation (Cortex compaction) endpoints
+# ------------------------------------------------------------------
+
+
+@app.post("/api/v1/cortex/consolidate")
+async def run_consolidation(
+    body: dict[str, Any] | None = None,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Run Tier A (auto-safe) consolidation.
+
+    Optionally accepts ``entity_path`` to consolidate a single entity.
+    """
+    from amfs_cortex.consolidator import ConsolidationStrategy
+
+    mem = _get_memory()
+    adapter = mem._adapter
+    namespace = mem._namespace
+    branch = (body or {}).get("branch", "main")
+    entity_path = (body or {}).get("entity_path")
+
+    strategy = ConsolidationStrategy(adapter, namespace=namespace)
+    if entity_path:
+        report = strategy.run_entity(entity_path, branch=branch)
+    else:
+        report = strategy.run(branch=branch)
+
+    return report.model_dump()
+
+
+@app.get("/api/v1/cortex/consolidation/candidates")
+async def list_consolidation_candidates(
+    entity_path: str = Query(...),
+    branch: str = Query("main"),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """List Tier B consolidation candidates (proposals) for an entity."""
+    from amfs_cortex.consolidator import ConsolidationStrategy
+
+    mem = _get_memory()
+    adapter = mem._adapter
+    namespace = mem._namespace
+
+    strategy = ConsolidationStrategy(adapter, namespace=namespace)
+    proposals = strategy.find_consolidation_candidates(entity_path, branch=branch)
+
+    return {
+        "entity_path": entity_path,
+        "proposals": [p.model_dump() for p in proposals],
+    }
+
+
+@app.get("/api/v1/cortex/consolidation/proposals")
+async def list_consolidation_proposals(
+    entity_path: str | None = Query(None),
+    status: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """List consolidation proposals from persisted branches.
+
+    Scans branches matching ``cortex/consolidation/`` and returns
+    structured proposal metadata extracted from each branch's diff.
+    """
+    mem = _get_memory()
+    adapter = mem._adapter
+    namespace = mem._namespace
+
+    try:
+        branches = adapter.list_branches(namespace=namespace, status="active" if status != "all" else None)
+    except Exception:
+        return {"proposals": [], "total": 0}
+
+    consolidation_branches = [
+        b for b in branches if b.name.startswith("cortex/consolidation/")
+    ]
+    if entity_path:
+        consolidation_branches = [
+            b for b in consolidation_branches
+            if b.name.startswith(f"cortex/consolidation/{entity_path}/")
+        ]
+
+    if status and status in ("approved", "rejected"):
+        branch_status = "merged" if status == "approved" else "closed"
+        branches_all = adapter.list_branches(namespace=namespace, status=branch_status)
+        extra = [b for b in branches_all if b.name.startswith("cortex/consolidation/")]
+        if entity_path:
+            extra = [b for b in extra if b.name.startswith(f"cortex/consolidation/{entity_path}/")]
+        consolidation_branches.extend(extra)
+
+    all_proposals = []
+    for b in consolidation_branches:
+        parts = b.name.split("/")
+        ep = "/".join(parts[2:-1]) if len(parts) > 3 else parts[2] if len(parts) >= 3 else "unknown"
+
+        branch_status_map = {"active": "pending", "merged": "approved", "closed": "rejected"}
+        prop_status = branch_status_map.get(b.status.value if hasattr(b.status, "value") else str(b.status), "pending")
+
+        if status and status != "all" and prop_status != status:
+            continue
+
+        try:
+            diff = adapter.diff_branch(b.name, namespace=namespace)
+            entry_keys = [f"{d.entity_path}/{d.key}" for d in diff.entries] if hasattr(diff, "entries") else []
+        except Exception:
+            diff = None
+            entry_keys = []
+
+        proposed_value = None
+        proposed_confidence = 0.0
+        if diff and hasattr(diff, "entries") and diff.entries:
+            first = diff.entries[0]
+            proposed_value = first.branch_value if hasattr(first, "branch_value") else None
+            proposed_confidence = 0.8
+
+        all_proposals.append({
+            "id": b.id or b.name,
+            "entity_path": ep,
+            "branch_name": b.name,
+            "strategy": b.description.split(":")[0].strip().lower().replace(" ", "_") if b.description and ":" in b.description else "consolidation",
+            "risk_tier": "review_required",
+            "source_entry_keys": entry_keys,
+            "proposed_value": proposed_value,
+            "proposed_confidence": proposed_confidence,
+            "compression_ratio": max(len(entry_keys), 1),
+            "rationale": b.description or "Consolidation proposal",
+            "status": prop_status,
+            "created_at": (b.created_at or b.branched_at).isoformat() if (b.created_at or b.branched_at) else None,
+            "reviewed_by": b.merged_by,
+            "reviewed_at": b.merged_at.isoformat() if b.merged_at else None,
+        })
+
+    return {
+        "proposals": all_proposals,
+        "total": len(all_proposals),
+    }
+
+
+@app.get("/api/v1/cortex/consolidation/status")
+async def consolidation_status(
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Get consolidation health metrics for the dashboard."""
+    mem = _get_memory()
+    adapter = mem._adapter
+    namespace = mem._namespace
+
+    consolidation_runs = 0
+    total_auto_archived = 0
+    if _cortex_worker:
+        consolidation_runs = _cortex_worker._consolidation_runs
+        for entry in _cortex_worker._activity_log:
+            if entry.get("type") == "consolidation_run":
+                total_auto_archived += entry.get("auto_archived", 0)
+
+    try:
+        branches = adapter.list_branches(namespace=namespace, status="active")
+        pending_branches = [
+            b for b in branches if b.name.startswith("cortex/consolidation/")
+        ]
+    except Exception:
+        pending_branches = []
+
+    entities_ready: list[str] = []
+    try:
+        entries = adapter.list()
+        entity_counts: dict[str, int] = {}
+        for e in entries:
+            entity_counts[e.entity_path] = entity_counts.get(e.entity_path, 0) + 1
+        for ep, count in sorted(entity_counts.items(), key=lambda x: -x[1]):
+            if count >= 10:
+                entities_ready.append(ep)
+            if len(entities_ready) >= 10:
+                break
+    except Exception:
+        pass
+
+    return {
+        "consolidation_runs": consolidation_runs,
+        "auto_archived": total_auto_archived,
+        "pending_proposals": len(pending_branches),
+        "entities_ready": entities_ready,
+    }
+
+
 @app.post("/api/v1/webhooks/{connector_name}")
 async def ingest_webhook(
     connector_name: str,

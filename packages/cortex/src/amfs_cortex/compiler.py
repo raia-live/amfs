@@ -25,6 +25,7 @@ class CompilationStrategy(Protocol):
     def compile_agent_brief(self, agent_id: str, adapter: PostgresAdapter, namespace: str, branch: str = "main") -> Digest | None: ...
     def compile_source(self, source_id: str, adapter: PostgresAdapter, namespace: str, branch: str = "main") -> Digest | None: ...
     def compile_connection_map(self, entity_path: str, adapter: PostgresAdapter, namespace: str, branch: str = "main") -> Digest | None: ...
+    def compile_trace_patterns(self, entity_path: str, adapter: PostgresAdapter, namespace: str, branch: str = "main") -> Digest | None: ...
 
 
 class DigestCompiler:
@@ -73,6 +74,8 @@ class DigestCompiler:
             digest = self._strategy.compile_source(scope, self._adapter, self._namespace, b)
         elif kind == "connection":
             digest = self._strategy.compile_connection_map(scope, self._adapter, self._namespace, b)
+        elif kind == "trace":
+            digest = self._strategy.compile_trace_patterns(scope, self._adapter, self._namespace, b)
         else:
             logger.warning("Unknown scope kind: %s", kind)
             return None
