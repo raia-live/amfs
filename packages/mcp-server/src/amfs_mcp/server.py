@@ -1518,6 +1518,44 @@ def amfs_diff(
     return json.dumps(result, default=str)
 
 
+@mcp.tool()
+def amfs_export_training_data(
+    entity_paths: list[str] | None = None,
+    min_confidence: float = 0.7,
+    format: str = "sft",
+    limit: int = 100,
+) -> dict:
+    """Export outcome-validated knowledge as a fine-tuning dataset.
+
+    Generates training examples from decision traces in SFT, DPO, or
+    Reward Model format. Only includes entries meeting the confidence
+    threshold and linked to production outcomes.
+
+    Args:
+        entity_paths: Filter to specific entities (exports all if omitted).
+        min_confidence: Minimum confidence threshold (default 0.7).
+        format: Export format — "sft", "dpo", or "reward_model".
+        limit: Maximum examples to generate.
+
+    Returns a dict with format, num_examples, and examples array.
+    """
+    mem = _get_memory()
+    try:
+        import httpx
+        base_url = os.environ.get("AMFS_HTTP_URL", "http://localhost:8741")
+        params = {"format": format, "min_confidence": min_confidence, "limit": limit}
+        if entity_paths:
+            params["entity_path"] = entity_paths[0]
+        resp = httpx.get(f"{base_url}/api/v1/pro/export", params=params, timeout=30.0)
+        if resp.status_code == 200:
+            return resp.json()
+        return {"error": f"Export endpoint returned {resp.status_code}", "detail": resp.text}
+    except ImportError:
+        return {"error": "httpx not installed — install it for export support"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────────────────────────────

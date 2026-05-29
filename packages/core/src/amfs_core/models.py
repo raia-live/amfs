@@ -369,7 +369,7 @@ class SearchQuery(BaseModel):
     since: datetime | None = None
     pattern_ref: str | None = None
     limit: int = 100
-    sort_by: str = "confidence"  # "confidence", "recency", "version"
+    sort_by: str = "confidence"  # "confidence", "recency", "version", "priority"
     recall_config: RecallConfig | None = None
     depth: int = 3
 
@@ -468,6 +468,7 @@ class DigestType(str, Enum):
     AGENT_BRIEF = "agent_brief"
     SOURCE = "source"
     CONNECTION_MAP = "connection_map"
+    TRACE_PATTERN = "trace_pattern"
 
 
 class Digest(BaseModel):
@@ -514,6 +515,44 @@ class EventType(str, Enum):
     FORK = "fork"
     SNAPSHOT_TAKEN = "snapshot_taken"
     SNAPSHOT_RECOVERED = "snapshot_recovered"
+    CONSOLIDATION_PROPOSED = "consolidation_proposed"
+    CONSOLIDATION_APPROVED = "consolidation_approved"
+    CONSOLIDATION_REJECTED = "consolidation_rejected"
+    CONSOLIDATION_AUTO_MERGED = "consolidation_auto_merged"
+
+
+class ConsolidationProposal(BaseModel):
+    """A proposed memory consolidation, created on a branch for review.
+
+    Tier A (auto-safe) proposals are applied directly; Tier B (semantic)
+    proposals sit on a branch until a human or agent approves the merge.
+    """
+
+    id: str
+    entity_path: str
+    branch_name: str
+    strategy: str
+    risk_tier: str
+    source_entry_keys: list[str]
+    proposed_value: Any
+    proposed_confidence: float
+    compression_ratio: float
+    rationale: str
+    status: str = "pending"
+    created_at: datetime
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
+
+
+class ConsolidationReport(BaseModel):
+    """Summary report of a consolidation run across an entity."""
+
+    entity_path: str
+    auto_archived: int
+    proposals_created: int
+    proposals_auto_merged: int
+    compression_ratio: float
+    consolidated_at: datetime
 
 
 class SessionMetadata(BaseModel):
