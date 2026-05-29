@@ -45,8 +45,6 @@ class BriefingService:
         5. Entry count weighted
         """
         all_digests = self._adapter.list_digests(namespace=self._namespace, branch=branch)
-        if not all_digests:
-            return []
 
         scored: list[tuple[float, Digest]] = []
         now = datetime.now(timezone.utc)
