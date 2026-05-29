@@ -13,6 +13,23 @@ export interface HttpAdapterOptions {
   headers?: Record<string, string>;
 }
 
+function snakeToCamel(str: string): string {
+  return str.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+}
+
+function convertKeys(obj: unknown): unknown {
+  if (obj === null || obj === undefined) return obj;
+  if (Array.isArray(obj)) return obj.map(convertKeys);
+  if (typeof obj === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      result[snakeToCamel(k)] = convertKeys(v);
+    }
+    return result;
+  }
+  return obj;
+}
+
 export class HttpAdapter implements AmfsAdapter {
   private readonly baseUrl: string;
   private readonly headers: Record<string, string>;
@@ -42,7 +59,8 @@ export class HttpAdapter implements AmfsAdapter {
       const body = await resp.text().catch(() => "");
       throw new Error(`AMFS API ${resp.status}: ${body}`);
     }
-    return resp.json() as Promise<T>;
+    const raw = await resp.json();
+    return convertKeys(raw) as T;
   }
 
   read(
@@ -50,7 +68,6 @@ export class HttpAdapter implements AmfsAdapter {
     key: string,
     options?: { minConfidence?: number }
   ): MemoryEntry | null {
-    // Synchronous interface — return null and let callers use readAsync
     return null;
   }
 
@@ -68,7 +85,6 @@ export class HttpAdapter implements AmfsAdapter {
   }
 
   write(entry: MemoryEntry): MemoryEntry {
-    // Synchronous interface — callers should use writeAsync for HTTP
     return entry;
   }
 
@@ -104,7 +120,6 @@ export class HttpAdapter implements AmfsAdapter {
     entityPath?: string,
     options?: { includeSuperseded?: boolean }
   ): MemoryEntry[] {
-    // Synchronous interface — return empty, callers should use listAsync
     return [];
   }
 
@@ -116,16 +131,25 @@ export class HttpAdapter implements AmfsAdapter {
     if (entityPath) params.set("entity_path", entityPath);
     if (options?.includeSuperseded) params.set("include_superseded", "true");
     const qs = params.toString();
-    return this.fetch<MemoryEntry[]>(`/api/v1/entries${qs ? `?${qs}` : ""}`);
+    const data = await this.fetch<{ entries: MemoryEntry[] } | MemoryEntry[]>(
+      `/api/v1/entries${qs ? `?${qs}` : ""}`
+    );
+    if (Array.isArray(data)) return data;
+    return data.entries ?? [];
   }
 
   async searchAsync(query: {
     query?: string;
     entityPath?: string;
     minConfidence?: number;
+    maxConfidence?: number;
     agentId?: string;
+    since?: string;
+    patternRef?: string;
     sortBy?: string;
     limit?: number;
+    depth?: number;
+    branch?: string;
   }): Promise<MemoryEntry[]> {
     return this.fetch<MemoryEntry[]>("/api/v1/search", {
       method: "POST",
@@ -134,8 +158,13 @@ export class HttpAdapter implements AmfsAdapter {
         entity_path: query.entityPath,
         min_confidence: query.minConfidence ?? 0.0,
         limit: query.limit ?? 100,
+        ...(query.maxConfidence != null ? { max_confidence: query.maxConfidence } : {}),
         ...(query.agentId ? { agent_id: query.agentId } : {}),
+        ...(query.since ? { since: query.since } : {}),
+        ...(query.patternRef ? { pattern_ref: query.patternRef } : {}),
         ...(query.sortBy ? { sort_by: query.sortBy } : {}),
+        ...(query.depth != null ? { depth: query.depth } : {}),
+        ...(query.branch ? { branch: query.branch } : {}),
       }),
     });
   }
@@ -172,7 +201,7 @@ export class HttpAdapter implements AmfsAdapter {
                 const raw = line.slice(5).trim();
                 if (raw) {
                   try {
-                    callback(JSON.parse(raw) as MemoryEntry);
+                    callback(convertKeys(JSON.parse(raw)) as MemoryEntry);
                   } catch { /* skip malformed */ }
                 }
               }
@@ -190,7 +219,6 @@ export class HttpAdapter implements AmfsAdapter {
   }
 
   commitOutcome(record: OutcomeRecord): MemoryEntry[] {
-    // Synchronous interface — return empty, callers should use commitOutcomeAsync
     return [];
   }
 
@@ -199,7 +227,10 @@ export class HttpAdapter implements AmfsAdapter {
     outcomeType: string;
     entityPath?: string;
     causalEntryKeys?: string[];
+    causalConfidence?: number;
+    agentId?: string;
   }): Promise<unknown> {
+    const agentId = record.agentId ?? this.agentId;
     return this.fetch("/api/v1/outcomes", {
       method: "POST",
       body: JSON.stringify({
@@ -207,6 +238,8 @@ export class HttpAdapter implements AmfsAdapter {
         outcome_type: record.outcomeType,
         ...(record.entityPath ? { entity_path: record.entityPath } : {}),
         ...(record.causalEntryKeys?.length ? { causal_entry_keys: record.causalEntryKeys } : {}),
+        ...(record.causalConfidence != null ? { causal_confidence: record.causalConfidence } : {}),
+        ...(agentId ? { agent_id: agentId } : {}),
       }),
     });
   }
@@ -217,6 +250,50 @@ export class HttpAdapter implements AmfsAdapter {
 
   async healthAsync(): Promise<Record<string, unknown>> {
     return this.fetch<Record<string, unknown>>("/api/v1/health");
+  }
+
+  async briefingAsync(options?: {
+    entityPath?: string;
+    limit?: number;
+  }): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (options?.entityPath) params.set("entity_path", options.entityPath);
+    if (options?.limit) params.set("limit", String(options.limit));
+    const qs = params.toString();
+    return this.fetch(`/api/v1/briefing${qs ? `?${qs}` : ""}`);
+  }
+
+  async consolidationStatusAsync(): Promise<unknown> {
+    return this.fetch("/api/v1/cortex/consolidation/status");
+  }
+
+  async consolidationProposalsAsync(options?: {
+    status?: string;
+    limit?: number;
+  }): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (options?.status) params.set("status", options.status);
+    if (options?.limit) params.set("limit", String(options.limit));
+    const qs = params.toString();
+    return this.fetch(`/api/v1/cortex/consolidation/proposals${qs ? `?${qs}` : ""}`);
+  }
+
+  async consolidationCandidatesAsync(options?: {
+    limit?: number;
+  }): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (options?.limit) params.set("limit", String(options.limit));
+    const qs = params.toString();
+    return this.fetch(`/api/v1/cortex/consolidation/candidates${qs ? `?${qs}` : ""}`);
+  }
+
+  async consolidateAsync(options?: {
+    dryRun?: boolean;
+  }): Promise<unknown> {
+    return this.fetch("/api/v1/cortex/consolidate", {
+      method: "POST",
+      body: JSON.stringify({ dry_run: options?.dryRun ?? true }),
+    });
   }
 
   async listTracesAsync(options?: {
@@ -231,9 +308,10 @@ export class HttpAdapter implements AmfsAdapter {
     if (options?.outcomeType) params.set("outcome_type", options.outcomeType);
     if (options?.limit) params.set("limit", String(options.limit));
     const qs = params.toString();
-    const data = await this.fetch<{ traces: DecisionTraceSummary[] }>(
+    const data = await this.fetch<{ traces: DecisionTraceSummary[] } | DecisionTraceSummary[]>(
       `/api/v1/traces${qs ? `?${qs}` : ""}`
     );
+    if (Array.isArray(data)) return data;
     return data.traces ?? [];
   }
 
@@ -248,59 +326,59 @@ export class HttpAdapter implements AmfsAdapter {
 
 export interface DecisionTraceSummary {
   id: string;
-  agent_id: string;
-  outcome_ref: string;
-  outcome_type: string;
-  decision_summary?: string;
-  causal_entries: number;
-  external_contexts: number;
-  session_duration_ms?: number;
-  created_at: string;
+  agentId: string;
+  outcomeRef: string;
+  outcomeType: string;
+  decisionSummary?: string;
+  causalEntries: number;
+  externalContexts: number;
+  sessionDurationMs?: number;
+  createdAt: string;
 }
 
 export interface DecisionTrace {
   id: string;
-  agent_id: string;
-  session_id: string;
-  outcome_ref: string;
-  outcome_type: string;
-  decision_summary?: string;
-  causal_entries: Array<{
-    entity_path: string;
+  agentId: string;
+  sessionId: string;
+  outcomeRef: string;
+  outcomeType: string;
+  decisionSummary?: string;
+  causalEntries: Array<{
+    entityPath: string;
     key: string;
     version: number;
     confidence: number;
     value?: unknown;
-    memory_type?: string;
-    written_by?: string;
-    read_at?: string;
+    memoryType?: string;
+    writtenBy?: string;
+    readAt?: string;
   }>;
-  external_contexts: Array<{
+  externalContexts: Array<{
     label: string;
     summary: string;
     source?: string;
-    recorded_at?: string;
+    recordedAt?: string;
   }>;
-  query_events: Array<{
+  queryEvents: Array<{
     operation: string;
     parameters: Record<string, unknown>;
-    result_count: number;
-    duration_ms?: number;
-    occurred_at?: string;
+    resultCount: number;
+    durationMs?: number;
+    occurredAt?: string;
   }>;
-  error_events: Array<{
+  errorEvents: Array<{
     operation: string;
-    error_type: string;
+    errorType: string;
     message: string;
-    stack_trace?: string;
-    occurred_at?: string;
+    stackTrace?: string;
+    occurredAt?: string;
   }>;
-  state_diff?: {
-    entries_created: number;
-    entries_updated: number;
+  stateDiff?: {
+    entriesCreated: number;
+    entriesUpdated: number;
   };
-  session_started_at?: string;
-  session_ended_at?: string;
-  session_duration_ms?: number;
-  created_at: string;
+  sessionStartedAt?: string;
+  sessionEndedAt?: string;
+  sessionDurationMs?: number;
+  createdAt: string;
 }

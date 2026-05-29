@@ -27,7 +27,7 @@ export interface SearchOptions {
   since?: string;
   patternRef?: string;
   limit?: number;
-  sortBy?: "confidence" | "recency" | "version";
+  sortBy?: "confidence" | "recency" | "version" | "priority";
   recallConfig?: RecallConfig;
 }
 

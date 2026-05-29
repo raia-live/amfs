@@ -53,6 +53,11 @@ export interface MemoryEntry {
   contentHash: string | null;
   integrityChain: string | null;
   commitId: string | null;
+  memoryType?: string;
+  branch?: string;
+  recallCount?: number;
+  priorityScore?: number;
+  tier?: string;
 }
 
 export interface CommitEntry {

@@ -2,9 +2,14 @@
 
 from amfs_core.embedder import EmbedderABC
 from amfs_core.models import (
+    AMFSConfig,
     ConflictPolicy,
+    ConsolidationProposal,
+    ConsolidationReport,
     DecisionTrace,
+    DigestType,
     Event,
+    LayerConfig,
     MemoryEntry,
     MemoryStats,
     MemoryType,
@@ -20,15 +25,21 @@ from amfs_core.models import (
     SemanticQuery,
     SessionMetadata,
 )
+from amfs_core.exceptions import StaleWriteError
 
 from amfs.memory import AgentMemory, MemoryScope
 
 __all__ = [
     "AgentMemory",
+    "AMFSConfig",
     "ConflictPolicy",
+    "ConsolidationProposal",
+    "ConsolidationReport",
     "DecisionTrace",
+    "DigestType",
     "EmbedderABC",
     "Event",
+    "LayerConfig",
     "MemoryEntry",
     "MemoryScope",
     "MemoryStats",
@@ -44,4 +55,5 @@ __all__ = [
     "SearchQuery",
     "SemanticQuery",
     "SessionMetadata",
+    "StaleWriteError",
 ]
