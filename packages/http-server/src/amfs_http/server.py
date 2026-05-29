@@ -3752,8 +3752,71 @@ async def list_connectors(
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _is_agent_visible_for_entity(
+    agent_id: str,
+    entity_path: str,
+    user_agents: set[str],
+    room_map: dict[str, set[str]],
+) -> bool:
+    """Check if an agent is visible in the context of a specific entity_path.
+
+    Mirrors the logic of UserVisibilityFilter.is_entry_visible but works
+    with raw agent_id + entity_path instead of requiring a full entry object.
+    """
+    if agent_id in user_agents:
+        return True
+    room_members = room_map.get(entity_path)
+    if room_members:
+        if agent_id in room_members:
+            return True
+        if agent_id in ("amfs-server", "system", "amfs"):
+            return True
+    return False
+
+
+def _filter_briefing_digests(vis: Any, digests: list) -> list:
+    """Filter briefing digests and their hot_context through visibility.
+
+    Ensures briefing only surfaces data the user could also access via
+    amfs_read / amfs_search, maintaining consistency across all endpoints.
+    """
+    user_agents = vis.get_user_agents()
+    room_map = vis.get_room_map()
+    filtered = []
+
+    for digest in digests:
+        scope = digest.scope
+        source_agents = digest.source_agents
+
+        if "hot_context" in digest.summary:
+            digest.summary["hot_context"] = [
+                h for h in digest.summary["hot_context"]
+                if _is_agent_visible_for_entity(
+                    h.get("agent", ""), scope, user_agents, room_map,
+                )
+            ]
+
+        if source_agents:
+            has_visible = any(
+                _is_agent_visible_for_entity(a, scope, user_agents, room_map)
+                for a in source_agents
+            )
+            if not has_visible:
+                continue
+        else:
+            has_room_access = scope in room_map
+            has_visible_hot = bool(digest.summary.get("hot_context"))
+            if not has_room_access and not has_visible_hot:
+                continue
+
+        filtered.append(digest)
+
+    return filtered
+
+
 @app.get("/api/v1/briefing")
 async def get_briefing(
+    request: Request,
     entity_path: str | None = Query(None),
     agent_id: str | None = Query(None),
     limit: int = Query(10, ge=1, le=100),
@@ -3766,6 +3829,11 @@ async def get_briefing(
         agent_id=agent_id,
         limit=limit,
     )
+
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter():
+        digests = _filter_briefing_digests(vis, digests)
+
     return {
         "digests": [d.model_dump(mode="json") for d in digests],
         "total": len(digests),
@@ -3774,6 +3842,7 @@ async def get_briefing(
 
 @app.get("/api/v1/cortex/status")
 async def cortex_status(
+    request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Get Cortex worker status and digest statistics."""
@@ -3789,6 +3858,11 @@ async def cortex_status(
         adapter = mem._adapter
         if isinstance(adapter, PostgresAdapter):
             all_digests = adapter.list_digests()
+
+            vis = _get_visibility_filter(request)
+            if vis is not None and vis.should_filter():
+                all_digests = _filter_briefing_digests(vis, all_digests)
+
             return {
                 "status": "active" if all_digests else "idle",
                 "digest_count": len(all_digests),
@@ -3808,6 +3882,7 @@ async def cortex_status(
 
 @app.get("/api/v1/cortex/digests")
 async def list_cortex_digests(
+    request: Request,
     digest_type: str | None = Query(None),
     scope: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
@@ -3825,6 +3900,11 @@ async def list_cortex_digests(
             digests = adapter.list_digests(digest_type=dt, namespace=namespace)
             if scope:
                 digests = [d for d in digests if d.scope == scope]
+
+            vis = _get_visibility_filter(request)
+            if vis is not None and vis.should_filter():
+                digests = _filter_briefing_digests(vis, digests)
+
             return {
                 "digests": [d.model_dump(mode="json") for d in digests],
                 "total": len(digests),
