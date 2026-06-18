@@ -242,6 +242,10 @@ class PostgresAdapter(AdapterABC):
             ADD COLUMN IF NOT EXISTS branch TEXT NOT NULL DEFAULT 'main'
         """)
         cur.execute("""
+            ALTER TABLE amfs_decision_traces
+            ADD COLUMN IF NOT EXISTS session_metadata JSONB DEFAULT '{}'
+        """)
+        cur.execute("""
             ALTER TABLE amfs_digests
             ADD COLUMN IF NOT EXISTS branch TEXT NOT NULL DEFAULT 'main'
         """)
@@ -1607,9 +1611,9 @@ class PostgresAdapter(AdapterABC):
                          decision_summary, causal_entries, external_contexts,
                          query_events, session_started_at, session_ended_at,
                          session_duration_ms,
-                         error_events, state_diff, created_at)
+                         error_events, state_diff, session_metadata, created_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb,
-                            %s::jsonb, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+                            %s::jsonb, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s)
                     RETURNING id, created_at
                     """,
                     (
@@ -1627,6 +1631,7 @@ class PostgresAdapter(AdapterABC):
                         trace.session_duration_ms,
                         json.dumps([e.model_dump(mode="json") for e in trace.error_events]),
                         json.dumps(trace.state_diff.model_dump(mode="json")) if trace.state_diff else None,
+                        json.dumps(trace.session_metadata) if trace.session_metadata else "{}",
                         trace.created_at,
                     ),
                 )
@@ -1703,6 +1708,10 @@ class PostgresAdapter(AdapterABC):
         if duration is not None:
             duration = float(duration)
 
+        sm_raw = row.get("session_metadata") or {}
+        if isinstance(sm_raw, str):
+            sm_raw = json.loads(sm_raw)
+
         return DecisionTrace(
             id=str(row["id"]),
             agent_id=row["agent_id"],
@@ -1715,6 +1724,7 @@ class PostgresAdapter(AdapterABC):
             query_events=[QueryEvent(**q) for q in qe_raw],
             error_events=[ErrorEvent(**e) for e in ee_raw],
             state_diff=MemoryStateDiff(**sd_raw) if sd_raw else None,
+            session_metadata=sm_raw,
             session_started_at=row.get("session_started_at"),
             session_ended_at=row.get("session_ended_at"),
             session_duration_ms=duration,
