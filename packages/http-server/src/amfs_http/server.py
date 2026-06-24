@@ -1027,6 +1027,7 @@ def _infer_tags(
 
 @app.put("/api/v1/agents/{agent_id:path}/profile")
 async def update_agent_profile(
+    request: Request,
     agent_id: str,
     body: dict[str, Any],
     _auth: str | None = Depends(verify_api_key),
@@ -1036,6 +1037,10 @@ async def update_agent_profile(
     mem = _get_memory()
     profile = AgentProfile.model_validate(body)
     agent = mem._adapter.update_agent_profile(agent_id, profile)
+    # Link the agent to the API key's owner so it shows on the user's dashboard
+    # immediately — set_identity announces through this endpoint before the
+    # agent has written any memory, so the write-path owner link never fires.
+    _ensure_agent_owner(request, agent_id, mem.namespace)
     return json.loads(json.dumps(agent.model_dump(mode="json"), default=str))
 
 
@@ -1694,6 +1699,18 @@ async def list_agents(
         own = vis.get_user_agents()
         before_own_filter = list(agent_data.keys())
         agent_data = {aid: d for aid, d in agent_data.items() if aid in own}
+        # Include owner-linked agents that have written zero entries (e.g. an
+        # agent that called set_identity over MCP but hasn't written memory
+        # yet). Without this they never appear on the dashboard.
+        for aid in own:
+            if aid not in agent_data:
+                agent_data[aid] = {
+                    "agent_id": aid,
+                    "entries_written": 0,
+                    "entities_touched": set(),
+                    "last_active": None,
+                    "first_seen": None,
+                }
         logger.warning(
             "[AGENTS] own_filter: before=%s after=%s own_set=%s",
             sorted(before_own_filter), sorted(agent_data.keys()), sorted(own),
@@ -1710,12 +1727,17 @@ async def list_agents(
                     with conn.cursor() as cur:
                         placeholders = ", ".join(["%s"] * len(known_agent_ids))
                         cur.execute(
-                            f"SELECT agent_id, created_at FROM amfs_agents "
+                            f"SELECT agent_id, created_at, last_active_at, profile "
+                            f"FROM amfs_agents "
                             f"WHERE namespace = %s AND agent_id IN ({placeholders})",
                             [adapter._namespace, *known_agent_ids],
                         )
                         for row in cur.fetchall():
-                            agent_registration[row["agent_id"]] = {"created_at": row["created_at"]}
+                            agent_registration[row["agent_id"]] = {
+                                "created_at": row["created_at"],
+                                "last_active_at": row.get("last_active_at"),
+                                "profile": row.get("profile"),
+                            }
         except (ImportError, Exception):
             pass
 
@@ -1736,14 +1758,27 @@ async def list_agents(
         desc_info = agent_descriptions.get(ad["agent_id"], {})
         reg = agent_registration.get(ad["agent_id"], {})
         created = reg.get("created_at") or ad.get("first_seen")
+        # Zero-write agents have no entry-derived activity; fall back to the
+        # registration row (set via set_identity / profile update).
+        last_active = ad["last_active"] or reg.get("last_active_at")
+        description = desc_info.get("description", "")
+        platform = desc_info.get("platform", "")
+        prof = reg.get("profile")
+        if isinstance(prof, dict):
+            if not description:
+                description = prof.get("description", "") or ""
+            if not platform:
+                sm = prof.get("session_metadata")
+                if isinstance(sm, dict):
+                    platform = sm.get("platform", "") or ""
         agents.append({
             "agentId": ad["agent_id"],
             "entriesWritten": ad["entries_written"],
             "entitiesTouched": len(ad["entities_touched"]),
-            "lastActive": ad["last_active"].isoformat() if ad["last_active"] else None,
+            "lastActive": last_active.isoformat() if last_active else None,
             "createdAt": created.isoformat() if created else None,
-            "description": desc_info.get("description", ""),
-            "platform": desc_info.get("platform", ""),
+            "description": description,
+            "platform": platform,
         })
     return {"agents": agents}
 
