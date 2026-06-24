@@ -53,7 +53,7 @@ Usage:
 
 Options:
   --client <name|all>   Configure a specific client: claude-desktop, cursor,
-                        claude-code, windsurf, vscode, or "all"
+                        claude-code, codex, windsurf, vscode, or "all"
   --api-key <key>       Connect to AMFS SaaS with this API key
   --api-url <url>       SaaS API URL (default: https://amfs-login.sense-lab.ai)
   --uninstall           Remove AMFS MCP config from clients
@@ -281,6 +281,10 @@ detect_clients() {
         DETECTED_CLIENTS+=("claude-code")
     fi
 
+    if command -v codex &>/dev/null; then
+        DETECTED_CLIENTS+=("codex")
+    fi
+
     local windsurf_dir
     windsurf_dir="$(dirname "$(windsurf_config_path)")"
     if [[ -d "$windsurf_dir" ]]; then
@@ -341,6 +345,32 @@ configure_client() {
                 fi
                 claude "${args[@]}"
                 success "Configured Claude Code"
+            fi
+            ;;
+        codex)
+            if $UNINSTALL; then
+                if command -v codex &>/dev/null; then
+                    codex mcp remove senselab 2>/dev/null || true
+                    success "Removed AMFS from Codex"
+                fi
+            else
+                if ! command -v codex &>/dev/null; then
+                    warn "Codex CLI (codex) not found on PATH — skipping"
+                    return 1
+                fi
+                resolve_uvx_path
+                local pkg="amfs-mcp-server"
+                if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
+                # codex mcp add <name> [--env KEY=VAL]... -- <command> [args...]
+                local args=("mcp" "add" "senselab" "--" "$UVX_PATH" "$pkg")
+                if [[ -n "$API_KEY" ]]; then
+                    local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
+                    args=("mcp" "add" "senselab" "--env" "AMFS_HTTP_URL=$url" "--env" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "$pkg")
+                fi
+                # Replace any existing entry so re-runs stay idempotent.
+                codex mcp remove senselab 2>/dev/null || true
+                codex "${args[@]}"
+                success "Configured Codex"
             fi
             ;;
         windsurf)

@@ -486,6 +486,30 @@ class AsyncPostgresAdapter:
                 row = await cur.fetchone()
         return self._row_to_agent(row)
 
+    async def register_agent(self, agent_id: str, namespace: str = "default") -> Agent:
+        """Ensure an agent row exists WITHOUT counting it as a memory write.
+
+        Mirrors :meth:`PostgresAdapter.register_agent` — used when an agent
+        announces itself (set_identity / profile update) so it appears on the
+        dashboard before writing any memory. Does not inflate ``entry_count``.
+        """
+        account_id = self._get_current_account_id()
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""
+                    INSERT INTO amfs_agents (namespace, agent_id, account_id)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT ON CONSTRAINT uq_agent DO UPDATE
+                        SET last_active_at = NOW(),
+                            account_id = COALESCE(amfs_agents.account_id, EXCLUDED.account_id)
+                    RETURNING {self._AGENT_COLUMNS}
+                    """,
+                    (namespace, agent_id, account_id),
+                )
+                row = await cur.fetchone()
+        return self._row_to_agent(row)
+
     # ──────────────────────────────────────────────────────────────
     # 6. log_event
     # ──────────────────────────────────────────────────────────────

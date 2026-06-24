@@ -1918,6 +1918,31 @@ class PostgresAdapter(AdapterABC):
                 row = cur.fetchone()
         return self._row_to_agent(row)
 
+    def register_agent(self, agent_id: str, namespace: str = "default") -> Agent:
+        """Ensure an agent row exists WITHOUT counting it as a memory write.
+
+        Unlike ``ensure_agent`` this does not increment ``entry_count`` — it is
+        used when an agent announces itself (e.g. via set_identity / profile
+        update) so the agent appears on the dashboard before it writes any
+        memory. Idempotent: refreshes ``last_active_at`` on conflict.
+        """
+        account_id = self._get_current_account_id()
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO amfs_agents (namespace, agent_id, account_id)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT ON CONSTRAINT uq_agent DO UPDATE
+                        SET last_active_at = NOW(),
+                            account_id = COALESCE(amfs_agents.account_id, EXCLUDED.account_id)
+                    RETURNING {self._AGENT_COLUMNS}
+                    """,
+                    (namespace, agent_id, account_id),
+                )
+                row = cur.fetchone()
+        return self._row_to_agent(row)
+
     def get_agent(self, agent_id: str, namespace: str = "default") -> Agent | None:
         account_id = self._get_current_account_id()
         if account_id:
@@ -1993,7 +2018,9 @@ class PostgresAdapter(AdapterABC):
         profile: Any,
         namespace: str = "default",
     ) -> Agent:
-        self.ensure_agent(agent_id, namespace)
+        # register (not ensure) — announcing a profile is not a memory write,
+        # so it must not inflate entry_count.
+        self.register_agent(agent_id, namespace)
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
