@@ -427,6 +427,66 @@ class AdapterABC(ABC):
             results.append(agent)
         return results
 
+    # --- Agent Groups ---
+
+    def create_agent_group(
+        self, group: "AgentGroup", namespace: str = "default"
+    ) -> "AgentGroup":
+        raise NotImplementedError
+
+    def list_agent_groups(self, namespace: str = "default") -> list["AgentGroup"]:
+        return []
+
+    def get_agent_group(self, group_id: str, namespace: str = "default") -> "AgentGroup | None":
+        return None
+
+    def update_agent_group(
+        self, group_id: str, *, name: str | None = None,
+        description: str | None = None, color: str | None = None,
+        icon: str | None = None, position: float | None = None,
+        namespace: str = "default",
+    ) -> "AgentGroup | None":
+        raise NotImplementedError
+
+    def delete_agent_group(self, group_id: str, namespace: str = "default") -> bool:
+        raise NotImplementedError
+
+    def add_agents_to_group(
+        self, group_id: str, agent_ids: list[str],
+        added_by: str = "user", namespace: str = "default",
+    ) -> int:
+        raise NotImplementedError
+
+    def remove_agents_from_group(
+        self, group_id: str, agent_ids: list[str], namespace: str = "default"
+    ) -> int:
+        raise NotImplementedError
+
+    def reorder_agent_groups(
+        self, positions: list[tuple[str, float]], namespace: str = "default"
+    ) -> None:
+        raise NotImplementedError
+
+    # --- Enriched agent queries ---
+
+    def list_agents_enriched(self, namespace: str = "default") -> list[dict]:
+        return []
+
+    def get_agent_activity_histogram(
+        self, agent_id: str, days: int = 7, namespace: str = "default"
+    ) -> list[int]:
+        return [0] * days
+
+    # --- Cluster suggestions ---
+
+    def dismiss_cluster_suggestion(
+        self, cluster_id: str, account_id: str
+    ) -> None:
+        raise NotImplementedError
+
+    def list_dismissed_cluster_ids(self, account_id: str) -> list[str]:
+        return []
+
     # ── Event log / timeline ───────────────────────────────────────────
 
     def log_event(self, event: Event) -> Event:

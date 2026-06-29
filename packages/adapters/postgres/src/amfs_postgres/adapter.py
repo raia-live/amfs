@@ -652,6 +652,50 @@ class PostgresAdapter(AdapterABC):
             ALTER TABLE amfs_api_keys
             ADD COLUMN IF NOT EXISTS created_by UUID
         """)
+        # Agent groups (user-defined and auto-generated)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS amfs_agent_groups (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                namespace TEXT NOT NULL DEFAULT 'default',
+                account_id UUID,
+                name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                color TEXT DEFAULT NULL,
+                icon TEXT DEFAULT NULL,
+                position FLOAT DEFAULT 0,
+                auto_generated BOOLEAN DEFAULT FALSE,
+                source_cluster_id TEXT DEFAULT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                CONSTRAINT uq_agent_group UNIQUE (namespace, account_id, name)
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_agent_groups_account
+                ON amfs_agent_groups(account_id) WHERE account_id IS NOT NULL
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS amfs_agent_group_members (
+                group_id UUID NOT NULL REFERENCES amfs_agent_groups(id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL,
+                namespace TEXT NOT NULL DEFAULT 'default',
+                added_at TIMESTAMPTZ DEFAULT NOW(),
+                added_by TEXT DEFAULT 'user',
+                PRIMARY KEY (group_id, agent_id)
+            )
+        """)
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_group_member_unique
+                ON amfs_agent_group_members(namespace, agent_id)
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS amfs_agent_group_suggestions_dismissed (
+                account_id UUID NOT NULL,
+                cluster_id TEXT NOT NULL,
+                dismissed_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (account_id, cluster_id)
+            )
+        """)
 
     def _detect_optional_columns(self) -> None:
         """Check whether optional columns (embedding, search_tsv) exist.
@@ -2078,6 +2122,520 @@ class PostgresAdapter(AdapterABC):
                 )
                 row = cur.fetchone()
         return self._row_to_agent(row)
+
+    # ── Agent groups ──────────────────────────────────────────────────
+
+    def create_agent_group(self, group, namespace: str = "default"):
+        from amfs_core.models import AgentGroup
+
+        account_id = self._get_current_account_id()
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_agent_groups
+                        (namespace, account_id, name, description, color, icon,
+                         position, auto_generated, source_cluster_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id, created_at, updated_at
+                    """,
+                    (
+                        namespace,
+                        account_id,
+                        group.name,
+                        group.description or "",
+                        group.color,
+                        group.icon,
+                        group.position,
+                        group.auto_generated,
+                        group.source_cluster_id,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+        return AgentGroup(
+            id=str(row["id"]),
+            namespace=namespace,
+            account_id=str(account_id) if account_id else None,
+            name=group.name,
+            description=group.description or "",
+            color=group.color,
+            icon=group.icon,
+            position=group.position,
+            auto_generated=group.auto_generated,
+            source_cluster_id=group.source_cluster_id,
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def list_agent_groups(self, namespace: str = "default") -> list:
+        from amfs_core.models import AgentGroup
+
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND g.account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT g.id, g.namespace, g.account_id, g.name,
+                           g.description, g.color, g.icon, g.position,
+                           g.auto_generated, g.source_cluster_id,
+                           g.created_at, g.updated_at,
+                           COALESCE(ARRAY_AGG(m.agent_id) FILTER (WHERE m.agent_id IS NOT NULL), '{{}}'::TEXT[]) AS agent_ids,
+                           COUNT(m.agent_id) AS member_count
+                    FROM amfs_agent_groups g
+                    LEFT JOIN amfs_agent_group_members m ON m.group_id = g.id
+                    WHERE g.namespace = %s {account_filter}
+                    GROUP BY g.id
+                    ORDER BY g.position, g.created_at
+                    """,
+                    (namespace, *acct_params),
+                )
+                rows = cur.fetchall()
+
+        return [
+            AgentGroup(
+                id=str(r["id"]),
+                namespace=r["namespace"],
+                account_id=str(r["account_id"]) if r["account_id"] else None,
+                name=r["name"],
+                description=r["description"] or "",
+                color=r["color"],
+                icon=r["icon"],
+                position=float(r["position"]),
+                auto_generated=r["auto_generated"],
+                source_cluster_id=r["source_cluster_id"],
+                member_count=r["member_count"],
+                agent_ids=list(r["agent_ids"]),
+                created_at=r["created_at"],
+                updated_at=r["updated_at"],
+            )
+            for r in rows
+        ]
+
+    def get_agent_group(self, group_id: str, namespace: str = "default"):
+        from amfs_core.models import AgentGroup
+
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND g.account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT g.id, g.namespace, g.account_id, g.name,
+                           g.description, g.color, g.icon, g.position,
+                           g.auto_generated, g.source_cluster_id,
+                           g.created_at, g.updated_at,
+                           COALESCE(ARRAY_AGG(m.agent_id) FILTER (WHERE m.agent_id IS NOT NULL), '{{}}'::TEXT[]) AS agent_ids,
+                           COUNT(m.agent_id) AS member_count
+                    FROM amfs_agent_groups g
+                    LEFT JOIN amfs_agent_group_members m ON m.group_id = g.id
+                    WHERE g.namespace = %s AND g.id = %s {account_filter}
+                    GROUP BY g.id
+                    """,
+                    (namespace, group_id, *acct_params),
+                )
+                row = cur.fetchone()
+
+        if not row:
+            return None
+        return AgentGroup(
+            id=str(row["id"]),
+            namespace=row["namespace"],
+            account_id=str(row["account_id"]) if row["account_id"] else None,
+            name=row["name"],
+            description=row["description"] or "",
+            color=row["color"],
+            icon=row["icon"],
+            position=float(row["position"]),
+            auto_generated=row["auto_generated"],
+            source_cluster_id=row["source_cluster_id"],
+            member_count=row["member_count"],
+            agent_ids=list(row["agent_ids"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def update_agent_group(
+        self,
+        group_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        color: str | None = None,
+        icon: str | None = None,
+        position: float | None = None,
+        namespace: str = "default",
+    ):
+        from amfs_core.models import AgentGroup
+
+        fields: list[str] = []
+        params: list[Any] = []
+        if name is not None:
+            fields.append("name = %s")
+            params.append(name)
+        if description is not None:
+            fields.append("description = %s")
+            params.append(description)
+        if color is not None:
+            fields.append("color = %s")
+            params.append(color)
+        if icon is not None:
+            fields.append("icon = %s")
+            params.append(icon)
+        if position is not None:
+            fields.append("position = %s")
+            params.append(position)
+
+        if not fields:
+            return self.get_agent_group(group_id, namespace)
+
+        fields.append("updated_at = NOW()")
+        set_clause = ", ".join(fields)
+
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            params.append(account_id)
+        else:
+            account_filter = ""
+
+        params.extend([namespace, group_id])
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE amfs_agent_groups
+                    SET {set_clause}
+                    WHERE namespace = %s AND id = %s {account_filter}
+                    RETURNING id, namespace, account_id, name, description,
+                              color, icon, position, auto_generated,
+                              source_cluster_id, created_at, updated_at
+                    """,
+                    params,
+                )
+                row = cur.fetchone()
+                conn.commit()
+
+        if not row:
+            return None
+        return AgentGroup(
+            id=str(row["id"]),
+            namespace=row["namespace"],
+            account_id=str(row["account_id"]) if row["account_id"] else None,
+            name=row["name"],
+            description=row["description"] or "",
+            color=row["color"],
+            icon=row["icon"],
+            position=float(row["position"]),
+            auto_generated=row["auto_generated"],
+            source_cluster_id=row["source_cluster_id"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def delete_agent_group(self, group_id: str, namespace: str = "default") -> bool:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    DELETE FROM amfs_agent_groups
+                    WHERE namespace = %s AND id = %s {account_filter}
+                    """,
+                    (namespace, group_id, *acct_params),
+                )
+                deleted = cur.rowcount > 0
+                conn.commit()
+        return deleted
+
+    def add_agents_to_group(
+        self,
+        group_id: str,
+        agent_ids: list[str],
+        added_by: str = "user",
+        namespace: str = "default",
+    ) -> int:
+        if not agent_ids:
+            return 0
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM amfs_agent_group_members
+                    WHERE namespace = %s AND agent_id = ANY(%s)
+                    """,
+                    (namespace, agent_ids),
+                )
+                values = [(group_id, aid, namespace, added_by) for aid in agent_ids]
+                cur.executemany(
+                    """
+                    INSERT INTO amfs_agent_group_members
+                        (group_id, agent_id, namespace, added_by)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    values,
+                )
+                count = cur.rowcount
+                conn.commit()
+        return count
+
+    def remove_agents_from_group(
+        self,
+        group_id: str,
+        agent_ids: list[str],
+        namespace: str = "default",
+    ) -> int:
+        if not agent_ids:
+            return 0
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM amfs_agent_group_members
+                    WHERE group_id = %s AND namespace = %s AND agent_id = ANY(%s)
+                    """,
+                    (group_id, namespace, agent_ids),
+                )
+                count = cur.rowcount
+                conn.commit()
+        return count
+
+    def reorder_agent_groups(
+        self,
+        positions: list[tuple[str, float]],
+        namespace: str = "default",
+    ) -> None:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND account_id = %s"
+        else:
+            account_filter = ""
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                for group_id, position in positions:
+                    params: list[Any] = [position, namespace, group_id]
+                    if account_id:
+                        params.append(account_id)
+                    cur.execute(
+                        f"""
+                        UPDATE amfs_agent_groups
+                        SET position = %s, updated_at = NOW()
+                        WHERE namespace = %s AND id = %s {account_filter}
+                        """,
+                        params,
+                    )
+                conn.commit()
+
+    def list_agents_enriched(self, namespace: str = "default") -> list[dict[str, Any]]:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND a.account_id = %s"
+            entry_account_filter = "AND me.account_id = %s"
+            graph_account_filter = "AND kg.account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            entry_account_filter = ""
+            graph_account_filter = ""
+            acct_params = []
+
+        sql = f"""
+            WITH agent_entries AS (
+                SELECT
+                    me.agent_id,
+                    me.entity_path,
+                    me.memory_type,
+                    COUNT(*) AS cnt,
+                    MAX(me.written_at) AS last_written
+                FROM amfs_memory_entries me
+                WHERE me.namespace = %s
+                  AND me.superseded_at IS NULL
+                  {entry_account_filter}
+                GROUP BY me.agent_id, me.entity_path, me.memory_type
+            ),
+            agent_stats AS (
+                SELECT
+                    ae.agent_id,
+                    SUM(ae.cnt)::INT AS entries_written,
+                    COUNT(DISTINCT ae.entity_path) AS entities_touched,
+                    MAX(ae.last_written) AS last_active,
+                    SPLIT_PART(
+                        MODE() WITHIN GROUP (ORDER BY ae.entity_path),
+                        '/', 1
+                    ) AS primary_repo,
+                    jsonb_agg(DISTINCT ae.entity_path) AS entity_paths,
+                    jsonb_object_agg(
+                        ae.memory_type,
+                        ae.cnt
+                    ) FILTER (WHERE ae.memory_type IS NOT NULL) AS type_dist
+                FROM agent_entries ae
+                GROUP BY ae.agent_id
+            ),
+            agent_collab AS (
+                SELECT
+                    kg.target_entity AS agent_id,
+                    ARRAY_AGG(DISTINCT kg.source_entity) AS collaborators
+                FROM amfs_knowledge_graph kg
+                WHERE kg.namespace = %s
+                  AND kg.relation = 'learned_from'
+                  {graph_account_filter}
+                GROUP BY kg.target_entity
+            )
+            SELECT
+                a.agent_id,
+                a.created_at,
+                COALESCE(s.entries_written, 0) AS entries_written,
+                COALESCE(s.entities_touched, 0) AS entities_touched,
+                COALESCE(s.last_active, a.last_active_at) AS last_active,
+                s.primary_repo,
+                COALESCE(s.entity_paths, '[]'::jsonb) AS entity_paths,
+                COALESCE(s.type_dist, '{{}}'::jsonb) AS type_dist,
+                COALESCE(c.collaborators, '{{}}'::TEXT[]) AS collaborators,
+                gm.group_id::TEXT AS group_id,
+                COALESCE(
+                    a.profile->>'platform',
+                    a.profile->'session_metadata'->>'platform'
+                ) AS platform,
+                COALESCE(
+                    a.profile->>'model',
+                    a.profile->'session_metadata'->>'model'
+                ) AS model,
+                COALESCE(
+                    a.profile->'inferred_tags',
+                    a.profile->'tags'
+                ) AS inferred_tags,
+                a.profile->>'description' AS description
+            FROM amfs_agents a
+            LEFT JOIN agent_stats s ON s.agent_id = a.agent_id
+            LEFT JOIN agent_collab c ON c.agent_id = a.agent_id
+            LEFT JOIN amfs_agent_group_members gm
+                ON gm.agent_id = a.agent_id AND gm.namespace = a.namespace
+            WHERE a.namespace = %s {account_filter}
+            ORDER BY last_active DESC NULLS LAST
+        """
+        params: list[Any] = [
+            namespace, *acct_params,
+            namespace, *acct_params,
+            namespace, *acct_params,
+        ]
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        results: list[dict[str, Any]] = []
+        for r in rows:
+            tags = r["inferred_tags"]
+            if isinstance(tags, str):
+                tags = json.loads(tags)
+            results.append({
+                "agent_id": r["agent_id"],
+                "created_at": r["created_at"],
+                "entries_written": r["entries_written"],
+                "entities_touched": r["entities_touched"],
+                "last_active": r["last_active"],
+                "primary_repo": r["primary_repo"],
+                "entity_paths": r["entity_paths"] if isinstance(r["entity_paths"], list) else json.loads(r["entity_paths"]) if isinstance(r["entity_paths"], str) else r["entity_paths"],
+                "type_dist": r["type_dist"] if isinstance(r["type_dist"], dict) else json.loads(r["type_dist"]) if isinstance(r["type_dist"], str) else r["type_dist"],
+                "collaborators": list(r["collaborators"]),
+                "group_id": r["group_id"],
+                "platform": r["platform"],
+                "model": r["model"],
+                "inferred_tags": tags if isinstance(tags, list) else [],
+                "description": r["description"],
+            })
+        return results
+
+    def get_agent_activity_histogram(
+        self,
+        agent_id: str,
+        days: int = 7,
+        namespace: str = "default",
+    ) -> list[int]:
+        account_id = self._get_current_account_id()
+        if account_id:
+            account_filter = "AND e.account_id = %s"
+            acct_params: list[Any] = [account_id]
+        else:
+            account_filter = ""
+            acct_params = []
+
+        sql = f"""
+            SELECT d.day::date AS day,
+                   COUNT(e.id)::INT AS cnt
+            FROM generate_series(
+                (CURRENT_DATE - INTERVAL '%s days'),
+                CURRENT_DATE,
+                INTERVAL '1 day'
+            ) AS d(day)
+            LEFT JOIN amfs_events e
+                ON e.agent_id = %s
+               AND e.namespace = %s
+               AND e.created_at::date = d.day::date
+               {account_filter}
+            GROUP BY d.day
+            ORDER BY d.day
+        """
+        params: list[Any] = [days - 1, agent_id, namespace, *acct_params]
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        return [r["cnt"] for r in rows]
+
+    def dismiss_cluster_suggestion(self, cluster_id: str, account_id: str) -> None:
+        acct = self._get_current_account_id() or account_id
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_agent_group_suggestions_dismissed
+                        (account_id, cluster_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (acct, cluster_id),
+                )
+                conn.commit()
+
+    def list_dismissed_cluster_ids(self, account_id: str) -> list[str]:
+        acct = self._get_current_account_id() or account_id
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT cluster_id
+                    FROM amfs_agent_group_suggestions_dismissed
+                    WHERE account_id = %s
+                    """,
+                    (acct,),
+                )
+                rows = cur.fetchall()
+        return [r["cluster_id"] for r in rows]
 
     # ── Event log / timeline (Pro) ────────────────────────────────────
 

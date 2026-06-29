@@ -469,6 +469,7 @@ class DigestType(str, Enum):
     SOURCE = "source"
     CONNECTION_MAP = "connection_map"
     TRACE_PATTERN = "trace_pattern"
+    AGENT_CLUSTERS = "agent_clusters"
 
 
 class Digest(BaseModel):
@@ -618,6 +619,38 @@ class Agent(BaseModel):
     profile: AgentProfile | None = None
     capabilities: list[AgentCapability] = Field(default_factory=list)
     contracts: list[MemoryContract] = Field(default_factory=list)
+
+
+class AgentGroup(BaseModel):
+    """User-defined group of agents."""
+
+    id: str = ""
+    namespace: str = "default"
+    account_id: str | None = None
+    name: str
+    description: str = ""
+    color: str | None = None
+    icon: str | None = None
+    position: float = 0.0
+    auto_generated: bool = False
+    source_cluster_id: str | None = None
+    member_count: int = 0
+    agent_ids: list[str] = Field(default_factory=list)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class AgentCluster(BaseModel):
+    """Auto-detected cluster of related agents."""
+
+    cluster_id: str
+    suggested_name: str
+    agents: list[str]
+    dominant_entities: list[str] = Field(default_factory=list)
+    dominant_platform: str | None = None
+    cohesion_score: float = 0.0
+    rationale: str = ""
+    total_entries: int = 0
 
 
 class Event(BaseModel):
