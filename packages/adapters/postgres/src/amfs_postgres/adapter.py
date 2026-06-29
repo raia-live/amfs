@@ -2514,9 +2514,18 @@ class PostgresAdapter(AdapterABC):
                 COALESCE(s.type_dist, '{{}}'::jsonb) AS type_dist,
                 COALESCE(c.collaborators, '{{}}'::TEXT[]) AS collaborators,
                 gm.group_id::TEXT AS group_id,
-                a.profile->>'platform' AS platform,
-                a.profile->>'model' AS model,
-                a.profile->'inferred_tags' AS inferred_tags,
+                COALESCE(
+                    a.profile->>'platform',
+                    a.profile->'session_metadata'->>'platform'
+                ) AS platform,
+                COALESCE(
+                    a.profile->>'model',
+                    a.profile->'session_metadata'->>'model'
+                ) AS model,
+                COALESCE(
+                    a.profile->'inferred_tags',
+                    a.profile->'tags'
+                ) AS inferred_tags,
                 a.profile->>'description' AS description
             FROM amfs_agents a
             LEFT JOIN agent_stats s ON s.agent_id = a.agent_id
