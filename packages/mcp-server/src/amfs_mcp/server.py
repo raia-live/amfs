@@ -101,7 +101,6 @@ Use `{repo}/{service-or-module}` paths (e.g. `myapp/auth`, `amfs/core-engine`). 
 - **Patterns**: `amfs_write(..., "pattern-<name>", "...", pattern_refs=["related-key"])`
 - **Risks**: `amfs_write(..., "risk-<name>", "...", confidence=0.8, memory_type="belief")`
 - **Cross-agent reads**: `amfs_read_from("<agent_id>", ...)` for tracked knowledge transfer.
-- **Browse past traces**: `amfs_list_traces(entity_path="...", limit=5)` before making similar decisions.
 
 ## Confidence Scale
 
@@ -121,7 +120,28 @@ Use `{repo}/{service-or-module}` paths (e.g. `myapp/auth`, `amfs/core-engine`). 
 `amfs_write` responses include a `quality` score. If below 0.8, review `issues` and rewrite with more detail. Use `pattern_refs` to link related entries.
 """
 
-mcp = FastMCP(name="amfs", instructions=_INSTRUCTIONS)
+_toolset = os.environ.get("AMFS_TOOLSET", "all").lower()
+
+
+def _create_server(toolset: str) -> FastMCP:
+    """Build FastMCP with tag filtering, compatible with v2 and v3+."""
+    if toolset != "all":
+        try:
+            server = FastMCP(name="amfs", instructions=_INSTRUCTIONS, include_tags={"core"})
+        except TypeError:
+            server = FastMCP(name="amfs", instructions=_INSTRUCTIONS)
+            server.enable(tags={"core"}, only=True)
+        logger.info(
+            "AMFS toolset: core (15 essential tools). "
+            "Set AMFS_TOOLSET=all to expose all 36 tools."
+        )
+    else:
+        server = FastMCP(name="amfs", instructions=_INSTRUCTIONS)
+        logger.info("AMFS toolset: all (36 tools)")
+    return server
+
+
+mcp = _create_server(_toolset)
 
 # ---------------------------------------------------------------------------
 # Quality evaluation
@@ -353,7 +373,7 @@ def _serialize_entry(entry: Any) -> dict[str, Any]:
 # ──────────────────────────────────────────────────────────────────────
 
 
-@mcp.tool
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "idempotentHint": True})
 def amfs_set_identity(
     name: str,
     description: str | None = None,
@@ -503,7 +523,7 @@ def amfs_set_identity(
     return json.dumps(result, default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
 def amfs_whoami() -> str:
     """Show the current active identity and whether it was restored from disk.
 
@@ -524,7 +544,7 @@ def amfs_whoami() -> str:
     return json.dumps(result)
 
 
-@mcp.tool
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": False})
 def amfs_reset_identity() -> str:
     """Clear the sticky identity so it reverts to auto-detection.
 
@@ -548,7 +568,7 @@ def amfs_reset_identity() -> str:
     })
 
 
-@mcp.tool
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
 def amfs_read(entity_path: str, key: str) -> str:
     """Read a memory entry by entity path and key.
 
@@ -564,7 +584,7 @@ def amfs_read(entity_path: str, key: str) -> str:
     return json.dumps(_serialize_entry(entry), default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
 def amfs_write(
     entity_path: str,
     key: str,
@@ -661,7 +681,7 @@ def amfs_write(
     return json.dumps(result, default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
 def amfs_search(
     query: str | None = None,
     entity_path: str | None = None,
@@ -736,7 +756,7 @@ def amfs_search(
     }, default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
 def amfs_retrieve(
     query: str,
     entity_path: str | None = None,
@@ -805,7 +825,7 @@ def amfs_retrieve(
     }, default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
 def amfs_list(entity_path: str | None = None) -> str:
     """List all current memory entries, optionally filtered to an entity path.
 
@@ -834,7 +854,7 @@ def amfs_list(entity_path: str | None = None) -> str:
     }, default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
 def amfs_graph_neighbors(
     entity: str,
     relation: str | None = None,
@@ -879,7 +899,7 @@ def amfs_graph_neighbors(
     }, default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
 def amfs_stats() -> str:
     """Get aggregate statistics about the memory store.
 
@@ -892,7 +912,7 @@ def amfs_stats() -> str:
     return json.dumps(stats.model_dump(mode="json"), default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "destructiveHint": False})
 def amfs_commit_outcome(
     outcome_ref: str,
     outcome_type: str,
@@ -952,7 +972,7 @@ def amfs_commit_outcome(
     return json.dumps(result, default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
 def amfs_history(
     entity_path: str,
     key: str,
@@ -993,7 +1013,7 @@ def amfs_history(
     )
 
 
-@mcp.tool
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "destructiveHint": False})
 def amfs_record_context(
     label: str,
     summary: str,
@@ -1024,7 +1044,7 @@ def amfs_record_context(
     return json.dumps({"recorded": label, "source": source or None})
 
 
-@mcp.tool
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
 def amfs_recall(entity_path: str, key: str) -> str:
     """Recall YOUR OWN memory for a key — what do I know about this?
 
@@ -1046,7 +1066,7 @@ def amfs_recall(entity_path: str, key: str) -> str:
     return json.dumps(_serialize_entry(entry), default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
 def amfs_my_entries(entity_path: str | None = None) -> str:
     """List all entries written by YOU — what's in my brain?
 
@@ -1067,7 +1087,7 @@ def amfs_my_entries(entity_path: str | None = None) -> str:
     }, default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
 def amfs_read_from(agent_id: str, entity_path: str, key: str) -> str:
     """Read a specific key from ANOTHER agent's memory.
 
@@ -1089,7 +1109,7 @@ def amfs_read_from(agent_id: str, entity_path: str, key: str) -> str:
     return json.dumps(_serialize_entry(entry), default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
 def amfs_cross_agent_reads() -> str:
     """Show which other agents' memory this agent has read.
 
@@ -1125,7 +1145,7 @@ def amfs_cross_agent_reads() -> str:
     }, default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
 def amfs_explain(outcome_ref: str | None = None) -> str:
     """Explain the causal chain — which memories influenced this session's decisions.
 
@@ -1143,7 +1163,7 @@ def amfs_explain(outcome_ref: str | None = None) -> str:
     return json.dumps(explanation, default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
 def amfs_list_traces(
     entity_path: str | None = None,
     agent_id: str | None = None,
@@ -1194,7 +1214,7 @@ def amfs_list_traces(
     )
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
 def amfs_get_trace(trace_id: str) -> str:
     """Retrieve a full decision trace by ID.
 
@@ -1217,7 +1237,7 @@ def amfs_get_trace(trace_id: str) -> str:
     return json.dumps(trace.model_dump(mode="json"), default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
 def amfs_briefing(
     entity_path: str | None = None,
     agent_id: str | None = None,
@@ -1286,7 +1306,7 @@ def amfs_briefing(
 # ──────────────────────────────────────────────────────────────────────
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
 def amfs_timeline(
     limit: int = 50,
     event_type: str | None = None,
@@ -1326,7 +1346,7 @@ def amfs_timeline(
         return json.dumps({"error": f"Timeline unavailable: {e}"})
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
 def amfs_verify(
     entity_path: str | None = None,
 ) -> str:
@@ -1348,7 +1368,7 @@ def amfs_verify(
     return json.dumps(report, default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": False, "destructiveHint": False})
 def amfs_commit_batch(
     writes: list[dict[str, Any]],
     message: str = "",
@@ -1402,7 +1422,7 @@ def amfs_commit_batch(
     }, default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
 def amfs_commit_log(
     limit: int = 20,
 ) -> str:
@@ -1422,7 +1442,7 @@ def amfs_commit_log(
     }, default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
 def amfs_merge_base(
     commit_a: str,
     commit_b: str,
@@ -1445,7 +1465,7 @@ def amfs_merge_base(
     })
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": False, "destructiveHint": False})
 def amfs_set_profile(
     description: str = "",
     tags: list[str] | None = None,
@@ -1465,7 +1485,7 @@ def amfs_set_profile(
     return json.dumps({"status": "ok", "agent_id": mem.agent_id})
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": False, "destructiveHint": False})
 def amfs_declare_capability(
     name: str,
     description: str = "",
@@ -1485,7 +1505,7 @@ def amfs_declare_capability(
     return json.dumps({"status": "ok", "capability": name})
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
 def amfs_discover_agents(
     capability: str | None = None,
     entity_path: str | None = None,
@@ -1506,7 +1526,7 @@ def amfs_discover_agents(
     }, default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": False, "destructiveHint": False})
 def amfs_set_contract(
     entity_path: str,
     key_pattern: str = "*",
@@ -1540,7 +1560,7 @@ def amfs_set_contract(
     return json.dumps({"status": "ok", "entity_path": entity_path, "key_pattern": key_pattern})
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
 def amfs_diff(
     entity_path: str,
     key: str,
@@ -1561,7 +1581,7 @@ def amfs_diff(
     return json.dumps(result, default=str)
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True, "openWorldHint": True})
 def amfs_export_training_data(
     entity_paths: list[str] | None = None,
     min_confidence: float = 0.7,
@@ -1636,7 +1656,7 @@ def _http_api_call(method: str, path: str, *, params: dict | None = None, body: 
         return json.dumps({"error": str(e)})
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True, "openWorldHint": True})
 def amfs_consolidation_status() -> str:
     """Check the current memory consolidation status.
 
@@ -1647,7 +1667,7 @@ def amfs_consolidation_status() -> str:
     return _http_api_call("GET", "/api/v1/cortex/consolidation/status")
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True, "openWorldHint": True})
 def amfs_consolidation_proposals(
     status: str = "pending",
     limit: int = 20,
@@ -1668,7 +1688,7 @@ def amfs_consolidation_proposals(
                           params={"status": status, "limit": limit})
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True, "openWorldHint": True})
 def amfs_consolidation_candidates(
     limit: int = 20,
 ) -> str:
@@ -1685,7 +1705,7 @@ def amfs_consolidation_candidates(
                           params={"limit": limit})
 
 
-@mcp.tool
+@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
 def amfs_consolidate(
     dry_run: bool = True,
 ) -> str:
@@ -1744,6 +1764,16 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="URL path for HTTP transport (default: /mcp)",
     )
+    parser.add_argument(
+        "--toolset",
+        choices=["core", "all"],
+        default=None,
+        help=(
+            'Tool surface to expose: "all" (36 tools, default) '
+            'or "core" (15 essential tools). Also settable via AMFS_TOOLSET env var. '
+            "Use core for Claude Desktop to improve tool discovery reliability."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1759,8 +1789,20 @@ def main() -> None:
     1. ``--transport`` CLI flag
     2. ``AMFS_TRANSPORT`` env var
     3. Default: ``stdio``
+
+    Toolset is resolved in order:
+    1. ``--toolset`` CLI flag
+    2. ``AMFS_TOOLSET`` env var
+    3. Default: ``core`` (15 essential tools)
     """
     args = _parse_args()
+
+    if args.toolset and args.toolset != _toolset:
+        logger.warning(
+            "CLI --toolset=%s differs from AMFS_TOOLSET=%s. "
+            "Restart with AMFS_TOOLSET=%s for reliable results.",
+            args.toolset, _toolset, args.toolset,
+        )
 
     raw_transport = (
         args.transport
@@ -1773,10 +1815,16 @@ def main() -> None:
         host = args.host or os.environ.get("AMFS_HOST", "0.0.0.0")
         port = args.port or int(os.environ.get("AMFS_PORT", "8000"))
         path = args.path or os.environ.get("AMFS_PATH", "/mcp")
-        logger.info("Starting AMFS MCP server — transport=%s %s:%d%s", transport, host, port, path)
+        logger.info(
+            "Starting AMFS MCP server — transport=%s %s:%d%s toolset=%s",
+            transport, host, port, path, _toolset,
+        )
         mcp.run(transport=transport, host=host, port=port, path=path)
     else:
-        logger.info("Starting AMFS MCP server — transport=stdio")
+        logger.info(
+            "Starting AMFS MCP server — transport=stdio toolset=%s",
+            _toolset,
+        )
         mcp.run(transport="stdio")
 
 
