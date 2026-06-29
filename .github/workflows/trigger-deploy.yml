@@ -1,21 +1,34 @@
-name: Trigger Production Deploy
+name: Trigger Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths-ignore:
       - 'docs/**'
       - '*.md'
       - 'tests/**'
 
 jobs:
-  trigger:
+  trigger-prod:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger amfs-internal deploy
+      - name: Trigger amfs-internal production deploy
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.DEPLOY_PAT }}
           repository: raia-live/amfs-internal
           event-type: oss-updated
+          client-payload: '{"sha": "${{ github.sha }}", "ref": "${{ github.ref }}"}'
+
+  trigger-dev:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger amfs-internal dev deploy
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DEPLOY_PAT }}
+          repository: raia-live/amfs-internal
+          event-type: oss-updated-dev
           client-payload: '{"sha": "${{ github.sha }}", "ref": "${{ github.ref }}"}'
