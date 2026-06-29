@@ -76,6 +76,8 @@ class DigestCompiler:
             digest = self._strategy.compile_connection_map(scope, self._adapter, self._namespace, b)
         elif kind == "trace":
             digest = self._strategy.compile_trace_patterns(scope, self._adapter, self._namespace, b)
+        elif kind == "cluster":
+            digest = self._compile_agent_clusters(b)
         else:
             logger.warning("Unknown scope kind: %s", kind)
             return None
@@ -87,6 +89,24 @@ class DigestCompiler:
             self._log_brief_compiled(digest, kind, scope, b)
 
         return digest
+
+    def _compile_agent_clusters(self, branch: str) -> Digest | None:
+        """Run community detection across all agents."""
+        from amfs_cortex.clustering import AgentClusterStrategy
+
+        enriched = self._adapter.list_agents_enriched(namespace=self._namespace)
+        if not enriched:
+            return None
+
+        edges = self._adapter.list_graph_edges(
+            relation="learned_from",
+            namespace=self._namespace,
+            branch=branch,
+            limit=2000,
+        )
+
+        strategy = AgentClusterStrategy(scope=f"account:{self._namespace}")
+        return strategy.compute_clusters(enriched, edges)
 
     def _log_brief_compiled(self, digest: Digest, kind: str, scope: str, branch: str) -> None:
         """Log a brief_compiled timeline event for the relevant agent(s)."""
