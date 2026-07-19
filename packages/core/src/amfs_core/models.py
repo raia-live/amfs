@@ -149,6 +149,20 @@ class MemoryEntry(BaseModel):
     integrity_chain: str | None = None
     commit_id: str | None = None
 
+    def is_expired(self, *, now: datetime | None = None) -> bool:
+        """True when a TTL is set and has elapsed.
+
+        Read paths use this to enforce ``ttl_at`` immediately, without waiting
+        for the background ``LifecycleManager`` sweep to archive the entry.
+        """
+        if self.ttl_at is None:
+            return False
+        reference = now or datetime.now(timezone.utc)
+        ttl = self.ttl_at
+        if ttl.tzinfo is None:
+            ttl = ttl.replace(tzinfo=timezone.utc)
+        return ttl <= reference
+
     def effective_confidence(self, *, decay_half_life_days: float | None = None) -> float:
         """Confidence adjusted for four-signal decay: time, memory type, outcomes, and access frequency.
 

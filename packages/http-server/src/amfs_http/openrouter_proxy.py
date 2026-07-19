@@ -20,6 +20,8 @@ Configuration (env):
 - OPENROUTER_BASE_URL        default https://openrouter.ai/api/v1
 - AMFS_PROXY_INJECT_LIMIT    max memory facts injected (default 5)
 - AMFS_PROXY_WRITE_BACK      "true" to enable fact write-back (default false)
+- AMFS_PROXY_SAFETY_GATE     "false" to disable the Pro SafetyGate on write-back
+                             (default true; no-op when amfs_safety is absent)
 
 TODO(integration-test): tests/integration/test_openrouter_proxy.py exercises the
 inject/forward/write-back path against a mocked upstream; it is skipped in unit
@@ -40,6 +42,54 @@ BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 INJECT_LIMIT = int(os.environ.get("AMFS_PROXY_INJECT_LIMIT", "5"))
 WRITE_BACK = os.environ.get("AMFS_PROXY_WRITE_BACK", "false").lower() == "true"
+# Auto-run the Pro SafetyGate on write-back when available (secret block + PII
+# redact). Disabled explicitly with AMFS_PROXY_SAFETY_GATE=false. Soft/optional:
+# the gate lives in the Pro ``amfs_safety`` package; OSS-only deployments skip it.
+SAFETY_GATE = os.environ.get("AMFS_PROXY_SAFETY_GATE", "true").lower() == "true"
+
+_SAFETY_GATE_CACHE: dict[str, Any] = {}
+
+
+def _gate_value(mem: Any, scope: str, key: str, value: Any) -> tuple[bool, Any]:
+    """Run the optional Pro SafetyGate over a proposed write-back value.
+
+    Returns ``(allowed, value_to_write)`` — the value is redacted when the gate
+    masks sensitive content. Fail-open: any import/build/scan error allows the
+    original value through (the LLM exchange must never be lost to a gate bug).
+    """
+    if not SAFETY_GATE:
+        return True, value
+    try:
+        if "gate" not in _SAFETY_GATE_CACHE:
+            from amfs_safety import SafetyGate  # Pro package, optional
+
+            adapter = getattr(mem, "_adapter", None)
+            _SAFETY_GATE_CACHE["gate"] = SafetyGate(adapter=adapter)
+        gate = _SAFETY_GATE_CACHE["gate"]
+
+        from datetime import datetime, timezone
+
+        from amfs_core.models import MemoryEntry, Provenance
+
+        entry = MemoryEntry(
+            entity_path=scope,
+            key=key,
+            value=value,
+            provenance=Provenance(
+                agent_id="openrouter-proxy",
+                session_id="proxy",
+                written_at=datetime.now(timezone.utc),
+            ),
+            confidence=0.5,
+        )
+        decision = gate.check_write(entry)
+        if not decision.allowed:
+            logger.info("proxy: write-back blocked by SafetyGate (%s)", decision.max_severity)
+            return False, value
+        return True, decision.entry.value
+    except Exception:  # noqa: BLE001 - fail-open
+        logger.debug("proxy: SafetyGate unavailable/failed; allowing write", exc_info=True)
+        return True, value
 
 _MEMORY_HEADER = (
     "You have access to the following facts from persistent memory. "
@@ -71,6 +121,23 @@ def _retrieve_facts(get_memory: Callable[[], Any], scope: str | None, query: str
     except Exception:  # noqa: BLE001
         logger.debug("proxy: get_memory failed", exc_info=True)
         return []
+    # Prefer the Pro MultiStrategyRetriever (adaptive RRF + rerank) when the
+    # amfs_retrieval package is installed; otherwise SDK full-text/semantic
+    # search; otherwise list the scope. All fail-open.
+    try:
+        from amfs_http.pro_provider import build_pro_retriever, pro_retrieve_values
+
+        adapter = getattr(mem, "_adapter", None)
+        retriever = build_pro_retriever(adapter)
+        pro_values = pro_retrieve_values(retriever, scope, query, INJECT_LIMIT)
+        if pro_values is not None:
+            return [
+                v if isinstance(v, str) else json.dumps(v, default=str)
+                for v in pro_values
+            ][:INJECT_LIMIT]
+    except Exception:  # noqa: BLE001 - Pro path optional, fall through to OSS
+        logger.debug("proxy: pro retrieval skipped", exc_info=True)
+
     # Prefer full-text/semantic search; fall back to listing the scope.
     try:
         search = getattr(mem, "search", None)
@@ -107,8 +174,11 @@ def _write_back(get_memory: Callable[[], Any], scope: str | None,
     try:
         mem = get_memory()
         key = f"proxy-exchange-{abs(hash(query)) % 10_000_000}"
-        mem.write(scope, key, {"q": query[:500], "a": answer[:1500]},
-                  confidence=0.5)
+        value = {"q": query[:500], "a": answer[:1500]}
+        allowed, value = _gate_value(mem, scope, key, value)
+        if not allowed:
+            return
+        mem.write(scope, key, value, confidence=0.5)
         commit = getattr(mem, "commit_outcome", None)
         if callable(commit):
             commit("proxy-exchange", "success")

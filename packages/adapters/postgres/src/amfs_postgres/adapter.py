@@ -775,6 +775,8 @@ class PostgresAdapter(AdapterABC):
         entry = self._row_to_entry(row)
         if entry.confidence < min_confidence:
             return None
+        if entry.is_expired():
+            return None
         return entry
 
     # ------------------------------------------------------------------
