@@ -2137,6 +2137,17 @@ async def log_timeline_event(
         details=body.details,
         actor_agent_id=body.actor_agent_id,
     )
+    # WRITE events are authoritatively logged by the write handler
+    # (POST /api/v1/entries). HTTP-backed SDK clients ALSO emit a WRITE event
+    # here from their background log path, which produced two identical WRITE
+    # events per write (the "double-write" bug). The server is the single
+    # source of truth for WRITE timeline events, so drop client-originated
+    # ones here. This is version-agnostic: it fixes every client regardless of
+    # which SDK version they run via `uvx`, without waiting on a PyPI release.
+    # We still return a well-formed (but unpersisted) event so clients that
+    # parse the response don't error.
+    if event_type_enum is EventType.WRITE:
+        return event.model_dump(mode="json")
     saved = mem._adapter.log_event(event)
     return saved.model_dump(mode="json")
 
