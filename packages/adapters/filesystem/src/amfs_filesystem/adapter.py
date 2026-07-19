@@ -59,6 +59,8 @@ class FilesystemAdapter(AdapterABC):
         entry = self._read_entry(current_file)
         if entry.confidence < min_confidence:
             return None
+        if entry.is_expired():
+            return None
         return entry
 
     # ------------------------------------------------------------------

@@ -172,11 +172,19 @@ class PostgresAdapter(AdapterABC):
         auto_schema: bool = True,
         min_pool_size: int = 2,
         max_pool_size: int = 10,
+        embedder: EmbedderABC | None = None,
+        embedding_dim: int = 384,
     ) -> None:
         self._dsn = dsn
         self._namespace = namespace
         self._has_embedding_col = False
         self._has_search_tsv = False
+        # When an embedder is provided, embeddings are computed at write time and
+        # persisted, so ANN retrieval (semantic_search / pgvector HNSW) works
+        # without a separate backfill pass. embedding_dim must match the column
+        # dimension (see ensure_embedding_column). None => write-time embedding off.
+        self._embedder = embedder
+        self._embedding_dim = embedding_dim
         pool_kwargs: dict[str, Any] = {
             "kwargs": {"row_factory": dict_row, "autocommit": True},
         }
@@ -767,6 +775,8 @@ class PostgresAdapter(AdapterABC):
         entry = self._row_to_entry(row)
         if entry.confidence < min_confidence:
             return None
+        if entry.is_expired():
+            return None
         return entry
 
     # ------------------------------------------------------------------
@@ -870,10 +880,25 @@ class PostgresAdapter(AdapterABC):
                         branch,
                     ]
 
-                    if self._has_embedding_col and entry.embedding:
+                    # Write-time embedding: compute and persist an embedding when
+                    # the caller did not supply one and an embedder is configured.
+                    # Guarded so an embedder failure never blocks a write.
+                    embedding = entry.embedding
+                    if (embedding is None and self._embedder is not None
+                            and self._has_embedding_col):
+                        try:
+                            embedding = self._embedder.embed_value(entry.value)
+                        except Exception:  # noqa: BLE001
+                            logger.warning(
+                                "write-time embedding failed for %s/%s; storing without vector",
+                                entry.entity_path, entry.key, exc_info=True,
+                            )
+                            embedding = None
+
+                    if self._has_embedding_col and embedding:
                         columns.append("embedding")
                         params.append(
-                            f"[{','.join(str(v) for v in entry.embedding)}]"
+                            f"[{','.join(str(v) for v in embedding)}]"
                         )
 
                     cols_sql = ", ".join(columns)
@@ -886,7 +911,73 @@ class PostgresAdapter(AdapterABC):
                         params,
                     )
 
-        return entry.model_copy(update={"version": new_version})
+        return entry.model_copy(update={"version": new_version, "embedding": embedding})
+
+    def ensure_embedding_column(self, dim: int | None = None) -> None:
+        """Create the pgvector embedding column + HNSW index at a given dimension.
+
+        Idempotent when the column already exists at the right dimension. Use
+        this to provision a store for a larger embedder (e.g. bge-large at 1024)
+        instead of the default vector(384) from migration 002.
+
+        Requires the pgvector extension (``CREATE EXTENSION IF NOT EXISTS vector``).
+        This alters schema and, if the column exists at a different dimension,
+        does nothing (Postgres cannot change a vector column's dimension in
+        place — drop it first, see migration 005). Not called automatically.
+
+        TODO(integration-test): covered by tests/integration/test_postgres_embeddings.py
+        which requires AMFS_TEST_PG_DSN + pgvector; unvalidated in unit CI.
+        """
+        target = dim or self._embedding_dim
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                cur.execute(
+                    f"ALTER TABLE amfs_memory_entries "
+                    f"ADD COLUMN IF NOT EXISTS embedding vector({int(target)})"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_entries_embedding "
+                    "ON amfs_memory_entries USING hnsw (embedding vector_cosine_ops) "
+                    "WITH (m = 16, ef_construction = 64)"
+                )
+        self._detect_optional_columns()
+
+    def backfill_embeddings(self, *, batch_size: int = 200) -> int:
+        """Compute and store embeddings for existing rows that lack one.
+
+        Returns the number of rows updated. Requires a configured embedder and
+        the embedding column. Intended as a one-off migration step after
+        enabling write-time embeddings on an existing store.
+
+        TODO(integration-test): covered by tests/integration/test_postgres_embeddings.py
+        (needs AMFS_TEST_PG_DSN + pgvector); unvalidated in unit CI.
+        """
+        if self._embedder is None or not self._has_embedding_col:
+            return 0
+        updated = 0
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, value FROM amfs_memory_entries "
+                    "WHERE namespace = %s AND embedding IS NULL "
+                    "ORDER BY written_at LIMIT %s",
+                    (self._namespace, batch_size),
+                )
+                rows = cur.fetchall()
+                for r in rows:
+                    try:
+                        value = json.loads(r["value"]) if isinstance(r["value"], str) else r["value"]
+                        vec = self._embedder.embed_value(value)
+                    except Exception:  # noqa: BLE001
+                        logger.warning("backfill embedding failed for row %s", r["id"], exc_info=True)
+                        continue
+                    cur.execute(
+                        "UPDATE amfs_memory_entries SET embedding = %s WHERE id = %s",
+                        (f"[{','.join(str(v) for v in vec)}]", r["id"]),
+                    )
+                    updated += 1
+        return updated
 
     # ------------------------------------------------------------------
     # list
