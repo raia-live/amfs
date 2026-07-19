@@ -40,7 +40,7 @@ jobs:
         run: |
           uv venv .venv
           source .venv/bin/activate
-          uv pip install -e packages/core -e packages/adapters/filesystem -e packages/adapters/postgres -e packages/sdk-python -e packages/cli -e packages/mcp-server -e packages/cortex
+          uv pip install -e packages/core -e packages/adapters/filesystem -e packages/adapters/postgres -e packages/sdk-python -e packages/cli -e packages/mcp-server -e packages/cortex -e packages/http-server
           uv pip install pytest pytest-asyncio pyyaml
 
       - name: Run unit tests
