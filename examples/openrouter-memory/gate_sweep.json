@@ -1,0 +1,58 @@
+{
+  "self_similarity_min": 0.592,
+  "self_similarity_median": 0.808,
+  "miss_nearest_similarity_max": 0.686,
+  "miss_nearest_similarity_median": 0.595,
+  "sweep": [
+    {
+      "threshold": 0.3,
+      "recall_gate_pass_pct": 100.0,
+      "miss_abstain_pct": 0.0
+    },
+    {
+      "threshold": 0.35,
+      "recall_gate_pass_pct": 100.0,
+      "miss_abstain_pct": 0.0
+    },
+    {
+      "threshold": 0.4,
+      "recall_gate_pass_pct": 100.0,
+      "miss_abstain_pct": 0.0
+    },
+    {
+      "threshold": 0.45,
+      "recall_gate_pass_pct": 100.0,
+      "miss_abstain_pct": 0.0
+    },
+    {
+      "threshold": 0.5,
+      "recall_gate_pass_pct": 100.0,
+      "miss_abstain_pct": 0.0
+    },
+    {
+      "threshold": 0.55,
+      "recall_gate_pass_pct": 100.0,
+      "miss_abstain_pct": 25.0
+    },
+    {
+      "threshold": 0.6,
+      "recall_gate_pass_pct": 87.5,
+      "miss_abstain_pct": 62.5
+    },
+    {
+      "threshold": 0.65,
+      "recall_gate_pass_pct": 87.5,
+      "miss_abstain_pct": 75.0
+    },
+    {
+      "threshold": 0.7,
+      "recall_gate_pass_pct": 87.5,
+      "miss_abstain_pct": 100.0
+    },
+    {
+      "threshold": 0.75,
+      "recall_gate_pass_pct": 75.0,
+      "miss_abstain_pct": 100.0
+    }
+  ]
+}

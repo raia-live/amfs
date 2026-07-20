@@ -228,7 +228,8 @@ class TestMCPTools:
         result = json.loads(amfs_commit_outcome("INC-001", "critical_failure"))
         assert result["outcome_ref"] == "INC-001"
         assert result["affected_entries"] == 1
-        assert result["entries"][0]["confidence"] == 1.15
+        # CRITICAL_FAILURE erodes confidence: 1.0 * 0.85 = 0.85
+        assert result["entries"][0]["confidence"] == pytest.approx(0.85)
 
     def test_amfs_commit_outcome_invalid_type(self) -> None:
         from amfs_mcp.server import amfs_commit_outcome
@@ -245,7 +246,8 @@ class TestMCPTools:
 
         result = json.loads(amfs_commit_outcome("deploy-v1", "success"))
         assert result["affected_entries"] == 1
-        assert result["entries"][0]["confidence"] == pytest.approx(0.97)
+        # SUCCESS reinforces confidence: 1.0 * 1.03 = 1.03, clamped to 1.0
+        assert result["entries"][0]["confidence"] == pytest.approx(1.0)
 
     def test_embedding_stripped_from_output(self) -> None:
         from amfs_mcp.server import _serialize_entry

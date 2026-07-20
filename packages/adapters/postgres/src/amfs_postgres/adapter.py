@@ -362,15 +362,17 @@ class PostgresAdapter(AdapterABC):
                 k TEXT;
                 cur RECORD;
             BEGIN
+                -- SUCCESS reinforces confidence (>1.0), failures erode it (<1.0).
+                -- Result is clamped to [0,1] below.
                 CASE NEW.outcome_type
-                    WHEN 'critical_failure' THEN multiplier := 1.15;
-                    WHEN 'failure' THEN multiplier := 1.10;
-                    WHEN 'minor_failure' THEN multiplier := 1.08;
-                    WHEN 'success' THEN multiplier := 0.97;
-                    WHEN 'p1_incident' THEN multiplier := 1.15;
-                    WHEN 'p2_incident' THEN multiplier := 1.10;
-                    WHEN 'regression' THEN multiplier := 1.08;
-                    WHEN 'clean_deploy' THEN multiplier := 0.97;
+                    WHEN 'critical_failure' THEN multiplier := 0.85;
+                    WHEN 'failure' THEN multiplier := 0.90;
+                    WHEN 'minor_failure' THEN multiplier := 0.92;
+                    WHEN 'success' THEN multiplier := 1.03;
+                    WHEN 'p1_incident' THEN multiplier := 0.85;
+                    WHEN 'p2_incident' THEN multiplier := 0.90;
+                    WHEN 'regression' THEN multiplier := 0.92;
+                    WHEN 'clean_deploy' THEN multiplier := 1.03;
                     ELSE multiplier := 1.0;
                 END CASE;
 
@@ -402,7 +404,7 @@ class PostgresAdapter(AdapterABC):
                         ) VALUES (
                             cur.namespace, cur.entity_path, cur.key, cur.version + 1, cur.value,
                             cur.agent_id, cur.session_id, cur.written_at, cur.pattern_refs,
-                            cur.confidence * multiplier * NEW.causal_confidence,
+                            LEAST(1.0, GREATEST(0.0, cur.confidence * multiplier * NEW.causal_confidence)),
                             cur.outcome_count + 1, cur.recall_count,
                             cur.ttl_at, cur.memory_type,
                             cur.shared, cur.artifact_refs

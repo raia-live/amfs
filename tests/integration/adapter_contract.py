@@ -132,11 +132,12 @@ class AdapterContractTests:
         )
         updated = adapter.commit_outcome(record)
         assert len(updated) == 1
-        assert updated[0].confidence == 1.0 * 1.15 * 1.0
+        # CRITICAL_FAILURE erodes confidence: 1.0 * 0.85 = 0.85
+        assert abs(updated[0].confidence - 0.85) < 1e-6
         assert updated[0].outcome_count == 1
 
     def test_commit_outcome_clean_deploy(self, adapter: AdapterABC) -> None:
-        adapter.write(_make_entry(confidence=1.0))
+        adapter.write(_make_entry(confidence=0.9))
 
         record = OutcomeRecord(
             outcome_ref="DEP-001",
@@ -148,7 +149,8 @@ class AdapterContractTests:
         )
         updated = adapter.commit_outcome(record)
         assert len(updated) == 1
-        assert abs(updated[0].confidence - 0.97) < 1e-6
+        # SUCCESS reinforces confidence: 0.9 * 1.03 = 0.927
+        assert abs(updated[0].confidence - 0.927) < 1e-6
 
     def test_commit_outcome_missing_entry_skipped(self, adapter: AdapterABC) -> None:
         record = OutcomeRecord(

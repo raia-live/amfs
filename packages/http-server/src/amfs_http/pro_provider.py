@@ -14,7 +14,13 @@ Everything here is soft/optional and fail-open:
 
 Env:
 - AMFS_PROXY_PRO_RETRIEVAL   "false" to force the OSS search path (default true)
-- AMFS_PROXY_PRO_RERANK      "false" to skip cross-encoder rerank (default true)
+- AMFS_PROXY_PRO_RERANK      "false" to skip reranking entirely (default true)
+- AMFS_LLM_RERANK            "true" to use the LLM listwise reranker (Pro tier) —
+                             the lever that reaches >90% adversarial Hit@1. Costs
+                             one LLM call per retrieval, so it is opt-in. Needs
+                             AMFS_LLM_RERANK_BASE_URL/API_KEY (e.g. OpenRouter).
+                             When unset/unavailable, falls back to the offline
+                             cross-encoder.
 
 NOTE(integration-test): the Pro retrieval path requires the amfs-internal packages
 and a populated adapter; it is exercised in the amfs-internal retrieval eval, not
@@ -35,6 +41,34 @@ PRO_RERANK = os.environ.get("AMFS_PROXY_PRO_RERANK", "true").lower() == "true"
 _cache: dict[str, Any] = {}
 
 
+def _build_reranker() -> Any | None:
+    """Build the strongest available reranker.
+
+    Prefers the LLM listwise reranker (Pro tier) when ``AMFS_LLM_RERANK=true`` and
+    an OpenAI-compatible client/key are configured — it resolves confusable facts
+    under adversarial paraphrase and is the lever for top-1 accuracy, at the cost
+    of one LLM call per retrieval. Otherwise falls back to the offline
+    ``CrossEncoderReranker`` (single-digit ms, zero egress). Returns ``None`` only
+    if neither is importable.
+    """
+    try:
+        from amfs_retrieval import LLMReranker
+
+        llm = LLMReranker()  # reads AMFS_LLM_RERANK* env
+        if llm.available:
+            logger.info("pro_provider: LLM listwise reranker enabled for proxy")
+            return llm
+    except Exception:  # noqa: BLE001 - LLM rerank optional
+        logger.debug("pro_provider: LLM reranker unavailable", exc_info=True)
+    try:
+        from amfs_retrieval import CrossEncoderReranker
+
+        return CrossEncoderReranker()
+    except Exception:  # noqa: BLE001 - rerank optional
+        logger.debug("pro_provider: reranker unavailable", exc_info=True)
+        return None
+
+
 def build_pro_retriever(adapter: Any) -> Any | None:
     """Build a Pro MultiStrategyRetriever over ``adapter``, or None if unavailable.
 
@@ -48,14 +82,7 @@ def build_pro_retriever(adapter: Any) -> Any | None:
     try:
         from amfs_retrieval import MultiStrategyRetriever, create_pro_embedder
 
-        reranker = None
-        if PRO_RERANK:
-            try:
-                from amfs_retrieval import CrossEncoderReranker
-
-                reranker = CrossEncoderReranker()
-            except Exception:  # noqa: BLE001 - rerank optional
-                logger.debug("pro_provider: reranker unavailable", exc_info=True)
+        reranker = _build_reranker() if PRO_RERANK else None
 
         retriever = MultiStrategyRetriever(
             adapter, embedder=create_pro_embedder(), reranker=reranker

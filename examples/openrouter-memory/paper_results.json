@@ -1,0 +1,72 @@
+{
+  "config": {
+    "facts": 8,
+    "model_pairs": [
+      [
+        "openai/gpt-4o-mini",
+        "mistralai/mistral-nemo"
+      ],
+      [
+        "mistralai/mistral-nemo",
+        "amazon/nova-micro-v1"
+      ],
+      [
+        "amazon/nova-micro-v1",
+        "cohere/command-r7b-12-2024"
+      ]
+    ],
+    "trials": 2,
+    "cells": 48
+  },
+  "recall_success_pct": {
+    "no-memory": 16.7,
+    "in-context": 100.0,
+    "proxy": 100.0
+  },
+  "n_per_arm": {
+    "no-memory": 48,
+    "in-context": 48,
+    "proxy": 48
+  },
+  "audit": {
+    "proxy_reader_calls": 48,
+    "full_reconstruction_pct": 100.0,
+    "model_attribution_pct": 100.0
+  },
+  "overhead": {
+    "mean_baseline_prompt_tokens": 16.5,
+    "mean_proxy_prompt_tokens": 68.2,
+    "mean_no_memory_latency_ms": 1822.1,
+    "mean_proxy_reader_latency_ms": 1592.6
+  },
+  "per_pair_recall": {
+    "openai/gpt-4o-mini->mistralai/mistral-nemo": {
+      "no-memory": 12.5,
+      "in-context": 100.0,
+      "proxy": 100.0
+    },
+    "mistralai/mistral-nemo->amazon/nova-micro-v1": {
+      "no-memory": 12.5,
+      "in-context": 100.0,
+      "proxy": 100.0
+    },
+    "amazon/nova-micro-v1->cohere/command-r7b-12-2024": {
+      "no-memory": 25.0,
+      "in-context": 100.0,
+      "proxy": 100.0
+    }
+  },
+  "integrity": {
+    "clean_valid": true,
+    "tamper_detected": true,
+    "corrupted_report": [
+      {
+        "entity_path": "paper/integrity",
+        "key": "fact",
+        "version": 1,
+        "expected_hash": "d23998f8051c1a9624829475a284860bc64ec2db85f56f5a3b1dc71674e17a3f",
+        "actual_hash": "cd636dbf5c53de2f67fa4b5e92f3b20908cebe8db78405f08cd40b9b1066e404"
+      }
+    ]
+  }
+}

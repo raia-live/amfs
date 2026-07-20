@@ -29,6 +29,7 @@ from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
     MemoryEntry,
     OutcomeRecord,
+    clamp_confidence,
 )
 
 logger = logging.getLogger(__name__)
@@ -261,7 +262,9 @@ class S3Adapter(AdapterABC):
                 logger.warning("Causal entry not found: %s", entry_key_spec)
                 continue
 
-            new_confidence = current.confidence * multiplier * record.causal_confidence
+            new_confidence = clamp_confidence(
+                current.confidence * multiplier * record.causal_confidence
+            )
             new_entry = current.model_copy(
                 update={
                     "version": 1,
