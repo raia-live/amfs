@@ -599,6 +599,52 @@ class AgentMemory:
         )
         return self._adapter.semantic_search(query, self._embedder)
 
+    def retrieve(
+        self,
+        query: str,
+        *,
+        entity_path: str | None = None,
+        min_confidence: float = 0.0,
+        limit: int = 10,
+        recall_config: RecallConfig | None = None,
+    ) -> list[ScoredEntry]:
+        """Rank memories by meaning for a natural-language query.
+
+        Prefers server-side retrieval when the adapter supports it (e.g. the
+        HTTP adapter, where the server owns the embedder + pgvector index), so
+        semantic recall works even when this client has no local embedder.
+        Otherwise falls back to client-side composite scoring via ``search``.
+        """
+        cfg = recall_config or RecallConfig()
+
+        adapter_retrieve = getattr(self._adapter, "retrieve", None)
+        if callable(adapter_retrieve):
+            try:
+                rows = adapter_retrieve(
+                    query,
+                    entity_path=entity_path,
+                    min_confidence=min_confidence,
+                    limit=limit,
+                    semantic_weight=cfg.semantic_weight,
+                    recency_weight=cfg.recency_weight,
+                    confidence_weight=cfg.confidence_weight,
+                )
+                return [
+                    ScoredEntry(entry=entry, score=score, breakdown=breakdown or {})
+                    for entry, score, breakdown in rows
+                ]
+            except Exception:  # noqa: BLE001 - fall back to local scoring
+                logger.debug("Adapter server-side retrieve failed; using local scoring", exc_info=True)
+
+        result = self.search(
+            query=query,
+            entity_path=entity_path,
+            min_confidence=min_confidence,
+            limit=limit,
+            recall_config=cfg,
+        )
+        return result  # type: ignore[return-value]
+
     def stats(self) -> MemoryStats:
         """Aggregate statistics about current memory state."""
         return self._adapter.stats()
