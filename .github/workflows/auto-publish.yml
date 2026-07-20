@@ -1,0 +1,77 @@
+name: Auto-publish on version bump
+
+# Publishes to PyPI/npm automatically when a package manifest changes on main —
+# so "bump version + merge" is enough, no manual `v*` tag required. Publishing is
+# idempotent: `uv publish --check-url` and `npm publish` skip versions that are
+# already published, so only newly-bumped packages are released. Unchanged
+# packages (and re-runs) are safe no-ops.
+#
+# `release.yml` (tag-triggered) is kept for explicit tagged releases; the two do
+# not overlap (this runs on branch pushes, that runs on tags).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/**/pyproject.toml"
+      - "packages/sdk-typescript/package.json"
+
+concurrency:
+  group: auto-publish
+  cancel-in-progress: false
+
+jobs:
+  publish-python:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Build packages
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          uv pip install hatchling
+          for pkg in packages/core packages/adapters/filesystem packages/adapters/postgres packages/adapters/s3 packages/adapters/http packages/http-server packages/sdk-python packages/cli packages/mcp-server packages/integrations/strands; do
+            echo "Building $pkg..."
+            cd $pkg && python -m hatchling build && cd -
+          done
+
+      - name: Publish to PyPI
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          source .venv/bin/activate
+          for pkg in packages/core packages/adapters/filesystem packages/adapters/postgres packages/adapters/s3 packages/adapters/http packages/http-server packages/sdk-python packages/cli packages/mcp-server packages/integrations/strands; do
+            uv publish --check-url https://pypi.org/simple/ $pkg/dist/* || echo "Skipping $pkg (already published or error)"
+          done
+
+  publish-npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install and build
+        working-directory: packages/sdk-typescript
+        run: |
+          npm install
+          npm run build
+
+      - name: Publish to npm
+        working-directory: packages/sdk-typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public || echo "Skipping npm publish (already published or error)"
