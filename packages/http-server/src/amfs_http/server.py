@@ -44,6 +44,7 @@ from amfs_core.models import (
     LayerConfig,
     MemoryEntry,
     SearchQuery,
+    SemanticQuery,
 )
 from amfs_core.quality import HeuristicQualityEvaluator
 
@@ -56,6 +57,7 @@ from amfs_http.models import (
     CreateTeamRequest,
     EventRequest,
     OutcomeRequest,
+    RetrieveRequest,
     RunPatternDetectionRequest,
     SearchRequest,
     UpdateTeamMemberRequest,
@@ -124,6 +126,47 @@ _memory: AgentMemory | None = None
 _sse_manager = SSEManager()
 _bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="amfs-bg")
 _known_agents: set[str] = set()
+
+# ── Semantic embedder (shared by write-time embedding + /retrieve) ──────
+# One instance for the whole process so write and query vectors come from the
+# SAME model (otherwise cosine similarity is meaningless). Env-gated and fully
+# crash-safe: if the embedder can't be built, we return None and every caller
+# falls back to lexical behaviour — a bad rollout degrades to the status quo,
+# it never breaks writes or reads.
+_UNSET_EMBEDDER: Any = object()
+_server_embedder: Any = _UNSET_EMBEDDER
+
+
+def _embeddings_enabled() -> bool:
+    return os.environ.get("AMFS_ENABLE_EMBEDDINGS", "true").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _get_server_embedder():
+    """Return the process-wide embedder, or None if disabled/unavailable."""
+    global _server_embedder
+    if _server_embedder is _UNSET_EMBEDDER:
+        _server_embedder = None
+        if _embeddings_enabled():
+            try:
+                from amfs_core.default_embedder import create_default_embedder
+
+                _server_embedder = create_default_embedder()
+                logger.info(
+                    "Semantic embedder ready: %s",
+                    type(_server_embedder).__name__,
+                )
+            except Exception:  # noqa: BLE001 - never block startup on the embedder
+                logger.warning(
+                    "Embedder init failed — semantic retrieval disabled, "
+                    "falling back to lexical search",
+                    exc_info=True,
+                )
+                _server_embedder = None
+        else:
+            logger.info("AMFS_ENABLE_EMBEDDINGS is off — semantic retrieval disabled")
+    return _server_embedder
 
 _immutable_trace_store = None
 try:
@@ -199,6 +242,18 @@ def _get_memory() -> AgentMemory:
     mem._adapter = adapter
     mem._engine._adapter = adapter
     mem._propagator._adapter = adapter
+
+    # Share the process-wide embedder so mem.write() embeds on the sync
+    # fallback path and mem.semantic_search() works. The hot async path embeds
+    # explicitly in the write endpoint. Safe no-op when embeddings are disabled.
+    embedder = _get_server_embedder()
+    if embedder is not None:
+        mem._embedder = embedder
+        try:
+            if hasattr(adapter, "_embedder") and getattr(adapter, "_embedder", None) is None:
+                adapter._embedder = embedder
+        except Exception:  # noqa: BLE001 - adapter embedding is best-effort
+            logger.debug("Could not attach embedder to adapter", exc_info=True)
 
     _memory = mem
     return _memory
@@ -498,6 +553,21 @@ async def write_entry(
                 shared=req.shared,
                 branch=req.branch,
             )
+            # Write-time embedding for semantic retrieval. The async adapter
+            # persists entry.embedding when the pgvector column exists; without
+            # this the hot write path stores no vector (embeddings never land).
+            # Crash-safe: a failure here just stores the entry without a vector.
+            _embedder = _get_server_embedder()
+            if _embedder is not None:
+                try:
+                    entry_obj = entry_obj.model_copy(
+                        update={"embedding": _embedder.embed_value(req.value)}
+                    )
+                except Exception:  # noqa: BLE001 - never fail a write on embedding
+                    logger.warning(
+                        "write-time embedding failed for %s/%s — storing without vector",
+                        req.entity_path, req.key, exc_info=True,
+                    )
             try:
                 entry = await _async_adapter.write(entry_obj)
                 _used_async = True
@@ -765,6 +835,111 @@ async def search_entries(
     if vis is not None and vis.should_filter():
         results = vis.filter_entries(results)
 
+    return [_entry_to_response(e) for e in results]
+
+
+@app.post("/api/v1/retrieve")
+async def retrieve_entries(
+    request: Request,
+    req: RetrieveRequest,
+    _auth: str | None = Depends(verify_api_key),
+) -> list[dict[str, Any]]:
+    """Semantic (meaning-based) retrieval.
+
+    Ranks entries by embedding similarity to the query, blended with recency
+    and confidence, so plain-language queries match paraphrased memories.
+    Account isolation comes from the RLS-scoped async adapter; user/room
+    visibility is then enforced by UserVisibilityFilter (same as /search).
+
+    Degrades gracefully to lexical search when the embedder or pgvector column
+    is unavailable, so this endpoint never returns worse than /search.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+
+    branch = req.branch or "main"
+    vis = _get_visibility_filter(request)
+    embedder = _get_server_embedder()
+
+    pairs: list[tuple[MemoryEntry, float]] = []
+    if embedder is not None and _async_adapter is not None:
+        # Over-fetch a candidate pool so the recency/confidence blend has
+        # headroom beyond pure similarity, then trim to `limit` after scoring.
+        pool = max(req.limit * 5, 50)
+        sq = SemanticQuery(
+            text=req.query,
+            entity_path=req.entity_path,
+            min_confidence=req.min_confidence,
+            limit=pool,
+        )
+        try:
+            pairs = await _async_adapter.semantic_search(sq, embedder, branch=branch)
+        except Exception:
+            logger.warning("semantic_search failed — falling back to lexical", exc_info=True)
+            pairs = []
+
+    if pairs:
+        if vis is not None and vis.should_filter():
+            allowed = {id(e) for e in vis.filter_entries([e for e, _ in pairs])}
+            pairs = [(e, s) for e, s in pairs if id(e) in allowed]
+
+        now = _dt.now(_tz.utc)
+        half_life = 30.0
+        scored: list[tuple[MemoryEntry, float, dict[str, float]]] = []
+        for entry, sim in pairs:
+            written = getattr(entry.provenance, "written_at", None)
+            if written is not None:
+                if written.tzinfo is None:
+                    written = written.replace(tzinfo=_tz.utc)
+                age_days = max(0.0, (now - written).total_seconds() / 86400.0)
+                recency = 0.5 ** (age_days / half_life)
+            else:
+                recency = 0.0
+            conf = float(entry.confidence)
+            score = (
+                req.semantic_weight * sim
+                + req.recency_weight * recency
+                + req.confidence_weight * conf
+            )
+            scored.append((entry, score, {
+                "semantic": round(sim, 4),
+                "recency": round(recency, 4),
+                "confidence": round(conf, 4),
+            }))
+
+        scored.sort(key=lambda t: t[1], reverse=True)
+        out: list[dict[str, Any]] = []
+        for entry, score, breakdown in scored[: req.limit]:
+            data = _entry_to_response(entry)
+            data["_score"] = round(score, 4)
+            data["_breakdown"] = breakdown
+            out.append(data)
+        return out
+
+    # ── Lexical fallback (embedder/pgvector unavailable, or no vector hits) ──
+    sq_lex = SearchQuery(
+        query=req.query,
+        entity_path=req.entity_path,
+        min_confidence=req.min_confidence,
+        limit=req.limit,
+        sort_by="confidence",
+        depth=3,
+    )
+    mem = _get_memory()
+    results: list[MemoryEntry] = []
+    if _async_adapter is not None:
+        try:
+            results = await _async_adapter.search(sq_lex, branch=branch)
+        except Exception:
+            results = []
+    if not results:
+        try:
+            results = mem._adapter.search(sq_lex, branch=branch)
+        except TypeError:
+            results = mem._adapter.search(sq_lex)
+        except Exception:
+            results = []
+    if vis is not None and vis.should_filter():
+        results = vis.filter_entries(results)
     return [_entry_to_response(e) for e in results]
 
 

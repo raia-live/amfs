@@ -70,10 +70,25 @@ Every operation has a cost — be deliberate:
 - **Write** (2 ops): `amfs_write`, `amfs_record_context`
 - **Commit** (FREE): `amfs_commit_outcome` — always commit, never skip
 
+## Finding / recalling memories (READ THIS)
+
+When the user asks you to find, recall, look up, remember, or check what's stored
+about ANYTHING — or you just want to see if relevant memory exists — call
+`amfs_retrieve(query="<the user's words>")`. That's it. You do NOT need to know
+where it's stored: **entity_path and key are optional**. `amfs_retrieve` searches
+by meaning across everything you can see (all of your agents, all entities), so a
+plain phrase like "my favorite ice cream" or "the deploy runbook" is enough.
+
+- Reach for `amfs_retrieve` FIRST for any natural-language lookup.
+- Only use `amfs_read(entity_path, key)` when you ALREADY know the exact path AND
+  key — never guess them. If you're guessing, use `amfs_retrieve` instead.
+- Use `amfs_search` when you want structured filters (by agent, confidence, date,
+  pattern) or an exact keyword; it also accepts a bare `query`.
+
 ## Workflow
 
 1. **Get briefed**: `amfs_briefing(entity_path="<repo>/<module>")` — one briefing (1 op) replaces many individual reads. Always start here.
-2. **Read & explore**: `amfs_read` for known keys, `amfs_search(query="...")` for text search, `amfs_retrieve` for semantic retrieval, `amfs_graph_neighbors` for related entities.
+2. **Recall**: `amfs_retrieve(query="...")` to find anything by meaning (no path/key needed); `amfs_search(query="...")` for filtered/keyword search; `amfs_read(path, key)` only when you know the exact coordinates; `amfs_graph_neighbors` for related entities.
 3. **Record decisions as they happen**: `amfs_record_context("user-decision", "User chose X over Y", source="chat")`. Only record meaningful decisions — not every micro-step.
 4. **Write knowledge**: `amfs_write("<repo>/<module>", "task-summary-<desc>", "<what and why>")`. Use `memory_type="belief"` for hypotheses, `"experience"` for actions taken.
 5. **Commit outcomes**: `amfs_commit_outcome("<ref>", "success")` after completing significant work. This is FREE and snapshots the full decision trace.
@@ -570,10 +585,15 @@ def amfs_reset_identity() -> str:
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
 def amfs_read(entity_path: str, key: str) -> str:
-    """Read a memory entry by entity path and key.
+    """Read a single memory entry when you ALREADY know its exact path and key.
+
+    Only use this when you have the exact entity_path AND key (e.g. from a prior
+    search/retrieve result). Do NOT guess coordinates — if you're trying to find
+    something by meaning or the user gave you a plain phrase, use `amfs_retrieve`
+    instead (it needs no path/key).
 
     Returns the full entry as JSON including value, confidence, provenance,
-    and version. Returns a message if the entry does not exist.
+    and version. Returns a not_found message if the entry does not exist.
 
     Example: amfs_read("checkout-service", "retry-pattern")
     """
@@ -694,10 +714,14 @@ def amfs_search(
     limit: int = 20,
     depth: int = 3,
 ) -> str:
-    """Search across all memory entries with filters.
+    """Search across all memory entries with structured filters or exact keywords.
 
     Use this before starting work to find context about the entity you're
     modifying, or to check if another agent already solved a similar problem.
+    For plain natural-language recall ("what's my favorite ice cream?"), prefer
+    `amfs_retrieve` — it ranks by meaning and needs no filters. Reach for this
+    tool when you want to filter by agent/confidence/date/pattern or match an
+    exact keyword. `query`, `entity_path`, and all filters are optional.
 
     When a Postgres adapter with tsvector support is configured, the query
     text is used for full-text search.  Otherwise falls back to Python
@@ -767,14 +791,21 @@ def amfs_retrieve(
     confidence_weight: float = 0.2,
     depth: int = 3,
 ) -> str:
-    """Find the most relevant memories for a natural language query.
+    """Find memories by meaning — the default tool for any recall/lookup.
 
-    Blends semantic similarity, recency, and confidence into a single
-    ranked list.  Use this when you need to find memories by meaning,
-    not exact key/value match.  Use amfs_search for structured filtering.
+    Use this FIRST whenever the user asks you to find, recall, look up, or
+    remember something, or when you want to check whether relevant memory
+    exists. Just pass the user's own words as `query`. You do NOT need to know
+    where it's stored: `entity_path` is optional and, when omitted, this searches
+    across everything you can see (all your agents and all entities).
+
+    It blends semantic similarity, recency, and confidence into one ranked list,
+    so paraphrases and synonyms match even without exact keywords. Prefer this
+    over `amfs_read` (which needs exact coordinates) and over `amfs_search`
+    (which is for structured filtering / exact keywords).
 
     Args:
-        query: Natural language query describing what you're looking for
+        query: Natural language query in the user's own words (e.g. "my favorite ice cream")
         entity_path: Optional entity path filter
         min_confidence: Minimum confidence threshold (0.0-1.0)
         limit: Maximum results to return
@@ -795,13 +826,14 @@ def amfs_retrieve(
         confidence_weight=confidence_weight,
     )
 
-    results = mem.search(
+    # Prefer server-side semantic retrieval (embedder + pgvector live on the
+    # server); falls back to client-side composite scoring for local adapters.
+    results = mem.retrieve(
         query=query,
         entity_path=entity_path,
         min_confidence=min_confidence,
         limit=limit,
         recall_config=recall_config,
-        depth=depth,
     )
 
     serialized = []

@@ -183,6 +183,45 @@ class HttpAdapter(AdapterABC):
             return [_parse_entry(e) for e in data]
         return [_parse_entry(e) for e in data.get("entries", data if isinstance(data, list) else [])]
 
+    def retrieve(
+        self,
+        query: str,
+        *,
+        entity_path: str | None = None,
+        min_confidence: float = 0.0,
+        limit: int = 10,
+        semantic_weight: float = 0.5,
+        recency_weight: float = 0.3,
+        confidence_weight: float = 0.2,
+        branch: str = "main",
+    ) -> list[tuple[MemoryEntry, float, dict[str, float]]]:
+        """Server-side semantic retrieval via POST /api/v1/retrieve.
+
+        The server does the embedding + pgvector similarity + blend, so this
+        works even when the client has no embedder. Returns
+        (entry, score, breakdown) tuples; breakdown is empty on the server's
+        lexical fallback.
+        """
+        body: dict[str, Any] = {
+            "query": query,
+            "min_confidence": min_confidence,
+            "limit": limit,
+            "semantic_weight": semantic_weight,
+            "recency_weight": recency_weight,
+            "confidence_weight": confidence_weight,
+            "branch": branch,
+        }
+        if entity_path:
+            body["entity_path"] = entity_path
+        data = self._post("/api/v1/retrieve", body)
+        rows = data if isinstance(data, list) else data.get("entries", [])
+        out: list[tuple[MemoryEntry, float, dict[str, float]]] = []
+        for e in rows:
+            score = float(e.get("_score", 0.0)) if isinstance(e, dict) else 0.0
+            breakdown = e.get("_breakdown", {}) if isinstance(e, dict) else {}
+            out.append((_parse_entry(e), score, breakdown))
+        return out
+
     def stats(self) -> MemoryStats:
         data = self._get("/api/v1/stats")
         return MemoryStats.model_validate(data)
