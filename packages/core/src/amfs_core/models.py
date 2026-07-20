@@ -143,7 +143,7 @@ class QualityReport(BaseModel):
 class MemoryEntry(BaseModel):
     """A single versioned memory entry within the AMFS namespace."""
 
-    amfs_version: str = "0.2.0"
+    amfs_version: str = "0.3.0"
     entity_path: str
     key: str
     version: int = 1

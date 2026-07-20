@@ -49,7 +49,7 @@ class TestMemoryEntry:
         assert entry.confidence == 1.0
         assert entry.outcome_count == 0
         assert entry.ttl_at is None
-        assert entry.amfs_version == "0.2.0"
+        assert entry.amfs_version == "0.3.0"
         assert entry.memory_type == MemoryType.FACT
 
     def test_memory_type_belief(self) -> None:
