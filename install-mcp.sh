@@ -258,6 +258,97 @@ if 'mcpServers' in config and 'senselab' in config['mcpServers']:
 " "$config_file"
 }
 
+# ── SenseLab memory instructions ─────────────────────────────────────────────
+#
+# So agents recall proactively (esp. for personal facts) instead of relying only
+# on the advisory MCP instructions, we install a short "recall-first" guide into
+# the clients that auto-load on-disk instructions: Claude Code (a Skill +
+# ~/.claude/CLAUDE.md) and Codex (~/.codex/AGENTS.md). Blocks are delimited by
+# HTML-comment markers so they're idempotent (re-runs replace, not duplicate)
+# and removable by --uninstall. Claude Desktop has no writable instruction file
+# (its "personal preferences" are an app/account profile setting), so it can't
+# be auto-configured here — the dashboard onboarding shows a copy/paste snippet.
+
+SENSELAB_MARKER_BEGIN="<!-- >>> senselab-memory >>> -->"
+SENSELAB_MARKER_END="<!-- <<< senselab-memory <<< -->"
+
+senselab_instructions_body() {
+    cat <<'MD'
+## SenseLab memory (recall-first)
+
+You are connected to SenseLab (AMFS), a persistent memory shared across all your
+tools and sessions. Use it proactively:
+
+- **Start of session:** call `amfs_set_identity`, then `amfs_briefing(entity_path="repo/module")` for compiled context before working in a codebase.
+- **RECALL-FIRST (do not skip):** whenever the user asks what you know / remember / have saved about ANYTHING — including personal facts and preferences ("what food do I like?") — call `amfs_retrieve(query="<the user's words>")` BEFORE answering. `entity_path`/`key` are optional; it searches by meaning across everything you can see. Never tell the user you have no memory of something without running `amfs_retrieve` first.
+- **Remember things:** when the user shares a durable fact, preference, or decision, or says "remember…", call `amfs_write(entity_path, key, value)`.
+- `amfs_read`/`amfs_recall` need an EXACT key — a miss there means "try `amfs_retrieve`", NOT "nothing is stored".
+MD
+}
+
+upsert_senselab_block() {
+    # Idempotently insert/replace the marker-delimited block in a markdown file.
+    local file="$1"
+    mkdir -p "$(dirname "$file")"
+    SENSELAB_BODY="$(senselab_instructions_body)" \
+    SENSELAB_BEGIN="$SENSELAB_MARKER_BEGIN" \
+    SENSELAB_END="$SENSELAB_MARKER_END" \
+    python3 - "$file" <<'PY'
+import os, sys
+path = sys.argv[1]
+begin, end, body = os.environ["SENSELAB_BEGIN"], os.environ["SENSELAB_END"], os.environ["SENSELAB_BODY"]
+block = begin + "\n" + body.rstrip("\n") + "\n" + end
+try:
+    with open(path) as f:
+        content = f.read()
+except FileNotFoundError:
+    content = ""
+if begin in content and end in content:
+    pre = content.split(begin)[0].rstrip("\n")
+    post = content.split(end, 1)[1].lstrip("\n")
+    content = (pre + "\n\n" + post).strip("\n")
+content = (content.rstrip("\n") + "\n\n" if content.strip() else "") + block + "\n"
+with open(path, "w") as f:
+    f.write(content)
+PY
+}
+
+remove_senselab_block() {
+    local file="$1"
+    [[ -f "$file" ]] || return 0
+    SENSELAB_BEGIN="$SENSELAB_MARKER_BEGIN" SENSELAB_END="$SENSELAB_MARKER_END" \
+    python3 - "$file" <<'PY'
+import os, sys
+path = sys.argv[1]
+begin, end = os.environ["SENSELAB_BEGIN"], os.environ["SENSELAB_END"]
+with open(path) as f:
+    content = f.read()
+if begin in content and end in content:
+    pre = content.split(begin)[0].rstrip("\n")
+    post = content.split(end, 1)[1].lstrip("\n")
+    content = (pre + "\n\n" + post).strip("\n")
+    with open(path, "w") as f:
+        f.write(content + ("\n" if content else ""))
+PY
+}
+
+install_claude_code_skill() {
+    local skill_dir="$HOME/.claude/skills/senselab-memory"
+    mkdir -p "$skill_dir"
+    {
+        echo "---"
+        echo "name: senselab-memory"
+        echo "description: Use SenseLab (AMFS) as persistent memory. When the user asks what you know/remember/have saved about anything (including personal preferences), call amfs_retrieve BEFORE answering; save durable facts with amfs_write."
+        echo "---"
+        echo ""
+        senselab_instructions_body
+    } > "$skill_dir/SKILL.md"
+}
+
+remove_claude_code_skill() {
+    rm -rf "$HOME/.claude/skills/senselab-memory"
+}
+
 # ── Client detection ─────────────────────────────────────────────────────────
 
 declare -a DETECTED_CLIENTS=()
@@ -330,6 +421,8 @@ configure_client() {
                     claude mcp remove senselab 2>/dev/null || true
                     success "Removed AMFS from Claude Code"
                 fi
+                remove_claude_code_skill
+                remove_senselab_block "$HOME/.claude/CLAUDE.md"
             else
                 if ! command -v claude &>/dev/null; then
                     warn "Claude Code CLI (claude) not found on PATH — skipping"
@@ -345,6 +438,9 @@ configure_client() {
                 fi
                 claude "${args[@]}"
                 success "Configured Claude Code"
+                install_claude_code_skill
+                upsert_senselab_block "$HOME/.claude/CLAUDE.md"
+                success "Installed SenseLab recall-first memory guide (skill + ~/.claude/CLAUDE.md)"
             fi
             ;;
         codex)
@@ -353,6 +449,7 @@ configure_client() {
                     codex mcp remove senselab 2>/dev/null || true
                     success "Removed AMFS from Codex"
                 fi
+                remove_senselab_block "$HOME/.codex/AGENTS.md"
             else
                 if ! command -v codex &>/dev/null; then
                     warn "Codex CLI (codex) not found on PATH — skipping"
@@ -371,6 +468,8 @@ configure_client() {
                 codex mcp remove senselab 2>/dev/null || true
                 codex "${args[@]}"
                 success "Configured Codex"
+                upsert_senselab_block "$HOME/.codex/AGENTS.md"
+                success "Installed SenseLab recall-first memory guide (~/.codex/AGENTS.md)"
             fi
             ;;
         windsurf)
@@ -537,6 +636,17 @@ main() {
         echo "  To connect to AMFS SaaS, re-run with --api-key <key>"
     fi
     echo ""
+
+    # Claude Desktop has no writable instructions file — surface the one manual
+    # step so it recalls proactively like the file-based clients now do.
+    if [[ -d "$(dirname "$(claude_desktop_config_path)")" ]]; then
+        warn "Claude Desktop: add this to Settings → Profile (personal preferences) for proactive recall:"
+        echo "  Always use SenseLab as your memory. When I ask what you know, remember, or"
+        echo "  have saved about anything — including my personal preferences — call amfs_retrieve"
+        echo "  before answering, and never say you have no memory without checking. When I share"
+        echo "  a durable fact or say \"remember\", save it with amfs_write."
+        echo ""
+    fi
 }
 
 main
