@@ -79,6 +79,18 @@ where it's stored: **entity_path and key are optional**. `amfs_retrieve` searche
 by meaning across everything you can see (all of your agents, all entities), so a
 plain phrase like "my favorite ice cream" or "the deploy runbook" is enough.
 
+**RECALL-FIRST RULE (do not skip):** If the user asks what you know / remember /
+have saved about anything — INCLUDING personal facts and preferences ("what food
+do I like?") — you MUST call `amfs_retrieve` BEFORE answering. Never tell the user
+you have no memory of something without checking first.
+
+**Common misconceptions to avoid:**
+- SenseLab DOES store personal facts and preferences, not just code/decisions.
+- `amfs_retrieve` is full free-text *semantic* search. Never tell the user memory
+  "only works by exact key" or that you "need an entity_path/key" — you don't.
+- Don't stop at `amfs_read`/`amfs_recall` returning nothing: those need an EXACT
+  key. A miss there means "try `amfs_retrieve`", not "nothing is stored".
+
 - Reach for `amfs_retrieve` FIRST for any natural-language lookup.
 - Only use `amfs_read(entity_path, key)` when you ALREADY know the exact path AND
   key — never guess them. If you're guessing, use `amfs_retrieve` instead.
@@ -135,6 +147,22 @@ Use `{repo}/{service-or-module}` paths (e.g. `myapp/auth`, `amfs/core-engine`). 
 `amfs_write` responses include a `quality` score. If below 0.8, review `issues` and rewrite with more detail. Use `pattern_refs` to link related entries.
 """
 
+# Surfaced in the amfs_set_identity response so the agent (and, through it, the
+# user) immediately learns what SenseLab makes possible now that it's connected.
+# This is the reliable channel: agents always read tool output, even when they
+# skip the server `instructions` block.
+_GETTING_STARTED = {
+    "you_are_connected": "SenseLab is a shared memory across all your tools and agents. "
+    "Anything saved from one tool (e.g. Cursor) is recallable from another (e.g. Claude Desktop) on the same account.",
+    "recall_anything": "To find what's stored — including personal facts and preferences — "
+    "call amfs_retrieve(query=\"<the user's words>\"). No entity_path/key needed; it searches by meaning.",
+    "remember_something": "To save something for the future, call "
+    "amfs_write(entity_path, key, value). Use it whenever the user says 'remember…' or shares a durable fact/decision.",
+    "get_briefed": "Before working in a codebase, call amfs_briefing(entity_path=\"repo/module\") for compiled context.",
+    "recall_first_rule": "When the user asks what you know/remember/have saved about ANYTHING, "
+    "call amfs_retrieve BEFORE answering — never say you have no memory of it without checking.",
+}
+
 _toolset = os.environ.get("AMFS_TOOLSET", "all").lower()
 
 
@@ -147,7 +175,7 @@ def _create_server(toolset: str) -> FastMCP:
             server = FastMCP(name="amfs", instructions=_INSTRUCTIONS)
             server.enable(tags={"core"}, only=True)
         logger.info(
-            "AMFS toolset: core (15 essential tools). "
+            "AMFS toolset: core (essential tools incl. amfs_retrieve). "
             "Set AMFS_TOOLSET=all to expose all 36 tools."
         )
     else:
@@ -467,6 +495,7 @@ def amfs_set_identity(
             "session_id": mem.session_id,
             "status": "already_active",
             "sticky": True,
+            "getting_started": _GETTING_STARTED,
             "session_metadata": _session_metadata.model_dump(mode="json"),
         }, default=str)
 
@@ -531,6 +560,7 @@ def amfs_set_identity(
         "session_id": mem.session_id,
         "sticky": True,
         "hint": "Identity saved — it will be auto-restored in future sessions.",
+        "getting_started": _GETTING_STARTED,
         "session_metadata": _session_metadata.model_dump(mode="json"),
     }
     if description:
@@ -600,7 +630,11 @@ def amfs_read(entity_path: str, key: str) -> str:
     mem = _get_memory()
     entry = mem.read(entity_path, key)
     if entry is None:
-        return json.dumps({"status": "not_found", "entity_path": entity_path, "key": key})
+        return json.dumps({"status": "not_found", "entity_path": entity_path, "key": key,
+                           "hint": "No entry at that exact path/key. If you were guessing the "
+                                   "coordinates, call amfs_retrieve(query=\"<the user's words>\") to "
+                                   "search by meaning instead — do NOT tell the user nothing is stored "
+                                   "until you've tried amfs_retrieve."})
     return json.dumps(_serialize_entry(entry), default=str)
 
 
@@ -698,6 +732,11 @@ def amfs_write(
     result: dict[str, Any] = {"entry": _serialize_entry(entry)}
     if quality_report is not None:
         result["quality"] = quality_report.model_dump(mode="json")
+    result["next"] = (
+        "Saved. You — or your agents in any other tool on this account — can recall this "
+        "later just by asking in plain language; call amfs_retrieve(query=\"...\") "
+        "(no path/key needed). Tell the user it's saved and recallable from their other tools."
+    )
     return json.dumps(result, default=str)
 
 
@@ -780,7 +819,7 @@ def amfs_search(
     }, default=str)
 
 
-@mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
 def amfs_retrieve(
     query: str,
     entity_path: str | None = None,
@@ -1078,11 +1117,13 @@ def amfs_record_context(
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
 def amfs_recall(entity_path: str, key: str) -> str:
-    """Recall YOUR OWN memory for a key — what do I know about this?
+    """Recall YOUR OWN memory for an EXACT key — needs the precise path + key.
 
-    Unlike amfs_read (which returns the latest version by any agent),
-    amfs_recall returns only entries written by you. Use this to check
-    your own knowledge before acting.
+    NOTE: despite the name, this is NOT free-text recall — it requires the exact
+    entity_path AND key. If the user asked in plain language ("what food do I
+    like?") or you're guessing the key, use `amfs_retrieve(query=...)` instead —
+    it searches by meaning with no path/key needed. Only use amfs_recall to
+    re-read a key you already know you wrote.
 
     Args:
         entity_path: Entity path (e.g. "checkout-service")
@@ -1094,7 +1135,9 @@ def amfs_recall(entity_path: str, key: str) -> str:
     entry = mem.recall(entity_path, key)
     if entry is None:
         return json.dumps({"status": "not_found", "entity_path": entity_path, "key": key,
-                           "hint": "You have not written this key. Try amfs_read() for shared knowledge."})
+                           "hint": "No entry at that exact key. Do NOT conclude nothing is stored — "
+                                   "call amfs_retrieve(query=\"<the user's words>\") to search by meaning "
+                                   "across everything you can see (no path/key needed)."})
     return json.dumps(_serialize_entry(entry), default=str)
 
 
