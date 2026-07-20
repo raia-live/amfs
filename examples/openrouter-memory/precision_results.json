@@ -1,0 +1,97 @@
+{
+  "vector": {
+    "coverage": 30,
+    "direct": {
+      "hit@1": 96.7,
+      "hit@3": 96.7,
+      "mrr": 0.967,
+      "n": 30
+    },
+    "adversarial": {
+      "hit@1": 56.7,
+      "hit@3": 76.7,
+      "mrr": 0.656,
+      "n": 30
+    }
+  },
+  "senselab-semantic": {
+    "coverage": 30,
+    "direct": {
+      "hit@1": 96.7,
+      "hit@3": 96.7,
+      "mrr": 0.967,
+      "n": 30
+    },
+    "adversarial": {
+      "hit@1": 56.7,
+      "hit@3": 76.7,
+      "mrr": 0.656,
+      "n": 30
+    }
+  },
+  "senselab-xenc": {
+    "coverage": 30,
+    "direct": {
+      "hit@1": 93.3,
+      "hit@3": 96.7,
+      "mrr": 0.95,
+      "n": 30
+    },
+    "adversarial": {
+      "hit@1": 56.7,
+      "hit@3": 90.0,
+      "mrr": 0.694,
+      "n": 30
+    }
+  },
+  "senselab-llm": {
+    "coverage": 30,
+    "direct": {
+      "hit@1": 100.0,
+      "hit@3": 100.0,
+      "mrr": 1.0,
+      "n": 30
+    },
+    "adversarial": {
+      "hit@1": 93.3,
+      "hit@3": 96.7,
+      "mrr": 0.95,
+      "n": 30
+    }
+  },
+  "mem0": {
+    "coverage": 4,
+    "direct": {
+      "hit@1": 16.7,
+      "hit@3": 16.7,
+      "mrr": 0.167,
+      "n": 30
+    },
+    "adversarial": {
+      "hit@1": 10.0,
+      "hit@3": 16.7,
+      "mrr": 0.133,
+      "n": 30
+    }
+  },
+  "supermemory": {
+    "coverage": 20,
+    "direct": {
+      "hit@1": 76.7,
+      "hit@3": 76.7,
+      "mrr": 0.767,
+      "n": 30
+    },
+    "adversarial": {
+      "hit@1": 86.7,
+      "hit@3": 90.0,
+      "mrr": 0.878,
+      "n": 30
+    }
+  },
+  "_meta": {
+    "facts": 30,
+    "top_k": 3,
+    "clusters": "5 db, 5 on-call, 4 region, 4 port, 4 sla, 4 vendor, 4 misc"
+  }
+}

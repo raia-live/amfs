@@ -1,0 +1,323 @@
+{
+  "config": {
+    "model_pairs": [
+      [
+        "openai/gpt-4o-mini",
+        "mistralai/mistral-nemo"
+      ],
+      [
+        "mistralai/mistral-nemo",
+        "amazon/nova-micro-v1"
+      ],
+      [
+        "amazon/nova-micro-v1",
+        "cohere/command-r7b-12-2024"
+      ]
+    ],
+    "facts": 8,
+    "trials": 6,
+    "miss_questions": 8,
+    "miss_trials": 3,
+    "conf_gate": 0.5,
+    "sem_floor": 0.55,
+    "top_k": 3
+  },
+  "recall": {
+    "no-memory": {
+      "pct": 9.7,
+      "n": 144,
+      "ci": [
+        5.9,
+        15.7
+      ]
+    },
+    "in-context": {
+      "pct": 100.0,
+      "n": 144,
+      "ci": [
+        97.4,
+        100.0
+      ]
+    },
+    "vector": {
+      "pct": 98.6,
+      "n": 144,
+      "ci": [
+        95.1,
+        99.6
+      ]
+    },
+    "mem0": {
+      "pct": 91.7,
+      "n": 144,
+      "ci": [
+        86.0,
+        95.2
+      ]
+    },
+    "supermemory": {
+      "pct": 99.3,
+      "n": 144,
+      "ci": [
+        96.2,
+        99.9
+      ]
+    },
+    "amfs-pro": {
+      "pct": 99.3,
+      "n": 144,
+      "ci": [
+        96.2,
+        99.9
+      ]
+    }
+  },
+  "per_pair_recall": {
+    "openai/gpt-4o-mini->mistralai/mistral-nemo": {
+      "no-memory": {
+        "pct": 6.2,
+        "n": 48,
+        "ci": [
+          2.1,
+          16.8
+        ]
+      },
+      "in-context": {
+        "pct": 100.0,
+        "n": 48,
+        "ci": [
+          92.6,
+          100.0
+        ]
+      },
+      "vector": {
+        "pct": 100.0,
+        "n": 48,
+        "ci": [
+          92.6,
+          100.0
+        ]
+      },
+      "mem0": {
+        "pct": 87.5,
+        "n": 48,
+        "ci": [
+          75.3,
+          94.1
+        ]
+      },
+      "supermemory": {
+        "pct": 100.0,
+        "n": 48,
+        "ci": [
+          92.6,
+          100.0
+        ]
+      },
+      "amfs-pro": {
+        "pct": 100.0,
+        "n": 48,
+        "ci": [
+          92.6,
+          100.0
+        ]
+      }
+    },
+    "mistralai/mistral-nemo->amazon/nova-micro-v1": {
+      "no-memory": {
+        "pct": 10.4,
+        "n": 48,
+        "ci": [
+          4.5,
+          22.2
+        ]
+      },
+      "in-context": {
+        "pct": 100.0,
+        "n": 48,
+        "ci": [
+          92.6,
+          100.0
+        ]
+      },
+      "vector": {
+        "pct": 100.0,
+        "n": 48,
+        "ci": [
+          92.6,
+          100.0
+        ]
+      },
+      "mem0": {
+        "pct": 93.8,
+        "n": 48,
+        "ci": [
+          83.2,
+          97.9
+        ]
+      },
+      "supermemory": {
+        "pct": 97.9,
+        "n": 48,
+        "ci": [
+          89.1,
+          99.6
+        ]
+      },
+      "amfs-pro": {
+        "pct": 97.9,
+        "n": 48,
+        "ci": [
+          89.1,
+          99.6
+        ]
+      }
+    },
+    "amazon/nova-micro-v1->cohere/command-r7b-12-2024": {
+      "no-memory": {
+        "pct": 12.5,
+        "n": 48,
+        "ci": [
+          5.9,
+          24.7
+        ]
+      },
+      "in-context": {
+        "pct": 100.0,
+        "n": 48,
+        "ci": [
+          92.6,
+          100.0
+        ]
+      },
+      "vector": {
+        "pct": 95.8,
+        "n": 48,
+        "ci": [
+          86.0,
+          98.8
+        ]
+      },
+      "mem0": {
+        "pct": 93.8,
+        "n": 48,
+        "ci": [
+          83.2,
+          97.9
+        ]
+      },
+      "supermemory": {
+        "pct": 100.0,
+        "n": 48,
+        "ci": [
+          92.6,
+          100.0
+        ]
+      },
+      "amfs-pro": {
+        "pct": 100.0,
+        "n": 48,
+        "ci": [
+          92.6,
+          100.0
+        ]
+      }
+    }
+  },
+  "overhead": {
+    "no-memory": {
+      "latency_p50_ms": 835.6,
+      "latency_p95_ms": 3129.6,
+      "mean_prompt_tokens": 16.9
+    },
+    "in-context": {
+      "latency_p50_ms": 615.1,
+      "latency_p95_ms": 2756.8,
+      "mean_prompt_tokens": 36.3
+    },
+    "vector": {
+      "latency_p50_ms": 623.1,
+      "latency_p95_ms": 4275.7,
+      "mean_prompt_tokens": 52.4
+    },
+    "mem0": {
+      "latency_p50_ms": 696.3,
+      "latency_p95_ms": 3554.7,
+      "mean_prompt_tokens": 51.8
+    },
+    "supermemory": {
+      "latency_p50_ms": 615.7,
+      "latency_p95_ms": 4270.2,
+      "mean_prompt_tokens": 54.3
+    },
+    "amfs-pro": {
+      "latency_p50_ms": 609.9,
+      "latency_p95_ms": 4551.4,
+      "mean_prompt_tokens": 52.6
+    }
+  },
+  "abstain_on_miss": {
+    "no-memory": {
+      "decline_pct": 12.5,
+      "n": 24,
+      "ci": [
+        4.3,
+        31.0
+      ]
+    },
+    "vector": {
+      "decline_pct": 45.8,
+      "n": 24,
+      "ci": [
+        27.9,
+        64.9
+      ]
+    },
+    "mem0": {
+      "decline_pct": 45.8,
+      "n": 24,
+      "ci": [
+        27.9,
+        64.9
+      ]
+    },
+    "supermemory": {
+      "decline_pct": 37.5,
+      "n": 24,
+      "ci": [
+        21.2,
+        57.3
+      ]
+    },
+    "amfs-pro": {
+      "decline_pct": 54.2,
+      "n": 24,
+      "ci": [
+        35.1,
+        72.1
+      ]
+    }
+  },
+  "amfs_trace_verified_pct": 100.0,
+  "amfs_trace_verified_n": 144,
+  "governance": {
+    "sealed_trace": {
+      "signed": true,
+      "clean_verify_valid": true,
+      "tamper_detected": true,
+      "tamper_errors": [
+        "content_hash mismatch: stored=ff49b1b6f014986ca518ce85f580d0d70f61379279a2c84d51c5e137907e4ed2, computed=efd3e6fa44664625cbb69a5fd67c8c74e0eb25abf2db72f7ba98c748647f663a",
+        "signature verification failed \u2014 trace may have been tampered with"
+      ],
+      "chain_verified": true,
+      "chain_length": 2,
+      "content_hash": "ff49b1b6f014986c",
+      "signature": "b7ee8fbd700d5c07"
+    },
+    "safety_validator": {
+      "contradiction_flagged": true,
+      "contradiction_detail": "Proposed value conflicts with existing high-confidence entry (existing confidence: 0.90, written by gov-agent)",
+      "low_confidence_flagged": true
+    }
+  }
+}
