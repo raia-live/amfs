@@ -957,28 +957,48 @@ async def get_stats(
 
     vis = _get_visibility_filter(request)
     if vis is not None and vis.should_filter():
+        # Visibility-scoped stats. This branch must return the SAME shape as
+        # MemoryStats (which mem.stats() below produces), because the client
+        # parses /stats via MemoryStats.model_validate — any missing field
+        # silently defaults (confidence→0.0, outcome→0) and any mis-named key
+        # (e.g. "oldest_entry" vs "oldest_entry_at") is dropped to None. The
+        # earlier partial dict caused exactly that: correct counts but zeroed
+        # confidence/outcome and null timestamps.
+        from amfs_core.models import MemoryStats
+
         entries = mem.list()
         entries = vis.filter_entries(entries)
 
-        entity_set: set[str] = set()
-        agent_set: set[str] = set()
+        agents: dict[str, int] = {}
+        entities: dict[str, int] = {}
+        confidences: list[float] = []
+        written_ats: list[Any] = []
+        outcome_linked = 0
         for e in entries:
-            entity_set.add(e.entity_path)
-            agent_set.add(e.provenance.agent_id)
+            entities[e.entity_path] = entities.get(e.entity_path, 0) + 1
+            aid = e.provenance.agent_id
+            agents[aid] = agents.get(aid, 0) + 1
+            confidences.append(float(e.confidence))
+            if getattr(e, "outcome_count", 0):
+                outcome_linked += 1
+            wa = getattr(e.provenance, "written_at", None)
+            if wa is not None:
+                written_ats.append(wa)
 
-        return {
-            "total_entries": len(entries),
-            "total_entities": len(entity_set),
-            "total_agents": len(agent_set),
-            "oldest_entry": min(
-                (e.provenance.written_at for e in entries if e.provenance.written_at),
-                default=None,
-            ),
-            "newest_entry": max(
-                (e.provenance.written_at for e in entries if e.provenance.written_at),
-                default=None,
-            ),
-        }
+        scoped = MemoryStats(
+            total_entries=len(entries),
+            total_entities=len(entities),
+            total_agents=len(agents),
+            agents=agents,
+            entities=entities,
+            confidence_avg=(sum(confidences) / len(confidences)) if confidences else 0.0,
+            confidence_min=min(confidences) if confidences else 0.0,
+            confidence_max=max(confidences) if confidences else 0.0,
+            outcome_linked_count=outcome_linked,
+            oldest_entry_at=min(written_ats) if written_ats else None,
+            newest_entry_at=max(written_ats) if written_ats else None,
+        )
+        return json.loads(json.dumps(scoped.model_dump(mode="json"), default=str))
 
     stats = mem.stats()
     return json.loads(json.dumps(stats.model_dump(mode="json"), default=str))
