@@ -1,11 +1,23 @@
 [project]
 name = "amfs-core"
-version = "0.3.7"
+version = "0.3.8"
 description = "AMFS core models, engine, and adapter ABC"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
     "pydantic>=2.0,<3",
+]
+
+[project.optional-dependencies]
+# Real semantic embeddings. fastembed is ONNX-based (no torch) and ships the
+# retrieval-tuned BAAI/bge-small-en-v1.5 (384-dim). sentence-transformers is a
+# heavier alternative. Without either, create_default_embedder() falls back to
+# the deterministic-but-weak HashEmbedder.
+embedder = [
+    "fastembed>=0.3",
+]
+embedder-st = [
+    "sentence-transformers>=2.2",
 ]
 
 [build-system]

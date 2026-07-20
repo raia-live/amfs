@@ -44,20 +44,50 @@ class HashEmbedder(EmbedderABC):
         return [x / norm for x in vec]
 
 
+DEFAULT_EMBED_MODEL = "BAAI/bge-small-en-v1.5"  # 384-dim, matches the pgvector column
+
+
 def create_default_embedder() -> EmbedderABC:
     """Create the best available embedder.
 
-    Tries to load the ONNX-based sentence-transformers model first.
-    Falls back to HashEmbedder if dependencies are missing.
+    Preference order (all 384-dim, so interchangeable with the pgvector column):
+    1. ``fastembed`` ``TextEmbedding`` — ONNX, offline, no torch; fast on CPU.
+       Default ``BAAI/bge-small-en-v1.5`` (retrieval-tuned).
+    2. ``sentence-transformers`` ``all-MiniLM-L6-v2`` via ONNX.
+    3. ``HashEmbedder`` — deterministic but not semantically meaningful.
+
+    Falls back gracefully so semantic search never hard-fails; only quality
+    degrades when the optional model dependencies are missing.
     """
+    try:
+        return _create_fastembed_embedder()
+    except Exception as exc:  # noqa: BLE001 - fastembed missing/model unavailable
+        logger.info("fastembed unavailable (%s); trying sentence-transformers", exc)
+
     try:
         return _create_onnx_embedder()
     except ImportError:
-        logger.info(
-            "sentence-transformers/onnxruntime not available, "
-            "falling back to HashEmbedder. Install amfs-core[embedder] for better quality."
+        logger.warning(
+            "Neither fastembed nor sentence-transformers/onnxruntime available — "
+            "falling back to HashEmbedder (poor semantic quality). "
+            "Install amfs-core[embedder] for real embeddings."
         )
         return HashEmbedder()
+
+
+def _create_fastembed_embedder(model_name: str = DEFAULT_EMBED_MODEL) -> EmbedderABC:
+    from fastembed import TextEmbedding  # type: ignore[import-untyped]
+
+    class FastEmbedEmbedder(EmbedderABC):
+        def __init__(self) -> None:
+            self._model = TextEmbedding(model_name)
+            self.model_name = model_name
+
+        def embed(self, text: str) -> list[float]:
+            return [float(x) for x in next(iter(self._model.embed([text])))]
+
+    logger.info("Default embedder: fastembed %s", model_name)
+    return FastEmbedEmbedder()
 
 
 def _create_onnx_embedder() -> EmbedderABC:

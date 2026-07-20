@@ -41,6 +41,24 @@ class SearchRequest(BaseModel):
     depth: int = 3
 
 
+class RetrieveRequest(BaseModel):
+    """Semantic (meaning-based) retrieval request.
+
+    Ranks entries by embedding similarity to the query, blended with recency
+    and confidence. entity_path is optional — when omitted, searches across
+    everything the caller can see.
+    """
+
+    query: str
+    entity_path: str | None = None
+    min_confidence: float = 0.0
+    limit: int = 10
+    semantic_weight: float = 0.5
+    recency_weight: float = 0.3
+    confidence_weight: float = 0.2
+    branch: str = "main"
+
+
 class ContextRequest(BaseModel):
     label: str
     summary: str

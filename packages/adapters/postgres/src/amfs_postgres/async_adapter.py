@@ -29,6 +29,7 @@ from amfs_core.models import (
     MemoryType,
     Provenance,
     SearchQuery,
+    SemanticQuery,
 )
 
 from amfs_postgres.adapter import PostgresAdapter
@@ -462,6 +463,68 @@ class AsyncPostgresAdapter:
                 rows = await cur.fetchall()
 
         return [self._row_to_entry(r) for r in rows]
+
+    # ──────────────────────────────────────────────────────────────
+    # 4b. semantic_search (pgvector cosine, account-scoped via RLS pool)
+    # ──────────────────────────────────────────────────────────────
+
+    async def semantic_search(
+        self,
+        query: SemanticQuery,
+        embedder: Any,
+        *,
+        branch: str = "main",
+    ) -> list[tuple[MemoryEntry, float]]:
+        """Rank entries by pgvector cosine similarity to the query embedding.
+
+        Account isolation is enforced by the RLS pool wrapper (same as
+        ``search``), so results are already scoped to the request's account
+        before the LIMIT — never do a global top-K then filter, which would
+        both leak scan scope and drop the caller's own matches.
+
+        Returns (entry, similarity) pairs ordered by similarity desc. Empty
+        list when the pgvector column is absent (caller falls back to lexical).
+        """
+        if not self._has_embedding_col:
+            return []
+
+        query_vec = embedder.embed(query.text)
+        vec_str = f"[{','.join(str(v) for v in query_vec)}]"
+
+        conditions = [
+            "namespace = %s",
+            "branch = %s",
+            "superseded_at IS NULL",
+            "embedding IS NOT NULL",
+        ]
+        params: list[Any] = [self._namespace, branch]
+        if query.entity_path is not None:
+            conditions.append("entity_path = %s")
+            params.append(query.entity_path)
+        if query.min_confidence > 0:
+            conditions.append("confidence >= %s")
+            params.append(query.min_confidence)
+
+        where = " AND ".join(conditions)
+        sql = f"""
+            SELECT *, 1 - (embedding <=> %s::vector) AS similarity
+            FROM amfs_memory_entries
+            WHERE {where}
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+        """
+
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, [vec_str] + params + [vec_str, query.limit])
+                rows = await cur.fetchall()
+
+        results: list[tuple[MemoryEntry, float]] = []
+        for row in rows:
+            sim = float(row.get("similarity", 0) or 0)
+            if sim >= query.min_similarity:
+                results.append((self._row_to_entry(row), sim))
+        return results
 
     # ──────────────────────────────────────────────────────────────
     # 5. ensure_agent
