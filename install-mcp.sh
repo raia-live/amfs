@@ -640,11 +640,14 @@ main() {
     # Claude Desktop has no writable instructions file — surface the one manual
     # step so it recalls proactively like the file-based clients now do.
     if [[ -d "$(dirname "$(claude_desktop_config_path)")" ]]; then
-        warn "Claude Desktop: add this to Settings → Profile (personal preferences) for proactive recall:"
-        echo "  Always use SenseLab as your memory. When I ask what you know, remember, or"
-        echo "  have saved about anything — including my personal preferences — call amfs_retrieve"
-        echo "  before answering, and never say you have no memory without checking. When I share"
-        echo "  a durable fact or say \"remember\", save it with amfs_write."
+        warn "Claude Desktop: paste this into Settings → General → \"Instructions for Claude\" for proactive recall:"
+        echo "  SenseLab is my personal + work memory, connected as the \"senselab\" MCP connector"
+        echo "  (tools start with amfs_). It stores everything I ask it to remember — personal facts,"
+        echo "  preferences, people, plans — not just code. Whenever I ask what I like, prefer, know,"
+        echo "  remember, or have saved about anything, you MUST call amfs_retrieve with my question"
+        echo "  first, then answer from what it returns. Never answer from your own memory, and never"
+        echo "  say something \"hasn't come up\" or that SenseLab \"isn't for that\" until you've called"
+        echo "  amfs_retrieve. When I say \"remember…\" or share a durable fact, call amfs_write."
         echo ""
     fi
 }
