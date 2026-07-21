@@ -46,7 +46,7 @@ from amfs_mcp.agent_id import detect_agent_id, detect_platform
 logger = logging.getLogger(__name__)
 
 _INSTRUCTIONS = """\
-You have access to AMFS (Agent Memory File System) — persistent memory that survives across sessions, agents, and machines. Use it to build institutional knowledge over time.
+SenseLab is your persistent memory — it remembers ANYTHING the user wants to keep, across every session, tool, and machine. That includes **personal facts and preferences** (food, people, important dates, how they like things done) AND **work context** (decisions, patterns, code, runbooks). It is general-purpose memory for the whole person, NOT just a coding-agent tool.
 
 ## MANDATORY FIRST STEP: Set Your Identity
 
@@ -85,7 +85,10 @@ do I like?") — you MUST call `amfs_retrieve` BEFORE answering. Never tell the 
 you have no memory of something without checking first.
 
 **Common misconceptions to avoid:**
-- SenseLab DOES store personal facts and preferences, not just code/decisions.
+- SenseLab stores **personal facts and preferences** (food, people, plans, habits)
+  just as much as code/decisions. NEVER tell the user "SenseLab isn't a preferences
+  database", "it only stores work/agent memories", or "that's not what it's for".
+  It stores whatever was saved — so just search and see.
 - `amfs_retrieve` is full free-text *semantic* search. Never tell the user memory
   "only works by exact key" or that you "need an entity_path/key" — you don't.
 - Don't stop at `amfs_read`/`amfs_recall` returning nothing: those need an EXACT
@@ -107,6 +110,8 @@ you have no memory of something without checking first.
 
 ## What to Save (worth 2 ops)
 
+- **Personal facts & preferences** the user shares ("I like pizza", names of people,
+  important dates, how they like things done) — save whenever they state one or say "remember…"
 - Decisions with rationale (why X over Y)
 - Discovered patterns reusable across sessions
 - Risks, bugs, or gotchas that would trip up future agents
@@ -116,12 +121,12 @@ you have no memory of something without checking first.
 ## What NOT to Save (waste of ops)
 
 - Trivial changes the IDE/VCS already tracks ("added a comment", "renamed variable")
-- Anything recomputable from the current codebase in under 5 seconds
+- Anything trivially recomputable from the current context in under 5 seconds
 - Transient debug output or one-sentence entries (too low signal for 2 ops)
 
 ## Entity Naming
 
-Use `{repo}/{service-or-module}` paths (e.g. `myapp/auth`, `amfs/core-engine`). Avoid generic paths like `project` or `code`.
+Use short hierarchical paths. For work: `{repo}/{service-or-module}` (e.g. `myapp/auth`, `amfs/core-engine`). For personal memory: `user/preferences`, `user/people`, `user/plans`, etc. Avoid generic paths like `project` or `code`. When recalling you never need to remember the path — `amfs_retrieve` searches across all of them by meaning.
 
 ## Key Patterns
 
