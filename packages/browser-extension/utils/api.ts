@@ -56,16 +56,20 @@ async function request(
   }
 
   if (resp.status === 402) {
+    // Hosted gateway wraps the payload: { detail: { error, message,
+    // upgrade_url, plan_comparison_url } } — detail can also be a string.
     let upgradeUrl = UPGRADE_URL;
-    let detail = "You've used all your free memories this month.";
+    let message = "You've used all your free memories this month.";
     try {
       const data = await resp.json();
-      upgradeUrl = data.upgrade_url ?? data.plan_comparison_url ?? upgradeUrl;
-      detail = data.detail ?? data.message ?? detail;
+      const detail = typeof data.detail === "object" && data.detail !== null ? data.detail : data;
+      upgradeUrl = detail.upgrade_url ?? detail.plan_comparison_url ?? upgradeUrl;
+      message =
+        (typeof data.detail === "string" ? data.detail : detail.message) ?? message;
     } catch {
       // keep defaults
     }
-    throw new QuotaExceededError(upgradeUrl, detail);
+    throw new QuotaExceededError(upgradeUrl, message);
   }
   if (resp.status === 401 || resp.status === 403) {
     throw new AuthError();
@@ -114,7 +118,8 @@ export async function retrieve(
 ): Promise<RetrievedEntry[]> {
   const resp = await request(apiKey, "POST", "/api/v1/retrieve", { query, limit }, 1);
   const data = await resp.json();
-  return data.entries ?? data.results ?? [];
+  // Hosted API returns a bare array; tolerate wrapped shapes too.
+  return Array.isArray(data) ? data : (data.entries ?? data.results ?? []);
 }
 
 export async function whoami(apiKey: string): Promise<Record<string, unknown>> {
@@ -123,27 +128,37 @@ export async function whoami(apiKey: string): Promise<Record<string, unknown>> {
 }
 
 /**
- * Rooms are hosted-only (amfs_rooms). Tier check fails open like the Pro MCP:
- * if the endpoint is missing or errors, we don't unlock rooms but we also
- * don't break saving.
+ * Rooms are hosted-only (amfs_rooms). GET /api/v1/rooms/account-tier returns
+ * { plan_tier, plan_status, rooms_enabled }; if the endpoint is missing or
+ * errors we don't unlock rooms but we also don't break saving.
  */
 export async function fetchRoomsState(apiKey: string): Promise<RoomsState> {
   let tier: string | null = null;
+  let roomsUnlocked = false;
   try {
     const resp = await request(apiKey, "GET", "/api/v1/rooms/account-tier");
     const data = await resp.json();
-    tier = (data.tier ?? data.account_tier ?? null) as string | null;
+    tier = (data.plan_tier ?? null) as string | null;
+    roomsUnlocked =
+      typeof data.rooms_enabled === "boolean"
+        ? data.rooms_enabled
+        : tier !== null && ROOMS_TIERS.includes(tier.toLowerCase());
   } catch {
-    tier = null;
+    roomsUnlocked = false;
   }
 
-  const roomsUnlocked = tier !== null && ROOMS_TIERS.includes(tier.toLowerCase());
   let rooms: Room[] = [];
   if (roomsUnlocked) {
     try {
       const resp = await request(apiKey, "GET", "/api/v1/rooms");
       const data = await resp.json();
-      rooms = Array.isArray(data) ? data : (data.rooms ?? []);
+      const raw: Record<string, unknown>[] = Array.isArray(data) ? data : (data.rooms ?? []);
+      // RoomSummaryResponse: { id, entity_path, display_name, ... }
+      rooms = raw.map((r) => ({
+        room_id: String(r.id ?? r.room_id ?? ""),
+        name: (r.display_name ?? r.name) as string | undefined,
+        entity_path: r.entity_path as string | undefined,
+      }));
     } catch {
       rooms = [];
     }

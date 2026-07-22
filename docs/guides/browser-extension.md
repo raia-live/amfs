@@ -96,5 +96,5 @@ Build-time configuration:
 | Variable | Default | Purpose |
 |:---------|:--------|:--------|
 | `WXT_API_URL` | `https://amfs-login.sense-lab.ai` | AMFS HTTP API base URL |
-| `WXT_DASHBOARD_URL` | `https://app.sense-lab.ai` | Dashboard origin for the connect flow |
+| `WXT_DASHBOARD_URL` | `https://amfs.sense-lab.ai` | Dashboard origin for the connect flow |
 | `WXT_MIXPANEL_TOKEN` | *(unset — analytics off)* | Mixpanel project token |

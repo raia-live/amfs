@@ -10,6 +10,8 @@
     "build": "wxt build",
     "build:firefox": "wxt build -b firefox",
     "zip": "wxt zip",
+    "zip:firefox": "wxt zip -b firefox",
+    "e2e": "node scripts/e2e-save.mjs",
     "compile": "wxt prepare && tsc --noEmit",
     "postinstall": "wxt prepare"
   },

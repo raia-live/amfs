@@ -1,14 +1,23 @@
 # Spec: `/connect/extension` dashboard page (amfs-internal)
 
+> **Status: IMPLEMENTED** in amfs-internal branch `feat/connect-extension`
+> (`dashboard/src/app/connect/extension/`). The funnel below (login/signup
+> `callbackUrl`, onboarding `returnTo` + sessionStorage across Stripe) is
+> also implemented. Remaining ops item: set `NEXT_PUBLIC_EXTENSION_IDS` on
+> the dashboard deployment once the Chrome Web Store assigns the stable
+> extension ID (empty allowlist = accept any `?ext=` id, for dev/self-host).
+
 Companion work item for the browser extension in `packages/browser-extension`.
 The extension ships with a paste-key fallback, so this page is not a launch
 blocker — but it is the intended primary onboarding path.
 
 ## Flow
 
-1. Extension opens `https://app.sense-lab.ai/connect/extension` in a new tab
+1. Extension opens `https://amfs.sense-lab.ai/connect/extension` in a new tab
    (origin configurable at build time via `WXT_DASHBOARD_URL`; it must match
    the `externally_connectable.matches` entry in the extension manifest).
+   `amfs.sense-lab.ai` is the production dashboard (`AMFS_DASHBOARD_PUBLIC_URL`
+   in amfs-internal deploy workflow).
 2. If the visitor has no session: run the normal signup/login flow, then
    return to `/connect/extension`. **New users must be able to complete
    signup, auto-select the Free plan, and land back here in one uninterrupted
@@ -64,26 +73,47 @@ Response: `{ ok: true }` or `{ ok: false, error: string }`.
 
 ## Extension ID allowlist
 
-`EXTENSION_ID` must be pinned server-side (env/config), not derived from the
-request. Expect two IDs: the published Chrome Web Store ID (stable) and a dev
-ID for unpacked builds. Reject `sendMessage` targets outside the allowlist.
+The extension opens `/connect/extension?ext=<chrome.runtime.id>`. The page
+validates `ext` against `NEXT_PUBLIC_EXTENSION_IDS` (comma-separated: the
+published Chrome Web Store ID plus optionally a dev ID for unpacked builds)
+and uses it as the `sendMessage` target. When the allowlist env is empty
+(local dev / self-hosted), any provided id is accepted. If `sendMessage`
+fails or is unavailable (Firefox has no `externally_connectable`), the page
+falls back to showing the key once for manual paste into the extension's
+Options page.
 
-## Verification items for amfs-internal (blocking questions)
+## Verified against amfs-internal (was: blocking questions)
 
-1. **Usage headers on API-key traffic**: `docs/guides/saas-billing-metering.md`
-   documents `X-AMFS-Ops-Remaining` / `X-AMFS-Ops-Limit` / `X-AMFS-Usage-Warning`
-   for dashboard traffic. The extension reads them from every API response and
-   falls back to local per-month save counting when absent. If the hosted
-   gateway can also attach them to API-key responses, the extension's usage
-   meter becomes exact for free — please confirm/enable.
-2. **`GET /api/v1/rooms/account-tier`**: confirm the response field name
-   (extension accepts `tier` or `account_tier`) and that it is reachable with
-   an extension-minted key.
-3. **Room entity path**: confirm the room objects returned by
-   `GET /api/v1/rooms` include `entity_path` (the extension writes room saves
-   to that entity; rooms without it fall back to personal memory).
-4. **402 body**: extension uses `upgrade_url` / `plan_comparison_url` /
-   `detail` from the 402 response; confirm shape.
+1. **Usage headers on API-key traffic — confirmed.** The tenant middleware
+   (`packages/tenant/src/amfs_tenant/http_deps.py`) attaches
+   `X-AMFS-Ops-Remaining` / `X-AMFS-Ops-Limit` / `X-AMFS-Usage-Warning` to
+   billable API-key responses (op cost > 0). Free routes (cost 0) don't carry
+   them; the extension keeps its local fallback for that case.
+2. **`GET /api/v1/rooms/account-tier` — confirmed.** Returns
+   `{ plan_tier, plan_status, rooms_enabled }` (`amfs_rooms/routes.py`). The
+   extension uses `rooms_enabled` directly.
+3. **Room entity path — confirmed.** `GET /api/v1/rooms` returns
+   `RoomSummaryResponse` objects with `id`, `entity_path`, `display_name`.
+4. **402 body — confirmed.** The gateway wraps the payload as
+   `{ "detail": { "error", "message", "upgrade_url", "plan_comparison_url" } }`
+   (detail can also be a plain string for "No active plan"). The extension
+   parses the nested shape.
+
+## Key minting endpoint (existing, reuse it)
+
+The dashboard BFF already exposes `POST /api/settings/api-keys`
+(`dashboard/src/app/api/settings/api-keys/route.ts`), which proxies to the
+OSS admin endpoint `POST /api/v1/admin/api-keys` and returns the raw key
+once. The connect page posts:
+
+```json
+{
+  "name": "Browser extension",
+  "key_type": "agent",
+  "rate_limit_rpm": 120,
+  "scopes": [{ "pattern": "*", "permission": "read_write" }]
+}
+```
 
 ## Growth recommendations (pricing decisions, not extension blockers)
 

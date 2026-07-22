@@ -36,7 +36,7 @@ Load unpacked: `chrome://extensions` → Developer mode → Load unpacked →
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `WXT_API_URL` | `https://amfs-login.sense-lab.ai` | AMFS HTTP API base |
-| `WXT_DASHBOARD_URL` | `https://app.sense-lab.ai` | dashboard origin (connect flow + `externally_connectable`) |
+| `WXT_DASHBOARD_URL` | `https://amfs.sense-lab.ai` | dashboard origin (connect flow + `externally_connectable`) |
 | `WXT_MIXPANEL_TOKEN` | unset (analytics disabled) | Mixpanel project token |
 
 Docs: `docs/guides/browser-extension.md` in the repo root.

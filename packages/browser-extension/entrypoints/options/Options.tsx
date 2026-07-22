@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { browser } from "wxt/browser";
 import { whoami } from "@/utils/api";
 import { DEFAULT_BLOCKLIST } from "@/utils/blocklist";
 import { CONNECT_URL } from "@/utils/config";
@@ -60,8 +61,11 @@ export default function Options() {
           </div>
         ) : (
           <p>
-            Not connected. <a href={CONNECT_URL}>Connect via the dashboard</a> or paste an API key
-            below.
+            Not connected.{" "}
+            <a href={`${CONNECT_URL}?ext=${browser.runtime.id}`} target="_blank" rel="noreferrer">
+              Connect via the dashboard
+            </a>{" "}
+            or paste an API key below.
           </p>
         )}
         <div className="row">

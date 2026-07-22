@@ -7,7 +7,7 @@ import { defineConfig } from "wxt";
  */
 const API_URL = import.meta.env.WXT_API_URL ?? "https://amfs-login.sense-lab.ai";
 const DASHBOARD_URL =
-  import.meta.env.WXT_DASHBOARD_URL ?? "https://app.sense-lab.ai";
+  import.meta.env.WXT_DASHBOARD_URL ?? "https://amfs.sense-lab.ai";
 
 export default defineConfig({
   modules: ["@wxt-dev/module-react"],

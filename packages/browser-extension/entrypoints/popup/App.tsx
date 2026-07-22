@@ -148,7 +148,13 @@ function ConnectView() {
       </p>
       <button
         className="save-btn"
-        onClick={() => void browser.tabs.create({ url: CONNECT_URL })}
+        onClick={() =>
+          void browser.tabs.create({
+            // ext id lets the dashboard validate the target and address
+            // chrome.runtime.sendMessage back to this extension.
+            url: `${CONNECT_URL}?ext=${browser.runtime.id}`,
+          })
+        }
       >
         Connect to SenseLab
       </button>
