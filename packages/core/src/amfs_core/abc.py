@@ -265,6 +265,78 @@ class AdapterABC(ABC):
             newest_entry_at=newest,
         )
 
+    def entity_summaries(
+        self,
+        *,
+        agent_ids: list[str] | None = None,
+    ) -> list[dict]:
+        """Per-entity aggregates (count, avg confidence, last write, agents).
+
+        Returns a list of dicts sorted by most recently updated:
+        ``{entity_path, entry_count, avg_confidence, last_updated,
+        last_agent, agents, hashed_count}``.
+
+        *agent_ids*, when given, restricts aggregation to entries written by
+        those agents (used by per-user visibility layers).
+
+        Default implementation groups over ``list()``; adapters with SQL
+        storage should override with GROUP BY aggregates.
+        """
+        from amfs_core.aggregates import entity_summaries_from_entries
+
+        entries = self.list()
+        if agent_ids is not None:
+            allowed = set(agent_ids)
+            entries = [e for e in entries if e.provenance.agent_id in allowed]
+        return entity_summaries_from_entries(entries)
+
+    def stats_extended(
+        self,
+        *,
+        agent_ids: list[str] | None = None,
+    ) -> dict:
+        """Aggregate stats with value/ROI extras beyond ``stats()``.
+
+        Returns the ``MemoryStats`` fields plus ``total_recalls``,
+        ``entries_this_week``, ``entries_last_week``, and
+        ``memory_type_counts``. *agent_ids* restricts to those writers.
+
+        Default implementation iterates over ``list()``; adapters with SQL
+        storage should override with aggregates.
+        """
+        from amfs_core.aggregates import extended_stats_from_entries
+
+        entries = self.list()
+        if agent_ids is not None:
+            allowed = set(agent_ids)
+            entries = [e for e in entries if e.provenance.agent_id in allowed]
+        return extended_stats_from_entries(entries)
+
+    def share_stats(
+        self,
+        *,
+        since: datetime | None = None,
+        pair_limit: int = 20,
+        agent_ids: list[str] | None = None,
+    ) -> dict:
+        """Cross-agent knowledge-share aggregate from decision traces.
+
+        A "share" is a trace causal entry written by a different agent than
+        the trace's own agent. Returns ``{total, pairs}`` where pairs are
+        ``{reader, author, count}`` sorted by count (capped at *pair_limit*).
+
+        Default implementation scans ``list_traces()``; SQL adapters should
+        override with a JSONB aggregate so full traces never leave the DB.
+        """
+        from amfs_core.aggregates import share_stats_from_traces
+
+        return share_stats_from_traces(
+            self.list_traces(limit=10_000),
+            since=since,
+            pair_limit=pair_limit,
+            agent_ids=agent_ids,
+        )
+
     # ── Content integrity ────────────────────────────────────────────────
 
     def verify_integrity(
