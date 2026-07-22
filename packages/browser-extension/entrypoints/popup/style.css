@@ -1,0 +1,268 @@
+:root {
+  --blue: #009bee;
+  --orange: #e67200;
+  --text: #1a1a1a;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  --bg: #ffffff;
+  --bg-soft: #f6f8fa;
+  --green: #16a34a;
+  --amber: #d97706;
+  --red: #dc2626;
+  --radius: 12px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+}
+
+body {
+  font-family: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  font-size: 14px;
+}
+
+.popup {
+  width: 340px;
+  padding: 14px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.logo {
+  font-weight: 700;
+  font-size: 15px;
+  background: linear-gradient(90deg, var(--blue), var(--orange));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.header-link {
+  font-size: 12px;
+  color: var(--muted);
+  text-decoration: none;
+}
+.header-link:hover {
+  color: var(--blue);
+}
+
+h2 {
+  font-size: 17px;
+  line-height: 1.3;
+}
+
+.muted {
+  color: var(--muted);
+}
+.tiny {
+  font-size: 12px;
+}
+
+.connect {
+  gap: 14px;
+  padding-bottom: 18px;
+}
+
+.save-btn {
+  width: 100%;
+  padding: 10px 0;
+  border: none;
+  border-radius: var(--radius);
+  background: linear-gradient(90deg, var(--blue), #0077cc);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.save-btn:hover {
+  filter: brightness(1.06);
+}
+.save-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.link-btn,
+.inline-link {
+  background: none;
+  border: none;
+  color: var(--blue);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+}
+.inline-link:hover,
+.link-btn:hover {
+  text-decoration: underline;
+}
+
+.note {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  resize: none;
+}
+.note:focus {
+  outline: 2px solid var(--blue);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+
+.destination label {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.dest-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dest {
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  cursor: pointer;
+  color: var(--text);
+}
+.dest.active {
+  border-color: var(--blue);
+  background: #e6f5fe;
+  color: #00618f;
+  font-weight: 600;
+}
+.dest.locked {
+  color: var(--muted);
+  border-style: dashed;
+}
+.dest.locked:hover {
+  border-color: var(--orange);
+  color: var(--orange);
+}
+.lock {
+  font-size: 11px;
+}
+.dest-empty {
+  align-self: center;
+}
+
+.status {
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+}
+.status.ok {
+  background: #f0fdf4;
+  color: var(--green);
+}
+.status.warn {
+  background: #fffbeb;
+  color: var(--amber);
+}
+.status.err {
+  background: #fef2f2;
+  color: var(--red);
+}
+.status a {
+  color: inherit;
+}
+
+.first-save {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.prompt-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+}
+.prompt-box code {
+  flex: 1;
+  font-size: 12.5px;
+  word-break: break-word;
+}
+.copy-btn {
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.copy-btn:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+.usage-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg-soft);
+  overflow: hidden;
+}
+.usage-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+.usage-fill.ok {
+  background: linear-gradient(90deg, var(--blue), #66c7f5);
+}
+.usage-fill.warn {
+  background: var(--amber);
+}
+.usage-fill.critical {
+  background: var(--red);
+}
+.usage-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.site-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.last-save {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

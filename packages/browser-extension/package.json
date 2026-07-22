@@ -1,0 +1,29 @@
+{
+  "name": "@senselab-ai/browser-extension",
+  "version": "0.1.0",
+  "description": "SenseLab web clipper — save any page or selection into your agent memory",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "dev:firefox": "wxt -b firefox",
+    "build": "wxt build",
+    "build:firefox": "wxt build -b firefox",
+    "zip": "wxt zip",
+    "compile": "wxt prepare && tsc --noEmit",
+    "postinstall": "wxt prepare"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@wxt-dev/module-react": "^1.2.2",
+    "typescript": "^5.8.0",
+    "wxt": "^0.20.27"
+  },
+  "license": "BSL-1.1"
+}
