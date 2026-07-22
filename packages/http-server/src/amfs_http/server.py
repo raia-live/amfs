@@ -765,6 +765,10 @@ async def list_entries(
     entity_path: str | None = Query(None),
     branch: str = Query("main"),
     include_superseded: bool = Query(False),
+    limit: int | None = Query(None, ge=1, le=10_000),
+    offset: int = Query(0, ge=0),
+    sort: str | None = Query(None, pattern="^(written_at|recall_count)$"),
+    fields: str | None = Query(None, pattern="^meta$"),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     try:
@@ -812,7 +816,50 @@ async def list_entries(
             entity_path, total_before, vis,
         )
 
-    return {"entries": [_entry_to_response(e) for e in entries]}
+    # Sorting/pagination/meta happen after the visibility filter so callers
+    # can never page past entries they aren't allowed to see. Defaults keep
+    # the historical behavior (full list, full fields) intact.
+    if sort == "written_at":
+        entries = sorted(entries, key=lambda e: e.provenance.written_at, reverse=True)
+    elif sort == "recall_count":
+        entries = sorted(entries, key=lambda e: e.recall_count, reverse=True)
+
+    total = len(entries)
+    if offset:
+        entries = entries[offset:]
+    if limit is not None:
+        entries = entries[:limit]
+
+    payload = [_entry_to_response(e) for e in entries]
+    if fields == "meta":
+        for item in payload:
+            item.pop("value", None)
+            item.pop("artifact_refs", None)
+
+    return {"entries": payload, "total": total}
+
+
+@app.get("/api/v1/entities")
+async def list_entity_summaries(
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Per-entity aggregates without entry values — a few KB instead of the
+    multi-MB /entries payload. Dashboards should prefer this endpoint."""
+    mem = _get_memory()
+
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter():
+        # Room visibility can't be expressed as a per-agent SQL filter, so
+        # filter entries in Python and aggregate with the shared helper.
+        from amfs_core.aggregates import entity_summaries_from_entries
+
+        entries = vis.filter_entries(mem.list())
+        summaries = entity_summaries_from_entries(entries)
+    else:
+        summaries = mem._adapter.entity_summaries()
+
+    return json.loads(json.dumps({"entities": summaries}, default=str))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -989,51 +1036,23 @@ async def get_stats(
 
     vis = _get_visibility_filter(request)
     if vis is not None and vis.should_filter():
-        # Visibility-scoped stats. This branch must return the SAME shape as
-        # MemoryStats (which mem.stats() below produces), because the client
-        # parses /stats via MemoryStats.model_validate — any missing field
-        # silently defaults (confidence→0.0, outcome→0) and any mis-named key
-        # (e.g. "oldest_entry" vs "oldest_entry_at") is dropped to None. The
-        # earlier partial dict caused exactly that: correct counts but zeroed
-        # confidence/outcome and null timestamps.
-        from amfs_core.models import MemoryStats
+        # Visibility-scoped stats. This branch must return a SUPERSET of the
+        # MemoryStats shape (which the unfiltered branch below produces),
+        # because the client parses /stats via MemoryStats.model_validate —
+        # any missing field silently defaults (confidence→0.0, outcome→0) and
+        # any mis-named key (e.g. "oldest_entry" vs "oldest_entry_at") is
+        # dropped to None. Room visibility semantics (co-member entries on
+        # shared entity paths) can't be expressed as a plain agent_id filter,
+        # so this path filters in Python and aggregates via the same shared
+        # helper the adapter defaults use.
+        from amfs_core.aggregates import extended_stats_from_entries
 
-        entries = mem.list()
-        entries = vis.filter_entries(entries)
+        entries = vis.filter_entries(mem.list())
+        scoped = extended_stats_from_entries(entries)
+        return json.loads(json.dumps(scoped, default=str))
 
-        agents: dict[str, int] = {}
-        entities: dict[str, int] = {}
-        confidences: list[float] = []
-        written_ats: list[Any] = []
-        outcome_linked = 0
-        for e in entries:
-            entities[e.entity_path] = entities.get(e.entity_path, 0) + 1
-            aid = e.provenance.agent_id
-            agents[aid] = agents.get(aid, 0) + 1
-            confidences.append(float(e.confidence))
-            if getattr(e, "outcome_count", 0):
-                outcome_linked += 1
-            wa = getattr(e.provenance, "written_at", None)
-            if wa is not None:
-                written_ats.append(wa)
-
-        scoped = MemoryStats(
-            total_entries=len(entries),
-            total_entities=len(entities),
-            total_agents=len(agents),
-            agents=agents,
-            entities=entities,
-            confidence_avg=(sum(confidences) / len(confidences)) if confidences else 0.0,
-            confidence_min=min(confidences) if confidences else 0.0,
-            confidence_max=max(confidences) if confidences else 0.0,
-            outcome_linked_count=outcome_linked,
-            oldest_entry_at=min(written_ats) if written_ats else None,
-            newest_entry_at=max(written_ats) if written_ats else None,
-        )
-        return json.loads(json.dumps(scoped.model_dump(mode="json"), default=str))
-
-    stats = mem.stats()
-    return json.loads(json.dumps(stats.model_dump(mode="json"), default=str))
+    stats = mem._adapter.stats_extended()
+    return json.loads(json.dumps(stats, default=str))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1632,6 +1651,30 @@ async def save_trace(
     mem = _get_memory()
     saved = mem._adapter.save_trace(trace)
     return saved.model_dump(mode="json")
+
+
+# NOTE: must be registered before /api/v1/traces/{trace_id} so "share-stats"
+# isn't captured as a trace_id.
+@app.get("/api/v1/traces/share-stats")
+async def get_share_stats(
+    request: Request,
+    since: datetime | None = Query(None),
+    pair_limit: int = Query(20, ge=1, le=100),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Cross-agent knowledge-share totals and top reader/author pairs,
+    aggregated server-side so full traces never cross the wire."""
+    mem = _get_memory()
+
+    vis = _get_visibility_filter(request)
+    agent_ids: list[str] | None = None
+    if vis is not None and vis.should_filter():
+        agent_ids = sorted(vis.get_visible_agent_ids())
+
+    stats = mem._adapter.share_stats(
+        since=since, pair_limit=pair_limit, agent_ids=agent_ids
+    )
+    return json.loads(json.dumps(stats, default=str))
 
 
 @app.get("/api/v1/traces/{trace_id}")
