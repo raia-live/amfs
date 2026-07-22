@@ -1567,6 +1567,184 @@ class PostgresAdapter(AdapterABC):
             newest_entry_at=row["newest_entry_at"],
         )
 
+    def entity_summaries(
+        self,
+        *,
+        agent_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Per-entity aggregates via GROUP BY — never loads entry values."""
+        conditions = ["namespace = %s", "branch = 'main'", "superseded_at IS NULL"]
+        params: list[Any] = [self._namespace]
+        if agent_ids is not None:
+            conditions.append("agent_id = ANY(%s)")
+            params.append(list(agent_ids))
+        where = " AND ".join(conditions)
+
+        sql = f"""
+            SELECT entity_path,
+                   COUNT(*) AS entry_count,
+                   AVG(confidence) AS avg_confidence,
+                   MAX(written_at) AS last_updated,
+                   (ARRAY_AGG(agent_id ORDER BY written_at DESC))[1] AS last_agent,
+                   ARRAY_AGG(DISTINCT agent_id) AS agents,
+                   COUNT(*) FILTER (WHERE content_hash IS NOT NULL) AS hashed_count
+            FROM amfs_memory_entries
+            WHERE {where}
+            GROUP BY entity_path
+            ORDER BY MAX(written_at) DESC
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        return [
+            {
+                "entity_path": r["entity_path"],
+                "entry_count": r["entry_count"],
+                "avg_confidence": float(r["avg_confidence"] or 0),
+                "last_updated": r["last_updated"],
+                "last_agent": r["last_agent"],
+                "agents": sorted(r["agents"] or []),
+                "hashed_count": r["hashed_count"],
+            }
+            for r in rows
+        ]
+
+    def stats_extended(
+        self,
+        *,
+        agent_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Extended aggregate stats in SQL (recalls, weekly deltas, types)."""
+        conditions = ["namespace = %s", "superseded_at IS NULL"]
+        params: list[Any] = [self._namespace]
+        if agent_ids is not None:
+            conditions.append("agent_id = ANY(%s)")
+            params.append(list(agent_ids))
+        where = " AND ".join(conditions)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        COUNT(*) AS total_entries,
+                        COUNT(DISTINCT entity_path) AS total_entities,
+                        COUNT(DISTINCT agent_id) AS total_agents,
+                        AVG(confidence) AS confidence_avg,
+                        MIN(confidence) AS confidence_min,
+                        MAX(confidence) AS confidence_max,
+                        COUNT(*) FILTER (WHERE outcome_count > 0) AS outcome_linked_count,
+                        MIN(written_at) AS oldest_entry_at,
+                        MAX(written_at) AS newest_entry_at,
+                        COALESCE(SUM(recall_count), 0) AS total_recalls,
+                        COUNT(*) FILTER (WHERE written_at >= NOW() - INTERVAL '7 days')
+                            AS entries_this_week,
+                        COUNT(*) FILTER (
+                            WHERE written_at >= NOW() - INTERVAL '14 days'
+                              AND written_at < NOW() - INTERVAL '7 days'
+                        ) AS entries_last_week
+                    FROM amfs_memory_entries
+                    WHERE {where}
+                    """,
+                    params,
+                )
+                row = cur.fetchone()
+
+                cur.execute(
+                    f"""
+                    SELECT agent_id, COUNT(*) AS cnt
+                    FROM amfs_memory_entries WHERE {where} GROUP BY agent_id
+                    """,
+                    params,
+                )
+                agent_rows = cur.fetchall()
+
+                cur.execute(
+                    f"""
+                    SELECT entity_path, COUNT(*) AS cnt
+                    FROM amfs_memory_entries WHERE {where} GROUP BY entity_path
+                    """,
+                    params,
+                )
+                entity_rows = cur.fetchall()
+
+                cur.execute(
+                    f"""
+                    SELECT memory_type, COUNT(*) AS cnt
+                    FROM amfs_memory_entries WHERE {where} GROUP BY memory_type
+                    """,
+                    params,
+                )
+                type_rows = cur.fetchall()
+
+        return {
+            "total_entries": row["total_entries"] if row else 0,
+            "total_entities": row["total_entities"] if row else 0,
+            "total_agents": row["total_agents"] if row else 0,
+            "agents": {r["agent_id"]: r["cnt"] for r in agent_rows},
+            "entities": {r["entity_path"]: r["cnt"] for r in entity_rows},
+            "confidence_avg": float(row["confidence_avg"] or 0) if row else 0.0,
+            "confidence_min": float(row["confidence_min"] or 0) if row else 0.0,
+            "confidence_max": float(row["confidence_max"] or 0) if row else 0.0,
+            "outcome_linked_count": row["outcome_linked_count"] if row else 0,
+            "oldest_entry_at": row["oldest_entry_at"] if row else None,
+            "newest_entry_at": row["newest_entry_at"] if row else None,
+            "total_recalls": int(row["total_recalls"]) if row else 0,
+            "entries_this_week": row["entries_this_week"] if row else 0,
+            "entries_last_week": row["entries_last_week"] if row else 0,
+            "memory_type_counts": {
+                (r["memory_type"] or "fact"): r["cnt"] for r in type_rows
+            },
+        }
+
+    def share_stats(
+        self,
+        *,
+        since: datetime | None = None,
+        pair_limit: int = 20,
+        agent_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Cross-agent share aggregate via JSONB unnest — full traces never
+        leave the database."""
+        conditions = [
+            "t.namespace = %s",
+            "NULLIF(ce->>'written_by', '') IS NOT NULL",
+            "ce->>'written_by' <> t.agent_id",
+        ]
+        params: list[Any] = [self._namespace]
+        if since is not None:
+            conditions.append("t.created_at >= %s")
+            params.append(since)
+        if agent_ids is not None:
+            conditions.append("t.agent_id = ANY(%s)")
+            params.append(list(agent_ids))
+            conditions.append("ce->>'written_by' = ANY(%s)")
+            params.append(list(agent_ids))
+        where = " AND ".join(conditions)
+
+        sql = f"""
+            SELECT t.agent_id AS reader, ce->>'written_by' AS author,
+                   COUNT(*) AS cnt
+            FROM amfs_decision_traces t
+            CROSS JOIN LATERAL jsonb_array_elements(t.causal_entries) AS ce
+            WHERE {where}
+            GROUP BY t.agent_id, ce->>'written_by'
+            ORDER BY cnt DESC
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        total = sum(r["cnt"] for r in rows)
+        pairs = [
+            {"reader": r["reader"], "author": r["author"], "count": r["cnt"]}
+            for r in rows[:pair_limit]
+        ]
+        return {"total": total, "pairs": pairs}
+
     # ------------------------------------------------------------------
     # watch
     # ------------------------------------------------------------------

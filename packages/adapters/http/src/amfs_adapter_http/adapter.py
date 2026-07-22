@@ -230,6 +230,50 @@ class HttpAdapter(AdapterABC):
         data = self._get("/api/v1/stats")
         return MemoryStats.model_validate(data)
 
+    def stats_extended(self, *, agent_ids: list[str] | None = None) -> dict:
+        # The server applies its own visibility scoping; a local agent_ids
+        # restriction can't be forwarded, so fall back to the list() scan.
+        if agent_ids is not None:
+            return super().stats_extended(agent_ids=agent_ids)
+        data = self._get("/api/v1/stats")
+        if "total_recalls" not in data:
+            # Older server without extended stats — compute locally.
+            return super().stats_extended()
+        return data
+
+    def entity_summaries(self, *, agent_ids: list[str] | None = None) -> list[dict]:
+        if agent_ids is not None:
+            return super().entity_summaries(agent_ids=agent_ids)
+        try:
+            data = self._get("/api/v1/entities")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return super().entity_summaries()
+            raise
+        return data.get("entities", [])
+
+    def share_stats(
+        self,
+        *,
+        since: datetime | None = None,
+        pair_limit: int = 20,
+        agent_ids: list[str] | None = None,
+    ) -> dict:
+        if agent_ids is not None:
+            return super().share_stats(
+                since=since, pair_limit=pair_limit, agent_ids=agent_ids
+            )
+        params: dict[str, Any] = {"pair_limit": pair_limit}
+        if since:
+            params["since"] = since.isoformat()
+        try:
+            return self._get("/api/v1/traces/share-stats", **params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                # Older server routes this to /traces/{trace_id} → 404.
+                return super().share_stats(since=since, pair_limit=pair_limit)
+            raise
+
     def list_outcomes(
         self,
         *,
