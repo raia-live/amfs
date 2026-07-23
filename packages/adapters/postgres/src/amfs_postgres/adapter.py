@@ -1677,7 +1677,48 @@ class PostgresAdapter(AdapterABC):
                 )
                 type_rows = cur.fetchall()
 
+                # Weekly reuse deltas from the timestamped event log (READ /
+                # CROSS_AGENT_READ events). recall_count on entries is a bare
+                # counter, so this is the only source of *when* reuse happened.
+                event_conditions = [
+                    "namespace = %s",
+                    "event_type IN ('read', 'cross_agent_read')",
+                ]
+                event_params: list[Any] = [self._namespace]
+                if agent_ids is not None:
+                    event_conditions.append("agent_id = ANY(%s)")
+                    event_params.append(list(agent_ids))
+                event_where = " AND ".join(event_conditions)
+                recalls_this_week = 0
+                recalls_last_week = 0
+                try:
+                    cur.execute(
+                        f"""
+                        SELECT
+                            COUNT(*) FILTER (
+                                WHERE created_at >= NOW() - INTERVAL '7 days'
+                            ) AS recalls_this_week,
+                            COUNT(*) FILTER (
+                                WHERE created_at >= NOW() - INTERVAL '14 days'
+                                  AND created_at < NOW() - INTERVAL '7 days'
+                            ) AS recalls_last_week
+                        FROM amfs_events
+                        WHERE {event_where}
+                        """,
+                        event_params,
+                    )
+                    event_row = cur.fetchone()
+                    if event_row:
+                        recalls_this_week = int(event_row["recalls_this_week"] or 0)
+                        recalls_last_week = int(event_row["recalls_last_week"] or 0)
+                except Exception:
+                    # Older deployments without the events table: deltas stay 0
+                    # and the dashboard hides the trend line.
+                    pass
+
         return {
+            "recalls_this_week": recalls_this_week,
+            "recalls_last_week": recalls_last_week,
             "total_entries": row["total_entries"] if row else 0,
             "total_entities": row["total_entities"] if row else 0,
             "total_agents": row["total_agents"] if row else 0,
