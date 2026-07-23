@@ -93,6 +93,11 @@ def extended_stats_from_entries(entries: "list[MemoryEntry]") -> dict:
         "total_recalls": total_recalls,
         "entries_this_week": this_week,
         "entries_last_week": last_week,
+        # Entries carry only a recall counter, not recall timestamps, so the
+        # pure-Python path can't compute weekly reuse deltas. None (vs 0) lets
+        # clients distinguish "unknown" from "no reuse" and hide the trend.
+        "recalls_this_week": None,
+        "recalls_last_week": None,
         "memory_type_counts": memory_type_counts,
     }
 
