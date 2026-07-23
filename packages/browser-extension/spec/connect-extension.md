@@ -3,9 +3,14 @@
 > **Status: IMPLEMENTED** in amfs-internal branch `feat/connect-extension`
 > (`dashboard/src/app/connect/extension/`). The funnel below (login/signup
 > `callbackUrl`, onboarding `returnTo` + sessionStorage across Stripe) is
-> also implemented. Remaining ops item: set `NEXT_PUBLIC_EXTENSION_IDS` on
-> the dashboard deployment once the Chrome Web Store assigns the stable
-> extension ID (empty allowlist = accept any `?ext=` id, for dev/self-host).
+> also implemented. The allowlist is wired into the deploy pipeline: the
+> dashboard Dockerfile takes a `NEXT_PUBLIC_EXTENSION_IDS` build arg, fed
+> from the `CHROME_EXTENSION_IDS` GitHub repo variable in both deploy
+> workflows (prod `deploy.yml` and dev/env `deploy-env.yml`). Once the
+> Chrome Web Store assigns the stable extension ID, run:
+> `gh variable set CHROME_EXTENSION_IDS -R raia-live/amfs-internal -b "<store-id>"`
+> and redeploy. While unset, the allowlist is empty = accept any `?ext=` id
+> (dev/self-host behavior).
 
 Companion work item for the browser extension in `packages/browser-extension`.
 The extension ships with a paste-key fallback, so this page is not a launch
