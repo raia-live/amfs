@@ -160,6 +160,10 @@ class MemoryEntry(BaseModel):
     embedding: list[float] | None = None
     artifact_refs: list[ArtifactRef] = Field(default_factory=list)
     memory_type: MemoryType = MemoryType.FACT
+    # True when the value is a stored working file (source code, markup, config)
+    # rather than a knowledge claim. Orthogonal to ``memory_type``; used to demote
+    # artifacts in retrieve/search/briefing so they don't crowd out real facts.
+    is_artifact: bool = False
     shared: bool = True
     branch: str = "main"
     content_hash: str | None = None
@@ -403,6 +407,9 @@ class SearchQuery(BaseModel):
     sort_by: str = "confidence"  # "confidence", "recency", "version", "priority"
     recall_config: RecallConfig | None = None
     depth: int = 3
+    # When True (default) artifacts (stored source files) are demoted to the
+    # bottom of results; when False they are excluded entirely.
+    include_artifacts: bool = True
 
 
 class TierConfig(BaseModel):

@@ -18,6 +18,7 @@ from typing import Any
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from amfs_core.content import classify_artifact
 from amfs_core.exceptions import VersionConflictError
 from amfs_core.models import (
     Agent,
@@ -134,6 +135,7 @@ class AsyncPostgresAdapter:
         self._namespace = namespace
         self._has_embedding_col = False
         self._has_search_tsv = False
+        self._has_is_artifact_col = False
         self._pool = _AsyncTenantRLSPoolWrapper(
             AsyncConnectionPool(
                 dsn,
@@ -162,13 +164,14 @@ class AsyncPostgresAdapter:
                     """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'amfs_memory_entries'
-                      AND column_name IN ('embedding', 'search_tsv')
+                      AND column_name IN ('embedding', 'search_tsv', 'is_artifact')
                     """,
                 )
                 rows = await cur.fetchall()
                 found = {row["column_name"] for row in rows}
                 self._has_embedding_col = "embedding" in found
                 self._has_search_tsv = "search_tsv" in found
+                self._has_is_artifact_col = "is_artifact" in found
 
     # ── helpers (delegated to sync adapter statics) ─────────────────
 
@@ -293,6 +296,14 @@ class AsyncPostgresAdapter:
 
                     entry_id = uuid.uuid4()
 
+                    # Classify at the persistence chokepoint (the HTTP hot path
+                    # builds entries inline and bypasses CoWEngine). The HTTP
+                    # handler already embeds a descriptor for artifacts before
+                    # calling write; this just guarantees the flag is set.
+                    is_artifact = bool(entry.is_artifact) or classify_artifact(
+                        entry.key, entry.value
+                    )
+
                     columns = [
                         "id", "namespace", "entity_path", "key", "version",
                         "value", "agent_id", "session_id", "written_at",
@@ -322,6 +333,10 @@ class AsyncPostgresAdapter:
                         ),
                         branch,
                     ]
+
+                    if self._has_is_artifact_col:
+                        columns.append("is_artifact")
+                        params.append(is_artifact)
 
                     if self._has_embedding_col and entry.embedding:
                         columns.append("embedding")
@@ -360,7 +375,7 @@ class AsyncPostgresAdapter:
                 entry.entity_path, entry.key, inserted_row["id"],
             )
 
-        return entry.model_copy(update={"version": new_version})
+        return entry.model_copy(update={"version": new_version, "is_artifact": is_artifact})
 
     # ──────────────────────────────────────────────────────────────
     # 3. list
@@ -399,6 +414,7 @@ class AsyncPostgresAdapter:
 
     async def search(self, query: SearchQuery, *, branch: str = "main") -> list[MemoryEntry]:
         use_fts = bool(query.query and self._has_search_tsv)
+        col_ready = self._has_is_artifact_col
 
         conditions = ["namespace = %s", "branch = %s", "superseded_at IS NULL"]
         params: list[Any] = [self._namespace, branch]
@@ -406,6 +422,9 @@ class AsyncPostgresAdapter:
         if query.depth < 3:
             conditions.append("tier <= %s")
             params.append(query.depth)
+
+        if col_ready and not query.include_artifacts:
+            conditions.append("is_artifact IS NOT TRUE")
 
         if query.entity_path is not None:
             conditions.append("entity_path = %s")
@@ -448,6 +467,14 @@ class AsyncPostgresAdapter:
         else:
             order = order_map.get(query.sort_by, "confidence DESC")
 
+        # Demote artifacts beneath equally-ranked facts (leading sort key when
+        # the column is ready; Python fallback below otherwise).
+        fetch_limit = query.limit
+        if col_ready and query.sort_by != "priority":
+            order = f"is_artifact ASC, {order}"
+        elif not col_ready:
+            fetch_limit = min(query.limit * 3, 1000)
+
         where = " AND ".join(conditions)
         sql = f"""
             SELECT * FROM amfs_memory_entries
@@ -455,14 +482,21 @@ class AsyncPostgresAdapter:
             ORDER BY {order}
             LIMIT %s
         """
-        params.append(query.limit)
+        params.append(fetch_limit)
 
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql, params)
                 rows = await cur.fetchall()
 
-        return [self._row_to_entry(r) for r in rows]
+        entries = [self._row_to_entry(r) for r in rows]
+        if not col_ready:
+            if not query.include_artifacts:
+                entries = [e for e in entries if not classify_artifact(e.key, e.value)]
+            else:
+                entries.sort(key=lambda e: classify_artifact(e.key, e.value))
+            entries = entries[: query.limit]
+        return entries
 
     # ──────────────────────────────────────────────────────────────
     # 4b. semantic_search (pgvector cosine, account-scoped via RLS pool)

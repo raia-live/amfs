@@ -572,8 +572,12 @@ async def write_entry(
                         pass
                     _ensure_agent_owner(request, req.agent_id, _agent_ns)
 
+            from amfs_core.content import embedding_input
             from amfs_core.models import Provenance
             provenance = mem._tagger.tag(pattern_refs=req.pattern_refs or None)
+            # Classify here so the flag is set before the inline-built entry hits
+            # the async adapter, and embed a clean descriptor for artifacts.
+            _is_artifact, _embed_text = embedding_input(req.key, req.value)
             entry_obj = MemoryEntry(
                 entity_path=req.entity_path,
                 key=req.key,
@@ -584,6 +588,7 @@ async def write_entry(
                 memory_type=mt,
                 shared=req.shared,
                 branch=req.branch,
+                is_artifact=_is_artifact,
             )
             # Write-time embedding for semantic retrieval. The async adapter
             # persists entry.embedding when the pgvector column exists; without
@@ -593,7 +598,7 @@ async def write_entry(
             if _embedder is not None:
                 try:
                     entry_obj = entry_obj.model_copy(
-                        update={"embedding": _embedder.embed_value(req.value)}
+                        update={"embedding": _embedder.embed(_embed_text)}
                     )
                 except Exception:  # noqa: BLE001 - never fail a write on embedding
                     logger.warning(
@@ -885,6 +890,7 @@ async def search_entries(
         sort_by=req.sort_by,
         limit=req.limit,
         depth=req.depth,
+        include_artifacts=req.include_artifacts,
     )
     mem = _get_memory()
     if _async_adapter is not None:
@@ -961,6 +967,20 @@ async def retrieve_entries(
             allowed = {id(e) for e in vis.filter_entries([e for e, _ in pairs])}
             pairs = [(e, s) for e, s in pairs if id(e) in allowed]
 
+        # Artifact awareness. The is_artifact column is authoritative once
+        # backfilled; before that (older DB) classify on the fly over the small
+        # candidate pool so demotion works immediately.
+        from amfs_core.content import ARTIFACT_PENALTY, classify_artifact
+        col_ready = getattr(_async_adapter, "_has_is_artifact_col", False)
+
+        def _is_artifact(e: MemoryEntry) -> bool:
+            if col_ready:
+                return bool(e.is_artifact)
+            return classify_artifact(e.key, e.value)
+
+        if not req.include_artifacts:
+            pairs = [(e, s) for e, s in pairs if not _is_artifact(e)]
+
         now = _dt.now(_tz.utc)
         half_life = 30.0
         scored: list[tuple[MemoryEntry, float, dict[str, float]]] = []
@@ -979,10 +999,17 @@ async def retrieve_entries(
                 + req.recency_weight * recency
                 + req.confidence_weight * conf
             )
+            artifact = _is_artifact(entry)
+            if artifact:
+                # Multiplicative demotion: a code file no longer outranks a real
+                # fact on a generic query, but a genuinely code-relevant query
+                # (high sim) can still surface it.
+                score *= ARTIFACT_PENALTY
             scored.append((entry, score, {
                 "semantic": round(sim, 4),
                 "recency": round(recency, 4),
                 "confidence": round(conf, 4),
+                "is_artifact": artifact,
             }))
 
         scored.sort(key=lambda t: t[1], reverse=True)
@@ -1002,6 +1029,7 @@ async def retrieve_entries(
         limit=req.limit,
         sort_by="confidence",
         depth=3,
+        include_artifacts=req.include_artifacts,
     )
     mem = _get_memory()
     results: list[MemoryEntry] = []

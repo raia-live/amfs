@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from amfs_core.abc import AdapterABC, WatchHandle
+from amfs_core.content import embedding_input
 from amfs_core.embedder import EmbedderABC
 from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker
 from amfs_core.exceptions import StaleWriteError
@@ -314,9 +315,13 @@ class AgentMemory:
                         current.provenance.agent_id,
                     )
 
+        # Artifacts embed a clean descriptor (filename + symbols) rather than the
+        # raw, 512-token-truncated blob, so code files stop matching generic queries.
+        # The adapter is the authoritative place the is_artifact flag is persisted.
+        _, embed_text = embedding_input(key, value)
         embedding = None
         if self._embedder is not None:
-            embedding = self._embedder.embed_value(value)
+            embedding = self._embedder.embed(embed_text)
 
         importance_score = None
         importance_dimensions = None
@@ -472,6 +477,7 @@ class AgentMemory:
         sort_by: str = "confidence",
         recall_config: RecallConfig | None = None,
         depth: int = 3,
+        include_artifacts: bool = True,
     ) -> list[MemoryEntry] | list[ScoredEntry]:
         """Search across all entities with rich filters.
 
@@ -508,6 +514,7 @@ class AgentMemory:
                 sort_by=sort_by,
                 recall_config=recall_config,
                 depth=depth,
+                include_artifacts=include_artifacts,
             )
             for entry in self._adapter.search(sq):
                 if entry.entry_key not in seen_keys:
@@ -607,6 +614,7 @@ class AgentMemory:
         min_confidence: float = 0.0,
         limit: int = 10,
         recall_config: RecallConfig | None = None,
+        include_artifacts: bool = True,
     ) -> list[ScoredEntry]:
         """Rank memories by meaning for a natural-language query.
 
@@ -614,6 +622,9 @@ class AgentMemory:
         HTTP adapter, where the server owns the embedder + pgvector index), so
         semantic recall works even when this client has no local embedder.
         Otherwise falls back to client-side composite scoring via ``search``.
+
+        Artifacts (stored source files) are demoted by default; pass
+        ``include_artifacts=False`` to exclude them entirely.
         """
         cfg = recall_config or RecallConfig()
 
@@ -628,6 +639,7 @@ class AgentMemory:
                     semantic_weight=cfg.semantic_weight,
                     recency_weight=cfg.recency_weight,
                     confidence_weight=cfg.confidence_weight,
+                    include_artifacts=include_artifacts,
                 )
                 return [
                     ScoredEntry(entry=entry, score=score, breakdown=breakdown or {})
@@ -642,6 +654,7 @@ class AgentMemory:
             min_confidence=min_confidence,
             limit=limit,
             recall_config=cfg,
+            include_artifacts=include_artifacts,
         )
         return result  # type: ignore[return-value]
 

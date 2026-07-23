@@ -85,6 +85,9 @@ class BriefingService:
                     entity_path=entity_path,
                     sort_by="priority",
                     limit=_HOT_CONTEXT_LIMIT,
+                    # Working files shouldn't dominate the "what you know" context
+                    # an agent reads at task start.
+                    include_artifacts=False,
                 ),
                 branch=branch,
             )
@@ -129,6 +132,9 @@ class BriefingService:
                     entity_path=entity_path,
                     sort_by="priority",
                     limit=_HOT_CONTEXT_LIMIT,
+                    # Working files shouldn't dominate the "what you know" context
+                    # an agent reads at task start.
+                    include_artifacts=False,
                 ),
                 branch=branch,
             )

@@ -15,6 +15,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from amfs_core.abc import AdapterABC, WatchHandle
+from amfs_core.content import ARTIFACT_PENALTY, classify_artifact, embedding_input
 from amfs_core.embedder import EmbedderABC
 from amfs_core.exceptions import AdapterError, VersionConflictError
 from amfs_core.models import (
@@ -179,6 +180,7 @@ class PostgresAdapter(AdapterABC):
         self._namespace = namespace
         self._has_embedding_col = False
         self._has_search_tsv = False
+        self._has_is_artifact_col = False
         # When an embedder is provided, embeddings are computed at write time and
         # persisted, so ANN retrieval (semantic_search / pgvector HNSW) works
         # without a separate backfill pass. embedding_dim must match the column
@@ -240,6 +242,17 @@ class PostgresAdapter(AdapterABC):
         cur.execute("""
             ALTER TABLE amfs_memory_entries
             ADD COLUMN IF NOT EXISTS branch TEXT NOT NULL DEFAULT 'main'
+        """)
+        # Artifact flag: distinguishes stored working files (source code, markup,
+        # config) from knowledge facts so retrieval can demote them. Partial index
+        # stays tiny because only the artifact rows are indexed.
+        cur.execute("""
+            ALTER TABLE amfs_memory_entries
+            ADD COLUMN IF NOT EXISTS is_artifact BOOLEAN NOT NULL DEFAULT FALSE
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_is_artifact
+            ON amfs_memory_entries (is_artifact) WHERE is_artifact
         """)
         cur.execute("""
             ALTER TABLE amfs_outcomes
@@ -400,14 +413,16 @@ class PostgresAdapter(AdapterABC):
                             namespace, entity_path, key, version, value,
                             agent_id, session_id, written_at, pattern_refs,
                             confidence, outcome_count, recall_count,
-                            ttl_at, memory_type, shared, artifact_refs
+                            ttl_at, memory_type, shared, artifact_refs,
+                            is_artifact
                         ) VALUES (
                             cur.namespace, cur.entity_path, cur.key, cur.version + 1, cur.value,
                             cur.agent_id, cur.session_id, cur.written_at, cur.pattern_refs,
                             LEAST(1.0, GREATEST(0.0, cur.confidence * multiplier * NEW.causal_confidence)),
                             cur.outcome_count + 1, cur.recall_count,
                             cur.ttl_at, cur.memory_type,
-                            cur.shared, cur.artifact_refs
+                            cur.shared, cur.artifact_refs,
+                            cur.is_artifact
                         );
                     END IF;
                 END LOOP;
@@ -719,12 +734,13 @@ class PostgresAdapter(AdapterABC):
                     """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'amfs_memory_entries'
-                      AND column_name IN ('embedding', 'search_tsv')
+                      AND column_name IN ('embedding', 'search_tsv', 'is_artifact')
                     """,
                 )
                 found = {row["column_name"] for row in cur.fetchall()}
                 self._has_embedding_col = "embedding" in found
                 self._has_search_tsv = "search_tsv" in found
+                self._has_is_artifact_col = "is_artifact" in found
 
     # ------------------------------------------------------------------
     # read
@@ -852,6 +868,14 @@ class PostgresAdapter(AdapterABC):
 
                     entry_id = uuid.uuid4()
 
+                    # Classify at the persistence chokepoint so every write path
+                    # (HTTP async hot path, TransactionBuffer, Cortex, lifecycle,
+                    # snapshot — all of which bypass CoWEngine) gets a consistent
+                    # flag, and so a new version after a redact/revert re-classifies.
+                    is_artifact = bool(entry.is_artifact) or classify_artifact(
+                        entry.key, entry.value
+                    )
+
                     columns = [
                         "id", "namespace", "entity_path", "key", "version",
                         "value", "agent_id", "session_id", "written_at",
@@ -882,14 +906,21 @@ class PostgresAdapter(AdapterABC):
                         branch,
                     ]
 
+                    if self._has_is_artifact_col:
+                        columns.append("is_artifact")
+                        params.append(is_artifact)
+
                     # Write-time embedding: compute and persist an embedding when
                     # the caller did not supply one and an embedder is configured.
-                    # Guarded so an embedder failure never blocks a write.
+                    # Artifacts embed a clean descriptor (filename + symbols), not
+                    # the noisy, 512-token-truncated raw blob. Guarded so an
+                    # embedder failure never blocks a write.
                     embedding = entry.embedding
                     if (embedding is None and self._embedder is not None
                             and self._has_embedding_col):
                         try:
-                            embedding = self._embedder.embed_value(entry.value)
+                            _, embed_text = embedding_input(entry.key, entry.value)
+                            embedding = self._embedder.embed(embed_text)
                         except Exception:  # noqa: BLE001
                             logger.warning(
                                 "write-time embedding failed for %s/%s; storing without vector",
@@ -913,7 +944,11 @@ class PostgresAdapter(AdapterABC):
                         params,
                     )
 
-        return entry.model_copy(update={"version": new_version, "embedding": embedding})
+        return entry.model_copy(update={
+            "version": new_version,
+            "embedding": embedding,
+            "is_artifact": is_artifact,
+        })
 
     def ensure_embedding_column(self, dim: int | None = None) -> None:
         """Create the pgvector embedding column + HNSW index at a given dimension.
@@ -981,6 +1016,80 @@ class PostgresAdapter(AdapterABC):
                     updated += 1
         return updated
 
+    def backfill_is_artifact(self, *, batch_size: int = 200, reembed: bool = True) -> int:
+        """Classify existing rows and set ``is_artifact``; re-embed newly-flagged
+        artifacts from a clean descriptor.
+
+        This fixes two things on historical data: rows written before the flag
+        existed are classified, and code blobs whose vectors were the noisy,
+        512-token-truncated raw content are re-embedded from a filename+symbols
+        descriptor so they stop spuriously matching generic prose queries.
+
+        Idempotent and resumable: only rows whose flag actually flips are
+        touched (and only those are re-embedded), so re-running is cheap.
+        Returns the number of rows updated.
+
+        TODO(integration-test): exercised against a real DB in
+        tests/integration/test_postgres_embeddings.py (needs AMFS_TEST_PG_DSN).
+        """
+        if not self._has_is_artifact_col:
+            return 0
+        can_embed = reembed and self._embedder is not None and self._has_embedding_col
+        updated = 0
+        last_id = "00000000-0000-0000-0000-000000000000"
+        while True:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT id, key, value, is_artifact FROM amfs_memory_entries "
+                        "WHERE namespace = %s AND id > %s "
+                        "ORDER BY id LIMIT %s",
+                        (self._namespace, last_id, batch_size),
+                    )
+                    rows = cur.fetchall()
+                    if not rows:
+                        break
+                    for r in rows:
+                        last_id = r["id"]
+                        stored = bool(r["is_artifact"])
+                        try:
+                            value = (
+                                json.loads(r["value"])
+                                if isinstance(r["value"], str)
+                                else r["value"]
+                            )
+                        except (json.JSONDecodeError, ValueError):
+                            value = r["value"]
+                        is_art = classify_artifact(r["key"], value)
+                        if is_art == stored:
+                            continue
+                        if is_art and can_embed:
+                            try:
+                                _, text = embedding_input(r["key"], value)
+                                vec = self._embedder.embed(text)
+                                cur.execute(
+                                    "UPDATE amfs_memory_entries "
+                                    "SET is_artifact = %s, embedding = %s WHERE id = %s",
+                                    (is_art, f"[{','.join(str(v) for v in vec)}]", r["id"]),
+                                )
+                            except Exception:  # noqa: BLE001
+                                logger.warning(
+                                    "backfill re-embed failed for row %s", r["id"],
+                                    exc_info=True,
+                                )
+                                cur.execute(
+                                    "UPDATE amfs_memory_entries "
+                                    "SET is_artifact = %s WHERE id = %s",
+                                    (is_art, r["id"]),
+                                )
+                        else:
+                            cur.execute(
+                                "UPDATE amfs_memory_entries SET is_artifact = %s WHERE id = %s",
+                                (is_art, r["id"]),
+                            )
+                        updated += 1
+        return updated
+
     # ------------------------------------------------------------------
     # list
     # ------------------------------------------------------------------
@@ -1026,6 +1135,7 @@ class PostgresAdapter(AdapterABC):
         (``"recency"``, ``"version"``) are respected as-is.
         """
         use_fts = bool(query.query and getattr(self, "_has_search_tsv", False))
+        col_ready = getattr(self, "_has_is_artifact_col", False)
 
         conditions = ["namespace = %s", "branch = %s", "superseded_at IS NULL"]
         params: list[Any] = [self._namespace, branch]
@@ -1033,6 +1143,10 @@ class PostgresAdapter(AdapterABC):
         if query.depth < 3:
             conditions.append("tier <= %s")
             params.append(query.depth)
+
+        # Exclude artifacts entirely at the SQL layer when the column is ready.
+        if col_ready and not query.include_artifacts:
+            conditions.append("is_artifact IS NOT TRUE")
 
         if query.entity_path is not None:
             conditions.append("entity_path = %s")
@@ -1081,6 +1195,14 @@ class PostgresAdapter(AdapterABC):
             order = order_map.get(query.sort_by, "confidence DESC")
             fetch_limit = query.limit
 
+        # Demote artifacts beneath equally-ranked facts. With the column ready we
+        # do it in SQL (leading sort key); otherwise we over-fetch and demote in
+        # Python below so the pre-backfill window still behaves.
+        if col_ready and not use_priority_sort:
+            order = f"is_artifact ASC, {order}"
+        elif not col_ready:
+            fetch_limit = min(max(fetch_limit, query.limit * 3), 1000)
+
         where = " AND ".join(conditions)
         sql = f"""
             SELECT * FROM amfs_memory_entries
@@ -1097,11 +1219,28 @@ class PostgresAdapter(AdapterABC):
 
         entries = [self._row_to_entry(r) for r in rows]
 
+        def _art(e: MemoryEntry) -> bool:
+            return bool(e.is_artifact) if col_ready else classify_artifact(e.key, e.value)
+
+        # Read-time fallback (column not yet backfilled): exclude or stable-demote
+        # artifacts in Python. Stable so non-artifact ordering is preserved.
+        if not col_ready:
+            if not query.include_artifacts:
+                entries = [e for e in entries if not _art(e)]
+            elif not use_priority_sort:
+                entries.sort(key=_art)
+
         if use_priority_sort:
             from amfs_core.tiering import PriorityScorer
             scorer = PriorityScorer()
             scores = scorer.score_batch(entries)
-            entries.sort(key=lambda e: scores.get(e.entry_key, 0.0), reverse=True)
+            entries.sort(
+                key=lambda e: scores.get(e.entry_key, 0.0)
+                * (ARTIFACT_PENALTY if _art(e) else 1.0),
+                reverse=True,
+            )
+            entries = entries[: query.limit]
+        elif not col_ready:
             entries = entries[: query.limit]
 
         return entries
@@ -2124,6 +2263,7 @@ class PostgresAdapter(AdapterABC):
             memory_type=memory_type,
             shared=row.get("shared", True),
             branch=row.get("branch", "main"),
+            is_artifact=bool(row.get("is_artifact", False)),
         )
 
     # ── Digest storage (Memory Cortex) ──────────────────────────────
@@ -3349,6 +3489,9 @@ class PostgresAdapter(AdapterABC):
                             be.get("shared", True), json.dumps(be.get("artifact_refs") or [], default=str),
                             parent,
                         ]
+                        if self._has_is_artifact_col:
+                            columns.append("is_artifact")
+                            params_list.append(be.get("is_artifact", False))
                         cols_sql = ", ".join(columns)
                         placeholders = ", ".join(["%s"] * len(params_list))
                         cur.execute(
@@ -3887,13 +4030,13 @@ class PostgresAdapter(AdapterABC):
                              agent_id, session_id, tool_context, pattern_refs,
                              written_at, confidence, outcome_count,
                              ttl_at, artifact_refs, memory_type, shared,
-                             branch, embedding)
+                             branch, embedding, is_artifact)
                             VALUES
                             (%s, %s, %s, 1, %s,
                              %s, %s, %s, %s,
                              NOW(), %s, 0,
                              %s, %s, %s, %s,
-                             'main', %s)
+                             'main', %s, %s)
                             ON CONFLICT ON CONSTRAINT uq_entry_version DO NOTHING
                             """,
                             (
@@ -3911,6 +4054,7 @@ class PostgresAdapter(AdapterABC):
                                 row.get("memory_type", "fact"),
                                 row.get("shared", False),
                                 row.get("embedding"),
+                                row.get("is_artifact", False),
                             ),
                         )
                         copied += cur.rowcount
