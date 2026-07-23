@@ -1726,7 +1726,8 @@ class PostgresAdapter(AdapterABC):
                    MAX(written_at) AS last_updated,
                    (ARRAY_AGG(agent_id ORDER BY written_at DESC))[1] AS last_agent,
                    ARRAY_AGG(DISTINCT agent_id) AS agents,
-                   COUNT(*) FILTER (WHERE content_hash IS NOT NULL) AS hashed_count
+                   COUNT(*) FILTER (WHERE content_hash IS NOT NULL) AS hashed_count,
+                   COALESCE(SUM(recall_count), 0) AS total_recalls
             FROM amfs_memory_entries
             WHERE {where}
             GROUP BY entity_path
@@ -1746,6 +1747,7 @@ class PostgresAdapter(AdapterABC):
                 "last_agent": r["last_agent"],
                 "agents": sorted(r["agents"] or []),
                 "hashed_count": r["hashed_count"],
+                "total_recalls": int(r["total_recalls"] or 0),
             }
             for r in rows
         ]

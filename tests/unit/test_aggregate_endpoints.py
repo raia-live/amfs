@@ -109,6 +109,16 @@ class TestEntitySummaries:
     def test_empty(self) -> None:
         assert entity_summaries_from_entries([]) == []
 
+    def test_sums_recall_counts_per_entity(self) -> None:
+        entries = [
+            _entry("repo/a", "k1", "agent-a", recall_count=5, written_at=NOW),
+            _entry("repo/a", "k2", "agent-b", recall_count=2, written_at=NOW),
+            _entry("repo/b", "k1", "agent-a", recall_count=9, written_at=NOW),
+        ]
+        by_path = {s["entity_path"]: s for s in entity_summaries_from_entries(entries)}
+        assert by_path["repo/a"]["total_recalls"] == 7
+        assert by_path["repo/b"]["total_recalls"] == 9
+
 
 class TestExtendedStats:
     def test_counts_recalls_and_weekly_delta(self) -> None:

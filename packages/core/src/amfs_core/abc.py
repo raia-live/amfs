@@ -274,7 +274,7 @@ class AdapterABC(ABC):
 
         Returns a list of dicts sorted by most recently updated:
         ``{entity_path, entry_count, avg_confidence, last_updated,
-        last_agent, agents, hashed_count}``.
+        last_agent, agents, hashed_count, total_recalls}``.
 
         *agent_ids*, when given, restricts aggregation to entries written by
         those agents (used by per-user visibility layers).
