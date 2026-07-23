@@ -511,7 +511,10 @@ async def entry_quality(
 ) -> dict[str, Any]:
     """Compute a quality report for a stored entry on demand."""
     mem = _get_memory()
-    entry = mem.read(entity_path, key, branch=branch)
+    # Read straight from the adapter — this is an internal/dashboard inspection,
+    # not an agent recall, so it must NOT increment recall_count (doing so
+    # inflates reuse metrics every time a topic/agent page is viewed).
+    entry = mem._adapter.read(entity_path, key, branch=branch)
     if entry is None:
         raise HTTPException(status_code=404, detail="Entry not found")
 
@@ -2118,7 +2121,13 @@ async def agent_memory_graph(
             "confidence": e.confidence,
             "memoryType": e.memory_type.value if hasattr(e.memory_type, "value") else str(e.memory_type),
             "writtenAt": e.provenance.written_at.isoformat(),
+            "recallCount": getattr(e, "recall_count", 0),
         })
+
+    # How many times this agent's own saved knowledge was recalled. This is the
+    # reliable reuse signal (recall_count is incremented on every read), unlike
+    # timeline read events which are not recorded on every deployment.
+    total_recalls = sum(getattr(e, "recall_count", 0) for e in written_by_agent)
 
     # Build read counts from both traces (causal_entries) and timeline events.
     read_entities: dict[str, dict[str, int]] = {}
@@ -2181,6 +2190,7 @@ async def agent_memory_graph(
         "traceCount": len(traces),
         "totalWritten": len(written_by_agent),
         "totalReads": total_read_events,
+        "totalRecalls": total_recalls,
         "crossAgentReads": cross_agent_reads,
     }
 
