@@ -143,6 +143,13 @@ class TestExtendedStats:
         assert stats["oldest_entry_at"] == NOW - timedelta(days=30)
         assert stats["newest_entry_at"] == NOW
 
+    def test_recall_deltas_unknown_from_entries(self) -> None:
+        # Entries carry only a recall counter (no timestamps), so the pure
+        # path reports None — clients hide the trend instead of showing 0.
+        stats = extended_stats_from_entries([_entry("repo/a", "k", "agent-a")])
+        assert stats["recalls_this_week"] is None
+        assert stats["recalls_last_week"] is None
+
     def test_empty(self) -> None:
         stats = extended_stats_from_entries([])
         assert stats["total_entries"] == 0
