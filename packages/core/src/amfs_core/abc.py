@@ -561,6 +561,13 @@ class AdapterABC(ABC):
 
     # ── Event log / timeline ───────────────────────────────────────────
 
+    #: When True, this adapter delegates writes to a remote AMFS server that
+    #: records the WRITE timeline event itself (in its write handler). The SDK
+    #: must then NOT also emit a WRITE event, otherwise a single write produces
+    #: two identical timeline events. Set True on HttpAdapter; False for direct
+    #: adapters (filesystem/postgres) where the SDK is the only logger.
+    server_side_write_events: bool = False
+
     def log_event(self, event: Event) -> Event:
         """Persist a timeline event. Default is a no-op."""
         return event

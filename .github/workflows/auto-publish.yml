@@ -1,9 +1,24 @@
-name: Release
+name: Auto-publish on version bump
+
+# Publishes to PyPI/npm automatically when a package manifest changes on main —
+# so "bump version + merge" is enough, no manual `v*` tag required. Publishing is
+# idempotent: `uv publish --check-url` and `npm publish` skip versions that are
+# already published, so only newly-bumped packages are released. Unchanged
+# packages (and re-runs) are safe no-ops.
+#
+# `release.yml` (tag-triggered) is kept for explicit tagged releases; the two do
+# not overlap (this runs on branch pushes, that runs on tags).
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+    paths:
+      - "packages/**/pyproject.toml"
+      - "packages/sdk-typescript/package.json"
+
+concurrency:
+  group: auto-publish
+  cancel-in-progress: false
 
 jobs:
   publish-python:

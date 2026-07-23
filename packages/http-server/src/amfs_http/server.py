@@ -68,6 +68,27 @@ from amfs_http.sse import SSEManager
 
 logger = logging.getLogger(__name__)
 
+
+def _server_version() -> str:
+    """Return the deployed amfs-http-server package version.
+
+    Sourced from installed package metadata so it changes on every release —
+    unlike the per-entry ``amfs_version`` schema tag. This is the value to use
+    when telling deploys/revisions apart.
+    """
+    try:
+        from importlib.metadata import version
+
+        return version("amfs-http-server")
+    except Exception:
+        return "unknown"
+
+
+# Set by the deploy pipeline (e.g. the git SHA) so a running revision is
+# identifiable even between version bumps. Empty when not provided.
+_BUILD_SHA = os.environ.get("AMFS_BUILD_SHA", "")
+_SCHEMA_VERSION = MemoryEntry.model_fields["amfs_version"].default
+
 # ── Async adapter (hot-path, non-blocking) ──────────────────────────
 _async_adapter = None  # AsyncPostgresAdapter | None, set in lifespan
 
@@ -96,7 +117,7 @@ async def _lifespan(application: FastAPI):  # noqa: ARG001
 app = FastAPI(
     title="AMFS HTTP API",
     description="Agent Memory File System — REST API with SSE support",
-    version="0.1.0",
+    version=_server_version(),
     lifespan=_lifespan,
 )
 
@@ -371,14 +392,25 @@ def _ensure_agent_owner(
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _health_payload() -> dict[str, str]:
+    payload = {
+        "status": "ok",
+        "version": _server_version(),      # deploy/package version — changes per release
+        "schema_version": _SCHEMA_VERSION,  # per-entry MemoryEntry schema tag
+    }
+    if _BUILD_SHA:
+        payload["build"] = _BUILD_SHA
+    return payload
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return _health_payload()
 
 
 @app.get("/api/v1/health")
 async def health_v1() -> dict[str, str]:
-    return {"status": "ok"}
+    return _health_payload()
 
 
 @app.get("/api/v1/auth/whoami")
@@ -2375,6 +2407,17 @@ async def log_timeline_event(
         details=body.details,
         actor_agent_id=body.actor_agent_id,
     )
+    # WRITE events are authoritatively logged by the write handler
+    # (POST /api/v1/entries). HTTP-backed SDK clients ALSO emit a WRITE event
+    # here from their background log path, which produced two identical WRITE
+    # events per write (the "double-write" bug). The server is the single
+    # source of truth for WRITE timeline events, so drop client-originated
+    # ones here. This is version-agnostic: it fixes every client regardless of
+    # which SDK version they run via `uvx`, without waiting on a PyPI release.
+    # We still return a well-formed (but unpersisted) event so clients that
+    # parse the response don't error.
+    if event_type_enum is EventType.WRITE:
+        return event.model_dump(mode="json")
     saved = mem._adapter.log_event(event)
     return saved.model_dump(mode="json")
 

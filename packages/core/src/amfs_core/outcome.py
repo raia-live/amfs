@@ -11,6 +11,7 @@ from amfs_core.models import (
     MemoryEntry,
     OutcomeRecord,
     OutcomeType,
+    clamp_confidence,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ class OutcomeBackPropagator:
         without actually writing.
         """
         multiplier = OUTCOME_MULTIPLIERS[outcome_type]
-        return current_confidence * multiplier * causal_confidence
+        return clamp_confidence(current_confidence * multiplier * causal_confidence)
 
     @staticmethod
     def make_record(

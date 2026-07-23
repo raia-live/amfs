@@ -48,6 +48,10 @@ class HttpAdapter(AdapterABC):
         timeout: Optional httpx Timeout override.
     """
 
+    # The server's write handler (POST /api/v1/entries) records the WRITE
+    # timeline event, so the SDK must not log it again (avoids double events).
+    server_side_write_events: bool = True
+
     def __init__(
         self,
         base_url: str,

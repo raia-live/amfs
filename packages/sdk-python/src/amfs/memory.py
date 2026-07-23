@@ -360,24 +360,28 @@ class AgentMemory:
         _prefs = pattern_refs
 
         def _bg_log_and_edges() -> None:
-            try:
-                _adapter.log_event(Event(
-                    namespace=_ns,
-                    agent_id=_aid,
-                    branch=_ev_branch,
-                    event_type=EventType.WRITE,
-                    summary=f"Wrote {_ep}/{_k} v{_entry_version}",
-                    details={
-                        "entity_path": _ep,
-                        "key": _k,
-                        "version": _entry_version,
-                        "confidence": _entry_confidence,
-                        "memory_type": _entry_mt,
-                        "shared": _entry_shared,
-                    },
-                ))
-            except Exception:
-                logger.debug("Failed to log write event", exc_info=True)
+            # Skip client-side WRITE logging when the adapter delegates to a
+            # remote server that already records the event (HttpAdapter) —
+            # otherwise a single write produces two identical timeline events.
+            if not getattr(_adapter, "server_side_write_events", False):
+                try:
+                    _adapter.log_event(Event(
+                        namespace=_ns,
+                        agent_id=_aid,
+                        branch=_ev_branch,
+                        event_type=EventType.WRITE,
+                        summary=f"Wrote {_ep}/{_k} v{_entry_version}",
+                        details={
+                            "entity_path": _ep,
+                            "key": _k,
+                            "version": _entry_version,
+                            "confidence": _entry_confidence,
+                            "memory_type": _entry_mt,
+                            "shared": _entry_shared,
+                        },
+                    ))
+                except Exception:
+                    logger.debug("Failed to log write event", exc_info=True)
             if _prefs:
                 try:
                     self._materialize_pattern_ref_edges(_ep, _k, _prefs, _ev_branch)

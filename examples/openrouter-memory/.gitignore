@@ -1,0 +1,16 @@
+# Never commit the OpenRouter key or local memory/audit data
+.env
+.data/
+.pro_data/
+.gov_data/
+audit.jsonl
+pro_audit.jsonl
+benchmark_results.json
+proxy.log
+*.key
+*.log
+
+# Local virtualenv and caches (never commit)
+.venv/
+__pycache__/
+.DS_Store

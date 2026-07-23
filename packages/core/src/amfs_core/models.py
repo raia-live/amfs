@@ -50,10 +50,10 @@ class MemoryTier(int, Enum):
 class OutcomeType(str, Enum):
     """Types of outcomes that can affect memory confidence."""
 
-    SUCCESS = "success"                      # confidence *= 0.97
-    MINOR_FAILURE = "minor_failure"          # confidence *= 1.08
-    FAILURE = "failure"                      # confidence *= 1.10
-    CRITICAL_FAILURE = "critical_failure"    # confidence *= 1.15
+    SUCCESS = "success"                      # confidence *= 1.03 (reinforce)
+    MINOR_FAILURE = "minor_failure"          # confidence *= 0.92 (erode)
+    FAILURE = "failure"                      # confidence *= 0.90 (erode)
+    CRITICAL_FAILURE = "critical_failure"    # confidence *= 0.85 (erode)
 
     # Backward-compatible aliases (deprecated)
     CLEAN_DEPLOY = "clean_deploy"
@@ -63,17 +63,34 @@ class OutcomeType(str, Enum):
 
 
 # Multipliers applied to confidence when an outcome is committed.
+#
+# Semantics (as of the confidence-direction fix): a SUCCESS *reinforces*
+# confidence (>1.0) and failures *erode* it (<1.0), which matches the intuitive
+# meaning of the field — a memory that keeps leading to good outcomes should be
+# trusted more, not less. Failures move confidence more than a single success,
+# so trust is easy to lose and slow to rebuild. The result is always clamped to
+# [0.0, 1.0] via ``clamp_confidence`` (a success can never push past certainty,
+# and repeated failures floor at zero rather than going negative).
 OUTCOME_MULTIPLIERS: dict[OutcomeType | str, float] = {
-    OutcomeType.CRITICAL_FAILURE: 1.15,
-    OutcomeType.FAILURE: 1.10,
-    OutcomeType.MINOR_FAILURE: 1.08,
-    OutcomeType.SUCCESS: 0.97,
+    OutcomeType.CRITICAL_FAILURE: 0.85,
+    OutcomeType.FAILURE: 0.90,
+    OutcomeType.MINOR_FAILURE: 0.92,
+    OutcomeType.SUCCESS: 1.03,
     # Legacy values
-    OutcomeType.P1_INCIDENT: 1.15,
-    OutcomeType.P2_INCIDENT: 1.10,
-    OutcomeType.REGRESSION: 1.08,
-    OutcomeType.CLEAN_DEPLOY: 0.97,
+    OutcomeType.P1_INCIDENT: 0.85,
+    OutcomeType.P2_INCIDENT: 0.90,
+    OutcomeType.REGRESSION: 0.92,
+    OutcomeType.CLEAN_DEPLOY: 1.03,
 }
+
+# Confidence is a probability-like quantity in [0, 1]. Outcome back-propagation
+# multiplies by the factors above, so results must be clamped: successes saturate
+# at 1.0 (never exceed certainty) and failures floor at 0.0 (never go negative).
+
+
+def clamp_confidence(value: float) -> float:
+    """Clamp a confidence value into the valid [0.0, 1.0] range."""
+    return max(0.0, min(1.0, float(value)))
 
 # Beliefs are penalised more by regressions and decay faster.
 MEMORY_TYPE_DECAY_MULTIPLIERS: dict[MemoryType, float] = {
@@ -126,7 +143,7 @@ class QualityReport(BaseModel):
 class MemoryEntry(BaseModel):
     """A single versioned memory entry within the AMFS namespace."""
 
-    amfs_version: str = "0.2.0"
+    amfs_version: str = "0.3.0"
     entity_path: str
     key: str
     version: int = 1

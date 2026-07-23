@@ -16,6 +16,7 @@ from amfs_core.models import (
     Commit,
     MemoryEntry,
     OutcomeRecord,
+    clamp_confidence,
 )
 
 from amfs_filesystem.layout import PathLayout
@@ -251,7 +252,9 @@ class FilesystemAdapter(AdapterABC):
                 logger.warning("Causal entry not found: %s", entry_key_spec)
                 continue
 
-            new_confidence = current.confidence * multiplier * record.causal_confidence
+            new_confidence = clamp_confidence(
+                current.confidence * multiplier * record.causal_confidence
+            )
             new_entry = current.model_copy(
                 update={
                     "version": 1,
