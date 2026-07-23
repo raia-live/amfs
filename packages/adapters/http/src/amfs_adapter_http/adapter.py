@@ -198,13 +198,15 @@ class HttpAdapter(AdapterABC):
         recency_weight: float = 0.3,
         confidence_weight: float = 0.2,
         branch: str = "main",
+        include_artifacts: bool = True,
     ) -> list[tuple[MemoryEntry, float, dict[str, float]]]:
         """Server-side semantic retrieval via POST /api/v1/retrieve.
 
         The server does the embedding + pgvector similarity + blend, so this
         works even when the client has no embedder. Returns
         (entry, score, breakdown) tuples; breakdown is empty on the server's
-        lexical fallback.
+        lexical fallback. Artifacts (stored source files) are demoted by the
+        server; pass ``include_artifacts=False`` to exclude them entirely.
         """
         body: dict[str, Any] = {
             "query": query,
@@ -214,6 +216,7 @@ class HttpAdapter(AdapterABC):
             "recency_weight": recency_weight,
             "confidence_weight": confidence_weight,
             "branch": branch,
+            "include_artifacts": include_artifacts,
         }
         if entity_path:
             body["entity_path"] = entity_path

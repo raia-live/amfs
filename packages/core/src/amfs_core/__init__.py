@@ -1,6 +1,14 @@
 """AMFS Core — models, engine, and adapter ABC."""
 
 from amfs_core.abc import AdapterABC, WatchHandle
+from amfs_core.content import (
+    ARTIFACT_PENALTY,
+    artifact_descriptor,
+    classify_artifact,
+    embedding_input,
+    is_artifact_key,
+    is_code_like,
+)
 from amfs_core.embedder import EmbedderABC, cosine_similarity
 from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker
 from amfs_core.exceptions import (
@@ -63,11 +71,17 @@ from amfs_core.quality import (
 )
 
 __all__ = [
+    "ARTIFACT_PENALTY",
     "AMFSConfig",
     "AMFSError",
     "AdapterABC",
     "AdapterError",
     "Agent",
+    "artifact_descriptor",
+    "classify_artifact",
+    "embedding_input",
+    "is_artifact_key",
+    "is_code_like",
     "Branch",
     "BranchAccess",
     "BranchAccessPermission",

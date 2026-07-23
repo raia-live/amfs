@@ -39,6 +39,9 @@ class SearchRequest(BaseModel):
     sort_by: str = "confidence"
     branch: str = "main"
     depth: int = 3
+    # When True (default) artifacts are demoted to the bottom of results; when
+    # False they are excluded entirely.
+    include_artifacts: bool = True
 
 
 class RetrieveRequest(BaseModel):
@@ -57,6 +60,9 @@ class RetrieveRequest(BaseModel):
     recency_weight: float = 0.3
     confidence_weight: float = 0.2
     branch: str = "main"
+    # When True (default) artifacts (stored source files) are demoted but still
+    # returned; when False they are excluded entirely from results.
+    include_artifacts: bool = True
 
 
 class ContextRequest(BaseModel):

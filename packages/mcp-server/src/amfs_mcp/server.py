@@ -757,6 +757,7 @@ def amfs_search(
     sort_by: str = "confidence",
     limit: int = 20,
     depth: int = 3,
+    include_artifacts: bool = True,
 ) -> str:
     """Search across all memory entries with structured filters or exact keywords.
 
@@ -782,6 +783,8 @@ def amfs_search(
         sort_by: Sort order — "confidence", "recency", "version", or "priority"
         limit: Maximum results to return
         depth: Tier depth (1=hot only, 2=hot+warm, 3=all tiers)
+        include_artifacts: When False, exclude stored source files from results
+            (they are demoted by default)
 
     Example: amfs_search(entity_path="checkout-service", min_confidence=0.5)
     """
@@ -804,6 +807,7 @@ def amfs_search(
         sort_by=sort_by,
         limit=limit,
         depth=depth,
+        include_artifacts=include_artifacts,
     )
 
     if not results:
@@ -834,6 +838,7 @@ def amfs_retrieve(
     recency_weight: float = 0.3,
     confidence_weight: float = 0.2,
     depth: int = 3,
+    include_artifacts: bool = True,
 ) -> str:
     """Find memories by meaning — the default tool for any recall/lookup.
 
@@ -857,6 +862,8 @@ def amfs_retrieve(
         recency_weight: Weight for recency (0.0-1.0)
         confidence_weight: Weight for confidence (0.0-1.0)
         depth: Tier depth (1=hot only, 2=hot+warm, 3=all tiers)
+        include_artifacts: When False, exclude stored source files from results
+            (they are demoted by default so genuine facts rank above code)
 
     Returns ranked results with score breakdowns showing how each
     signal contributed to the final ranking.
@@ -878,6 +885,7 @@ def amfs_retrieve(
         min_confidence=min_confidence,
         limit=limit,
         recall_config=recall_config,
+        include_artifacts=include_artifacts,
     )
 
     serialized = []

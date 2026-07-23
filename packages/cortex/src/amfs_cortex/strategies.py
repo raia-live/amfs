@@ -50,6 +50,8 @@ class RuleBasedStrategy:
             entity_path=entity_path,
             limit=1000,
             sort_by="confidence",
+            # Digest narrative/top_keys summarise knowledge, not stored code files.
+            include_artifacts=False,
         ), branch=branch)
         if not entries:
             return None
