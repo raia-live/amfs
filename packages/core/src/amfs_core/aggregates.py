@@ -35,6 +35,7 @@ def entity_summaries_from_entries(entries: "list[MemoryEntry]") -> list[dict]:
                 "last_agent": group_sorted[0].provenance.agent_id,
                 "agents": sorted({e.provenance.agent_id for e in group}),
                 "hashed_count": sum(1 for e in group if e.content_hash),
+                "total_recalls": sum(e.recall_count for e in group),
             }
         )
     summaries.sort(key=lambda s: s["last_updated"], reverse=True)
