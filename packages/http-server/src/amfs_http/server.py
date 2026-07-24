@@ -1012,6 +1012,32 @@ async def search_entries(
     if vis is not None and vis.should_filter():
         results = vis.filter_entries(results)
 
+    # Reuse accounting. `amfs_search` is the read surface some agent profiles
+    # (e.g. the Base44 builder profile) expose instead of /retrieve, so a
+    # text-driven search is a real recall — but historically it incremented no
+    # counter, leaving reuse metrics (memories reused / rework avoided) reading
+    # 0 even when memory was clearly used. Only credit *query-driven* searches
+    # (recall intent), not pure filter/browse (agent_id/entity_path listings),
+    # and only the top-K surfaced hits so we don't inflate on the long tail.
+    # Skip system/bench scratch namespaces. Best-effort: never let accounting
+    # failure affect the response.
+    if req.query and req.query.strip():
+        reuse_credit_k = min(3, req.limit or 3)
+        for entry in results[:reuse_credit_k]:
+            if entry.entity_path.startswith(("_system/", "bench/", "bench-")):
+                continue
+            try:
+                if _async_adapter is not None:
+                    await _async_adapter.increment_recall_count(
+                        entry.entity_path, entry.key, branch=branch
+                    )
+                else:
+                    _get_memory()._adapter.increment_recall_count(
+                        entry.entity_path, entry.key, branch=branch
+                    )
+            except Exception:  # noqa: BLE001 - reuse accounting is best-effort
+                logger.debug("search recall bump failed", exc_info=True)
+
     return [_entry_to_response(e) for e in results]
 
 
