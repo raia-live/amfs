@@ -22,7 +22,7 @@ import amfs_http.server as server
 import pytest
 from amfs_core.models import MemoryEntry, Provenance
 from amfs_core.query_norm import normalize_temporal
-from amfs_http.models import RetrieveRequest
+from amfs_http.models import RetrieveRequest, SearchRequest
 from amfs_postgres._fts import or_tsquery
 
 # ──────────────────────────────────────────────────────────────────────
@@ -255,3 +255,69 @@ class TestHybridUnion:
         keys = {d["entity_path"] + "/" + d["key"] for d in out}
         assert target.entry_key in keys
         assert junk.entry_key not in keys
+
+
+# ──────────────────────────────────────────────────────────────────────
+# search_entries reuse accounting
+#
+# `amfs_search` is the read surface some agent profiles (e.g. the Base44
+# builder profile) expose instead of /retrieve. A text-driven search is a real
+# recall and must bump recall_count, or reuse metrics read 0 even when memory
+# was used. Browse/filter calls (no query) must NOT bump.
+# ──────────────────────────────────────────────────────────────────────
+
+class _RecordingSearchAdapter:
+    def __init__(self, hits):
+        self._hits = hits
+        self.bumped: list[tuple[str, str]] = []
+
+    async def search(self, query, *, branch="main"):
+        return list(self._hits)
+
+    async def increment_recall_count(self, entity_path, key, *, branch="main"):
+        self.bumped.append((entity_path, key))
+
+
+def _run_search(request, req):
+    return asyncio.run(server.search_entries(request, req, _auth=None))
+
+
+class TestSearchReuseAccounting:
+    def test_query_driven_search_bumps_top_k(self, monkeypatch):
+        hits = [
+            _entry("invoicehub", "deferred-decisions", "recurring invoices deferred"),
+            _entry("invoicehub", "schema", "client and invoice entities"),
+            _entry("invoicehub", "layout", "sidebar clients invoices"),
+            _entry("invoicehub", "extra", "fourth hit should not be credited"),
+        ]
+        fake = _RecordingSearchAdapter(hits)
+        monkeypatch.setattr(server, "_async_adapter", fake)
+
+        _run_search(_request(), SearchRequest(query="invoicehub decisions", limit=20))
+        # Only the top-3 surfaced hits are credited (no long-tail inflation).
+        assert fake.bumped == [
+            ("invoicehub", "deferred-decisions"),
+            ("invoicehub", "schema"),
+            ("invoicehub", "layout"),
+        ]
+
+    def test_browse_without_query_does_not_bump(self, monkeypatch):
+        hits = [_entry("invoicehub", "deferred-decisions", "recurring invoices deferred")]
+        fake = _RecordingSearchAdapter(hits)
+        monkeypatch.setattr(server, "_async_adapter", fake)
+
+        # Pure filter/browse (no query text) is not a recall — must not bump.
+        _run_search(_request(), SearchRequest(agent_id="base44-builder", limit=20))
+        assert fake.bumped == []
+
+    def test_system_and_bench_namespaces_skipped(self, monkeypatch):
+        hits = [
+            _entry("_system/telemetry", "row", "system row matches query"),
+            _entry("bench-run-1/obs", "row", "benchmark row matches query"),
+            _entry("invoicehub", "deferred-decisions", "real recall target"),
+        ]
+        fake = _RecordingSearchAdapter(hits)
+        monkeypatch.setattr(server, "_async_adapter", fake)
+
+        _run_search(_request(), SearchRequest(query="matches query", limit=20))
+        assert fake.bumped == [("invoicehub", "deferred-decisions")]
