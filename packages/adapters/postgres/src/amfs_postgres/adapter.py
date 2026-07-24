@@ -14,6 +14,7 @@ from typing import Any, Callable
 import psycopg
 from psycopg.rows import dict_row
 
+from amfs_postgres._fts import or_tsquery
 from amfs_core.abc import AdapterABC, WatchHandle
 from amfs_core.content import ARTIFACT_PENALTY, classify_artifact, embedding_input
 from amfs_core.embedder import EmbedderABC
@@ -1129,13 +1130,16 @@ class PostgresAdapter(AdapterABC):
         """Search using PostgreSQL full-text search when a text query is available.
 
         When ``SearchQuery.query`` is set and the ``search_tsv`` column exists
-        the adapter adds a ``search_tsv @@ plainto_tsquery(...)`` filter and,
-        when ``sort_by`` is the default ``"confidence"``, orders by ts_rank so
-        keyword relevance is factored in.  Explicit ``sort_by`` values
-        (``"recency"``, ``"version"``) are respected as-is.
+        the adapter adds an OR-combined tsquery filter (see ``_fts.or_tsquery``)
+        so multi-term queries recall documents matching ANY term instead of
+        requiring every term, and — when ``sort_by`` is the default
+        ``"confidence"`` — orders by ts_rank so keyword relevance is factored
+        in.  Explicit ``sort_by`` values (``"recency"``, ``"version"``) are
+        respected as-is.
         """
         use_fts = bool(query.query and getattr(self, "_has_search_tsv", False))
         col_ready = getattr(self, "_has_is_artifact_col", False)
+        tsq_sql, tsq_params = or_tsquery(query.query) if use_fts else ("", [])
 
         conditions = ["namespace = %s", "branch = %s", "superseded_at IS NULL"]
         params: list[Any] = [self._namespace, branch]
@@ -1168,8 +1172,8 @@ class PostgresAdapter(AdapterABC):
             params.append(query.pattern_ref)
 
         if use_fts:
-            conditions.append("search_tsv @@ plainto_tsquery('english', %s)")
-            params.append(query.query)
+            conditions.append(f"search_tsv @@ {tsq_sql}")
+            params.extend(tsq_params)
         elif query.query and query.recall_config is None:
             conditions.append(
                 "(key ILIKE %s OR entity_path ILIKE %s OR value::text ILIKE %s)"
@@ -1188,8 +1192,8 @@ class PostgresAdapter(AdapterABC):
             order = "confidence DESC"
             fetch_limit = min(query.limit * 3, 1000)
         elif use_fts and query.sort_by == "confidence":
-            order = "ts_rank(search_tsv, plainto_tsquery('english', %s)) DESC, confidence DESC"
-            params.append(query.query)
+            order = f"ts_rank(search_tsv, {tsq_sql}) DESC, confidence DESC"
+            params.extend(tsq_params)
             fetch_limit = query.limit
         else:
             order = order_map.get(query.sort_by, "confidence DESC")
