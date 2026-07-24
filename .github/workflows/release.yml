@@ -6,7 +6,50 @@ on:
       - "v*"
 
 jobs:
+  # Gate: build the release wheels and invoke the whole MCP tool surface against
+  # the installed set (siblings resolved from the just-built wheels, everything
+  # else from PyPI). Catches the class of bug where a published release crashes
+  # the instant a tool is called — invisible to unit tests that run against
+  # editable source. `publish-python` depends on this.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the wheels the smoke needs
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade build
+          mkdir -p /tmp/wheels
+          # Minimal set the MCP tool surface imports; other siblings satisfy
+          # their `>=` floors from PyPI.
+          for pkg in packages/core packages/sdk-python packages/adapters/filesystem packages/mcp-server; do
+            echo "Building $pkg..."
+            python -m build "$pkg" --outdir /tmp/wheels
+          done
+          ls -l /tmp/wheels
+
+      - name: Install the release set (built wheels + PyPI) and run the smoke
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/smoke-venv
+          /tmp/smoke-venv/bin/pip install --upgrade pip
+          # --find-links makes the about-to-be-published packages resolve from
+          # the locally built wheels (matching versions), the rest from PyPI.
+          /tmp/smoke-venv/bin/pip install --find-links /tmp/wheels amfs-mcp-server amfs-adapter-filesystem pytest
+          # Run from a copy OUTSIDE the repo so the installed wheels (not the
+          # source tree) are imported.
+          mkdir -p /tmp/smoke-run
+          cp tests/unit/test_mcp_tools_smoke.py /tmp/smoke-run/
+          cd /tmp/smoke-run
+          /tmp/smoke-venv/bin/python -m pytest test_mcp_tools_smoke.py -v
+
   publish-python:
+    needs: smoke
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -60,3 +103,69 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public || echo "Skipping npm publish (already published or error)"
+
+  # Post-publish live smoke: drive the *just-published* server the way a real
+  # client does — `uvx amfs-mcp-server@<version>` (deps resolved from PyPI),
+  # speaking the MCP protocol over stdio against a real backend. Proves the
+  # published artifact works end-to-end, not just that it builds.
+  #
+  # Runs against BOTH dev and prod. Each leg self-skips until its URL variable +
+  # API-key secret are configured, so this is safe to merge before the secrets
+  # exist.
+  #
+  # Configure per environment (repo Settings → Secrets and variables → Actions):
+  #   dev:  variable SMOKE_MCP_DEV_URL   + secret SMOKE_MCP_DEV_API_KEY
+  #   prod: variable SMOKE_MCP_PROD_URL  + secret SMOKE_MCP_PROD_API_KEY
+  # The API key must be a test-account key valid in THAT environment's database.
+  live-smoke:
+    needs: publish-python
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev, prod]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv (provides uvx) + mcp client
+        run: python -m pip install --upgrade uv mcp
+
+      - name: Derive version from the release tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the new version to be installable from PyPI
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/amfs-mcp-server/${VERSION}/json")
+            if [ "$CODE" = "200" ]; then echo "amfs-mcp-server ${VERSION} is live on PyPI."; exit 0; fi
+            echo "Waiting for PyPI to index ${VERSION} (attempt $i, HTTP ${CODE})..."
+            sleep 10
+          done
+          echo "Timed out waiting for amfs-mcp-server ${VERSION} on PyPI." >&2
+          exit 1
+
+      - name: Live smoke ${{ matrix.environment }} over MCP
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
+          MCP_PACKAGE: amfs-mcp-server
+          MCP_VERSION: ${{ steps.ver.outputs.version }}
+          DEV_URL: ${{ vars.SMOKE_MCP_DEV_URL }}
+          DEV_KEY: ${{ secrets.SMOKE_MCP_DEV_API_KEY }}
+          PROD_URL: ${{ vars.SMOKE_MCP_PROD_URL }}
+          PROD_KEY: ${{ secrets.SMOKE_MCP_PROD_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ "$ENVIRONMENT" = "dev" ]; then URL="$DEV_URL"; KEY="$DEV_KEY"; else URL="$PROD_URL"; KEY="$PROD_KEY"; fi
+          if [ -z "$URL" ]; then
+            echo "No SMOKE_MCP_${ENVIRONMENT^^}_URL configured — skipping $ENVIRONMENT live smoke."
+            exit 0
+          fi
+          AMFS_HTTP_URL="$URL" AMFS_API_KEY="$KEY" python scripts/mcp_live_smoke.py

@@ -118,13 +118,15 @@ ensure_uv() {
 # ── Step 2: Pre-install amfs-mcp-server ──────────────────────────────────────
 
 ensure_amfs_mcp() {
+    # `--refresh` so the warm-up pulls the latest published build, matching the
+    # `--refresh` the generated client config uses at launch.
     if [[ -n "$API_KEY" ]]; then
         info "Installing amfs-mcp-server-pro (SaaS)..."
-        uvx --from amfs-mcp-server-pro amfs-mcp-server-pro --help &>/dev/null || true
+        uvx --refresh --from amfs-mcp-server-pro amfs-mcp-server-pro --help &>/dev/null || true
         success "amfs-mcp-server-pro is ready"
     else
         info "Installing amfs-mcp-server..."
-        uvx --from amfs-mcp-server amfs-mcp-server --help &>/dev/null || true
+        uvx --refresh --from amfs-mcp-server amfs-mcp-server --help &>/dev/null || true
         success "amfs-mcp-server is ready"
     fi
 }
@@ -177,10 +179,15 @@ ENVJSON
 )
     fi
 
+    # `--refresh` forces uvx to re-resolve from PyPI on each launch instead of
+    # reusing a stale cached environment. Without it, a user who ever ran an
+    # older build keeps getting it forever — even after we publish a fix — so
+    # retrieval can stay broken across releases. The small per-launch re-resolve
+    # cost is worth never serving a stale MCP server.
     cat <<MCPJSON
 {
         "command": "$UVX_PATH",
-        "args": ["$pkg"],
+        "args": ["--refresh", "$pkg"],
         "env": $env_block
     }
 MCPJSON
@@ -431,10 +438,13 @@ configure_client() {
                 resolve_uvx_path
                 local pkg="amfs-mcp-server"
                 if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
-                local args=("mcp" "add" "senselab" "--" "$UVX_PATH" "$pkg")
+                # `--refresh` (a uvx flag, before the package) forces a fresh
+                # re-resolve each launch so users never get stuck on a stale
+                # cached build after we publish a fix.
+                local args=("mcp" "add" "senselab" "--" "$UVX_PATH" "--refresh" "$pkg")
                 if [[ -n "$API_KEY" ]]; then
                     local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
-                    args=("mcp" "add" "senselab" "-e" "AMFS_HTTP_URL=$url" "-e" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "$pkg")
+                    args=("mcp" "add" "senselab" "-e" "AMFS_HTTP_URL=$url" "-e" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "--refresh" "$pkg")
                 fi
                 claude "${args[@]}"
                 success "Configured Claude Code"
@@ -459,10 +469,13 @@ configure_client() {
                 local pkg="amfs-mcp-server"
                 if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
                 # codex mcp add <name> [--env KEY=VAL]... -- <command> [args...]
-                local args=("mcp" "add" "senselab" "--" "$UVX_PATH" "$pkg")
+                # `--refresh` (uvx flag, before the package) forces a fresh
+                # re-resolve each launch so a stale cache can't pin users to an
+                # old build after we publish a fix.
+                local args=("mcp" "add" "senselab" "--" "$UVX_PATH" "--refresh" "$pkg")
                 if [[ -n "$API_KEY" ]]; then
                     local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
-                    args=("mcp" "add" "senselab" "--env" "AMFS_HTTP_URL=$url" "--env" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "$pkg")
+                    args=("mcp" "add" "senselab" "--env" "AMFS_HTTP_URL=$url" "--env" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "--refresh" "$pkg")
                 fi
                 # Replace any existing entry so re-runs stay idempotent.
                 codex mcp remove senselab 2>/dev/null || true
