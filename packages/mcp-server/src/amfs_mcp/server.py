@@ -234,9 +234,28 @@ _session_metadata: SessionMetadata | None = None
 _IDENTITY_COOLDOWN_SECONDS = 30
 
 
-def _identity_file() -> Path:
-    """Path to the sticky identity file."""
+def _legacy_identity_file() -> Path:
+    """Path to the pre-per-client shared sticky identity file.
+
+    This machine-global file was shared by EVERY MCP client, so a work
+    identity set in one client (e.g. Cursor) leaked into another (e.g. Claude
+    Desktop), overriding its auto-detected identity and hiding the user's real
+    memories. We no longer read it for auto-restore; kept only so it can be
+    cleaned up on the next save/reset.
+    """
     return Path.home() / ".amfs" / ".identity"
+
+
+def _identity_file() -> Path:
+    """Path to the sticky identity file, scoped per client.
+
+    Keyed by the detected platform (cursor / claude-code / cli) so each client
+    restores its OWN last identity and Cursor work identities never leak into
+    Claude Desktop (which detects as "cli") or vice versa. Note: distinct
+    non-IDE clients (Claude Desktop, headless CLI) all map to "cli" and share
+    one file — acceptable, since the reported leak is across IDE vs desktop.
+    """
+    return Path.home() / ".amfs" / f".identity-{detect_platform()}"
 
 
 def _save_sticky_identity(name: str) -> None:
@@ -247,10 +266,22 @@ def _save_sticky_identity(name: str) -> None:
         path.write_text(name, encoding="utf-8")
     except OSError:
         logger.debug("Could not save sticky identity to %s", _identity_file(), exc_info=True)
+    # Best-effort: retire the legacy machine-global file so stale cross-client
+    # state can't be restored by an older client on this machine.
+    try:
+        legacy = _legacy_identity_file()
+        if legacy.is_file():
+            legacy.unlink()
+    except OSError:
+        logger.debug("Could not remove legacy sticky identity file", exc_info=True)
 
 
 def _load_sticky_identity() -> str | None:
-    """Load the previously set identity from disk, if it exists."""
+    """Load the previously set identity for THIS client, if it exists.
+
+    Only reads the per-client file — never the legacy shared file — so a work
+    identity set in another client cannot bleed into this session.
+    """
     try:
         path = _identity_file()
         if path.is_file():
@@ -260,6 +291,25 @@ def _load_sticky_identity() -> str | None:
     except OSError:
         logger.debug("Could not read sticky identity from %s", _identity_file(), exc_info=True)
     return None
+
+
+def _call_compat(fn: Any, **kwargs: Any) -> Any:
+    """Call ``fn(**kwargs)`` resiliently across amfs-mcp / amfs SDK version skew.
+
+    The hosted connector can run a newer amfs-mcp (whose read tools pass
+    ``include_artifacts``) against an older installed amfs SDK whose
+    ``retrieve``/``search`` predate that parameter — which otherwise raises
+    ``TypeError: ... unexpected keyword argument 'include_artifacts'`` and
+    hard-breaks recall on clients like Claude Desktop. Retry once without the
+    offending kwarg so retrieval degrades gracefully instead of failing.
+    """
+    try:
+        return fn(**kwargs)
+    except TypeError as e:
+        if "include_artifacts" in kwargs and "include_artifacts" in str(e):
+            kwargs.pop("include_artifacts", None)
+            return fn(**kwargs)
+        raise
 
 
 def _get_adapter() -> AdapterABC:
@@ -605,12 +655,12 @@ def amfs_reset_identity() -> str:
     global _active_identity
     old = _active_identity
     _active_identity = None
-    try:
-        path = _identity_file()
-        if path.is_file():
-            path.unlink()
-    except OSError:
-        logger.debug("Could not remove sticky identity file", exc_info=True)
+    for path in (_identity_file(), _legacy_identity_file()):
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            logger.debug("Could not remove sticky identity file %s", path, exc_info=True)
     return json.dumps({
         "previous_identity": old,
         "current_identity": detect_agent_id(),
@@ -796,7 +846,8 @@ def amfs_search(
     except (ValueError, TypeError) as e:
         return json.dumps({"error": f"Invalid 'since' timestamp: {e}"})
 
-    results = mem.search(
+    results = _call_compat(
+        mem.search,
         query=query,
         entity_path=entity_path,
         min_confidence=min_confidence,
@@ -879,7 +930,8 @@ def amfs_retrieve(
 
     # Prefer server-side semantic retrieval (embedder + pgvector live on the
     # server); falls back to client-side composite scoring for local adapters.
-    results = mem.retrieve(
+    results = _call_compat(
+        mem.retrieve,
         query=query,
         entity_path=entity_path,
         min_confidence=min_confidence,
