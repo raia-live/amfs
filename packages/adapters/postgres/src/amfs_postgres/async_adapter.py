@@ -18,6 +18,7 @@ from typing import Any
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from amfs_postgres._fts import or_tsquery
 from amfs_core.content import classify_artifact
 from amfs_core.exceptions import VersionConflictError
 from amfs_core.models import (
@@ -415,6 +416,7 @@ class AsyncPostgresAdapter:
     async def search(self, query: SearchQuery, *, branch: str = "main") -> list[MemoryEntry]:
         use_fts = bool(query.query and self._has_search_tsv)
         col_ready = self._has_is_artifact_col
+        tsq_sql, tsq_params = or_tsquery(query.query) if use_fts else ("", [])
 
         conditions = ["namespace = %s", "branch = %s", "superseded_at IS NULL"]
         params: list[Any] = [self._namespace, branch]
@@ -446,8 +448,8 @@ class AsyncPostgresAdapter:
             params.append(query.pattern_ref)
 
         if use_fts:
-            conditions.append("search_tsv @@ plainto_tsquery('english', %s)")
-            params.append(query.query)
+            conditions.append(f"search_tsv @@ {tsq_sql}")
+            params.extend(tsq_params)
         elif query.query and query.recall_config is None:
             conditions.append(
                 "(key ILIKE %s OR entity_path ILIKE %s OR value::text ILIKE %s)"
@@ -462,8 +464,8 @@ class AsyncPostgresAdapter:
         }
 
         if use_fts and query.sort_by == "confidence":
-            order = "ts_rank(search_tsv, plainto_tsquery('english', %s)) DESC, confidence DESC"
-            params.append(query.query)
+            order = f"ts_rank(search_tsv, {tsq_sql}) DESC, confidence DESC"
+            params.extend(tsq_params)
         else:
             order = order_map.get(query.sort_by, "confidence DESC")
 
