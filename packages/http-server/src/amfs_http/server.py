@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -189,6 +190,67 @@ def _get_server_embedder():
             logger.info("AMFS_ENABLE_EMBEDDINGS is off — semantic retrieval disabled")
     return _server_embedder
 
+
+# ── Injectable retrieval enhancers (Pro layer) ─────────────────────────
+# The Pro layer registers a cross-encoder reranker and/or an LLM query
+# rewriter into the SINGLE /api/v1/retrieve path (see set_retrieval_enhancers,
+# called from mount_pro_api). Keeping ranking here — rather than in a separate
+# Pro endpoint — means account (RLS) + per-user/room (UserVisibilityFilter)
+# isolation is enforced in exactly one place and can never drift. Both are
+# no-ops when unset, so a pure-OSS deployment is unchanged.
+_retrieval_reranker: Any = None
+_retrieval_query_rewriter: Any = None
+
+
+def set_retrieval_enhancers(reranker: Any = None, query_rewriter: Any = None) -> None:
+    """Register optional retrieval enhancers used by /api/v1/retrieve.
+
+    - ``reranker``: object with ``available: bool`` and
+      ``rerank(query, docs) -> list[float]`` (e.g. amfs_retrieval.CrossEncoderReranker).
+    - ``query_rewriter``: object with ``expand(query) -> list[str]``
+      (e.g. amfs_retrieval.LLMQueryRewriter). Should return ``[query]`` when
+      disabled.
+    """
+    global _retrieval_reranker, _retrieval_query_rewriter
+    if reranker is not None:
+        _retrieval_reranker = reranker
+    if query_rewriter is not None:
+        _retrieval_query_rewriter = query_rewriter
+
+
+# Benchmark/system scratch namespaces must never outrank a user's real memory
+# in recall (the incident that motivated this had bench rows crowding out real
+# task summaries). Matched against the leading segment of entity_path.
+_EXCLUDED_ENTITY_RE = re.compile(r"^(?:_system(?:/|$)|_?bench[-/])", re.I)
+
+
+def _is_excluded_entity(entity_path: str) -> bool:
+    return bool(entity_path) and bool(_EXCLUDED_ENTITY_RE.match(entity_path))
+
+
+def _retrieve_min_semantic() -> float:
+    """Abstain floor: results whose semantic similarity is below this AND that
+    have no keyword match are trimmed as clearly-irrelevant tail (the top
+    result is always kept). Env-tunable; conservative default."""
+    try:
+        return float(os.environ.get("AMFS_RETRIEVE_MIN_SEMANTIC", "0.15"))
+    except ValueError:
+        return 0.15
+
+
+def _doc_text_for_rerank(entry: MemoryEntry) -> str:
+    """Compact document text for the cross-encoder: key + stringified value,
+    bounded so a huge value can't blow up the reranker input."""
+    val = entry.value
+    if not isinstance(val, str):
+        try:
+            val = json.dumps(val, default=str)
+        except Exception:  # noqa: BLE001
+            val = str(val)
+    text = f"{entry.key}: {val}"
+    return text[:2000]
+
+
 _immutable_trace_store = None
 try:
     from amfs_traces.api import mount_pro_routes
@@ -286,6 +348,33 @@ try:
     logger.info("Pro API endpoints mounted (intelligence, extraction)")
 except ImportError:
     pass
+
+# Optional retrieval enhancers (proprietary amfs_retrieval, same optional-import
+# pattern as the pro blocks above). When the package is present — as in the
+# hosted amfs-pro image that serves /api/v1/retrieve — inject a cross-encoder
+# reranker + query rewriter into the SINGLE retrieve path so ranking improves
+# without a second endpoint (isolation stays enforced in one place). Absent in
+# pure-OSS installs, where retrieve stays hybrid-but-unreranked.
+try:
+    from amfs_retrieval import CrossEncoderReranker, LLMQueryRewriter
+
+    _rerank_on = os.environ.get("AMFS_RERANK", "true").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    # ms-marco-MiniLM-L-6-v2: 0.08GB, apache-2.0 (commercial-safe). The
+    # fastembed default (jina v2) is cc-by-nc-4.0 and 1.1GB — unsuitable for a
+    # commercial SaaS image. Overridable via AMFS_RERANK_MODEL.
+    _rerank_model = os.environ.get("AMFS_RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+    _reranker = CrossEncoderReranker(model_name=_rerank_model) if _rerank_on else None
+    set_retrieval_enhancers(reranker=_reranker, query_rewriter=LLMQueryRewriter())
+    logger.info(
+        "Retrieval enhancers registered (rerank=%s model=%s, query_rewrite=%s)",
+        _rerank_on, _rerank_model, os.environ.get("AMFS_QUERY_REWRITE", "false"),
+    )
+except ImportError:
+    logger.debug("amfs_retrieval not installed — /retrieve stays hybrid without rerank")
+except Exception:  # noqa: BLE001 - never block startup on enhancers
+    logger.warning("Retrieval enhancer registration failed", exc_info=True)
 
 try:
     from amfs_rooms import mount_rooms
@@ -939,118 +1028,210 @@ async def retrieve_entries(
     Account isolation comes from the RLS-scoped async adapter; user/room
     visibility is then enforced by UserVisibilityFilter (same as /search).
 
-    Degrades gracefully to lexical search when the embedder or pgvector column
-    is unavailable, so this endpoint never returns worse than /search.
+    Hybrid by construction: candidates are the UNION of pgvector semantic
+    neighbours and OR-tsquery lexical matches (not a zero-hit-only fallback),
+    so a paraphrase match and an exact-term match both surface. Temporal intent
+    ("yesterday", "last week") is parsed out of the query into a recency signal
+    instead of polluting the embedded text. Account isolation (RLS) + per-user/
+    room visibility (UserVisibilityFilter) are applied ONCE over the merged set.
+    A Pro-injected cross-encoder reranker and query rewriter refine the top
+    candidates when present. Degrades gracefully to lexical-only when the
+    embedder or pgvector column is unavailable.
     """
     from datetime import datetime as _dt, timezone as _tz
+
+    from amfs_core.content import ARTIFACT_PENALTY, classify_artifact
+    from amfs_core.query_norm import normalize_temporal
 
     branch = req.branch or "main"
     vis = _get_visibility_filter(request)
     embedder = _get_server_embedder()
 
-    pairs: list[tuple[MemoryEntry, float]] = []
-    if embedder is not None and _async_adapter is not None:
-        # Over-fetch a candidate pool so the recency/confidence blend has
-        # headroom beyond pure similarity, then trim to `limit` after scoring.
-        pool = max(req.limit * 5, 50)
-        sq = SemanticQuery(
-            text=req.query,
-            entity_path=req.entity_path,
-            min_confidence=req.min_confidence,
-            limit=pool,
-        )
+    # 1. Split temporal intent out of the query so it becomes a recency signal
+    #    rather than embedded/lexical noise.
+    tnorm = normalize_temporal(req.query)
+    topical = tnorm.topical
+    recency_weight = req.recency_weight * tnorm.recency_weight_boost
+
+    # 2. Query variants: the Pro-injected rewriter adds paraphrases/HyDE; in OSS
+    #    this is just the topical query.
+    queries: list[str] = [topical]
+    rewriter = _retrieval_query_rewriter
+    if rewriter is not None:
         try:
-            pairs = await _async_adapter.semantic_search(sq, embedder, branch=branch)
-        except Exception:
-            logger.warning("semantic_search failed — falling back to lexical", exc_info=True)
-            pairs = []
+            for q in rewriter.expand(topical):
+                if q and q not in queries:
+                    queries.append(q)
+        except Exception:  # noqa: BLE001 - rewrite is best-effort
+            logger.debug("query rewrite failed", exc_info=True)
 
-    if pairs:
-        if vis is not None and vis.should_filter():
-            allowed = {id(e) for e in vis.filter_entries([e for e, _ in pairs])}
-            pairs = [(e, s) for e, s in pairs if id(e) in allowed]
+    # Over-fetch a wide candidate pool so the blend + visibility filtering have
+    # headroom before trimming to `limit`.
+    pool = max(req.limit * 10, 150)
 
-        # Artifact awareness. The is_artifact column is authoritative once
-        # backfilled; before that (older DB) classify on the fly over the small
-        # candidate pool so demotion works immediately.
-        from amfs_core.content import ARTIFACT_PENALTY, classify_artifact
-        col_ready = getattr(_async_adapter, "_has_is_artifact_col", False)
+    # entry_key -> {"entry", "sim", "keyword"}
+    candidates: dict[str, dict[str, Any]] = {}
 
-        def _is_artifact(e: MemoryEntry) -> bool:
-            if col_ready:
-                return bool(e.is_artifact)
-            return classify_artifact(e.key, e.value)
-
-        if not req.include_artifacts:
-            pairs = [(e, s) for e, s in pairs if not _is_artifact(e)]
-
-        now = _dt.now(_tz.utc)
-        half_life = 30.0
-        scored: list[tuple[MemoryEntry, float, dict[str, float]]] = []
-        for entry, sim in pairs:
-            written = getattr(entry.provenance, "written_at", None)
-            if written is not None:
-                if written.tzinfo is None:
-                    written = written.replace(tzinfo=_tz.utc)
-                age_days = max(0.0, (now - written).total_seconds() / 86400.0)
-                recency = 0.5 ** (age_days / half_life)
-            else:
-                recency = 0.0
-            conf = float(entry.confidence)
-            score = (
-                req.semantic_weight * sim
-                + req.recency_weight * recency
-                + req.confidence_weight * conf
+    # 3a. Semantic channel (per query variant), keep best similarity per entry.
+    if embedder is not None and _async_adapter is not None:
+        for qtext in queries:
+            sq = SemanticQuery(
+                text=qtext,
+                entity_path=req.entity_path,
+                min_confidence=req.min_confidence,
+                limit=pool,
             )
-            artifact = _is_artifact(entry)
-            if artifact:
-                # Multiplicative demotion: a code file no longer outranks a real
-                # fact on a generic query, but a genuinely code-relevant query
-                # (high sim) can still surface it.
-                score *= ARTIFACT_PENALTY
-            scored.append((entry, score, {
-                "semantic": round(sim, 4),
-                "recency": round(recency, 4),
-                "confidence": round(conf, 4),
-                "is_artifact": artifact,
-            }))
+            try:
+                pairs = await _async_adapter.semantic_search(sq, embedder, branch=branch)
+            except Exception:
+                logger.warning("semantic_search failed — continuing with lexical", exc_info=True)
+                pairs = []
+            for entry, sim in pairs:
+                slot = candidates.get(entry.entry_key)
+                if slot is None:
+                    candidates[entry.entry_key] = {"entry": entry, "sim": sim, "keyword": 0.0}
+                elif sim > slot["sim"]:
+                    slot["sim"] = sim
 
-        scored.sort(key=lambda t: t[1], reverse=True)
-        out: list[dict[str, Any]] = []
-        for entry, score, breakdown in scored[: req.limit]:
-            data = _entry_to_response(entry)
-            data["_score"] = round(score, 4)
-            data["_breakdown"] = breakdown
-            out.append(data)
-        return out
-
-    # ── Lexical fallback (embedder/pgvector unavailable, or no vector hits) ──
+    # 3b. Lexical channel (first-class, always run — OR-tsquery recall).
     sq_lex = SearchQuery(
-        query=req.query,
+        query=topical,
         entity_path=req.entity_path,
         min_confidence=req.min_confidence,
-        limit=req.limit,
+        limit=pool,
         sort_by="confidence",
         depth=3,
         include_artifacts=req.include_artifacts,
     )
-    mem = _get_memory()
-    results: list[MemoryEntry] = []
+    lex_entries: list[MemoryEntry] = []
     if _async_adapter is not None:
         try:
-            results = await _async_adapter.search(sq_lex, branch=branch)
+            lex_entries = await _async_adapter.search(sq_lex, branch=branch)
         except Exception:
-            results = []
-    if not results:
+            logger.debug("async lexical search failed", exc_info=True)
+            lex_entries = []
+    for entry in lex_entries:
+        slot = candidates.get(entry.entry_key)
+        if slot is None:
+            candidates[entry.entry_key] = {"entry": entry, "sim": 0.0, "keyword": 1.0}
+        else:
+            slot["keyword"] = 1.0
+
+    # 3c. Sync fallback only if nothing came back from the async paths (e.g.
+    #     non-postgres deployment or embedder+async both unavailable).
+    if not candidates:
+        mem = _get_memory()
         try:
             results = mem._adapter.search(sq_lex, branch=branch)
         except TypeError:
             results = mem._adapter.search(sq_lex)
         except Exception:
             results = []
+        for entry in results:
+            candidates.setdefault(
+                entry.entry_key, {"entry": entry, "sim": 0.0, "keyword": 1.0}
+            )
+
+    # 4. Drop benchmark/system scratch namespaces from user recall.
+    candidates = {
+        k: v
+        for k, v in candidates.items()
+        if not _is_excluded_entity(getattr(v["entry"], "entity_path", ""))
+    }
+
+    # 5. Visibility (account RLS already scoped the fetch; this adds per-user +
+    #    room scoping) applied ONCE over the full merged set so lexical-only
+    #    hits are filtered exactly like semantic ones — no leak path.
     if vis is not None and vis.should_filter():
-        results = vis.filter_entries(results)
-    return [_entry_to_response(e) for e in results]
+        allowed = {e.entry_key for e in vis.filter_entries([v["entry"] for v in candidates.values()])}
+        candidates = {k: v for k, v in candidates.items() if k in allowed}
+
+    # 6. Artifact awareness (column authoritative once backfilled; classify on
+    #    the fly otherwise so demotion works immediately).
+    col_ready = getattr(_async_adapter, "_has_is_artifact_col", False)
+
+    def _is_artifact(e: MemoryEntry) -> bool:
+        if col_ready:
+            return bool(e.is_artifact)
+        return classify_artifact(e.key, e.value)
+
+    if not req.include_artifacts:
+        candidates = {k: v for k, v in candidates.items() if not _is_artifact(v["entry"])}
+
+    # 7. Blend semantic + recency + confidence + keyword.
+    now = _dt.now(_tz.utc)
+    half_life = 30.0
+    keyword_weight = 0.15
+    scored: list[tuple[MemoryEntry, float, dict[str, Any]]] = []
+    for slot in candidates.values():
+        entry = slot["entry"]
+        sim = float(slot["sim"])
+        keyword = float(slot["keyword"])
+        written = getattr(entry.provenance, "written_at", None)
+        if written is not None:
+            if written.tzinfo is None:
+                written = written.replace(tzinfo=_tz.utc)
+            age_days = max(0.0, (now - written).total_seconds() / 86400.0)
+            recency = 0.5 ** (age_days / half_life)
+        else:
+            recency = 0.0
+        conf = float(entry.confidence)
+        score = (
+            req.semantic_weight * sim
+            + recency_weight * recency
+            + req.confidence_weight * conf
+            + keyword_weight * keyword
+        )
+        artifact = _is_artifact(entry)
+        if artifact:
+            score *= ARTIFACT_PENALTY
+        scored.append((entry, score, {
+            "semantic": round(sim, 4),
+            "recency": round(recency, 4),
+            "confidence": round(conf, 4),
+            "keyword": round(keyword, 4),
+            "is_artifact": artifact,
+        }))
+
+    scored.sort(key=lambda t: t[1], reverse=True)
+
+    # 8. Cross-encoder rerank (Pro-injected) over the top-N, then reorder them
+    #    ahead of the untouched tail.
+    reranker = _retrieval_reranker
+    rerank_top_n = 30
+    if reranker is not None and getattr(reranker, "available", False) and scored:
+        head = scored[:rerank_top_n]
+        try:
+            rr_scores = reranker.rerank(topical, [_doc_text_for_rerank(e) for e, _, _ in head])
+        except Exception:  # noqa: BLE001 - rerank is best-effort
+            logger.debug("rerank failed", exc_info=True)
+            rr_scores = None
+        if rr_scores and len(rr_scores) == len(head):
+            reranked = [
+                (entry, float(rs), {**bd, "rerank": round(float(rs), 4)})
+                for (entry, _, bd), rs in zip(head, rr_scores)
+            ]
+            reranked.sort(key=lambda t: t[1], reverse=True)
+            scored = reranked + scored[rerank_top_n:]
+
+    # 9. Abstain floor: trim clearly-irrelevant tail (low semantic AND no
+    #    keyword match), but never drop the single best result.
+    floor = _retrieve_min_semantic()
+    if floor > 0 and len(scored) > 1:
+        kept = [scored[0]]
+        for entry, score, bd in scored[1:]:
+            if bd.get("semantic", 0.0) < floor and not bd.get("keyword"):
+                continue
+            kept.append((entry, score, bd))
+        scored = kept
+
+    out: list[dict[str, Any]] = []
+    for entry, score, breakdown in scored[: req.limit]:
+        data = _entry_to_response(entry)
+        data["_score"] = round(score, 4)
+        data["_breakdown"] = breakdown
+        out.append(data)
+    return out
 
 
 # ──────────────────────────────────────────────────────────────────────
