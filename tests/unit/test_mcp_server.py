@@ -394,6 +394,89 @@ class TestIdentityGuard:
         assert raw["entry"]["provenance"]["agent_id"] == "writer-agent"
 
 
+class TestPerClientStickyIdentity:
+    """Sticky identity is scoped per client so a work identity set in one
+    client (Cursor) never leaks into another (Claude Desktop → "cli")."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_home(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # Neutralise inherited IDE signals so each test picks its own platform.
+        for var in ("CURSOR_SESSION_ID", "VSCODE_PID", "CLAUDE_CODE_SESSION"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_identity_file_scoped_by_platform(self, monkeypatch) -> None:
+        import amfs_mcp.server as srv
+
+        monkeypatch.setenv("CURSOR_SESSION_ID", "x")
+        assert srv._identity_file().name == ".identity-cursor"
+
+        monkeypatch.delenv("CURSOR_SESSION_ID", raising=False)
+        # Claude Desktop / generic desktop detects as "cli".
+        assert srv._identity_file().name == ".identity-cli"
+
+    def test_no_cross_client_leak(self, monkeypatch) -> None:
+        import amfs_mcp.server as srv
+
+        # Cursor sets a work identity...
+        monkeypatch.setenv("CURSOR_SESSION_ID", "x")
+        srv._save_sticky_identity("value-metrics-agent")
+        assert srv._load_sticky_identity() == "value-metrics-agent"
+
+        # ...Claude Desktop (cli) must NOT inherit it.
+        monkeypatch.delenv("CURSOR_SESSION_ID", raising=False)
+        assert srv._load_sticky_identity() is None
+
+    def test_save_retires_legacy_shared_file(self, monkeypatch) -> None:
+        import amfs_mcp.server as srv
+
+        monkeypatch.setenv("CURSOR_SESSION_ID", "x")
+        legacy = srv._legacy_identity_file()
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text("old-shared-id", encoding="utf-8")
+
+        srv._save_sticky_identity("new-id")
+        assert not legacy.is_file()
+        assert srv._load_sticky_identity() == "new-id"
+
+
+class TestCallCompat:
+    """amfs-mcp must not hard-fail against an older amfs SDK whose
+    retrieve/search predate include_artifacts (version skew)."""
+
+    def test_drops_include_artifacts_on_typeerror(self) -> None:
+        from amfs_mcp.server import _call_compat
+
+        seen: dict = {}
+
+        def old_retrieve(**kwargs):
+            if "include_artifacts" in kwargs:
+                raise TypeError(
+                    "retrieve() got an unexpected keyword argument 'include_artifacts'"
+                )
+            seen.update(kwargs)
+            return "ok"
+
+        assert _call_compat(old_retrieve, query="q", include_artifacts=True) == "ok"
+        assert "include_artifacts" not in seen
+        assert seen["query"] == "q"
+
+    def test_passes_through_when_supported(self) -> None:
+        from amfs_mcp.server import _call_compat
+
+        result = _call_compat(lambda **kw: kw, query="q", include_artifacts=False)
+        assert result["include_artifacts"] is False
+
+    def test_reraises_unrelated_typeerror(self) -> None:
+        from amfs_mcp.server import _call_compat
+
+        def broken(**kwargs):
+            raise TypeError("something else entirely")
+
+        with pytest.raises(TypeError, match="something else"):
+            _call_compat(broken, query="q", include_artifacts=True)
+
+
 # ---------------------------------------------------------------------------
 # Transport / CLI arg parsing tests
 # ---------------------------------------------------------------------------
