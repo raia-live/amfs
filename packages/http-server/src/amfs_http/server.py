@@ -1229,19 +1229,20 @@ async def retrieve_entries(
     #     (e.g. browser-extension clips) get surfaced and used, but it
     #     historically incremented no counter — so value metrics (rework
     #     avoided / memories reused) read 0 even when memory was clearly reused.
-    #     Bump recall_count for the SINGLE top-ranked hit only, so reuse tracks
-    #     real usage without inflating on every candidate returned. Best-effort:
-    #     never let accounting failure affect the response.
-    if scored:
-        top_entry = scored[0][0]
+    #     Bump recall_count for the top-K returned hits (not every candidate),
+    #     so reuse reflects the memories actually surfaced to the caller without
+    #     inflating on the long tail. Best-effort: never let accounting failure
+    #     affect the response.
+    reuse_credit_k = min(3, req.limit)
+    for entry, _score, _bd in scored[:reuse_credit_k]:
         try:
             if _async_adapter is not None:
                 await _async_adapter.increment_recall_count(
-                    top_entry.entity_path, top_entry.key, branch=branch
+                    entry.entity_path, entry.key, branch=branch
                 )
             else:
                 _get_memory()._adapter.increment_recall_count(
-                    top_entry.entity_path, top_entry.key, branch=branch
+                    entry.entity_path, entry.key, branch=branch
                 )
         except Exception:  # noqa: BLE001 - reuse accounting is best-effort
             logger.debug("retrieve recall bump failed", exc_info=True)
