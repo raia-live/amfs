@@ -1225,6 +1225,27 @@ async def retrieve_entries(
             kept.append((entry, score, bd))
         scored = kept
 
+    # 10. Reuse accounting. Semantic retrieval is the primary way memories
+    #     (e.g. browser-extension clips) get surfaced and used, but it
+    #     historically incremented no counter — so value metrics (rework
+    #     avoided / memories reused) read 0 even when memory was clearly reused.
+    #     Bump recall_count for the SINGLE top-ranked hit only, so reuse tracks
+    #     real usage without inflating on every candidate returned. Best-effort:
+    #     never let accounting failure affect the response.
+    if scored:
+        top_entry = scored[0][0]
+        try:
+            if _async_adapter is not None:
+                await _async_adapter.increment_recall_count(
+                    top_entry.entity_path, top_entry.key, branch=branch
+                )
+            else:
+                _get_memory()._adapter.increment_recall_count(
+                    top_entry.entity_path, top_entry.key, branch=branch
+                )
+        except Exception:  # noqa: BLE001 - reuse accounting is best-effort
+            logger.debug("retrieve recall bump failed", exc_info=True)
+
     out: list[dict[str, Any]] = []
     for entry, score, breakdown in scored[: req.limit]:
         data = _entry_to_response(entry)
