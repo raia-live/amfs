@@ -17,6 +17,24 @@ npm run compile    # typecheck
 Load unpacked: `chrome://extensions` → Developer mode → Load unpacked →
 `.output/chrome-mv3`.
 
+## Agent identity convention
+
+Every clip is authored under the canonical `web-clipper` agent id
+(`CLIPPER_AGENT_ID` in `utils/config.ts`). This is the single identity for all
+extension-related memory.
+
+When working on this extension with AMFS memory, set your identity to the same
+canonical id so build notes and real user clips stay on one agent page (and
+reuse/recall metrics don't get split):
+
+```
+amfs_set_identity("web-clipper", "<what you're working on>", model="<your-model>")
+```
+
+Do **not** use ad-hoc dev ids like `chrome-extension-agent` for extension work —
+AMFS has no agent rename/merge, so a split identity can only be reconciled by a
+costly multi-table migration.
+
 ## Layout
 
 - `entrypoints/background.ts` — service worker: context menus, keyboard
