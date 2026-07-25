@@ -103,6 +103,13 @@ function Install-UvIfMissing {
 
     Write-Info "uv not found - installing..."
     try {
+        # PowerShell 5.1 can still default to TLS 1.0, which astral.sh refuses.
+        try {
+            [Net.ServicePointManager]::SecurityProtocol =
+                [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        } catch {
+            # PowerShell 7+ negotiates TLS itself and may not expose Tls12 here.
+        }
         Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
     } catch {
         Stop-WithError @"
@@ -378,12 +385,20 @@ function Invoke-Cli {
     if (-not $command) { return $false }
 
     $target = $command.Source
+    # Capture stdout instead of letting it flow into this function's output,
+    # which would otherwise be returned alongside the boolean and make every
+    # call look successful. stderr is left alone so real errors stay visible.
+    $global:LASTEXITCODE = 0
     if ($target -match '\.(cmd|bat)$') {
-        & cmd.exe /c $target @CliArgs
+        $output = & cmd.exe /c $target @CliArgs
     } else {
-        & $target @CliArgs
+        $output = & $target @CliArgs
     }
-    return ($LASTEXITCODE -eq 0)
+    $succeeded = ($LASTEXITCODE -eq 0)
+    if (-not $succeeded -and $output) {
+        Write-Verbose ($output -join [Environment]::NewLine)
+    }
+    return $succeeded
 }
 
 function Test-CliExists {
