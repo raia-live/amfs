@@ -21,16 +21,27 @@ AMFS provides a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
 
 ## Quick Install
 
-The fastest way to set up AMFS MCP — one command that installs everything and configures your IDE automatically:
+The fastest way to set up AMFS MCP — one command that installs everything and configures your IDE automatically.
+
+**macOS / Linux:**
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.sh | bash
 ```
 
-This will:
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.ps1 | iex
+```
+
+Either script will:
 1. Install [`uv`](https://docs.astral.sh/uv/) if you don't have it
 2. Install the `amfs-mcp-server` package
 3. Detect your installed MCP clients (Cursor, Claude Desktop, Claude Code, Windsurf, VS Code) and configure them
+
+{: .note }
+Windows users running Claude Code under WSL should use the macOS/Linux command instead — WSL is a Linux environment. Use the PowerShell script only for native Windows installs.
 
 ### Connecting to AMFS SaaS
 
@@ -38,6 +49,18 @@ Pass your API key to connect to hosted AMFS:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.sh | bash -s -- --api-key <your-key>
+```
+
+On Windows, `irm | iex` cannot forward arguments, so pass the key through the environment:
+
+```powershell
+$env:AMFS_API_KEY="<your-key>"; irm https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.ps1 | iex
+```
+
+Or invoke the script as a scriptblock to pass parameters explicitly:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.ps1))) -ApiKey <your-key>
 ```
 
 ### Non-interactive / CI
@@ -55,6 +78,15 @@ curl -sSL ... | bash -s -- --uninstall
 ```
 
 Supported `--client` values: `claude-desktop`, `cursor`, `claude-code`, `windsurf`, `vscode`, `all`.
+
+On Windows the same options are PowerShell parameters (`-Client`, `-ApiKey`, `-Yes`, `-Uninstall`), which requires downloading the script first so arguments can be passed:
+
+```powershell
+irm https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.ps1 -OutFile install-mcp.ps1
+.\install-mcp.ps1 -Client cursor
+.\install-mcp.ps1 -Client all -Yes -ApiKey <your-key>
+.\install-mcp.ps1 -Uninstall
+```
 
 {: .note }
 Prefer the quick installer above. The manual sections below are for advanced setups or unsupported clients.
@@ -114,7 +146,10 @@ After setup, your AI agents have tools across five categories:
 
 ## AMFS Pro (SaaS) and Cursor
 
-On **Sense Lab**, the AMFS dashboard (**Agents** page, MCP Connection card) is the source of truth. Cursor talks to hosted AMFS by running the **`amfs-mcp-server`** process locally with **stdio** (e.g. `uvx`), while the server uses **`AMFS_HTTP_URL`** (dashboard **Server URL**, e.g. `https://amfs-login.sense-lab.ai`) and **`AMFS_API_KEY`** to call the HTTP API. That URL is the **API base**, not an MCP Streamable HTTP path—there is **no `/mcp`** on it for this setup. The `/mcp` path applies only when you run the MCP server in **HTTP transport mode** as its own listening service (see [Streamable HTTP](#streamable-http-team--remote) below).
+On **Sense Lab**, the AMFS dashboard (**Agents** page, MCP Connection card) is the source of truth. Cursor talks to hosted AMFS by running the **`amfs-mcp-server`** process locally with **stdio** (e.g. `uvx`), while the server uses **`AMFS_HTTP_URL`** (dashboard **Server URL**, e.g. `https://amfs-login.sense-lab.ai`) and **`AMFS_API_KEY`** to call the HTTP API. In this setup `AMFS_HTTP_URL` is the **API base** and must not include a path.
+
+{: .note }
+The hosted API *does* also serve a Streamable HTTP MCP endpoint at **`/mcp`** (authenticate with `Authorization: Bearer <amfs_key>` or `X-AMFS-API-Key`), which needs no local process at all. It exposes a **minimal tool set** intended for app-building sessions, so features such as **Rooms**, negotiations, identity, and trace browsing are **not** available there. Use the stdio setup below for the full tool set.
 
 Use the official **[Cursor plugin](https://github.com/raia-live/cursor-plugin)** (same shape as the dashboard JSON) or copy the snippet from the dashboard. Set **`AMFS_API_KEY`** in your environment and reference it with [Cursor interpolation](https://cursor.com/docs/mcp.md#config-interpolation). See also [SaaS / hosted AMFS](https://raia-live.github.io/amfs/guides/saas/).
 

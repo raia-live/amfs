@@ -88,10 +88,18 @@ Drop AMFS into whatever you're already using. No rewrites. Your agents start sha
 <details>
 <summary><strong>MCP — Cursor, Claude Desktop, Claude Code</strong></summary>
 
-One command to give any MCP-compatible client persistent agent memory:
+One command to give any MCP-compatible client persistent agent memory.
+
+macOS / Linux:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.sh | bash
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.ps1 | iex
 ```
 
 Or add manually to your MCP config:
