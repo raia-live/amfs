@@ -507,50 +507,82 @@ def _visible_entity_paths(request: Request) -> set[str] | None:
 
 def _ensure_agent_owner(
     request: Request, agent_id: str, namespace: str = "default"
-) -> None:
+) -> str | None:
     """Link the agent to the API key's owner user in the Pro agents table.
 
     This is a no-op when amfs_rooms is not installed or the request
     has no tenant context.  The linkage lets the UserVisibilityFilter
     discover which agents belong to which user.
+
+    Returns the agent's effective owner_user_id after the upsert, or
+    None when ownership tracking is unavailable (pure OSS build, no
+    tenant context, or an older amfs_rooms without a return value).
     """
     ctx = getattr(request.state, "tenant_ctx", None)
     user_id = getattr(request.state, "user_id", None)
     if not ctx or not user_id:
-        return
+        return None
     try:
         from amfs_rooms.visibility import ensure_agent_owner
 
         mem = _get_memory()
         pool = getattr(mem._adapter, "_pool", None)
         if pool is not None:
-            ensure_agent_owner(
+            owner = ensure_agent_owner(
                 pool,
                 agent_id=agent_id,
                 owner_user_id=user_id,
                 account_id=ctx.account_id,
                 namespace=namespace,
             )
+            return str(owner) if owner is not None else None
     except ImportError:
         pass
     except Exception:
         logger.debug("Failed to ensure agent owner for %s", agent_id, exc_info=True)
+    return None
+
+
+# Server/internal identities are exempt from ownership enforcement: they are
+# excluded from per-user visibility anyway and may legitimately appear in
+# requests from any user's tooling.
+_SYSTEM_AGENT_IDS = {"amfs-server", "system", "amfs"}
 
 
 def _link_agent_owner_once(request: Request, agent_id: str, namespace: str) -> None:
-    """Idempotently link agent → owning user, cached per (agent, ns, user).
+    """Link agent → owning user and enforce identity ownership.
 
-    Unlike the _known_agents registration cache, this re-runs when the same
-    agent later appears under a different (or first) user attribution, so
-    owner linkage is never permanently skipped by an early unattributed write.
+    Raises 409 when the agent identity is already owned by a DIFFERENT
+    user in the account. Without this, a write under someone else's
+    identity silently succeeds but is attributed to the other user:
+    invisible to its actual author (per-user visibility follows agent
+    ownership) and injected into — or even superseding entries in — the
+    owner's view. This bites real setups: sticky identities and generic
+    agent names ('claude-desktop', 'agent/<os-user>') collide as soon as
+    a second user joins the account.
+
+    Successful self-owned links are cached per (agent, ns, user) so the
+    hot write path doesn't repeat the DB call. Unlike the _known_agents
+    registration cache, this re-runs when the same agent later appears
+    under a different (or first) user attribution, so owner linkage is
+    never permanently skipped by an early unattributed write.
     """
     user_id = getattr(request.state, "user_id", None)
-    if user_id is None:
+    if user_id is None or agent_id in _SYSTEM_AGENT_IDS:
         return
     cache_key = f"{agent_id}:{namespace}:{user_id}"
     if cache_key in _owner_linked_agents:
         return
-    _ensure_agent_owner(request, agent_id, namespace)
+    owner = _ensure_agent_owner(request, agent_id, namespace)
+    if owner is not None and owner != str(user_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Agent identity '{agent_id}' is already registered to a "
+                "different user in this account. Set a unique agent identity "
+                "(e.g. call amfs_set_identity with a new name) and retry."
+            ),
+        )
     _owner_linked_agents.add(cache_key)
 
 
@@ -1651,11 +1683,13 @@ async def update_agent_profile(
 
     mem = _get_memory()
     profile = AgentProfile.model_validate(body)
-    agent = mem._adapter.update_agent_profile(agent_id, profile)
     # Link the agent to the API key's owner so it shows on the user's dashboard
     # immediately — set_identity announces through this endpoint before the
     # agent has written any memory, so the write-path owner link never fires.
-    _ensure_agent_owner(request, agent_id, mem.namespace)
+    # Runs BEFORE the profile update: a colliding identity (owned by another
+    # user in the account) must 409 here without touching the agent record.
+    _link_agent_owner_once(request, agent_id, mem.namespace)
+    agent = mem._adapter.update_agent_profile(agent_id, profile)
     return json.loads(json.dumps(agent.model_dump(mode="json"), default=str))
 
 
@@ -1925,12 +1959,14 @@ async def commit_outcome(
 
     original_agent = mem._tagger.agent_id if req.agent_id else None
     if req.agent_id:
+        # Ownership guard first: a 409 for a foreign-owned identity must not
+        # leave the process-wide tagger pointing at the requested agent.
+        _link_agent_owner_once(request, req.agent_id, mem.namespace)
         mem._tagger.agent_id = req.agent_id
         try:
             mem._adapter.ensure_agent(req.agent_id, mem.namespace)
         except Exception:
             pass
-        _ensure_agent_owner(request, req.agent_id, mem.namespace)
     try:
         entries = mem.commit_outcome(
             req.outcome_ref,
