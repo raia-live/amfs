@@ -18,8 +18,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from amfs_core.aggregates import (
+    CHARS_PER_TOKEN,
+    RECALL_TOKENS_CEIL,
+    RECALL_TOKENS_FLOOR,
     entity_summaries_from_entries,
     extended_stats_from_entries,
+    recall_tokens_saved,
     share_stats_from_traces,
 )
 from amfs_core.models import (
@@ -119,6 +123,37 @@ class TestEntitySummaries:
         assert by_path["repo/a"]["total_recalls"] == 7
         assert by_path["repo/b"]["total_recalls"] == 9
 
+    def test_sums_recalled_tokens_per_entity(self) -> None:
+        entries = [
+            _entry("repo/a", "k1", "agent-a", recall_count=3, written_at=NOW),
+            _entry("repo/a", "k2", "agent-b", recall_count=0, written_at=NOW),
+        ]
+        by_path = {s["entity_path"]: s for s in entity_summaries_from_entries(entries)}
+        # Tiny {"v": 1} values hit the per-reuse floor; unrecalled entries add 0.
+        assert by_path["repo/a"]["recalled_tokens_saved"] == 3 * RECALL_TOKENS_FLOOR
+
+
+class TestRecallTokensSaved:
+    def test_zero_when_never_recalled(self) -> None:
+        assert recall_tokens_saved(_entry(recall_count=0)) == 0
+
+    def test_floored_for_tiny_content(self) -> None:
+        # A one-line value must not be credited like a re-derived investigation,
+        # but still counts for the floor.
+        assert recall_tokens_saved(_entry(recall_count=2)) == 2 * RECALL_TOKENS_FLOOR
+
+    def test_measured_for_real_content(self) -> None:
+        entry = _entry(recall_count=1)
+        entry.value = {"doc": "x" * (3 * RECALL_TOKENS_FLOOR * CHARS_PER_TOKEN)}
+        expected = len(__import__("json").dumps(entry.value)) // CHARS_PER_TOKEN
+        assert recall_tokens_saved(entry) == expected
+        assert recall_tokens_saved(entry) > RECALL_TOKENS_FLOOR
+
+    def test_capped_for_huge_content(self) -> None:
+        entry = _entry(recall_count=1)
+        entry.value = "x" * (50 * RECALL_TOKENS_CEIL * CHARS_PER_TOKEN)
+        assert recall_tokens_saved(entry) == RECALL_TOKENS_CEIL
+
 
 class TestExtendedStats:
     def test_counts_recalls_and_weekly_delta(self) -> None:
@@ -146,6 +181,8 @@ class TestExtendedStats:
         assert stats["total_entities"] == 2
         assert stats["total_agents"] == 2
         assert stats["total_recalls"] == 7
+        # Tiny values hit the per-reuse floor: 7 recalls × floor.
+        assert stats["recalled_tokens_saved"] == 7 * RECALL_TOKENS_FLOOR
         assert stats["entries_this_week"] == 1
         assert stats["entries_last_week"] == 1
         assert stats["outcome_linked_count"] == 1
