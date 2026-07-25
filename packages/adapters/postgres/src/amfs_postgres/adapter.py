@@ -1730,7 +1730,11 @@ class PostgresAdapter(AdapterABC):
                    MAX(written_at) AS last_updated,
                    (ARRAY_AGG(agent_id ORDER BY written_at DESC))[1] AS last_agent,
                    ARRAY_AGG(DISTINCT agent_id) AS agents,
-                   COUNT(*) FILTER (WHERE content_hash IS NOT NULL) AS hashed_count,
+                   -- The Postgres schema has no content_hash column (hashes
+                   -- live only on filesystem-backed entries), so hashed_count
+                   -- is always 0 here — matching entity_summaries_from_entries,
+                   -- which sees content_hash=None on every Postgres row.
+                   0::bigint AS hashed_count,
                    COALESCE(SUM(recall_count), 0) AS total_recalls
             FROM amfs_memory_entries
             WHERE {where}

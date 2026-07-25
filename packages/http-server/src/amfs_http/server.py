@@ -5182,7 +5182,7 @@ async def run_consolidation(
 
     mem = _get_memory()
     adapter = mem._adapter
-    namespace = mem._namespace
+    namespace = mem.namespace
     branch = (body or {}).get("branch", "main")
     entity_path = (body or {}).get("entity_path")
 
@@ -5221,7 +5221,7 @@ async def list_consolidation_candidates(
 
     mem = _get_memory()
     adapter = mem._adapter
-    namespace = mem._namespace
+    namespace = mem.namespace
 
     strategy = ConsolidationStrategy(adapter, namespace=namespace)
     proposals = strategy.find_consolidation_candidates(entity_path, branch=branch)
@@ -5247,7 +5247,7 @@ async def list_consolidation_proposals(
     visible_paths = _visible_entity_paths(request)
     mem = _get_memory()
     adapter = mem._adapter
-    namespace = mem._namespace
+    namespace = mem.namespace
 
     try:
         branches = adapter.list_branches(namespace=namespace, status="active" if status != "all" else None)
@@ -5330,7 +5330,7 @@ async def consolidation_status(
     """Get consolidation health metrics for the dashboard."""
     mem = _get_memory()
     adapter = mem._adapter
-    namespace = mem._namespace
+    namespace = mem.namespace
     vis = _active_visibility_filter(request)
 
     consolidation_runs = 0
