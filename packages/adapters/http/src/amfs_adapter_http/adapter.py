@@ -39,6 +39,33 @@ def _parse_entry(data: dict[str, Any]) -> MemoryEntry:
     return MemoryEntry.model_validate(data)
 
 
+def _raise_with_detail(resp: httpx.Response) -> None:
+    """raise_for_status, but with the server's `detail` in the message.
+
+    httpx's default message is just "409 Conflict for url ..." — the API's
+    actionable guidance (e.g. "Agent identity X is already registered to a
+    different user... call amfs_set_identity...") lives in the JSON body and
+    MUST reach the caller: MCP agents read the exception text to self-correct.
+    """
+    if not resp.is_error:
+        return
+    detail = None
+    try:
+        payload = resp.json()
+        if isinstance(payload, dict):
+            detail = payload.get("detail") or payload.get("error")
+    except Exception:
+        detail = None
+    if detail:
+        raise httpx.HTTPStatusError(
+            f"{resp.status_code} {resp.reason_phrase} for "
+            f"{resp.request.method} {resp.request.url.path}: {detail}",
+            request=resp.request,
+            response=resp,
+        )
+    resp.raise_for_status()
+
+
 class HttpAdapter(AdapterABC):
     """Storage adapter that delegates to the AMFS HTTP/REST API.
 
@@ -78,7 +105,7 @@ class HttpAdapter(AdapterABC):
                 logger.debug("Rate limited on %s %s, retrying in %.1fs", method, path, wait)
                 time.sleep(wait)
                 continue
-            resp.raise_for_status()
+            _raise_with_detail(resp)
             return resp.json()
 
     def _get(self, path: str, **params: Any) -> Any:
@@ -409,7 +436,7 @@ class HttpAdapter(AdapterABC):
             f"/api/v1/agents/{quote(agent_id, safe='')}/profile",
             json=profile.model_dump(),
         )
-        resp.raise_for_status()
+        _raise_with_detail(resp)
         return Agent.model_validate(resp.json())
 
     def list_digests(

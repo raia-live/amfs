@@ -173,3 +173,80 @@ class TestEnsureAgent:
 
         assert agent.agent_id == "my-agent"
         assert len(calls) == 0
+
+
+def _make_error_adapter(status_code: int, body: Any):
+    """Create an HttpAdapter whose transport always returns an error response."""
+    from amfs_adapter_http.adapter import HttpAdapter
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if isinstance(body, (dict, list)):
+            return httpx.Response(status_code, json=body)
+        return httpx.Response(status_code, text=body)
+
+    adapter = HttpAdapter.__new__(HttpAdapter)
+    adapter._base = "http://test"
+    adapter._api_key = "test-key"
+    adapter._client = httpx.Client(
+        base_url="http://test",
+        headers={"X-AMFS-API-Key": "test-key"},
+        transport=httpx.MockTransport(_handler),
+    )
+    return adapter
+
+
+class TestErrorDetailSurfaced:
+    """4xx/5xx responses must expose the server's `detail` in the exception
+    message so MCP agents can read the guidance and self-correct (e.g. the
+    409 agent-identity collision tells them to call amfs_set_identity)."""
+
+    def test_409_detail_in_message(self) -> None:
+        detail = (
+            "Agent identity 'agent/dai' is already registered to a different "
+            "user in this account. Set a unique agent identity and retry."
+        )
+        adapter = _make_error_adapter(409, {"detail": detail})
+
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            adapter._request("GET", "/api/v1/entries")
+
+        assert detail in str(exc_info.value)
+        assert exc_info.value.response.status_code == 409
+
+    def test_update_agent_profile_surfaces_detail(self) -> None:
+        detail = "Agent identity 'agent/dai' is already registered to a different user"
+        adapter = _make_error_adapter(409, {"detail": detail})
+
+        profile = MagicMock()
+        profile.model_dump.return_value = {"display_name": "Dai"}
+
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            adapter.update_agent_profile("agent/dai", profile)
+
+        assert detail in str(exc_info.value)
+
+    def test_error_key_used_as_fallback(self) -> None:
+        adapter = _make_error_adapter(403, {"error": "restricted member"})
+
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            adapter._request("GET", "/api/v1/entries")
+
+        assert "restricted member" in str(exc_info.value)
+
+    def test_non_json_body_falls_back_to_plain_raise(self) -> None:
+        adapter = _make_error_adapter(500, "internal server error")
+
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            adapter._request("GET", "/api/v1/entries")
+
+        assert exc_info.value.response.status_code == 500
+
+    def test_404_still_catchable_by_status_code(self) -> None:
+        # entity_summaries() and friends catch HTTPStatusError and check
+        # response.status_code == 404 — the enriched error must preserve that.
+        adapter = _make_error_adapter(404, {"detail": "not found"})
+
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            adapter._request("GET", "/api/v1/missing")
+
+        assert exc_info.value.response.status_code == 404
