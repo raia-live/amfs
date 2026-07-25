@@ -72,11 +72,24 @@ class SSEManager:
             except asyncio.QueueFull:
                 logger.debug("Room SSE queue full, dropping event for room %s", room_id)
 
-    async def event_generator(self, entity_path: str = "*"):
+    async def event_generator(self, entity_path: str = "*", predicate=None):
+        """Yield SSE events, optionally filtered per subscriber.
+
+        ``predicate`` receives the entry dict and returns True when the
+        subscriber may see it (used for per-user visibility). Events that
+        fail the predicate — or whose predicate raises — are dropped.
+        """
         queue = self.subscribe(entity_path)
         try:
             while True:
                 event = await queue.get()
+                if predicate is not None:
+                    try:
+                        if not predicate(event.get("entry", {})):
+                            continue
+                    except Exception:
+                        logger.debug("SSE visibility predicate failed — dropping event", exc_info=True)
+                        continue
                 yield {
                     "event": event["type"],
                     "data": json.dumps(event["entry"], default=str),

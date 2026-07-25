@@ -148,6 +148,11 @@ _memory: AgentMemory | None = None
 _sse_manager = SSEManager()
 _bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="amfs-bg")
 _known_agents: set[str] = set()
+# Tracks (agent, namespace, user) triples whose owner linkage was already
+# upserted, so the hot write path doesn't repeat the DB call. Kept separate
+# from _known_agents: an agent may be registered before its owner is known
+# (e.g. first write arrived without user attribution).
+_owner_linked_agents: set[str] = set()
 
 # ── Semantic embedder (shared by write-time embedding + /retrieve) ──────
 # One instance for the whole process so write and query vectors come from the
@@ -444,6 +449,62 @@ def _get_visibility_filter(request: Request):
     return getattr(request.state, "visibility_filter", None)
 
 
+def _active_visibility_filter(request: Request):
+    """Return the visibility filter when per-user scoping applies, else None.
+
+    None means the caller sees the whole account: either there is no user
+    context (plain API key on a single-user / self-hosted install) or the
+    user is an account admin.
+    """
+    vis = getattr(request.state, "visibility_filter", None)
+    if vis is not None and vis.should_filter():
+        return vis
+    return None
+
+
+def _visible_agent_ids(request: Request) -> set[str] | None:
+    """Set of agent_ids the caller may see, or None for unrestricted."""
+    vis = _active_visibility_filter(request)
+    if vis is None:
+        return None
+    try:
+        return set(vis.get_visible_agent_ids())
+    except Exception:
+        logger.warning("Failed to resolve visible agents — denying by default", exc_info=True)
+        return set()
+
+
+def _require_agent_visible(request: Request, agent_id: str) -> None:
+    """404 when the target agent is hidden from the caller."""
+    vis = _active_visibility_filter(request)
+    if vis is not None and not vis.is_agent_visible(agent_id):
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+
+def _require_account_admin(request: Request) -> None:
+    """403 for non-admin members of a multi-user account.
+
+    No-op when there is no per-user visibility context (plain API key on a
+    single-user or self-hosted install) or when the user is an account admin.
+    """
+    if _active_visibility_filter(request) is not None:
+        raise HTTPException(status_code=403, detail="Requires account admin access")
+
+
+def _visible_entity_paths(request: Request) -> set[str] | None:
+    """Entity paths the caller may see, or None for unrestricted."""
+    vis = _active_visibility_filter(request)
+    if vis is None:
+        return None
+    try:
+        paths = {e.entity_path for e in vis.filter_entries(_get_memory().list())}
+        paths.update(vis.get_room_map().keys())
+        return paths
+    except Exception:
+        logger.warning("Failed to resolve visible entity paths — denying by default", exc_info=True)
+        return set()
+
+
 def _ensure_agent_owner(
     request: Request, agent_id: str, namespace: str = "default"
 ) -> None:
@@ -474,6 +535,23 @@ def _ensure_agent_owner(
         pass
     except Exception:
         logger.debug("Failed to ensure agent owner for %s", agent_id, exc_info=True)
+
+
+def _link_agent_owner_once(request: Request, agent_id: str, namespace: str) -> None:
+    """Idempotently link agent → owning user, cached per (agent, ns, user).
+
+    Unlike the _known_agents registration cache, this re-runs when the same
+    agent later appears under a different (or first) user attribution, so
+    owner linkage is never permanently skipped by an early unattributed write.
+    """
+    user_id = getattr(request.state, "user_id", None)
+    if user_id is None:
+        return
+    cache_key = f"{agent_id}:{namespace}:{user_id}"
+    if cache_key in _owner_linked_agents:
+        return
+    _ensure_agent_owner(request, agent_id, namespace)
+    _owner_linked_agents.add(cache_key)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -593,6 +671,7 @@ async def read_entry(
 
 @app.get("/api/v1/quality/{entity_path:path}/{key}")
 async def entry_quality(
+    request: Request,
     entity_path: str,
     key: str,
     branch: str = Query("main"),
@@ -607,8 +686,14 @@ async def entry_quality(
     if entry is None:
         raise HTTPException(status_code=404, detail="Entry not found")
 
+    vis = _active_visibility_filter(request)
+    if vis is not None and not vis.is_entry_visible(entry):
+        raise HTTPException(status_code=404, detail="Entry not found")
+
     try:
         existing_entries = mem.list(entity_path)
+        if vis is not None:
+            existing_entries = vis.filter_entries(existing_entries)
         existing_keys = [e.key for e in existing_entries if e.key != key]
     except Exception:
         existing_keys = []
@@ -662,7 +747,7 @@ async def write_entry(
                         _known_agents.add(_agent_cache_key)
                     except Exception:
                         pass
-                    _ensure_agent_owner(request, req.agent_id, _agent_ns)
+                _link_agent_owner_once(request, req.agent_id, _agent_ns)
 
             from amfs_core.content import embedding_input
             from amfs_core.models import Provenance
@@ -724,7 +809,7 @@ async def write_entry(
                         _known_agents.add(_agent_cache_key)
                     except Exception:
                         pass
-                    _ensure_agent_owner(request, req.agent_id, mem.namespace)
+                _link_agent_owner_once(request, req.agent_id, mem.namespace)
             entry = mem.write(
                 req.entity_path,
                 req.key,
@@ -1322,11 +1407,20 @@ async def get_stats(
 
 @app.post("/api/v1/verify")
 async def verify_integrity(
+    request: Request,
     body: dict[str, Any] = {},
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     mem = _get_memory()
     entity_path = body.get("entity_path")
+    # Integrity verification walks the full hash chain, which necessarily
+    # spans entries the caller may not be allowed to see. Restrict it to
+    # account admins / unrestricted callers.
+    if _active_visibility_filter(request) is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Integrity verification requires account admin access",
+        )
     return mem.verify(entity_path)
 
 
@@ -1355,11 +1449,15 @@ async def create_commit(
 
 @app.get("/api/v1/commits")
 async def list_commits(
+    request: Request,
     limit: int = Query(50, ge=1, le=500),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     mem = _get_memory()
     commits = mem.commit_log(limit=limit)
+    allowed = _visible_agent_ids(request)
+    if allowed is not None:
+        commits = [c for c in commits if c.author_agent_id in allowed]
     return {
         "commits": [json.loads(json.dumps(c.model_dump(mode="json"), default=str)) for c in commits],
         "count": len(commits),
@@ -1368,11 +1466,15 @@ async def list_commits(
 
 @app.get("/api/v1/commits/{commit_id}")
 async def get_commit(
+    request: Request,
     commit_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     mem = _get_memory()
     commit = mem.get_commit(commit_id)
+    allowed = _visible_agent_ids(request)
+    if commit is not None and allowed is not None and commit.author_agent_id not in allowed:
+        commit = None
     if commit is None:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Commit not found")
@@ -1559,6 +1661,7 @@ async def update_agent_profile(
 
 @app.put("/api/v1/agents/{agent_id:path}/capabilities")
 async def update_agent_capabilities(
+    request: Request,
     agent_id: str,
     body: dict[str, Any],
     _auth: str | None = Depends(verify_api_key),
@@ -1566,6 +1669,7 @@ async def update_agent_capabilities(
     from amfs_core.models import AgentCapability
 
     mem = _get_memory()
+    _link_agent_owner_once(request, agent_id, mem.namespace)
     capabilities = [AgentCapability.model_validate(c) for c in body.get("capabilities", [])]
     agent = mem._adapter.update_agent_capabilities(agent_id, capabilities)
     return json.loads(json.dumps(agent.model_dump(mode="json"), default=str))
@@ -1573,6 +1677,7 @@ async def update_agent_capabilities(
 
 @app.put("/api/v1/agents/{agent_id:path}/contracts")
 async def update_agent_contracts(
+    request: Request,
     agent_id: str,
     body: dict[str, Any],
     _auth: str | None = Depends(verify_api_key),
@@ -1580,6 +1685,7 @@ async def update_agent_contracts(
     from amfs_core.models import MemoryContract
 
     mem = _get_memory()
+    _link_agent_owner_once(request, agent_id, mem.namespace)
     contracts = [MemoryContract.model_validate(c) for c in body.get("contracts", [])]
     agent = mem._adapter.update_agent_contracts(agent_id, contracts)
     return json.loads(json.dumps(agent.model_dump(mode="json"), default=str))
@@ -1610,12 +1716,24 @@ async def discover_agents(
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _require_entry_visible(request: Request, entity_path: str, key: str) -> None:
+    """404 when the current entry exists but is hidden from the caller."""
+    vis = _active_visibility_filter(request)
+    if vis is None:
+        return
+    entry = _get_memory()._adapter.read(entity_path, key)
+    if entry is not None and not vis.is_entry_visible(entry):
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+
 @app.post("/api/v1/diff")
 async def compute_diff(
+    request: Request,
     body: dict[str, Any],
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     mem = _get_memory()
+    _require_entry_visible(request, body["entity_path"], body["key"])
     return mem.diff(
         body["entity_path"],
         body["key"],
@@ -1625,10 +1743,12 @@ async def compute_diff(
 
 @app.post("/api/v1/patches")
 async def create_patch(
+    request: Request,
     body: dict[str, Any],
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     mem = _get_memory()
+    _require_entry_visible(request, body["entity_path"], body["key"])
     return mem.create_patch(
         body["entity_path"],
         body["key"],
@@ -1643,6 +1763,7 @@ async def create_patch(
 
 @app.get("/api/v1/history/{entity_path:path}/{key}")
 async def get_history(
+    request: Request,
     entity_path: str,
     key: str,
     since: str | None = Query(None),
@@ -1654,6 +1775,9 @@ async def get_history(
     until_dt = datetime.fromisoformat(until) if until else None
 
     versions = mem.history(entity_path, key, since=since_dt, until=until_dt)
+    vis = _active_visibility_filter(request)
+    if vis is not None:
+        versions = vis.filter_entries(versions)
     return {
         "entity_path": entity_path,
         "key": key,
@@ -1838,6 +1962,7 @@ async def commit_outcome(
 
 @app.get("/api/v1/outcomes")
 async def list_outcomes(
+    request: Request,
     entity_path: str | None = Query(None),
     since: str | None = Query(None),
     limit: int = Query(100),
@@ -1850,6 +1975,9 @@ async def list_outcomes(
         since=since_dt,
         limit=limit,
     )
+    allowed = _visible_agent_ids(request)
+    if allowed is not None:
+        records = [r for r in records if r.agent_id in allowed]
     return {"outcomes": [r.model_dump(mode="json") for r in records]}
 
 
@@ -1870,10 +1998,21 @@ async def record_context(
 
 @app.get("/api/v1/explain")
 async def explain(
+    request: Request,
     outcome_ref: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     mem = _get_memory()
+    allowed = _visible_agent_ids(request)
+    if allowed is not None:
+        # Restricted members may only explain outcomes committed by agents
+        # they can see; the ref-less session explain spans the whole account.
+        if outcome_ref is None:
+            raise HTTPException(status_code=403, detail="outcome_ref is required")
+        records = mem._adapter.list_outcomes(limit=10000)
+        record = next((r for r in records if r.outcome_ref == outcome_ref), None)
+        if record is None or record.agent_id not in allowed:
+            raise HTTPException(status_code=404, detail="Outcome not found")
     return mem.explain(outcome_ref)
 
 
@@ -1884,6 +2023,7 @@ async def explain(
 
 @app.get("/api/v1/traces")
 async def list_traces(
+    request: Request,
     entity_path: str | None = Query(None),
     agent_id: str | None = Query(None),
     outcome_type: str | None = Query(None),
@@ -1897,6 +2037,9 @@ async def list_traces(
         outcome_type=outcome_type,
         limit=limit,
     )
+    allowed = _visible_agent_ids(request)
+    if allowed is not None:
+        traces = [t for t in traces if t.agent_id in allowed]
     return {"traces": [t.model_dump(mode="json") for t in traces]}
 
 
@@ -1909,6 +2052,8 @@ async def save_trace(
     body = await req.json()
     trace = DecisionTrace.model_validate(body)
     mem = _get_memory()
+    if trace.agent_id:
+        _link_agent_owner_once(req, trace.agent_id, mem.namespace)
     saved = mem._adapter.save_trace(trace)
     return saved.model_dump(mode="json")
 
@@ -1939,11 +2084,15 @@ async def get_share_stats(
 
 @app.get("/api/v1/traces/{trace_id}")
 async def get_trace(
+    request: Request,
     trace_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     mem = _get_memory()
     trace = mem._adapter.get_trace(trace_id)
+    allowed = _visible_agent_ids(request)
+    if trace is not None and allowed is not None and trace.agent_id not in allowed:
+        trace = None
     if trace is None:
         return JSONResponse({"error": "Trace not found"}, status_code=404)
     return trace.model_dump(mode="json")
@@ -1951,6 +2100,7 @@ async def get_trace(
 
 @app.post("/api/v1/traces/{trace_id}/explain")
 async def explain_trace(
+    request: Request,
     trace_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -1963,6 +2113,9 @@ async def explain_trace(
 
     mem = _get_memory()
     trace = mem._adapter.get_trace(trace_id)
+    allowed = _visible_agent_ids(request)
+    if trace is not None and allowed is not None and trace.agent_id not in allowed:
+        trace = None
     if trace is None:
         return JSONResponse({"error": "Trace not found"}, status_code=404)
 
@@ -2102,8 +2255,22 @@ Return ONLY valid JSON, no markdown formatting."""
 
 @app.get("/api/v1/admin/usage")
 async def get_usage(
+    request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    # Account-wide usage/billing telemetry is admin-only. Non-admin members
+    # get a zeroed payload (rather than 403) so the settings page still
+    # renders without exposing the owner's data.
+    if _active_visibility_filter(request) is not None:
+        return {
+            "requestsToday": 0,
+            "requestsThisMonth": 0,
+            "peakRpm": 0,
+            "avgLatencyMs": 0,
+            "quotas": [],
+            "topAgents": [],
+            "topEntities": [],
+        }
     mem = _get_memory()
     st = mem.stats()
     outcomes = mem._adapter.list_outcomes(limit=10000)
@@ -2653,11 +2820,14 @@ class LogEventRequest(BaseModel):
 
 @app.post("/api/v1/timeline/events")
 async def log_timeline_event(
+    request: Request,
     body: LogEventRequest,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Log a timeline event for an agent."""
     mem = _get_memory()
+    if body.agent_id:
+        _link_agent_owner_once(request, body.agent_id, mem.namespace)
     try:
         event_type_enum = EventType(body.event_type)
     except ValueError:
@@ -2725,11 +2895,18 @@ async def upsert_graph_edge_endpoint(
 
 @app.get("/api/v1/agents/enriched")
 async def list_agents_enriched(
+    request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Return enriched agent info with activity histograms."""
     mem = _get_memory()
     agents = mem._adapter.list_agents_enriched(namespace=mem.namespace)
+    allowed = _visible_agent_ids(request)
+    if allowed is not None:
+        agents = [
+            a for a in agents
+            if (a.get("agent_id") or a.get("agentId", "")) in allowed
+        ]
     for agent in agents[:100]:
         aid = agent.get("agent_id") or agent.get("agentId", "")
         if aid:
@@ -2741,11 +2918,25 @@ async def list_agents_enriched(
 
 @app.get("/api/v1/agent-groups")
 async def list_agent_groups(
+    request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """List all agent groups."""
     mem = _get_memory()
     groups = mem._adapter.list_agent_groups(namespace=mem.namespace)
+    allowed = _visible_agent_ids(request)
+    if allowed is not None:
+        scoped = []
+        for g in groups:
+            visible_members = [a for a in g.agent_ids if a in allowed]
+            if not visible_members:
+                continue
+            g = g.model_copy(update={
+                "agent_ids": visible_members,
+                "member_count": len(visible_members),
+            })
+            scoped.append(g)
+        groups = scoped
     return {"groups": [g.model_dump(mode="json") for g in groups]}
 
 
@@ -2823,6 +3014,9 @@ async def add_group_members(
             status_code=400,
             content={"error": "agent_ids list is required"},
         )
+    allowed = _visible_agent_ids(request)
+    if allowed is not None and any(a not in allowed for a in agent_ids):
+        raise HTTPException(status_code=403, detail="Cannot group agents you do not own")
     mem = _get_memory()
     count = mem._adapter.add_agents_to_group(
         group_id, agent_ids, namespace=mem.namespace,
@@ -2872,6 +3066,7 @@ async def reorder_agent_groups_endpoint(
 
 @app.get("/api/v1/agent-groups/suggestions")
 async def agent_group_suggestions(
+    request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Return cluster-based group suggestions, excluding dismissed ones."""
@@ -2894,6 +3089,15 @@ async def agent_group_suggestions(
 
     clusters = digest.summary.get("clusters", [])
     suggestions = [c for c in clusters if c.get("cluster_id") not in dismissed]
+    allowed = _visible_agent_ids(request)
+    if allowed is not None:
+        scoped = []
+        for c in suggestions:
+            members = [a for a in (c.get("agent_ids") or []) if a in allowed]
+            if len(members) < 2:
+                continue
+            scoped.append({**c, "agent_ids": members})
+        suggestions = scoped
     return {"suggestions": suggestions}
 
 
@@ -2986,11 +3190,13 @@ SNAPSHOT_ENTITY = "_system/agent-snapshots"
 
 @app.post("/api/v1/agents/{agent_id:path}/snapshots")
 async def create_snapshot(
+    request: Request,
     agent_id: str,
     req: CreateSnapshotRequest,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Create a named snapshot of an agent's brain state."""
+    _require_agent_visible(request, agent_id)
     mem = _get_memory()
     snapshot_id = f"snap-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
     snapshot_value = {
@@ -3042,10 +3248,12 @@ async def create_snapshot(
 
 @app.get("/api/v1/agents/{agent_id:path}/snapshots")
 async def list_snapshots(
+    request: Request,
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """List all snapshots for an agent."""
+    _require_agent_visible(request, agent_id)
     mem = _get_memory()
     entries = mem.list(entity_path=SNAPSHOT_ENTITY)
     prefix = f"{agent_id}/"
@@ -3068,11 +3276,13 @@ async def list_snapshots(
 
 @app.get("/api/v1/agents/{agent_id:path}/snapshots/{snapshot_id}")
 async def get_snapshot(
+    request: Request,
     agent_id: str,
     snapshot_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Get the full data for a specific snapshot."""
+    _require_agent_visible(request, agent_id)
     mem = _get_memory()
     key = f"{agent_id}/{snapshot_id}"
     entry = mem.recall(SNAPSHOT_ENTITY, key)
@@ -3084,11 +3294,13 @@ async def get_snapshot(
 
 @app.delete("/api/v1/agents/{agent_id:path}/snapshots/{snapshot_id}")
 async def delete_snapshot(
+    request: Request,
     agent_id: str,
     snapshot_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Delete a snapshot."""
+    _require_agent_visible(request, agent_id)
     mem = _get_memory()
     key = f"{agent_id}/{snapshot_id}"
     entry = mem.recall(SNAPSHOT_ENTITY, key)
@@ -3100,11 +3312,13 @@ async def delete_snapshot(
 
 @app.post("/api/v1/agents/{agent_id:path}/snapshots/{snapshot_id}/recover")
 async def recover_snapshot(
+    request: Request,
     agent_id: str,
     snapshot_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Recover an agent's memory to the state captured in a snapshot."""
+    _require_agent_visible(request, agent_id)
     mem = _get_memory()
     key = f"{agent_id}/{snapshot_id}"
     entry = mem.recall(SNAPSHOT_ENTITY, key)
@@ -3153,6 +3367,7 @@ async def recover_snapshot(
 
 @app.post("/api/v1/rollback")
 async def rollback(
+    request: Request,
     body: dict[str, Any],
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -3165,6 +3380,8 @@ async def rollback(
     target_event_id = body.get("target_event_id")
     target_timestamp = body.get("target_timestamp")
     agent_id = body.get("agent_id")
+    if agent_id:
+        _require_agent_visible(request, agent_id)
 
     if target_event_id:
         event = mem._adapter.get_event(target_event_id, mem.namespace)
@@ -3177,6 +3394,7 @@ async def rollback(
             raise HTTPException(status_code=404, detail="Event not found")
         timestamp = event.created_at
         agent_id = agent_id or event.agent_id
+        _require_agent_visible(request, agent_id)
     elif target_timestamp:
         if not agent_id:
             raise HTTPException(
@@ -3224,10 +3442,12 @@ async def rollback(
 
 @app.get("/api/v1/agents/{agent_id:path}/branches")
 async def agent_branches(
+    request: Request,
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Branches created or merged by this agent."""
+    _require_agent_visible(request, agent_id)
     mem = _get_memory()
     try:
         all_branches = mem.list_branches()  # type: ignore[attr-defined]
@@ -3247,10 +3467,12 @@ async def agent_branches(
 
 @app.get("/api/v1/agents/{agent_id:path}/pull-requests")
 async def agent_pull_requests(
+    request: Request,
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Pull requests created, merged, or closed by this agent."""
+    _require_agent_visible(request, agent_id)
     mem = _get_memory()
     try:
         all_prs = mem.list_pull_requests()  # type: ignore[attr-defined]
@@ -3347,22 +3569,40 @@ def _audit_log(
 
 @app.get("/api/v1/admin/api-keys")
 async def list_api_keys(
+    request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     pool = _get_db_pool()
     if pool is None:
         return {"keys": []}
     ns = _get_namespace()
+    # Non-admin members only see keys they created themselves (they still
+    # need this endpoint for their own setup/settings page).
+    restricted_user_id = None
+    if _active_visibility_filter(request) is not None:
+        restricted_user_id = getattr(request.state, "user_id", None)
+        if restricted_user_id is None:
+            return {"keys": []}
     with pool.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """SELECT id, name, prefix, key_type, active, scopes,
-                          rate_limit_rpm, last_used, created_at, expires_at
-                   FROM amfs_api_keys
-                   WHERE namespace = %s
-                   ORDER BY created_at DESC""",
-                (ns,),
-            )
+            if restricted_user_id is not None:
+                cur.execute(
+                    """SELECT id, name, prefix, key_type, active, scopes,
+                              rate_limit_rpm, last_used, created_at, expires_at
+                       FROM amfs_api_keys
+                       WHERE namespace = %s AND created_by = %s
+                       ORDER BY created_at DESC""",
+                    (ns, str(restricted_user_id)),
+                )
+            else:
+                cur.execute(
+                    """SELECT id, name, prefix, key_type, active, scopes,
+                              rate_limit_rpm, last_used, created_at, expires_at
+                       FROM amfs_api_keys
+                       WHERE namespace = %s
+                       ORDER BY created_at DESC""",
+                    (ns,),
+                )
             rows = cur.fetchall()
     keys = []
     for row in rows:
@@ -3448,14 +3688,27 @@ async def revoke_api_key(
     if pool is None:
         return {"error": "API key management requires a Postgres backend"}
     ns = _get_namespace()
+    restricted_user_id = None
+    if _active_visibility_filter(request) is not None:
+        restricted_user_id = getattr(request.state, "user_id", None)
+        if restricted_user_id is None:
+            return {"error": "Key not found"}
     with pool.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """UPDATE amfs_api_keys SET active = FALSE
-                   WHERE id = %s::uuid AND namespace = %s
-                   RETURNING id, name""",
-                (key_id, ns),
-            )
+            if restricted_user_id is not None:
+                cur.execute(
+                    """UPDATE amfs_api_keys SET active = FALSE
+                       WHERE id = %s::uuid AND namespace = %s AND created_by = %s
+                       RETURNING id, name""",
+                    (key_id, ns, str(restricted_user_id)),
+                )
+            else:
+                cur.execute(
+                    """UPDATE amfs_api_keys SET active = FALSE
+                       WHERE id = %s::uuid AND namespace = %s
+                       RETURNING id, name""",
+                    (key_id, ns),
+                )
             row = cur.fetchone()
     if row is None:
         return {"error": "Key not found"}
@@ -3474,10 +3727,15 @@ async def revoke_api_key(
 
 @app.get("/api/v1/admin/audit")
 async def list_audit_log(
+    request: Request,
     action: str | None = Query(None),
     limit: int = Query(200),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    # Account-wide audit log is admin-only; non-admin members get an empty
+    # list so the settings page renders without exposing other users' actions.
+    if _active_visibility_filter(request) is not None:
+        return {"entries": []}
     pool = _get_db_pool()
     if pool is None:
         return {"entries": []}
@@ -3527,6 +3785,7 @@ async def list_audit_log(
 
 @app.get("/api/v1/patterns")
 async def list_patterns(
+    request: Request,
     entity_path: str | None = Query(None),
     limit: int = Query(100),
     _auth: str | None = Depends(verify_api_key),
@@ -3534,6 +3793,9 @@ async def list_patterns(
     """List unique pattern_refs used across memory entries with usage counts."""
     mem = _get_memory()
     entries = mem.list(entity_path)
+    vis = _active_visibility_filter(request)
+    if vis is not None:
+        entries = vis.filter_entries(entries)
 
     pattern_counts: dict[str, int] = {}
     pattern_entities: dict[str, set[str]] = {}
@@ -3565,8 +3827,12 @@ async def list_patterns(
 
 @app.get("/api/v1/admin/teams")
 async def list_teams(
+    request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    # Team management is admin-only; non-admin members get an empty list.
+    if _active_visibility_filter(request) is not None:
+        return {"teams": []}
     pool = _get_db_pool()
     if pool is None:
         return {"teams": []}
@@ -3608,6 +3874,7 @@ async def create_team(
     request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    _require_account_admin(request)
     pool = _get_db_pool()
     if pool is None:
         return {"error": "Team management requires a Postgres backend"}
@@ -3643,6 +3910,7 @@ async def update_team(
     request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    _require_account_admin(request)
     pool = _get_db_pool()
     if pool is None:
         return {"error": "Team management requires a Postgres backend"}
@@ -3696,6 +3964,7 @@ async def delete_team(
     request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    _require_account_admin(request)
     pool = _get_db_pool()
     if pool is None:
         return {"error": "Team management requires a Postgres backend"}
@@ -3726,10 +3995,14 @@ async def delete_team(
 
 @app.get("/api/v1/admin/teams/{team_id}/members")
 async def list_team_members(
+    request: Request,
     team_id: str,
     include_removed: bool = Query(False),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    # Member emails/roles are admin-only.
+    if _active_visibility_filter(request) is not None:
+        return {"members": []}
     pool = _get_db_pool()
     if pool is None:
         return {"members": []}
@@ -3783,6 +4056,7 @@ async def add_team_member(
     request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    _require_account_admin(request)
     pool = _get_db_pool()
     if pool is None:
         return {"error": "Team management requires a Postgres backend"}
@@ -3840,6 +4114,7 @@ async def update_team_member(
     request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    _require_account_admin(request)
     pool = _get_db_pool()
     if pool is None:
         return {"error": "Team management requires a Postgres backend"}
@@ -3894,6 +4169,7 @@ async def remove_team_member(
     request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    _require_account_admin(request)
     pool = _get_db_pool()
     if pool is None:
         return {"error": "Team management requires a Postgres backend"}
@@ -3928,6 +4204,7 @@ async def reinstate_team_member(
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Re-activate a previously removed team member."""
+    _require_account_admin(request)
     pool = _get_db_pool()
     if pool is None:
         return {"error": "Team management requires a Postgres backend"}
@@ -3965,6 +4242,7 @@ async def reinstate_team_member(
 
 @app.get("/api/v1/admin/members/check-email")
 async def check_member_email(
+    request: Request,
     email: str = Query(...),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -3975,6 +4253,7 @@ async def check_member_email(
 
     Returns status: "active", "removed", or "not_found".
     """
+    _require_account_admin(request)
     pool = _get_db_pool()
     if pool is None:
         return {"email": email, "status": "unknown", "memberships": []}
@@ -4240,8 +4519,42 @@ async def resolve_pattern(
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _filter_graph_edges(request: Request, edges: list) -> list:
+    """Restrict knowledge-graph edges for non-admin members.
+
+    An edge is visible when it is attributable to one of the caller's
+    agents (provenance agent_id or an agent-typed endpoint) or lives on a
+    shared room entity path. Unattributable edges are hidden by default.
+    """
+    vis = _active_visibility_filter(request)
+    if vis is None:
+        return edges
+    allowed = _visible_agent_ids(request) or set()
+    try:
+        room_paths = set(vis.get_room_map().keys())
+    except Exception:
+        room_paths = set()
+
+    def _edge_visible(e: Any) -> bool:
+        prov = getattr(e, "provenance", None) or {}
+        if isinstance(prov, dict):
+            if prov.get("agent_id") in allowed:
+                return True
+            ep = prov.get("entity_path")
+            if ep and ep in room_paths:
+                return True
+        if getattr(e, "source_type", None) == "agent" and e.source_entity in allowed:
+            return True
+        if getattr(e, "target_type", None) == "agent" and e.target_entity in allowed:
+            return True
+        return False
+
+    return [e for e in edges if _edge_visible(e)]
+
+
 @app.get("/api/v1/pro/graph/neighbors")
 async def graph_neighbors(
+    request: Request,
     entity: str = Query(...),
     relation: str | None = Query(None),
     direction: str = Query("both"),
@@ -4267,6 +4580,7 @@ async def graph_neighbors(
             {"entity": entity, "edges": [], "count": 0, "error": str(exc)},
             status_code=200,
         )
+    edges = _filter_graph_edges(request, edges)
     return {
         "entity": entity,
         "edges": [e.model_dump(mode="json") for e in edges],
@@ -4455,12 +4769,16 @@ def _compute_tiers(entries: list) -> tuple[dict[str, int], dict[str, float]]:
 
 @app.get("/api/v1/pro/tiers/distribution")
 async def tiers_distribution(
+    request: Request,
     agent_id: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Return HMO tier distribution (Hot / Warm / Archive)."""
     mem = _get_memory()
     entries = mem.list()
+    vis = _active_visibility_filter(request)
+    if vis is not None:
+        entries = vis.filter_entries(entries)
     if agent_id:
         entries = [e for e in entries if e.provenance.agent_id == agent_id]
 
@@ -4492,6 +4810,7 @@ async def tiers_distribution(
 
 @app.get("/api/v1/pro/tiers/entries")
 async def tiers_entries(
+    request: Request,
     tier: int = Query(..., ge=1, le=3),
     limit: int = Query(50, ge=1, le=500),
     agent_id: str | None = Query(None),
@@ -4500,6 +4819,9 @@ async def tiers_entries(
     """Return entries for a given HMO tier as a flat array."""
     mem = _get_memory()
     entries = mem.list()
+    vis = _active_visibility_filter(request)
+    if vis is not None:
+        entries = vis.filter_entries(entries)
     if agent_id:
         entries = [e for e in entries if e.provenance.agent_id == agent_id]
 
@@ -4531,10 +4853,17 @@ async def tiers_entries(
 
 @app.get("/api/v1/stream")
 async def stream(
+    request: Request,
     entity_path: str = Query("*"),
     _auth: str | None = Depends(verify_api_key),
 ) -> EventSourceResponse:
-    return EventSourceResponse(_sse_manager.event_generator(entity_path))
+    # Non-admin members only receive write events for entries they are
+    # allowed to see; everything else is dropped before it hits the wire.
+    vis = _active_visibility_filter(request)
+    predicate = vis.is_entry_visible if vis is not None else None
+    return EventSourceResponse(
+        _sse_manager.event_generator(entity_path, predicate=predicate)
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -4767,10 +5096,14 @@ async def list_cortex_digests(
 
 @app.get("/api/v1/cortex/activity")
 async def cortex_activity(
+    request: Request,
     limit: int = Query(default=50, le=200),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Get recent Cortex compilation and event activity."""
+    # The worker activity log spans the whole account — admin-only view.
+    if _active_visibility_filter(request) is not None:
+        return {"events": [], "total": 0, "throughput": [], "stats": None}
     if _cortex_worker:
         log = _cortex_worker.activity_log
         recent = log[-limit:] if len(log) > limit else log
@@ -4801,6 +5134,7 @@ async def cortex_recompile(
 
 @app.post("/api/v1/cortex/consolidate")
 async def run_consolidation(
+    request: Request,
     body: dict[str, Any] | None = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -4816,6 +5150,16 @@ async def run_consolidation(
     branch = (body or {}).get("branch", "main")
     entity_path = (body or {}).get("entity_path")
 
+    visible_paths = _visible_entity_paths(request)
+    if visible_paths is not None:
+        # Restricted members may only consolidate entities they can see;
+        # account-wide consolidation is admin-only.
+        if not entity_path or entity_path not in visible_paths:
+            raise HTTPException(
+                status_code=403,
+                detail="Consolidation requires a visible entity_path",
+            )
+
     strategy = ConsolidationStrategy(adapter, namespace=namespace)
     if entity_path:
         report = strategy.run_entity(entity_path, branch=branch)
@@ -4827,12 +5171,17 @@ async def run_consolidation(
 
 @app.get("/api/v1/cortex/consolidation/candidates")
 async def list_consolidation_candidates(
+    request: Request,
     entity_path: str = Query(...),
     branch: str = Query("main"),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """List Tier B consolidation candidates (proposals) for an entity."""
     from amfs_cortex.consolidator import ConsolidationStrategy
+
+    visible_paths = _visible_entity_paths(request)
+    if visible_paths is not None and entity_path not in visible_paths:
+        return {"entity_path": entity_path, "proposals": []}
 
     mem = _get_memory()
     adapter = mem._adapter
@@ -4849,6 +5198,7 @@ async def list_consolidation_candidates(
 
 @app.get("/api/v1/cortex/consolidation/proposals")
 async def list_consolidation_proposals(
+    request: Request,
     entity_path: str | None = Query(None),
     status: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
@@ -4858,6 +5208,7 @@ async def list_consolidation_proposals(
     Scans branches matching ``cortex/consolidation/`` and returns
     structured proposal metadata extracted from each branch's diff.
     """
+    visible_paths = _visible_entity_paths(request)
     mem = _get_memory()
     adapter = mem._adapter
     namespace = mem._namespace
@@ -4888,6 +5239,9 @@ async def list_consolidation_proposals(
     for b in consolidation_branches:
         parts = b.name.split("/")
         ep = "/".join(parts[2:-1]) if len(parts) > 3 else parts[2] if len(parts) >= 3 else "unknown"
+
+        if visible_paths is not None and ep not in visible_paths:
+            continue
 
         branch_status_map = {"active": "pending", "merged": "approved", "closed": "rejected"}
         prop_status = branch_status_map.get(b.status.value if hasattr(b.status, "value") else str(b.status), "pending")
@@ -4934,16 +5288,19 @@ async def list_consolidation_proposals(
 
 @app.get("/api/v1/cortex/consolidation/status")
 async def consolidation_status(
+    request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Get consolidation health metrics for the dashboard."""
     mem = _get_memory()
     adapter = mem._adapter
     namespace = mem._namespace
+    vis = _active_visibility_filter(request)
 
     consolidation_runs = 0
     total_auto_archived = 0
-    if _cortex_worker:
+    # Worker counters are account-global — only exposed to admins.
+    if _cortex_worker and vis is None:
         consolidation_runs = _cortex_worker._consolidation_runs
         for entry in _cortex_worker._activity_log:
             if entry.get("type") == "consolidation_run":
@@ -4954,12 +5311,20 @@ async def consolidation_status(
         pending_branches = [
             b for b in branches if b.name.startswith("cortex/consolidation/")
         ]
+        if vis is not None:
+            visible_paths = _visible_entity_paths(request) or set()
+            pending_branches = [
+                b for b in pending_branches
+                if "/".join(b.name.split("/")[2:-1]) in visible_paths
+            ]
     except Exception:
         pending_branches = []
 
     entities_ready: list[str] = []
     try:
         entries = adapter.list()
+        if vis is not None:
+            entries = vis.filter_entries(entries)
         entity_counts: dict[str, int] = {}
         for e in entries:
             entity_counts[e.entity_path] = entity_counts.get(e.entity_path, 0) + 1
