@@ -2936,9 +2936,15 @@ async def upsert_graph_edge_endpoint(
 @app.get("/api/v1/agents/enriched")
 async def list_agents_enriched(
     request: Request,
+    histograms: bool = True,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    """Return enriched agent info with activity histograms."""
+    """Return enriched agent info with activity histograms.
+
+    Pass histograms=false to skip the per-agent activity histogram queries —
+    summary consumers (e.g. the dashboard overview's agent count) only need
+    the roster, and the histograms cost up to 100 extra queries per call.
+    """
     mem = _get_memory()
     agents = mem._adapter.list_agents_enriched(namespace=mem.namespace)
     allowed = _visible_agent_ids(request)
@@ -2947,12 +2953,13 @@ async def list_agents_enriched(
             a for a in agents
             if (a.get("agent_id") or a.get("agentId", "")) in allowed
         ]
-    for agent in agents[:100]:
-        aid = agent.get("agent_id") or agent.get("agentId", "")
-        if aid:
-            agent["activity_histogram"] = mem._adapter.get_agent_activity_histogram(
-                aid, days=7, namespace=mem.namespace,
-            )
+    if histograms:
+        for agent in agents[:100]:
+            aid = agent.get("agent_id") or agent.get("agentId", "")
+            if aid:
+                agent["activity_histogram"] = mem._adapter.get_agent_activity_histogram(
+                    aid, days=7, namespace=mem.namespace,
+                )
     return {"agents": agents}
 
 
