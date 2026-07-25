@@ -67,6 +67,21 @@ logger = logging.getLogger(__name__)
 
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
 
+# SQL mirror of amfs_core.aggregates.recall_tokens_saved: per reuse, credit
+# the measured content size (~CHARS_PER_TOKEN chars/token) clamped to
+# [floor, ceil]. Constants are imported so SQL and Python can't drift.
+from amfs_core.aggregates import (  # noqa: E402
+    CHARS_PER_TOKEN as _CHARS_PER_TOKEN,
+    RECALL_TOKENS_CEIL as _RECALL_TOKENS_CEIL,
+    RECALL_TOKENS_FLOOR as _RECALL_TOKENS_FLOOR,
+)
+
+_RECALLED_TOKENS_SQL = (
+    "COALESCE(SUM(recall_count * LEAST(GREATEST("
+    f"length(value::text) / {_CHARS_PER_TOKEN}, {_RECALL_TOKENS_FLOOR}), "
+    f"{_RECALL_TOKENS_CEIL})), 0)"
+)
+
 
 class _SingleConnectionPool:
     """Minimal pool shim wrapping a single connection for environments
@@ -1735,7 +1750,8 @@ class PostgresAdapter(AdapterABC):
                    -- is always 0 here — matching entity_summaries_from_entries,
                    -- which sees content_hash=None on every Postgres row.
                    0::bigint AS hashed_count,
-                   COALESCE(SUM(recall_count), 0) AS total_recalls
+                   COALESCE(SUM(recall_count), 0) AS total_recalls,
+                   {_RECALLED_TOKENS_SQL} AS recalled_tokens_saved
             FROM amfs_memory_entries
             WHERE {where}
             GROUP BY entity_path
@@ -1756,6 +1772,7 @@ class PostgresAdapter(AdapterABC):
                 "agents": sorted(r["agents"] or []),
                 "hashed_count": r["hashed_count"],
                 "total_recalls": int(r["total_recalls"] or 0),
+                "recalled_tokens_saved": int(r["recalled_tokens_saved"] or 0),
             }
             for r in rows
         ]
@@ -1788,6 +1805,7 @@ class PostgresAdapter(AdapterABC):
                         MIN(written_at) AS oldest_entry_at,
                         MAX(written_at) AS newest_entry_at,
                         COALESCE(SUM(recall_count), 0) AS total_recalls,
+                        {_RECALLED_TOKENS_SQL} AS recalled_tokens_saved,
                         COUNT(*) FILTER (WHERE written_at >= NOW() - INTERVAL '7 days')
                             AS entries_this_week,
                         COUNT(*) FILTER (
@@ -1882,6 +1900,7 @@ class PostgresAdapter(AdapterABC):
             "oldest_entry_at": row["oldest_entry_at"] if row else None,
             "newest_entry_at": row["newest_entry_at"] if row else None,
             "total_recalls": int(row["total_recalls"]) if row else 0,
+            "recalled_tokens_saved": int(row["recalled_tokens_saved"]) if row else 0,
             "entries_this_week": row["entries_this_week"] if row else 0,
             "entries_last_week": row["entries_last_week"] if row else 0,
             "memory_type_counts": {

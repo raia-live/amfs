@@ -2559,7 +2559,10 @@ async def agent_memory_graph(
     # How many times this agent's own saved knowledge was recalled. This is the
     # reliable reuse signal (recall_count is incremented on every read), unlike
     # timeline read events which are not recorded on every deployment.
+    from amfs_core.aggregates import recall_tokens_saved
+
     total_recalls = sum(getattr(e, "recall_count", 0) for e in written_by_agent)
+    recalled_tokens_saved = sum(recall_tokens_saved(e) for e in written_by_agent)
 
     # Build read counts from both traces (causal_entries) and timeline events.
     read_entities: dict[str, dict[str, int]] = {}
@@ -2623,6 +2626,7 @@ async def agent_memory_graph(
         "totalWritten": len(written_by_agent),
         "totalReads": total_read_events,
         "totalRecalls": total_recalls,
+        "recalledTokensSaved": recalled_tokens_saved,
         "crossAgentReads": cross_agent_reads,
     }
 

@@ -8,11 +8,39 @@ Python fallback and the filtered path always agree.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from amfs_core.models import DecisionTrace, MemoryEntry
+
+
+# ── Recall-weighted "avoided re-research" token credit ─────────────────
+# Per reuse we credit the measured content size (~4 chars/token), clamped:
+# - floor: even a tiny memory replaces *some* lookup work, but a one-line
+#   preference must not be credited like a re-derived investigation;
+# - ceil: a single huge payload can't inflate the estimate — re-deriving one
+#   memory realistically costs a few file reads + searches, no more.
+# Dashboards and the MCP value ledger surface these numbers to users, so the
+# same constants are mirrored in the Postgres adapter SQL, the dashboard's
+# value-metrics.ts, and the MCP server's value_ledger.py. Keep them in sync.
+RECALL_TOKENS_FLOOR = 200
+RECALL_TOKENS_CEIL = 4000
+CHARS_PER_TOKEN = 4
+
+
+def recall_tokens_saved(entry: "MemoryEntry") -> int:
+    """Estimated tokens of re-research avoided by this entry's recalls."""
+    recalls = entry.recall_count or 0
+    if recalls <= 0:
+        return 0
+    try:
+        chars = len(json.dumps(entry.value, default=str))
+    except (TypeError, ValueError):
+        chars = len(str(entry.value))
+    per_recall = min(max(chars // CHARS_PER_TOKEN, RECALL_TOKENS_FLOOR), RECALL_TOKENS_CEIL)
+    return recalls * per_recall
 
 
 def entity_summaries_from_entries(entries: "list[MemoryEntry]") -> list[dict]:
@@ -36,6 +64,7 @@ def entity_summaries_from_entries(entries: "list[MemoryEntry]") -> list[dict]:
                 "agents": sorted({e.provenance.agent_id for e in group}),
                 "hashed_count": sum(1 for e in group if e.content_hash),
                 "total_recalls": sum(e.recall_count for e in group),
+                "recalled_tokens_saved": sum(recall_tokens_saved(e) for e in group),
             }
         )
     summaries.sort(key=lambda s: s["last_updated"], reverse=True)
@@ -54,6 +83,7 @@ def extended_stats_from_entries(entries: "list[MemoryEntry]") -> dict:
     confidences: list[float] = []
     outcome_linked = 0
     total_recalls = 0
+    recalled_tokens = 0
     this_week = 0
     last_week = 0
     oldest: datetime | None = None
@@ -69,6 +99,7 @@ def extended_stats_from_entries(entries: "list[MemoryEntry]") -> dict:
         if entry.outcome_count > 0:
             outcome_linked += 1
         total_recalls += entry.recall_count
+        recalled_tokens += recall_tokens_saved(entry)
         written = entry.provenance.written_at
         if written >= week_ago:
             this_week += 1
@@ -92,6 +123,7 @@ def extended_stats_from_entries(entries: "list[MemoryEntry]") -> dict:
         "oldest_entry_at": oldest,
         "newest_entry_at": newest,
         "total_recalls": total_recalls,
+        "recalled_tokens_saved": recalled_tokens,
         "entries_this_week": this_week,
         "entries_last_week": last_week,
         # Entries carry only a recall counter, not recall timestamps, so the
