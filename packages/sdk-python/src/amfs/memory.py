@@ -641,10 +641,12 @@ class AgentMemory:
                     confidence_weight=cfg.confidence_weight,
                     include_artifacts=include_artifacts,
                 )
-                return [
+                scored = [
                     ScoredEntry(entry=entry, score=score, breakdown=breakdown or {})
                     for entry, score, breakdown in rows
                 ]
+                self._record_retrieval_reuse(query, entity_path, scored)
+                return scored
             except Exception:  # noqa: BLE001 - fall back to local scoring
                 logger.debug("Adapter server-side retrieve failed; using local scoring", exc_info=True)
 
@@ -656,7 +658,39 @@ class AgentMemory:
             recall_config=cfg,
             include_artifacts=include_artifacts,
         )
+        self._record_retrieval_reuse(query, entity_path, result)  # type: ignore[arg-type]
         return result  # type: ignore[return-value]
+
+    def _record_retrieval_reuse(
+        self,
+        query: str,
+        entity_path: str | None,
+        results: list[ScoredEntry],
+    ) -> None:
+        """Link a successful retrieval into the session's causal chain.
+
+        Retrieval is how agents mostly recall memory, but it never entered the
+        read tracker — so ``commit_outcome`` saw an empty causal chain, traces
+        recorded no reads, and no outcome ever reinforced the memory that
+        actually drove it.
+
+        Only the top-ranked entry becomes a causal read. Retrieval returns a
+        ranked candidate list, and back-propagating an outcome onto every
+        candidate would reinforce memories the agent never acted on and undo the
+        bounded-causal-set assumption commit_outcome relies on for speed. The
+        full result set is still preserved as a query event.
+
+        This is deliberately separate from ``recall_count``, which the server
+        credits to the top-K surfaced hits: reuse counts what was shown, causal
+        linkage records what an outcome should reinforce.
+        """
+        self._read_tracker.record_query(
+            "retrieve",
+            {"query": query, "entity_path": entity_path},
+            len(results),
+        )
+        if results:
+            self._read_tracker.record(results[0].entry)
 
     def stats(self) -> MemoryStats:
         """Aggregate statistics about current memory state."""
@@ -1036,6 +1070,12 @@ class AgentMemory:
         executor.submit(_bg_log_and_edges)
 
         self._last_trace = trace
+        # Start a fresh causal window. The reads, contexts and queries just
+        # snapshotted belong to this outcome; without this a second
+        # commit_outcome in the same session re-links the first task's reads and
+        # reinforces them again, and the trace's duration keeps growing from
+        # process start rather than describing the work it covers.
+        self._read_tracker.clear()
         return updated
 
     def _materialize_causal_edges(
@@ -1157,6 +1197,24 @@ class AgentMemory:
             if len(parts) != 2:
                 continue
             ep, k = parts
+            # Serve from the read-time snapshot. Re-reading through the adapter
+            # would both misreport what the agent actually saw and, over HTTP,
+            # bump recall_count — making this diagnostic inflate the reuse
+            # metric it exists to explain. Mirrors commit_outcome's snapshot-first
+            # path.
+            snapshot = self._read_tracker.entry_snapshot(ek)
+            if snapshot:
+                entries.append({
+                    "entity_path": ep,
+                    "key": k,
+                    "value": snapshot.get("value"),
+                    "confidence": snapshot.get("confidence"),
+                    "version": snapshot.get("version"),
+                    "memory_type": snapshot.get("memory_type"),
+                    "written_by": snapshot.get("written_by"),
+                    "read_version": self._read_tracker.read_version(ek),
+                })
+                continue
             entry = self._adapter.read(ep, k)
             if entry:
                 data = entry.model_dump(mode="json")

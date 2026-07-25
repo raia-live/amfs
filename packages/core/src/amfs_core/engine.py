@@ -182,6 +182,10 @@ class ReadTracker:
         self._queries.clear()
         self._errors.clear()
         self._writes.clear()
+        # The window this tracker describes restarts here, so a trace committed
+        # after a clear reports the duration of its own work rather than the
+        # lifetime of the process.
+        self._session_started_at = datetime.now(timezone.utc)
 
     def contains(self, entry_key: str) -> bool:
         return entry_key in self._reads

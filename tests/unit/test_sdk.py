@@ -313,6 +313,76 @@ class TestAutoCausalTracking:
         mem.clear_read_log()
         assert mem.read_log == []
 
+    def test_retrieve_links_only_top_hit(self, mem: AgentMemory) -> None:
+        """Retrieval is the main recall path, so it must feed the causal chain —
+        but only with the answer, not the whole candidate list."""
+        mem.write("svc", "runbook", "restart the worker pool when the queue backs up")
+        mem.write("svc", "invoices", "invoice totals reconcile nightly")
+
+        results = mem.retrieve("worker queue backs up")
+
+        assert results, "expected retrieval to rank at least one candidate"
+        assert len(results) > 1, "fixture should produce a candidate list, not one hit"
+        top = results[0].entry
+        assert mem.read_log == [f"{top.entity_path}/{top.key}"]
+
+    def test_commit_outcome_links_retrieved_memory(self, mem: AgentMemory) -> None:
+        """The regression that left every decision trace empty: retrieved
+        memories were never linked to the outcome they informed."""
+        mem.write("svc", "runbook", "restart the worker pool when the queue backs up")
+        results = mem.retrieve("worker queue backs up")
+        top = results[0].entry
+
+        updated = mem.commit_outcome("REL-1", OutcomeType.SUCCESS)
+
+        assert [e.key for e in updated] == [top.key]
+        trace = mem._last_trace
+        assert trace is not None
+        assert [c.key for c in trace.causal_entries] == [top.key]
+
+    def test_commit_outcome_starts_fresh_causal_window(self, mem: AgentMemory) -> None:
+        """A second outcome must not re-link (and re-reinforce) the first
+        task's reads."""
+        mem.write("svc", "k1", "v1")
+        mem.write("svc", "k2", "v2")
+
+        mem.read("svc", "k1")
+        mem.commit_outcome("TASK-1", OutcomeType.SUCCESS)
+        assert mem.read_log == []
+
+        mem.read("svc", "k2")
+        updated = mem.commit_outcome("TASK-2", OutcomeType.SUCCESS)
+
+        assert [e.key for e in updated] == ["k2"]
+
+    def test_explain_does_not_reread_entries(self, mem: AgentMemory) -> None:
+        """explain() is a diagnostic and must serve the read-time snapshot.
+
+        Over HTTP every adapter read hits the server's entry endpoint, which
+        bumps recall_count — so re-reading here would make explaining reuse
+        inflate the very metric it explains.
+        """
+        mem.write("svc", "pattern", "exponential backoff")
+        mem.read("svc", "pattern")
+
+        reads: list[tuple[str, str]] = []
+        original = mem._adapter.read
+
+        def spy(entity_path: str, key: str, **kwargs: Any) -> Any:
+            reads.append((entity_path, key))
+            return original(entity_path, key, **kwargs)
+
+        mem._adapter.read = spy  # type: ignore[method-assign]
+        try:
+            chain = mem.explain()
+        finally:
+            mem._adapter.read = original  # type: ignore[method-assign]
+
+        assert reads == []
+        assert chain["causal_chain_length"] == 1
+        assert chain["causal_entries"][0]["key"] == "pattern"
+        assert chain["causal_entries"][0]["value"] == "exponential backoff"
+
     def test_record_context(self, mem: AgentMemory) -> None:
         mem.record_context("git-log", "15 commits since last deploy", source="git")
         chain = mem.explain()
