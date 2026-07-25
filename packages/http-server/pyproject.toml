@@ -1,6 +1,6 @@
 [project]
 name = "amfs-http-server"
-version = "0.3.9"
+version = "0.3.10"
 description = "AMFS HTTP/REST API server with SSE support"
 requires-python = ">=3.11"
 license = "Apache-2.0"
