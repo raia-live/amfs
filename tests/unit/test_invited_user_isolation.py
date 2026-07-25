@@ -160,3 +160,69 @@ class TestAdminEndpointsRestricted:
         )
         assert res.status_code == 200
         assert res.json() == {"members": []}
+
+# ---------------------------------------------------------------------------
+# Agent identity ownership guard (write paths)
+# ---------------------------------------------------------------------------
+
+
+def _write_request(user_id="user-a"):
+    return types.SimpleNamespace(state=types.SimpleNamespace(user_id=user_id))
+
+
+class TestAgentIdentityWriteGuard:
+    """_link_agent_owner_once must reject writes under an agent identity that
+    is owned by a DIFFERENT user of the account (409), and claim/cache
+    self-owned identities. Regression for invited users writing via a sticky
+    identity that collides with the account owner's agent (the write used to
+    succeed silently but be invisible to its author)."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        server._owner_linked_agents.clear()
+        yield
+        server._owner_linked_agents.clear()
+
+    def test_foreign_owner_409_and_not_cached(self, monkeypatch):
+        monkeypatch.setattr(
+            server, "_ensure_agent_owner", lambda req, aid, ns: "user-b"
+        )
+        with pytest.raises(HTTPException) as exc:
+            server._link_agent_owner_once(_write_request("user-a"), "claude-desktop", "default")
+        assert exc.value.status_code == 409
+        assert "already registered to a different user" in exc.value.detail
+        assert not server._owner_linked_agents
+
+    def test_self_owner_allowed_and_cached(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            server, "_ensure_agent_owner",
+            lambda req, aid, ns: calls.append(aid) or "user-a",
+        )
+        server._link_agent_owner_once(_write_request("user-a"), "my-agent", "default")
+        server._link_agent_owner_once(_write_request("user-a"), "my-agent", "default")
+        assert calls == ["my-agent"]  # second call served from cache
+
+    def test_unknown_owner_allowed(self, monkeypatch):
+        # Pure-OSS builds / older amfs_rooms return None: fail open.
+        monkeypatch.setattr(server, "_ensure_agent_owner", lambda req, aid, ns: None)
+        server._link_agent_owner_once(_write_request("user-a"), "my-agent", "default")
+
+    def test_system_agents_exempt(self, monkeypatch):
+        called = []
+        monkeypatch.setattr(
+            server, "_ensure_agent_owner",
+            lambda req, aid, ns: called.append(aid) or "user-b",
+        )
+        for aid in ("amfs-server", "system", "amfs"):
+            server._link_agent_owner_once(_write_request("user-a"), aid, "default")
+        assert called == []
+
+    def test_no_user_attribution_noop(self, monkeypatch):
+        called = []
+        monkeypatch.setattr(
+            server, "_ensure_agent_owner",
+            lambda req, aid, ns: called.append(aid) or "user-b",
+        )
+        server._link_agent_owner_once(_write_request(user_id=None), "any-agent", "default")
+        assert called == []
