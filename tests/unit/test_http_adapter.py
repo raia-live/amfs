@@ -87,6 +87,25 @@ class TestSearchForwardsDepth:
 
         assert calls[0]["body"]["branch"] == "feature-x"
 
+    def test_include_artifacts_false_forwarded(self) -> None:
+        # Dropping this flag made every SaaS caller's include_artifacts=False a
+        # no-op, so a search could come back carrying whole source files.
+        adapter, calls = _make_adapter({
+            "POST /api/v1/search": {"entries": []},
+        })
+        adapter.search(SearchQuery(entity_path="svc", include_artifacts=False))
+
+        assert calls[0]["body"]["include_artifacts"] is False
+
+    def test_include_artifacts_omitted_when_default(self) -> None:
+        # Left out when True so older servers keep their own default.
+        adapter, calls = _make_adapter({
+            "POST /api/v1/search": {"entries": []},
+        })
+        adapter.search(SearchQuery(entity_path="svc"))
+
+        assert "include_artifacts" not in calls[0]["body"]
+
 
 class TestGraphNeighbors:
     def test_proxies_to_server(self) -> None:
