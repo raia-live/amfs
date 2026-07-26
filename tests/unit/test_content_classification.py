@@ -61,6 +61,65 @@ class TestClassifyArtifact:
         assert not classify_artifact("prefs", {"food": "pizza", "drink": "water"})
 
 
+class TestProseAboutCodeIsNotCode:
+    """Every one of these is a real production memory that got filed as code.
+
+    All seven rows flagged ``is_artifact`` in the production store were technical
+    notes, not files, and each was caught by a bare substring appearing mid
+    sentence. Left unfixed, an entry's meaning is replaced by "source file
+    <key>." in its vector and it stops being findable by meaning.
+    """
+
+    def test_path_globs(self):
+        assert not is_code_like(
+            "Reads keyed by entry_key, keyword signal in blend, exclude "
+            "bench-*/_system/* (_is_excluded_entity), UserVisibilityFilter applied ONCE."
+        )
+        assert not is_code_like(
+            "Ran the main checkout's .venv pytest with PYTHONPATH listing worktree "
+            "packages/*/src to shadow the installed copies."
+        )
+        assert not is_code_like(
+            "auto-publish.yml triggers on push to main touching "
+            "packages/**/pyproject.toml or packages/sdk-typescript/package.json."
+        )
+        assert not is_code_like(
+            "CRITICAL: the /api/v1/pro/tenant/* provisioning router has no auth "
+            "dependency and the tenant middleware passes it through."
+        )
+
+    def test_quoted_markup_inside_a_sentence(self):
+        assert not is_code_like(
+            "POPUP LOGO: replaced the text <span class='logo'>SenseLab</span> in "
+            "the popup Header with an image tag pointing at the bundled logo."
+        )
+
+    def test_arrow_used_as_prose(self):
+        assert not is_code_like(
+            "Pro forwards include_artifacts to an OSS retrieve that lacks it => "
+            "TypeError on every call, even when the caller omits the argument."
+        )
+
+    def test_quoted_function_call(self):
+        assert not is_code_like(
+            "sendTeamInviteEmail has no success log line — only "
+            "console.error('[invite] Email failed for %s') on failure, so verify from logs."
+        )
+
+    def test_still_catches_real_code(self):
+        # The tightening must not cost genuine detection.
+        assert is_code_like("import React from 'react'\nexport const App = () => <div/>\n")
+        assert is_code_like("def compute(x):\n    return x * 2\n")
+        assert is_code_like(
+            "<div className='wrapper'>\n  <span>hi</span>\n</div>\n"
+        )
+
+    def test_weak_hints_corroborate(self):
+        # One line-anchored weak hint is not enough; two are.
+        assert not is_code_like("/* a note that opens with a comment marker and then prose */")
+        assert is_code_like("const total = 1\nconsole.log(total)\n")
+
+
 class TestArtifactDescriptor:
     def test_includes_language_filename_and_symbols(self):
         code = (
@@ -94,6 +153,21 @@ class TestEmbeddingInput:
         is_art, text = embedding_input("food-pref", "I love pizza")
         assert is_art is False
         assert text == "I love pizza"
+
+    def test_code_under_a_prose_key_embeds_its_content(self):
+        # A descriptor built from a prose key collapses to "source file <key>."
+        # and erases the entry's meaning, so it is reserved for file keys. The
+        # entry is still reported as an artifact, so ranking still demotes it.
+        value = "export default function App() { return null }"
+        is_art, text = embedding_input("notes", value)
+
+        assert is_art is True
+        assert text == value
+
+    def test_descriptor_requires_a_file_key(self):
+        _, text = embedding_input("decision-use-jwt", "const token = sign(payload)\nconsole.log(token)\n")
+
+        assert "source file" not in text
 
     def test_penalty_in_range(self):
         assert 0.0 < ARTIFACT_PENALTY < 1.0
