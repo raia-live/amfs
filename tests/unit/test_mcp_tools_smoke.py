@@ -146,6 +146,20 @@ class TestListValuePreview:
         assert len(entry["value"]) == srv.LIST_VALUE_CHAR_LIMIT
         assert "amfs_read" in entry["full_value"]
 
+    def test_structured_values_are_previewed_too(self, srv):
+        # The largest values in a real store are objects, not strings —
+        # investigations and design plans reach 20K characters as JSON — so a
+        # plain isinstance(str) check would leave the worst offenders whole.
+        srv.amfs_write("smoke/big", "plan", {"steps": ["do a thing"] * 2_000})
+        entry = next(
+            e for e in _ok("amfs_search", srv.amfs_search(entity_path="smoke/big"))["entries"]
+            if e["key"] == "plan"
+        )
+
+        assert entry["value_truncated"] is True
+        assert entry["value_format"] == "json"
+        assert len(entry["value"]) == srv.LIST_VALUE_CHAR_LIMIT
+
     def test_short_values_are_untouched(self, srv):
         entry = next(
             e for e in _ok("amfs_list", srv.amfs_list("smoke/ops"))["entries"]
