@@ -206,6 +206,11 @@ class HttpAdapter(AdapterABC):
             body["since"] = query.since.isoformat()
         if query.pattern_ref:
             body["pattern_ref"] = query.pattern_ref
+        # Without this the server applies its own default and every SaaS caller's
+        # include_artifacts=False is silently ignored, so a single search can come
+        # back carrying whole source files.
+        if getattr(query, "include_artifacts", True) is False:
+            body["include_artifacts"] = False
         branch = kwargs.get("branch")
         if branch:
             body["branch"] = branch
