@@ -27,6 +27,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Any
 
 from fastmcp import Context, FastMCP
@@ -466,6 +467,31 @@ def _serialize_entry(entry: Any) -> dict[str, Any]:
     return data
 
 
+# A stored source file can run past 50K characters, so a 20-result list response
+# can reach ~87K tokens — more context than the memories it recalls are worth.
+# List responses carry a preview instead; the exact-read tools stay whole.
+LIST_VALUE_CHAR_LIMIT = 2000
+
+
+def _serialize_entries(entries: Iterable[Any]) -> list[dict[str, Any]]:
+    """Serialize entries for a multi-result response, previewing long values."""
+    out: list[dict[str, Any]] = []
+    for entry in entries:
+        data = _serialize_entry(entry)
+        value = data.get("value")
+        if isinstance(value, str) and len(value) > LIST_VALUE_CHAR_LIMIT:
+            data["value"] = value[:LIST_VALUE_CHAR_LIMIT]
+            data["value_truncated"] = True
+            data["value_chars"] = len(value)
+            data["full_value"] = (
+                f"Preview only — {LIST_VALUE_CHAR_LIMIT} of {len(value)} characters. "
+                f"Call amfs_read(entity_path=\"{data.get('entity_path')}\", "
+                f"key=\"{data.get('key')}\") for the whole value."
+            )
+        out.append(data)
+    return out
+
+
 # ──────────────────────────────────────────────────────────────────────
 # MCP Tools
 # ──────────────────────────────────────────────────────────────────────
@@ -837,6 +863,9 @@ def amfs_search(
             (they are demoted by default)
 
     Example: amfs_search(entity_path="checkout-service", min_confidence=0.5)
+
+    Long values come back as a 2000-character preview with `value_truncated`
+    and `full_value` set; call amfs_read for the whole value.
     """
     from datetime import datetime as dt
 
@@ -875,7 +904,7 @@ def amfs_search(
         })
     return json.dumps({
         "count": len(results),
-        "entries": [_serialize_entry(e) for e in results],
+        "entries": _serialize_entries(results),
     }, default=str)
 
 
@@ -918,6 +947,9 @@ def amfs_retrieve(
 
     Returns ranked results with score breakdowns showing how each
     signal contributed to the final ranking.
+
+    Long values come back as a 2000-character preview with `value_truncated`
+    and `full_value` set; call amfs_read for the whole value.
     """
     from amfs_core.models import RecallConfig
 
@@ -941,8 +973,7 @@ def amfs_retrieve(
     )
 
     serialized = []
-    for scored in results:
-        data = _serialize_entry(scored.entry)
+    for scored, data in zip(results, _serialize_entries(s.entry for s in results)):
         data["_score"] = round(scored.score, 4)
         data["_breakdown"] = {k: round(v, 4) for k, v in scored.breakdown.items()}
         serialized.append(data)
@@ -986,7 +1017,7 @@ def amfs_list(entity_path: str | None = None) -> str:
         })
     return json.dumps({
         "count": len(entries),
-        "entries": [_serialize_entry(e) for e in entries],
+        "entries": _serialize_entries(entries),
     }, default=str)
 
 
@@ -1223,7 +1254,7 @@ def amfs_my_entries(entity_path: str | None = None) -> str:
     return json.dumps({
         "agent_id": mem.agent_id,
         "count": len(entries),
-        "entries": [_serialize_entry(e) for e in entries],
+        "entries": _serialize_entries(entries),
     }, default=str)
 
 
@@ -1430,7 +1461,7 @@ def amfs_briefing(
             "avg_confidence": round(avg_conf, 2),
             "contributing_agents": agents,
             "keys": keys,
-            "entries": [_serialize_entry(e) for e in entries[:limit]],
+            "entries": _serialize_entries(entries[:limit]),
         }, default=str)
 
     hint = (

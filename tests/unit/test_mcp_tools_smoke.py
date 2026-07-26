@@ -123,3 +123,51 @@ class TestWriteSurfaceSmoke:
 
     def test_commit_outcome(self, srv):
         _ok("amfs_commit_outcome", srv.amfs_commit_outcome("smoke-outcome", "success"))
+
+
+class TestListValuePreview:
+    """Multi-result responses preview long values instead of inlining them.
+
+    A stored source file can exceed 50K characters, and a 20-result search of
+    such a store measured ~348K characters (~87K tokens) — more context spent
+    than the recalled memories are worth, and enough to push anything appended
+    after the entries out of what a client keeps.
+    """
+
+    def test_search_previews_long_values(self, srv):
+        srv.amfs_write("smoke/big", "huge-file", "x" * 60_000)
+        entry = next(
+            e for e in _ok("amfs_search", srv.amfs_search(entity_path="smoke/big"))["entries"]
+            if e["key"] == "huge-file"
+        )
+
+        assert entry["value_truncated"] is True
+        assert entry["value_chars"] == 60_000
+        assert len(entry["value"]) == srv.LIST_VALUE_CHAR_LIMIT
+        assert "amfs_read" in entry["full_value"]
+
+    def test_short_values_are_untouched(self, srv):
+        entry = next(
+            e for e in _ok("amfs_list", srv.amfs_list("smoke/ops"))["entries"]
+            if e["key"] == "runbook"
+        )
+
+        assert entry["value"] == "the deploy runbook lives in the ops wiki"
+        assert "value_truncated" not in entry
+
+    def test_exact_reads_return_the_whole_value(self, srv):
+        # Truncation is a list-response concern only: amfs_read is how an agent
+        # recovers what a preview left out, so it must never be abbreviated.
+        srv.amfs_write("smoke/big", "huge-file", "x" * 60_000)
+
+        assert len(_ok("amfs_read", srv.amfs_read("smoke/big", "huge-file"))["value"]) == 60_000
+
+    def test_retrieve_previews_and_keeps_scores(self, srv):
+        srv.amfs_write("smoke/big", "huge-file", "runbook " * 8_000)
+        payload = _ok(
+            "amfs_retrieve", srv.amfs_retrieve(query="runbook", entity_path="smoke/big")
+        )
+        entry = next(e for e in payload["entries"] if e["key"] == "huge-file")
+
+        assert entry["value_truncated"] is True
+        assert "_score" in entry and "_breakdown" in entry
