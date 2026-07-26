@@ -9,13 +9,16 @@ preference on a query like "what do I prefer".
 This module is the single source of truth for that distinction. It is used to:
 
 * set ``MemoryEntry.is_artifact`` at persistence time (adapter write chokepoint),
-* choose what text to embed (a clean descriptor for artifacts, so the vector
-  represents *what the file is* rather than its noisy, truncated body), and
+* choose what text to embed (a clean descriptor for *file-keyed* artifacts, so
+  the vector represents what the file is rather than its noisy, truncated
+  body), and
 * demote artifacts in the retrieve/search/briefing read paths.
 
 The heuristics are intentionally narrow (precision over recall): a genuine
-natural-language fact that happens to contain a word like ``return`` must not be
-misread as code.
+natural-language fact that happens to contain a word like ``return`` — or a path
+glob, a quoted tag, or an arrow — must not be misread as code. Prose *about*
+code is the common case in an agent's memory, so markers only count at the start
+of a line, and the weak ones need corroboration.
 """
 
 from __future__ import annotations
@@ -62,13 +65,24 @@ _LANGUAGE_BY_EXT = {
     "r": "R", "pl": "Perl", "proto": "Protobuf", "gradle": "Gradle",
 }
 
-# Strong, code-specific markers. Deliberately narrow so prose is not misread as
-# code. Mirrors amfs_security.detectors.poisoning._CODE_MARKERS.
-_CODE_MARKERS = re.compile(
+# Declarations that open a line. One is enough: prose does not begin a line with
+# `def foo(` or `export default function`.
+_STRONG_CODE_MARKERS = re.compile(
     r"(?m)^\s*(?:import\s|from\s+\S+\s+import\b|export\s+(?:default\s+|const\s+|function\b)|"
     r"def\s+\w+\s*\(|class\s+\w+|function\s+\w*\s*\(|#include\b|package\s+\w|@\w+\s*$)"
-    r"|=>|</[A-Za-z]|/\*|\bconsole\.\w|\brequire\("
 )
+
+# Weaker hints, which turn up constantly in prose *about* code: a path glob
+# (`packages/*/src`), a quoted tag (`<span>x</span>`), an arrow meaning "leads
+# to", a mentioned `console.error(...)`. Matched as bare substrings these filed
+# genuine knowledge as code — every flagged row in production was a technical
+# note, not a file. So they count only when they open a line, and two separate
+# lines must carry one before content alone decides.
+_WEAK_CODE_MARKERS = re.compile(
+    r"(?m)^\s*(?:/\*|\*/|</?[A-Za-z][\w.-]*(?:\s|/?>)|(?:const|let|var)\s+\w+\s*=|"
+    r"console\.\w+\s*\(|require\s*\(|\)\s*=>|[})\]];?\s*$)"
+)
+_WEAK_MARKERS_REQUIRED = 2
 
 # Top-level symbol declarations, used to summarise an artifact in its descriptor.
 _SYMBOL_RE = re.compile(
@@ -111,7 +125,10 @@ def is_code_like(value: Any) -> bool:
     text = _stringify(value).strip()
     if len(text) < 24:
         return False
-    return bool(_CODE_MARKERS.search(text[:_SCAN_LIMIT]))
+    head = text[:_SCAN_LIMIT]
+    if _STRONG_CODE_MARKERS.search(head):
+        return True
+    return len(_WEAK_CODE_MARKERS.findall(head)) >= _WEAK_MARKERS_REQUIRED
 
 
 def classify_artifact(key: str, value: Any) -> bool:
@@ -152,11 +169,19 @@ def artifact_descriptor(key: str, value: Any) -> str:
 def embedding_input(key: str, value: Any) -> tuple[bool, str]:
     """Return ``(is_artifact, text_to_embed)`` for an entry's key/value.
 
-    Artifacts embed their descriptor; everything else embeds its value text.
     Every embed site (SDK write, HTTP write handler, adapter fallback, backfill,
     Pro retriever) routes through this so the classification and the embedded
     text never diverge.
+
+    A descriptor replaces the value only when the key actually names a file. It
+    is built from the filename, language and symbols, so under a prose-style key
+    it collapses to "source file <key>." and the entry's meaning never reaches
+    its vector — the entry stays listed and readable by exact key while becoming
+    unfindable by meaning. Content-only classification therefore still demotes,
+    but no longer decides what gets embedded.
     """
-    if classify_artifact(key, value):
-        return True, artifact_descriptor(key, value)
-    return False, _stringify(value)
+    if not classify_artifact(key, value):
+        return False, _stringify(value)
+    if not is_artifact_key(key):
+        return True, _stringify(value)
+    return True, artifact_descriptor(key, value)
