@@ -479,12 +479,18 @@ def _serialize_entries(entries: Iterable[Any]) -> list[dict[str, Any]]:
     for entry in entries:
         data = _serialize_entry(entry)
         value = data.get("value")
-        if isinstance(value, str) and len(value) > LIST_VALUE_CHAR_LIMIT:
-            data["value"] = value[:LIST_VALUE_CHAR_LIMIT]
+        # Structured values are the biggest ones in practice (investigations and
+        # design plans reach 20K characters as objects), so measure what a client
+        # actually receives rather than only checking plain strings.
+        rendered = value if isinstance(value, str) else json.dumps(value, default=str)
+        if len(rendered) > LIST_VALUE_CHAR_LIMIT:
+            data["value"] = rendered[:LIST_VALUE_CHAR_LIMIT]
             data["value_truncated"] = True
-            data["value_chars"] = len(value)
+            data["value_chars"] = len(rendered)
+            if not isinstance(value, str):
+                data["value_format"] = "json"
             data["full_value"] = (
-                f"Preview only — {LIST_VALUE_CHAR_LIMIT} of {len(value)} characters. "
+                f"Preview only — {LIST_VALUE_CHAR_LIMIT} of {len(rendered)} characters. "
                 f"Call amfs_read(entity_path=\"{data.get('entity_path')}\", "
                 f"key=\"{data.get('key')}\") for the whole value."
             )
