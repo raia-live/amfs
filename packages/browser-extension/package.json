@@ -1,6 +1,6 @@
 {
   "name": "@senselab-ai/browser-extension",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "SenseLab web clipper — save any page or selection into your agent memory",
   "private": true,
   "type": "module",

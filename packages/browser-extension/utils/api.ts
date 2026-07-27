@@ -127,6 +127,13 @@ export async function whoami(apiKey: string): Promise<Record<string, unknown>> {
   return resp.json();
 }
 
+function firstNonEmpty(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
 /**
  * Rooms are hosted-only (amfs_rooms). GET /api/v1/rooms/account-tier returns
  * { plan_tier, plan_status, rooms_enabled }; if the endpoint is missing or
@@ -153,11 +160,12 @@ export async function fetchRoomsState(apiKey: string): Promise<RoomsState> {
       const resp = await request(apiKey, "GET", "/api/v1/rooms");
       const data = await resp.json();
       const raw: Record<string, unknown>[] = Array.isArray(data) ? data : (data.rooms ?? []);
-      // RoomSummaryResponse: { id, entity_path, display_name, ... }
+      // RoomSummaryResponse: { id, entity_path, display_name, ... }. display_name
+      // can come back as "", which must not become a blank label in the picker.
       rooms = raw.map((r) => ({
         room_id: String(r.id ?? r.room_id ?? ""),
-        name: (r.display_name ?? r.name) as string | undefined,
-        entity_path: r.entity_path as string | undefined,
+        name: firstNonEmpty(r.display_name, r.name, r.slug),
+        entity_path: firstNonEmpty(r.entity_path),
       }));
     } catch {
       rooms = [];

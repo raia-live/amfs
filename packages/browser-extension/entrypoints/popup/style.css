@@ -38,13 +38,13 @@ body {
   justify-content: space-between;
 }
 
+/* Same asset the dashboard ships (senselab-logo-dark.png): the artwork is
+   stored colour-inverted for dark surfaces, so light backgrounds invert it
+   back to brand colours. Mirrors the dashboard's `invert dark:invert-0`. */
 .logo {
-  font-weight: 700;
-  font-size: 15px;
-  background: linear-gradient(90deg, var(--blue), var(--orange));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  height: 20px;
+  width: auto;
+  filter: invert(1);
 }
 
 .header-link {
@@ -121,45 +121,149 @@ h2 {
   border-color: transparent;
 }
 
-.destination label {
+.dest-label {
   display: block;
   margin-bottom: 6px;
 }
 
-.dest-options {
+/* The menu expands in flow rather than absolutely: an extension popup sizes
+   itself to the document, so an overlay would be clipped at the old height. */
+.dest-trigger {
+  width: 100%;
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.dest {
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   border: 1px solid var(--border);
   background: var(--bg-soft);
-  border-radius: 999px;
-  padding: 5px 12px;
-  font-size: 12.5px;
-  cursor: pointer;
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
   color: var(--text);
+  cursor: pointer;
 }
-.dest.active {
+.dest-trigger:hover {
   border-color: var(--blue);
-  background: #e6f5fe;
+}
+.dest-trigger-label {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chev {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.dest-search {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
+}
+.dest-search:focus {
+  outline: 2px solid var(--blue);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+
+.dest-menu {
+  margin-top: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.dest-list {
+  /* 4px pad + 5 rows of 40px: lands on a row edge instead of mid-text. */
+  max-height: 204px;
+  overflow-y: auto;
+  padding: 4px;
+  scrollbar-width: thin;
+}
+
+.dest-item {
+  width: 100%;
+  display: block;
+  text-align: left;
+  border: none;
+  background: none;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-family: inherit;
+  color: var(--text);
+  cursor: pointer;
+}
+.dest-item.cursor {
+  background: var(--bg-soft);
+}
+.dest-item-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.dest-item-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dest-item.selected .dest-item-name {
   color: #00618f;
   font-weight: 600;
 }
-.dest.locked {
+.dest-item-hint {
+  display: block;
+  font-size: 11px;
   color: var(--muted);
-  border-style: dashed;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.dest.locked:hover {
-  border-color: var(--orange);
+.dest-check {
+  color: var(--blue);
+  font-size: 11px;
+}
+.dest-item mark {
+  background: #d8f0ff;
+  color: inherit;
+  border-radius: 3px;
+}
+.dest-none {
+  padding: 6px 8px;
+}
+
+.dest-upsell,
+.dest-foot {
+  width: 100%;
+  display: block;
+  text-align: left;
+  border: none;
+  border-top: 1px solid var(--border);
+  background: var(--bg-soft);
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--muted);
+}
+.dest-upsell {
+  cursor: pointer;
+}
+.dest-upsell:hover {
   color: var(--orange);
+}
+.dest-foot a {
+  color: var(--blue);
+  text-decoration: none;
+}
+.dest-foot a:hover {
+  text-decoration: underline;
 }
 .lock {
   font-size: 11px;
-}
-.dest-empty {
-  align-self: center;
 }
 
 .status {

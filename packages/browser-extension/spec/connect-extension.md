@@ -125,8 +125,8 @@ once. The connect page posts:
 1. **Let Free users JOIN rooms they're invited to** (room creation stays
    Pro+). Every paid team then recruits free users through invites; those
    users build clip habits and hit the free quota wall, which is the upgrade
-   moment. Today the extension shows a locked "Team room — Pro" chip to
-   free/starter users.
+   moment. Today the destination picker shows a locked "Save into a shared
+   team room — Pro" row to free/starter users.
 2. **Public share link per clip**: a branded read-only "Saved with SenseLab"
    page per clip gives free users a shareable artifact (the Loom/Notion
    loop). Would need a dashboard route + opt-in share flag on the entry.
