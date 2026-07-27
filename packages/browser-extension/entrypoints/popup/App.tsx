@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { browser } from "wxt/browser";
 import { track } from "@/utils/analytics";
 import {
@@ -6,9 +6,18 @@ import {
   CRITICAL_THRESHOLD,
   DASHBOARD_URL,
   OPS_PER_SAVE,
+  ROOMS_URL,
   UPGRADE_URL,
   WARN_THRESHOLD,
 } from "@/utils/config";
+import {
+  type Destination,
+  buildDestinations,
+  destinationIndex,
+  filterDestinations,
+  highlightRuns,
+  queryTokens,
+} from "@/utils/destinations";
 import {
   getLastSave,
   getRoomsState,
@@ -129,7 +138,7 @@ export default function App() {
 function Header() {
   return (
     <div className="header">
-      <span className="logo">SenseLab</span>
+      <img className="logo" src="/senselab-logo-dark.png" alt="SenseLab" />
       <a className="header-link" href={DASHBOARD_URL} target="_blank" rel="noreferrer">
         Dashboard ↗
       </a>
@@ -220,6 +229,11 @@ function FirstSaveCelebration({ topic, retrieved }: { topic: string; retrieved: 
   );
 }
 
+/**
+ * Single-select combobox: collapsed it shows only the current destination, so
+ * an account with dozens of rooms costs one line instead of a wall of chips.
+ * Open, it filters by room name or memory path as you type.
+ */
 function DestinationPicker({
   roomsState,
   destination,
@@ -229,46 +243,181 @@ function DestinationPicker({
   destination: string | null;
   onChange: (d: string | null) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [cursor, setCursor] = useState(0);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
   const unlocked = roomsState?.roomsUnlocked ?? false;
-  const rooms = roomsState?.rooms ?? [];
+  const destinations = useMemo(() => buildDestinations(roomsState), [roomsState]);
+  const tokens = useMemo(() => queryTokens(query), [query]);
+  const results = useMemo(() => filterDestinations(destinations, query), [destinations, query]);
+  // An unknown id means the room was deleted or the tier was downgraded — the
+  // background falls back to personal memory, so show that rather than a UUID.
+  const selected = destinations[destinationIndex(destinations, destination)];
+
+  useEffect(() => {
+    if (!open) {
+      setQuery("");
+      return;
+    }
+    inputRef.current?.focus();
+    const onPointerDown = (e: MouseEvent) => {
+      if (!boxRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [open]);
+
+  useEffect(() => setCursor(0), [query]);
+
+  useEffect(() => {
+    if (!open) return;
+    listRef.current
+      ?.querySelector(`[data-idx="${cursor}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [open, cursor, results.length]);
+
+  // Open on the current destination so a room far down a long list is both
+  // highlighted and scrolled into view.
+  const openPicker = () => {
+    setCursor(destinationIndex(destinations, destination));
+    setOpen(true);
+  };
+
+  const commit = (d: Destination | undefined) => {
+    if (!d) return;
+    onChange(d.id);
+    setOpen(false);
+  };
+
+  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setCursor((c) => Math.min(c + 1, results.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setCursor((c) => Math.max(c - 1, 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      commit(results[cursor]);
+    } else if (e.key === "Escape" || e.key === "Tab") {
+      setOpen(false);
+    }
+  };
+
   return (
-    <div className="destination">
-      <label className="tiny muted">Save to</label>
-      <div className="dest-options">
-        <button
-          className={`dest ${destination === null ? "active" : ""}`}
-          onClick={() => onChange(null)}
-        >
-          My memory
-        </button>
-        {unlocked ? (
-          rooms.length > 0 ? (
-            rooms.map((r) => (
+    <div className="destination" ref={boxRef}>
+      <span className="tiny muted dest-label" id="dest-label">
+        Save to
+      </span>
+      {open ? (
+        <>
+          <input
+            ref={inputRef}
+            className="dest-search"
+            role="combobox"
+            aria-labelledby="dest-label"
+            aria-expanded
+            aria-controls="dest-list"
+            aria-autocomplete="list"
+            aria-activedescendant={results[cursor] ? `dest-opt-${cursor}` : undefined}
+            placeholder="Search rooms or memory paths…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={onKeyDown}
+          />
+          <div className="dest-menu">
+            <div className="dest-list" id="dest-list" role="listbox" ref={listRef}>
+              {results.length === 0 && (
+                <p className="dest-none tiny muted">No destination matches “{query}”</p>
+              )}
+              {results.map((d, i) => (
+                <button
+                  key={d.id ?? "personal"}
+                  id={`dest-opt-${i}`}
+                  data-idx={i}
+                  role="option"
+                  aria-selected={d.id === selected.id}
+                  className={`dest-item ${i === cursor ? "cursor" : ""} ${
+                    d.id === selected.id ? "selected" : ""
+                  }`}
+                  onMouseMove={() => setCursor(i)}
+                  onClick={() => commit(d)}
+                >
+                  <span className="dest-item-name">
+                    {/* Highlight runs live in their own inline span: the flex
+                        gap on the row would otherwise space out every run. */}
+                    <span className="dest-item-text">
+                      <Highlighted text={d.label} tokens={tokens} />
+                    </span>
+                    {d.id === selected.id && <span className="dest-check">✓</span>}
+                  </span>
+                  {d.hint && (
+                    <span className="dest-item-hint">
+                      <Highlighted text={d.hint} tokens={tokens} />
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+            {!unlocked ? (
               <button
-                key={r.room_id}
-                className={`dest ${destination === r.room_id ? "active" : ""}`}
-                onClick={() => onChange(r.room_id)}
+                className="dest-upsell"
+                onClick={() => {
+                  void track("extension_rooms_cta_clicked");
+                  void browser.tabs.create({ url: ROOMS_URL });
+                }}
               >
-                {(r.name as string) ?? r.room_id}
+                <span className="lock">🔒</span> Save into a shared team room — Pro
               </button>
-            ))
-          ) : (
-            <span className="tiny muted dest-empty">No rooms yet</span>
-          )
-        ) : (
-          <button
-            className="dest locked"
-            onClick={() => {
-              void track("extension_rooms_cta_clicked");
-              void browser.tabs.create({ url: `${UPGRADE_URL}?feature=rooms` });
-            }}
-            title="Share clips with your team — available on Pro"
-          >
-            <span className="lock">🔒</span> Team room — Pro
-          </button>
-        )}
-      </div>
+            ) : (
+              destinations.length === 1 && (
+                <p className="dest-foot tiny muted">
+                  No rooms yet —{" "}
+                  <a href={ROOMS_URL} target="_blank" rel="noreferrer">
+                    create one
+                  </a>
+                  .
+                </p>
+              )
+            )}
+          </div>
+        </>
+      ) : (
+        <button
+          className="dest-trigger"
+          aria-haspopup="listbox"
+          aria-expanded={false}
+          aria-labelledby="dest-label dest-value"
+          onClick={openPicker}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") {
+              e.preventDefault();
+              openPicker();
+            }
+          }}
+        >
+          <span className="dest-trigger-label" id="dest-value">
+            {selected.label}
+          </span>
+          <span className="chev">▾</span>
+        </button>
+      )}
     </div>
+  );
+}
+
+function Highlighted({ text, tokens }: { text: string; tokens: string[] }) {
+  if (tokens.length === 0) return <>{text}</>;
+  return (
+    <>
+      {highlightRuns(text, tokens).map((run, i) =>
+        run.match ? <mark key={i}>{run.text}</mark> : <span key={i}>{run.text}</span>,
+      )}
+    </>
   );
 }
 

@@ -6,6 +6,13 @@ export const DASHBOARD_URL = __AMFS_DASHBOARD_URL__;
 
 export const CONNECT_URL = `${DASHBOARD_URL}/connect/extension`;
 export const UPGRADE_URL = `${DASHBOARD_URL}/settings/usage`;
+/**
+ * Rooms list, which is also where rooms get created (the wizard is a modal on
+ * this page — there is no /rooms/new route, and ?create= needs an entity path
+ * we don't have). Free/Starter users get the Rooms upgrade pitch here instead,
+ * which is a better landing for the rooms CTA than the generic usage page.
+ */
+export const ROOMS_URL = `${DASHBOARD_URL}/rooms`;
 
 /** Agent identity every clip is attributed to. */
 export const CLIPPER_AGENT_ID = "web-clipper";
