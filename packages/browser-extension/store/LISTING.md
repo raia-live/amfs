@@ -7,6 +7,15 @@ npm run zip          # -> .output/senselab-browser-extension-<version>-chrome.zi
 WXT_MIXPANEL_TOKEN=<prod-token> npm run zip   # with analytics enabled
 ```
 
+Always pass the token for store builds — `track()` no-ops silently without it,
+so a plain `npm run zip` ships with analytics dark. The extension reports into
+the same Mixpanel project as the dashboard (its events are `extension_`-prefixed
+and carry `source: "browser-extension"`); the token is the public client token in
+the dashboard's `src/lib/analytics.ts` (`PROD_TOKEN`) in amfs-internal.
+
+Bump `version` in `package.json` before zipping — WXT copies it into the
+manifest, and the store rejects re-uploading an existing version.
+
 Firefox (AMO): `npm run zip:firefox`.
 
 After the store assigns the stable extension ID, set
@@ -70,10 +79,12 @@ Requires a free SenseLab account (senselab.ai).
 
 No remote code execution; all code is bundled in the package.
 
-## Assets needed before submission
+## Assets
 
-- 128x128 store icon (current `public/icon/128.png` is a placeholder — get a
-  final brand icon from design)
-- 1280x800 screenshots: popup save, first-save "ask your agent" moment,
-  room picker, options page
-- Optional 440x280 small promo tile
+- Store icon: `public/icon/*.png` are the SenseLab "S" mark, derived from the
+  dashboard's `senselab-logo-dark.png` (cropped to the mark, colour-inverted
+  since manifest icons can't carry the CSS invert the dashboard uses).
+- Still needed: 1280x800 screenshots (popup save, first-save "ask your agent"
+  moment, destination picker, options page) and an optional 440x280 promo tile.
+  Re-shoot these after any popup redesign — 0.2.0 changed the header logo and
+  replaced the destination chips with a searchable picker.
