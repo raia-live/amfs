@@ -35,6 +35,7 @@ from sse_starlette.sse import EventSourceResponse
 from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
 from pydantic import BaseModel, Field
+from amfs_core.aggregates import REUSE_CREDIT_K
 from amfs_core.models import (
     AgentGroup,
     AMFSConfig,
@@ -1135,14 +1136,21 @@ async def search_entries(
     # counter, leaving reuse metrics (memories reused / rework avoided) reading
     # 0 even when memory was clearly used. Only credit *query-driven* searches
     # (recall intent), not pure filter/browse (agent_id/entity_path listings),
-    # and only the top-K surfaced hits so we don't inflate on the long tail.
+    # and only the TOP hit: the rest of a ranked list is a candidate set the
+    # agent scrolls past, and crediting three per query inflated reuse roughly
+    # threefold (one real session: 4 lookups booked as 16 reuses).
     # Skip system/bench scratch namespaces. Best-effort: never let accounting
     # failure affect the response.
     if req.query and req.query.strip():
-        reuse_credit_k = min(3, req.limit or 3)
-        for entry in results[:reuse_credit_k]:
+        credited = 0
+        for entry in results:
+            if credited >= REUSE_CREDIT_K:
+                break
+            # Scratch namespaces don't consume the credit: a telemetry row
+            # ranking first would otherwise silently swallow the whole budget.
             if entry.entity_path.startswith(("_system/", "bench/", "bench-")):
                 continue
+            credited += 1
             try:
                 if _async_adapter is not None:
                     await _async_adapter.increment_recall_count(
@@ -1372,12 +1380,13 @@ async def retrieve_entries(
     #     (e.g. browser-extension clips) get surfaced and used, but it
     #     historically incremented no counter — so value metrics (rework
     #     avoided / memories reused) read 0 even when memory was clearly reused.
-    #     Bump recall_count for the top-K returned hits (not every candidate),
-    #     so reuse reflects the memories actually surfaced to the caller without
-    #     inflating on the long tail. Best-effort: never let accounting failure
-    #     affect the response.
-    reuse_credit_k = min(3, req.limit)
-    for entry, _score, _bd in scored[:reuse_credit_k]:
+    #     Bump recall_count for the TOP hit only. Reuse should count what the
+    #     agent took, not what it was shown: the rest of a ranked list is a
+    #     candidate set, and crediting the top three booked reuse that never
+    #     happened (a real session: 4 lookups, 16 credited reuses, 1 that
+    #     changed the agent's behavior). Best-effort: never let accounting
+    #     failure affect the response.
+    for entry, _score, _bd in scored[:REUSE_CREDIT_K]:
         try:
             if _async_adapter is not None:
                 await _async_adapter.increment_recall_count(

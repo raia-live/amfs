@@ -283,7 +283,7 @@ def _run_search(request, req):
 
 
 class TestSearchReuseAccounting:
-    def test_query_driven_search_bumps_top_k(self, monkeypatch):
+    def test_query_driven_search_bumps_only_the_top_hit(self, monkeypatch):
         hits = [
             _entry("invoicehub", "deferred-decisions", "recurring invoices deferred"),
             _entry("invoicehub", "schema", "client and invoice entities"),
@@ -294,12 +294,10 @@ class TestSearchReuseAccounting:
         monkeypatch.setattr(server, "_async_adapter", fake)
 
         _run_search(_request(), SearchRequest(query="invoicehub decisions", limit=20))
-        # Only the top-3 surfaced hits are credited (no long-tail inflation).
-        assert fake.bumped == [
-            ("invoicehub", "deferred-decisions"),
-            ("invoicehub", "schema"),
-            ("invoicehub", "layout"),
-        ]
+        # Reuse counts the memory the agent took, not the list it was shown.
+        # Crediting the head of the list inflated reuse ~3x — one real session
+        # made 4 lookups and was credited 16 reuses, of which 1 was used.
+        assert fake.bumped == [("invoicehub", "deferred-decisions")]
 
     def test_browse_without_query_does_not_bump(self, monkeypatch):
         hits = [_entry("invoicehub", "deferred-decisions", "recurring invoices deferred")]
@@ -311,6 +309,9 @@ class TestSearchReuseAccounting:
         assert fake.bumped == []
 
     def test_system_and_bench_namespaces_skipped(self, monkeypatch):
+        # Scratch rows outranking the real hit must not consume the credit —
+        # with a single credit to give, skipping them has to mean "keep
+        # looking", not "spend it here".
         hits = [
             _entry("_system/telemetry", "row", "system row matches query"),
             _entry("bench-run-1/obs", "row", "benchmark row matches query"),
