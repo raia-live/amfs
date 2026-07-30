@@ -10,6 +10,7 @@ const ROOMS_KEY = "roomsState";
 export const DEFAULT_SETTINGS: Settings = {
   apiKey: null,
   accountEmail: null,
+  agentId: null,
   defaultDestination: null,
   disabledSites: [],
   customBlocklist: [],

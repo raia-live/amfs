@@ -6,9 +6,13 @@
  * rooms tier endpoint.
  *
  * Usage: AMFS_API_KEY=amfs_… node scripts/e2e-save.mjs [base-url]
+ *
+ * Set AMFS_AGENT_ID when the key's user doesn't own `web-clipper` on the
+ * account — writes under another user's identity are rejected with 409.
  */
 const API_URL = process.argv[2] ?? process.env.AMFS_HTTP_URL ?? "https://amfs-login.sense-lab.ai";
 const API_KEY = process.env.AMFS_API_KEY;
+const AGENT_ID = process.env.AMFS_AGENT_ID ?? "web-clipper";
 if (!API_KEY) {
   console.error("Set AMFS_API_KEY");
   process.exit(1);
@@ -49,7 +53,7 @@ const writeBody = {
   value: clip,
   confidence: 1.0,
   memory_type: "experience",
-  agent_id: "web-clipper",
+  agent_id: AGENT_ID,
   shared: true,
 };
 
@@ -89,7 +93,7 @@ const r = await fetch(`${API_URL}/api/v1/entries/${entityPath}/${key}`, { header
 const rBody = await r.json();
 check(
   "read back clip",
-  r.ok && rBody.value?.url === testUrl && rBody.provenance?.agent_id === "web-clipper",
+  r.ok && rBody.value?.url === testUrl && rBody.provenance?.agent_id === AGENT_ID,
   `agent_id=${rBody.provenance?.agent_id}`,
 );
 

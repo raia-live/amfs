@@ -2,7 +2,7 @@
 
 Chrome/Edge/Firefox extension that saves web pages and text selections into
 SenseLab agent memory. Clips are written through the hosted REST API
-(`POST /api/v1/entries`) under the `web-clipper` agent and are immediately
+(`POST /api/v1/entries`) under a `web-clipper` agent and are immediately
 retrievable by every agent on the account.
 
 ## Quick start
@@ -19,11 +19,19 @@ Load unpacked: `chrome://extensions` → Developer mode → Load unpacked →
 
 ## Agent identity convention
 
-Every clip is authored under the canonical `web-clipper` agent id
-(`CLIPPER_AGENT_ID` in `utils/config.ts`). This is the single identity for all
-extension-related memory.
+Clips are authored under `web-clipper` (`CLIPPER_AGENT_ID` in
+`utils/config.ts`) — but an agent identity is owned by exactly one user per
+account, and the API answers 409 to a write carrying somebody else's identity.
+On a shared account the first person to save claims `web-clipper`, so each
+further user falls back to a derived variant (`web-clipper-<name>`, see
+`utils/identity.ts`). The resolved id is stored in settings and shown in
+Options.
 
-When working on this extension with AMFS memory, set your identity to the same
+The fallbacks are derived from the account email rather than random, so a
+reinstall returns to the same identity: AMFS has no agent rename/merge, and a
+split identity can only be reconciled by a costly multi-table migration.
+
+When working on this extension with AMFS memory, set your identity to the
 canonical id so build notes and real user clips stay on one agent page (and
 reuse/recall metrics don't get split):
 

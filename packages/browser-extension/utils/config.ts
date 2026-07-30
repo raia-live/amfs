@@ -14,7 +14,10 @@ export const UPGRADE_URL = `${DASHBOARD_URL}/settings/usage`;
  */
 export const ROOMS_URL = `${DASHBOARD_URL}/rooms`;
 
-/** Agent identity every clip is attributed to. */
+/**
+ * Base agent identity clips are attributed to. Only one user per account can
+ * own it, so teammates get a derived variant — see `utils/identity.ts`.
+ */
 export const CLIPPER_AGENT_ID = "web-clipper";
 
 /** Catch-all entity for selections and notes without a clean domain. */

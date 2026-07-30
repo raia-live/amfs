@@ -1,4 +1,4 @@
-import { API_URL, CLIPPER_AGENT_ID, OPS_PER_SAVE, ROOMS_TIERS, UPGRADE_URL } from "./config";
+import { API_URL, OPS_PER_SAVE, ROOMS_TIERS, UPGRADE_URL } from "./config";
 import { bumpLocalUsage, setUsageFromHeaders } from "./storage";
 import type { ClipContent, Room, RoomsState } from "./types";
 
@@ -18,7 +18,18 @@ export class AuthError extends Error {
   }
 }
 
-interface WriteResult {
+/**
+ * The agent identity on the write is owned by another user in the account.
+ * Recoverable: the caller retries under the next candidate identity.
+ */
+export class AgentIdentityConflictError extends Error {
+  constructor(message = "Another member of this account already uses this saving identity.") {
+    super(message);
+    this.name = "AgentIdentityConflictError";
+  }
+}
+
+export interface WriteResult {
   version: number;
   [k: string]: unknown;
 }
@@ -75,7 +86,11 @@ async function request(
     throw new AuthError();
   }
   if (!resp.ok) {
-    throw new Error(`API error ${resp.status}: ${await resp.text()}`);
+    const detail = await resp.text();
+    if (resp.status === 409 && /agent identity/i.test(detail)) {
+      throw new AgentIdentityConflictError();
+    }
+    throw new Error(`API error ${resp.status}: ${detail}`);
   }
   return resp;
 }
@@ -85,6 +100,7 @@ export async function writeClip(
   entityPath: string,
   key: string,
   clip: ClipContent,
+  agentId: string,
 ): Promise<WriteResult> {
   const resp = await request(
     apiKey,
@@ -96,7 +112,7 @@ export async function writeClip(
       value: clip,
       confidence: 1.0,
       memory_type: "experience",
-      agent_id: CLIPPER_AGENT_ID,
+      agent_id: agentId,
       shared: true,
     },
     OPS_PER_SAVE,

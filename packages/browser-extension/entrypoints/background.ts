@@ -1,9 +1,19 @@
 import { browser, type Browser } from "wxt/browser";
 import { defineBackground } from "wxt/utils/define-background";
 import { track } from "@/utils/analytics";
-import { AuthError, QuotaExceededError, fetchRoomsState, retrieve, writeClip } from "@/utils/api";
+import {
+  AgentIdentityConflictError,
+  AuthError,
+  QuotaExceededError,
+  fetchRoomsState,
+  retrieve,
+  whoami,
+  writeClip,
+  type WriteResult,
+} from "@/utils/api";
 import { isBlockedHost, isUnsupportedUrl } from "@/utils/blocklist";
-import { CLIPS_ENTITY, MAX_TEXT_BYTES } from "@/utils/config";
+import { CLIPPER_AGENT_ID, CLIPS_ENTITY, MAX_TEXT_BYTES } from "@/utils/config";
+import { type IdentitySeed, nextAgentId } from "@/utils/identity";
 import { clipKey, entityForUrl } from "@/utils/slug";
 import {
   getRoomsState,
@@ -18,6 +28,7 @@ import type {
   SaveOutcome,
   SaveRequest,
   SaveTrigger,
+  Settings,
 } from "@/utils/types";
 
 const MENU_SAVE_PAGE = "senselab-save-page";
@@ -78,9 +89,14 @@ export default defineBackground(() => {
   browser.runtime.onMessageExternal.addListener((message, _sender, sendResponse) => {
     void (async () => {
       if (message?.type === "amfs-connect" && typeof message.apiKey === "string") {
+        const email = typeof message.email === "string" ? message.email : null;
+        const previous = await getSettings();
         await updateSettings({
           apiKey: message.apiKey,
-          accountEmail: typeof message.email === "string" ? message.email : null,
+          accountEmail: email,
+          // Someone else connecting on this browser profile must not inherit
+          // the previous person's agent identity.
+          ...(email === previous.accountEmail ? {} : { agentId: null }),
         });
         await track("extension_connected");
         void refreshRooms();
@@ -184,7 +200,7 @@ async function performSave(
 
   const key = clipKey(clip.title, clip.url);
   try {
-    const result = await writeClip(settings.apiKey, entityPath, key, clip);
+    const result = await writeClipAsUser(settings.apiKey, settings, entityPath, key, clip);
     const lastSave = {
       url: clip.url,
       title: clip.title,
@@ -223,6 +239,55 @@ async function performSave(
     }
     await track("extension_save_failed", { error: (e as Error).message?.slice(0, 120) });
     return { ok: false, error: (e as Error).message };
+  }
+}
+
+/**
+ * Write the clip under an agent identity this user owns.
+ *
+ * An identity is owned by one user per account, so on a shared account the
+ * default `web-clipper` is already taken by whoever saved first and every
+ * teammate's write comes back 409. Moving to the next candidate identity and
+ * persisting the one that lands keeps that a silent one-time reassignment
+ * instead of an error the user can do nothing about.
+ */
+async function writeClipAsUser(
+  apiKey: string,
+  settings: Settings,
+  entityPath: string,
+  key: string,
+  clip: ClipContent,
+): Promise<WriteResult> {
+  let agentId = settings.agentId ?? CLIPPER_AGENT_ID;
+  let seed: IdentitySeed = { email: settings.accountEmail };
+  const tried: string[] = [];
+
+  for (;;) {
+    try {
+      const result = await writeClip(apiKey, entityPath, key, clip, agentId);
+      if (settings.agentId !== agentId) await updateSettings({ agentId });
+      return result;
+    } catch (e) {
+      if (!(e instanceof AgentIdentityConflictError)) throw e;
+      tried.push(agentId);
+      // No email means the key was pasted by hand in Options; whoami gives us
+      // something stable to derive the next identity from.
+      if (!seed.email && !seed.userId) seed = { ...seed, userId: await fetchUserId(apiKey) };
+      const next = nextAgentId(seed, tried);
+      if (!next) throw e;
+      agentId = next;
+      await track("extension_identity_reassigned", { attempt: tried.length });
+    }
+  }
+}
+
+async function fetchUserId(apiKey: string): Promise<string | null> {
+  try {
+    const info = await whoami(apiKey);
+    const id = info.user_id ?? info.actor_id;
+    return typeof id === "string" ? id : null;
+  } catch {
+    return null;
   }
 }
 

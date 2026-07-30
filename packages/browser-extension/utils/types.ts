@@ -12,6 +12,13 @@ export interface ClipContent {
 export interface Settings {
   apiKey: string | null;
   accountEmail: string | null;
+  /**
+   * Agent identity clips are authored under, resolved on first save and kept
+   * for the life of the connection. null = not resolved yet (also the state of
+   * every install that predates per-user identities, which keeps them on the
+   * shared `web-clipper` until the API says it belongs to someone else).
+   */
+  agentId: string | null;
   /** null = personal memory; otherwise a room id from the rooms list */
   defaultDestination: string | null;
   /** hostnames the user disabled saving on ("never save here") */

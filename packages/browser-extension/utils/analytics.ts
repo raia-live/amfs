@@ -14,7 +14,8 @@ export type AnalyticsEvent =
   | "extension_upgrade_cta_clicked"
   | "extension_rooms_cta_clicked"
   | "extension_connected"
-  | "extension_first_save";
+  | "extension_first_save"
+  | "extension_identity_reassigned";
 
 export async function track(
   event: AnalyticsEvent,
