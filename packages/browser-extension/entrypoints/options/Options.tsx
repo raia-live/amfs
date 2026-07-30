@@ -54,7 +54,14 @@ export default function Options() {
             </p>
             <button
               className="danger"
-              onClick={() => void patch({ apiKey: null, accountEmail: null, firstSaveDone: false })}
+              onClick={() =>
+                void patch({
+                  apiKey: null,
+                  accountEmail: null,
+                  agentId: null,
+                  firstSaveDone: false,
+                })
+              }
             >
               Disconnect
             </button>
@@ -82,6 +89,12 @@ export default function Options() {
             {keyStatus === "checking" ? "Checking…" : "Save key"}
           </button>
         </div>
+        {settings.agentId && (
+          <p className="muted">
+            Clips are filed under the agent <code>{settings.agentId}</code>. Each person on an
+            account saves under their own identity, so your clips stay yours.
+          </p>
+        )}
         {keyStatus === "ok" && <p className="ok">Key verified and saved.</p>}
         {keyStatus === "bad" && <p className="err">That key didn’t work — check it in your dashboard (Settings → API Keys).</p>}
       </section>
