@@ -50,7 +50,25 @@ class TestTheGuardIsDefinedOnce:
         """A bare '@name' with no topic is not a shared namespace, and an
         ordinary path that merely contains an @ must not be caught."""
         src = SYNC.read_text()
-        assert "entity_path NOT LIKE '@%/%'" in src
+        assert "entity_path NOT LIKE '@%%/%%'" in src
+
+    def test_its_wildcards_are_escaped_for_psycopg(self) -> None:
+        """psycopg reads '%' as the start of a placeholder on any query run
+        with parameters, so a single '%' here raises ProgrammingError the
+        moment an unscoped query also binds a value — which every one of them
+        does. The doubling is load-bearing, not style: consecutive LIKE
+        wildcards collapse, so the escaped form means the same thing on the
+        paths where psycopg passes the string through untouched.
+        """
+        line = next(
+            ln for ln in SYNC.read_text().splitlines()
+            if ln.startswith(f"{GUARD} =")
+        )
+        assert "%" in line, "the guard no longer uses a LIKE pattern"
+        assert not re.search(r"(?<!%)%(?!%)", line), (
+            f"unescaped '%' in {line.strip()} — psycopg will reject any "
+            f"unscoped query that binds parameters"
+        )
 
     def test_the_async_adapter_shares_the_definition(self) -> None:
         """Two copies of a security rule is one copy that gets forgotten."""

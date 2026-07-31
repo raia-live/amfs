@@ -81,7 +81,12 @@ logger = logging.getLogger(__name__)
 # Asking for the path explicitly is the act of deciding to trust it. So
 # read(), and any search scoped to the path, still return everything; it is
 # only the unscoped queries that filter it out.
-_EXCLUDE_SHARED_PATHS = "entity_path NOT LIKE '@%/%'"
+# The wildcards are doubled because psycopg parses '%' as a placeholder marker
+# whenever a query is executed with parameters, and '%/' is not a placeholder.
+# Doubling is safe in both directions: psycopg unescapes it to '@%/%', and on
+# the paths that pass the string through verbatim, consecutive LIKE wildcards
+# collapse, so '@%%/%%' matches exactly what '@%/%' does.
+_EXCLUDE_SHARED_PATHS = "entity_path NOT LIKE '@%%/%%'"
 
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
 
