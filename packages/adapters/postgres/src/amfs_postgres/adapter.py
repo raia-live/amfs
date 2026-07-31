@@ -65,6 +65,24 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+# Entity paths of the form @<name>/<topic> denote a shared namespace: one
+# whose contents belong to a group rather than to the account reading them.
+# Access to them is granted separately, outside this adapter.
+#
+# The rule below is that they are only ever returned when they were asked for
+# by name. A query that names no entity_path is an ambient one — "what do I
+# know", "what is relevant here" — and its results land in an agent's context
+# without anyone having decided they should. Shared content reaching that
+# position means a stranger who can write to a shared namespace can put text
+# in front of an agent that is working on something else entirely, which is
+# the shape of a prompt-injection attack and does not require the attacker to
+# do anything but write an ordinary memory.
+#
+# Asking for the path explicitly is the act of deciding to trust it. So
+# read(), and any search scoped to the path, still return everything; it is
+# only the unscoped queries that filter it out.
+_EXCLUDE_SHARED_PATHS = "entity_path NOT LIKE '@%/%'"
+
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
 
 # SQL mirror of amfs_core.aggregates.recall_tokens_saved: per reuse, credit
@@ -1135,6 +1153,8 @@ class PostgresAdapter(AdapterABC):
         if entity_path is not None:
             conditions.append("entity_path = %s")
             params.append(entity_path)
+        else:
+            conditions.append(_EXCLUDE_SHARED_PATHS)
 
         if not include_superseded:
             conditions.append("superseded_at IS NULL")
@@ -1182,6 +1202,8 @@ class PostgresAdapter(AdapterABC):
         if query.entity_path is not None:
             conditions.append("entity_path = %s")
             params.append(query.entity_path)
+        else:
+            conditions.append(_EXCLUDE_SHARED_PATHS)
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
@@ -1299,6 +1321,8 @@ class PostgresAdapter(AdapterABC):
         if query.entity_path is not None:
             conditions.append("entity_path = %s")
             params.append(query.entity_path)
+        else:
+            conditions.append(_EXCLUDE_SHARED_PATHS)
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
@@ -1748,6 +1772,11 @@ class PostgresAdapter(AdapterABC):
         if agent_ids is not None:
             conditions.append("agent_id = ANY(%s)")
             params.append(list(agent_ids))
+        # No entity_path argument to this one: it is unscoped by construction,
+        # so shared namespaces are always excluded. It groups by entity_path,
+        # which would otherwise list a shared namespace's topics as though
+        # they were this account's own.
+        conditions.append(_EXCLUDE_SHARED_PATHS)
         where = " AND ".join(conditions)
 
         sql = f"""

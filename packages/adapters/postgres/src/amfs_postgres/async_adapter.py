@@ -34,7 +34,7 @@ from amfs_core.models import (
     SemanticQuery,
 )
 
-from amfs_postgres.adapter import PostgresAdapter
+from amfs_postgres.adapter import _EXCLUDE_SHARED_PATHS, PostgresAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -402,6 +402,8 @@ class AsyncPostgresAdapter:
         if entity_path is not None:
             conditions.append("entity_path = %s")
             params.append(entity_path)
+        else:
+            conditions.append(_EXCLUDE_SHARED_PATHS)
 
         if not include_superseded:
             conditions.append("superseded_at IS NULL")
@@ -438,6 +440,8 @@ class AsyncPostgresAdapter:
         if query.entity_path is not None:
             conditions.append("entity_path = %s")
             params.append(query.entity_path)
+        else:
+            conditions.append(_EXCLUDE_SHARED_PATHS)
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
@@ -544,6 +548,8 @@ class AsyncPostgresAdapter:
         if query.entity_path is not None:
             conditions.append("entity_path = %s")
             params.append(query.entity_path)
+        else:
+            conditions.append(_EXCLUDE_SHARED_PATHS)
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
