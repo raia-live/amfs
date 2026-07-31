@@ -65,6 +65,29 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+# Entity paths of the form @<name>/<topic> denote a shared namespace: one
+# whose contents belong to a group rather than to the account reading them.
+# Access to them is granted separately, outside this adapter.
+#
+# The rule below is that they are only ever returned when they were asked for
+# by name. A query that names no entity_path is an ambient one — "what do I
+# know", "what is relevant here" — and its results land in an agent's context
+# without anyone having decided they should. Shared content reaching that
+# position means a stranger who can write to a shared namespace can put text
+# in front of an agent that is working on something else entirely, which is
+# the shape of a prompt-injection attack and does not require the attacker to
+# do anything but write an ordinary memory.
+#
+# Asking for the path explicitly is the act of deciding to trust it. So
+# read(), and any search scoped to the path, still return everything; it is
+# only the unscoped queries that filter it out.
+# The wildcards are doubled because psycopg parses '%' as a placeholder marker
+# whenever a query is executed with parameters, and '%/' is not a placeholder.
+# Doubling is safe in both directions: psycopg unescapes it to '@%/%', and on
+# the paths that pass the string through verbatim, consecutive LIKE wildcards
+# collapse, so '@%%/%%' matches exactly what '@%/%' does.
+_EXCLUDE_SHARED_PATHS = "entity_path NOT LIKE '@%%/%%'"
+
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
 
 # SQL mirror of amfs_core.aggregates.recall_tokens_saved: per reuse, credit
@@ -123,12 +146,14 @@ class _TenantRLSConnection:
             get_request_tenant_account_id,
             get_request_tenant_team_id,
             get_request_is_account_admin,
+            get_request_user_id,
         )
 
         conn = self._inner_ctx.__enter__()
         tid = get_request_tenant_account_id()
         team_id = get_request_tenant_team_id()
         is_admin = get_request_is_account_admin()
+        user_id = get_request_user_id()
 
         _TenantRLSConnection._log_counter += 1
         if _TenantRLSConnection._log_counter <= 20 or not tid:
@@ -139,11 +164,21 @@ class _TenantRLSConnection:
             )
 
         with conn.cursor() as cur:
+            # current_user_id is set unconditionally, like the others: on a
+            # pooled connection, leaving it alone would leave the previous
+            # borrower's user in place, and this is the one GUC that grants
+            # access across accounts rather than restricting within one.
             cur.execute(
                 "SELECT set_config('amfs.current_account_id', %s, false),"
                 "       set_config('amfs.current_team_id', %s, false),"
-                "       set_config('amfs.is_account_admin', %s, false)",
-                (tid if tid else "", team_id if team_id else "", "true" if is_admin else "false"),
+                "       set_config('amfs.is_account_admin', %s, false),"
+                "       set_config('amfs.current_user_id', %s, false)",
+                (
+                    tid if tid else "",
+                    team_id if team_id else "",
+                    "true" if is_admin else "false",
+                    user_id if user_id else "",
+                ),
             )
         return conn
 
@@ -1123,6 +1158,8 @@ class PostgresAdapter(AdapterABC):
         if entity_path is not None:
             conditions.append("entity_path = %s")
             params.append(entity_path)
+        else:
+            conditions.append(_EXCLUDE_SHARED_PATHS)
 
         if not include_superseded:
             conditions.append("superseded_at IS NULL")
@@ -1170,6 +1207,8 @@ class PostgresAdapter(AdapterABC):
         if query.entity_path is not None:
             conditions.append("entity_path = %s")
             params.append(query.entity_path)
+        else:
+            conditions.append(_EXCLUDE_SHARED_PATHS)
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
@@ -1287,6 +1326,8 @@ class PostgresAdapter(AdapterABC):
         if query.entity_path is not None:
             conditions.append("entity_path = %s")
             params.append(query.entity_path)
+        else:
+            conditions.append(_EXCLUDE_SHARED_PATHS)
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
@@ -1736,6 +1777,11 @@ class PostgresAdapter(AdapterABC):
         if agent_ids is not None:
             conditions.append("agent_id = ANY(%s)")
             params.append(list(agent_ids))
+        # No entity_path argument to this one: it is unscoped by construction,
+        # so shared namespaces are always excluded. It groups by entity_path,
+        # which would otherwise list a shared namespace's topics as though
+        # they were this account's own.
+        conditions.append(_EXCLUDE_SHARED_PATHS)
         where = " AND ".join(conditions)
 
         sql = f"""
