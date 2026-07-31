@@ -123,12 +123,14 @@ class _TenantRLSConnection:
             get_request_tenant_account_id,
             get_request_tenant_team_id,
             get_request_is_account_admin,
+            get_request_user_id,
         )
 
         conn = self._inner_ctx.__enter__()
         tid = get_request_tenant_account_id()
         team_id = get_request_tenant_team_id()
         is_admin = get_request_is_account_admin()
+        user_id = get_request_user_id()
 
         _TenantRLSConnection._log_counter += 1
         if _TenantRLSConnection._log_counter <= 20 or not tid:
@@ -139,11 +141,21 @@ class _TenantRLSConnection:
             )
 
         with conn.cursor() as cur:
+            # current_user_id is set unconditionally, like the others: on a
+            # pooled connection, leaving it alone would leave the previous
+            # borrower's user in place, and this is the one GUC that grants
+            # access across accounts rather than restricting within one.
             cur.execute(
                 "SELECT set_config('amfs.current_account_id', %s, false),"
                 "       set_config('amfs.current_team_id', %s, false),"
-                "       set_config('amfs.is_account_admin', %s, false)",
-                (tid if tid else "", team_id if team_id else "", "true" if is_admin else "false"),
+                "       set_config('amfs.is_account_admin', %s, false),"
+                "       set_config('amfs.current_user_id', %s, false)",
+                (
+                    tid if tid else "",
+                    team_id if team_id else "",
+                    "true" if is_admin else "false",
+                    user_id if user_id else "",
+                ),
             )
         return conn
 

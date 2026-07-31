@@ -40,6 +40,7 @@ class TestAsyncTenantRLSConnection:
             patch("amfs_postgres.tenant_context.get_request_tenant_account_id", return_value="acct-123"),
             patch("amfs_postgres.tenant_context.get_request_tenant_team_id", return_value="team-456"),
             patch("amfs_postgres.tenant_context.get_request_is_account_admin", return_value=True),
+            patch("amfs_postgres.tenant_context.get_request_user_id", return_value="user-789"),
         ):
             rls = _AsyncTenantRLSConnection(inner_ctx)
             conn = await rls.__aenter__()
@@ -49,7 +50,8 @@ class TestAsyncTenantRLSConnection:
         assert "set_config('amfs.current_account_id'" in sql
         assert "set_config('amfs.current_team_id'" in sql
         assert "set_config('amfs.is_account_admin'" in sql
-        assert params == ("acct-123", "team-456", "true")
+        assert "set_config('amfs.current_user_id'" in sql
+        assert params == ("acct-123", "team-456", "true", "user-789")
 
     async def test_no_tenant_sets_empty_strings(self, _make_conn):
         from amfs_postgres.async_adapter import _AsyncTenantRLSConnection
@@ -60,13 +62,14 @@ class TestAsyncTenantRLSConnection:
             patch("amfs_postgres.tenant_context.get_request_tenant_account_id", return_value=None),
             patch("amfs_postgres.tenant_context.get_request_tenant_team_id", return_value=None),
             patch("amfs_postgres.tenant_context.get_request_is_account_admin", return_value=False),
+            patch("amfs_postgres.tenant_context.get_request_user_id", return_value=None),
         ):
             rls = _AsyncTenantRLSConnection(inner_ctx)
             await rls.__aenter__()
 
         assert len(executed) == 1
         _, params = executed[0]
-        assert params == ("", "", "false")
+        assert params == ("", "", "false", "")
 
     async def test_admin_false(self, _make_conn):
         from amfs_postgres.async_adapter import _AsyncTenantRLSConnection
@@ -77,12 +80,43 @@ class TestAsyncTenantRLSConnection:
             patch("amfs_postgres.tenant_context.get_request_tenant_account_id", return_value="acct-x"),
             patch("amfs_postgres.tenant_context.get_request_tenant_team_id", return_value="team-y"),
             patch("amfs_postgres.tenant_context.get_request_is_account_admin", return_value=False),
+            patch("amfs_postgres.tenant_context.get_request_user_id", return_value=None),
         ):
             rls = _AsyncTenantRLSConnection(inner_ctx)
             await rls.__aenter__()
 
         _, params = executed[0]
-        assert params == ("acct-x", "team-y", "false")
+        assert params == ("acct-x", "team-y", "false", "")
+
+    async def test_a_pooled_connection_never_inherits_the_last_users_identity(
+        self, _make_conn
+    ):
+        """The GUC that grants cross-account access must be reset, not skipped.
+
+        Every other GUC here narrows what a request can see, so leaving a
+        stale one behind fails closed. current_user_id is the opposite: it is
+        what lets an invited user reach a room in someone else's account. A
+        connection handed on with the previous borrower's user still set
+        would grant the next request their room access.
+        """
+        from amfs_postgres.async_adapter import _AsyncTenantRLSConnection
+
+        inner_ctx, executed = _make_conn
+
+        with (
+            patch("amfs_postgres.tenant_context.get_request_tenant_account_id", return_value="acct-x"),
+            patch("amfs_postgres.tenant_context.get_request_tenant_team_id", return_value=None),
+            patch("amfs_postgres.tenant_context.get_request_is_account_admin", return_value=False),
+            patch("amfs_postgres.tenant_context.get_request_user_id", return_value=None),
+        ):
+            await _AsyncTenantRLSConnection(inner_ctx).__aenter__()
+
+        sql, params = executed[0]
+        assert "set_config('amfs.current_user_id'" in sql, (
+            "current_user_id is left untouched on checkout, so it keeps "
+            "whatever the previous borrower of this pooled connection set"
+        )
+        assert params[3] == ""
 
     async def test_aexit_delegates(self, _make_conn):
         from amfs_postgres.async_adapter import _AsyncTenantRLSConnection
@@ -93,6 +127,7 @@ class TestAsyncTenantRLSConnection:
             patch("amfs_postgres.tenant_context.get_request_tenant_account_id", return_value=None),
             patch("amfs_postgres.tenant_context.get_request_tenant_team_id", return_value=None),
             patch("amfs_postgres.tenant_context.get_request_is_account_admin", return_value=False),
+            patch("amfs_postgres.tenant_context.get_request_user_id", return_value=None),
         ):
             rls = _AsyncTenantRLSConnection(inner_ctx)
             await rls.__aenter__()
