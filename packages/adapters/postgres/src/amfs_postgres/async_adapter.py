@@ -61,16 +61,19 @@ class _AsyncTenantRLSConnection:
             get_request_tenant_account_id,
             get_request_tenant_team_id,
             get_request_is_account_admin,
+            get_request_user_id,
         )
 
         conn = await self._inner_ctx.__aenter__()
         tid = get_request_tenant_account_id()
         team_id = get_request_tenant_team_id()
         is_admin = get_request_is_account_admin()
+        user_id = get_request_user_id()
 
         guc_account = tid if tid else ""
         guc_team = team_id if team_id else ""
         guc_admin = "true" if is_admin else "false"
+        guc_user = user_id if user_id else ""
 
         if not tid:
             logger.warning(
@@ -80,11 +83,15 @@ class _AsyncTenantRLSConnection:
             )
 
         async with conn.cursor() as cur:
+            # Set unconditionally, for the same reason as the other three: a
+            # pooled connection would otherwise keep the previous borrower's
+            # user, and this is the GUC that grants access across accounts.
             await cur.execute(
                 "SELECT set_config('amfs.current_account_id', %s, false),"
                 "       set_config('amfs.current_team_id', %s, false),"
-                "       set_config('amfs.is_account_admin', %s, false)",
-                (guc_account, guc_team, guc_admin),
+                "       set_config('amfs.is_account_admin', %s, false),"
+                "       set_config('amfs.current_user_id', %s, false)",
+                (guc_account, guc_team, guc_admin, guc_user),
             )
         return conn
 
