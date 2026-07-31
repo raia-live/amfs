@@ -147,6 +147,14 @@ async def _dashboard_tenant_middleware(request: Request, call_next):
 
 _memory: AgentMemory | None = None
 _sse_manager = SSEManager()
+
+# Routers mounted onto this app from outside the package cannot reach a
+# module-level private, so the manager is published on app.state, which a
+# route reaches through its own Request. Without this the room event stream
+# has no manager to find and answers 503 on every connection, and the
+# broadcasts aimed at it are dropped in silence — which is how it behaved.
+app.state.sse_manager = _sse_manager
+
 _bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="amfs-bg")
 _known_agents: set[str] = set()
 # Tracks (agent, namespace, user) triples whose owner linkage was already
