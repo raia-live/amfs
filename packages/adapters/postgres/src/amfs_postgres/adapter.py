@@ -1705,11 +1705,15 @@ class PostgresAdapter(AdapterABC):
     # ------------------------------------------------------------------
 
     def stats(self) -> MemoryStats:
-        """Compute stats using SQL aggregates instead of full scan."""
+        """Compute stats using SQL aggregates instead of full scan.
+
+        Unscoped by construction, so shared namespaces are excluded here for
+        the same reason as in entity_summaries and stats_extended.
+        """
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         COUNT(*) as total_entries,
                         COUNT(DISTINCT entity_path) as total_entities,
@@ -1722,16 +1726,18 @@ class PostgresAdapter(AdapterABC):
                         MAX(written_at) as newest_entry_at
                     FROM amfs_memory_entries
                     WHERE namespace = %s AND superseded_at IS NULL
+                      AND {_EXCLUDE_SHARED_PATHS}
                     """,
                     (self._namespace,),
                 )
                 row = cur.fetchone()
 
                 cur.execute(
-                    """
+                    f"""
                     SELECT agent_id, COUNT(*) as cnt
                     FROM amfs_memory_entries
                     WHERE namespace = %s AND superseded_at IS NULL
+                      AND {_EXCLUDE_SHARED_PATHS}
                     GROUP BY agent_id
                     """,
                     (self._namespace,),
@@ -1739,10 +1745,11 @@ class PostgresAdapter(AdapterABC):
                 agent_rows = cur.fetchall()
 
                 cur.execute(
-                    """
+                    f"""
                     SELECT entity_path, COUNT(*) as cnt
                     FROM amfs_memory_entries
                     WHERE namespace = %s AND superseded_at IS NULL
+                      AND {_EXCLUDE_SHARED_PATHS}
                     GROUP BY entity_path
                     """,
                     (self._namespace,),
@@ -1834,6 +1841,12 @@ class PostgresAdapter(AdapterABC):
         if agent_ids is not None:
             conditions.append("agent_id = ANY(%s)")
             params.append(list(agent_ids))
+        # Unscoped by construction, like entity_summaries: there is no
+        # entity_path argument to opt into a shared namespace, and the
+        # breakdown below groups by entity_path. Without this, a shared
+        # namespace's topics appear in the account's own entity list and its
+        # entries inflate every total on the stats page.
+        conditions.append(_EXCLUDE_SHARED_PATHS)
         where = " AND ".join(conditions)
 
         with self._pool.connection() as conn:

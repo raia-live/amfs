@@ -125,6 +125,13 @@ class TestUnscopedReadsExcludeSharedNamespaces:
         account's own."""
         assert GUARD in _method(SYNC, "entity_summaries")
 
+    @pytest.mark.parametrize("method", ["stats", "stats_extended"])
+    def test_the_stats_aggregates_are_always_filtered(self, method) -> None:
+        """Same shape as entity_summaries — no entity_path to opt in with, and
+        a breakdown that groups by entity_path. Shared entries would both name
+        their topics and inflate every total the stats page shows."""
+        assert GUARD in _method(SYNC, method)
+
 
 class TestScopedReadsAreUntouched:
     def test_read_does_not_filter(self) -> None:
