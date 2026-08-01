@@ -146,6 +146,10 @@ class HttpAdapter(AdapterABC):
             "shared": entry.shared,
             "branch": entry.branch,
             "agent_id": entry.provenance.agent_id,
+            # Without this the server stamps its own session on the entry, so
+            # every write served by one process shares an id and none of them
+            # match the decision trace that recorded the write.
+            "session_id": entry.provenance.session_id,
         }
         data = self._post("/api/v1/entries", body)
         return _parse_entry(data)
