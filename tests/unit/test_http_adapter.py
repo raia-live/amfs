@@ -161,6 +161,53 @@ class TestListForwardsSuperseded:
         assert "include_superseded" not in calls[0]["params"]
 
 
+class TestWriteCarriesTheCallersSession:
+    """The server builds provenance from what this body says.
+
+    Anything omitted here is filled in from the server's own tagger, which is
+    one process serving every agent — so a dropped session_id silently
+    relabels the write with a session that has nothing to do with the caller,
+    and the decision trace (keyed on the caller's session) can no longer be
+    joined to the entries it produced.
+    """
+
+    def _write(self):
+        from datetime import datetime, timezone
+
+        from amfs_core.models import MemoryEntry, Provenance
+
+        adapter, calls = _make_adapter({
+            "POST /api/v1/entries": {
+                "entity_path": "svc",
+                "key": "k",
+                "value": "v",
+                "provenance": {
+                    "agent_id": "agent-1",
+                    "session_id": "sess-caller",
+                    "written_at": "2026-01-01T00:00:00Z",
+                },
+            },
+        })
+        entry = MemoryEntry(
+            entity_path="svc",
+            key="k",
+            value="v",
+            provenance=Provenance(
+                agent_id="agent-1",
+                session_id="sess-caller",
+                written_at=datetime.now(timezone.utc),
+            ),
+        )
+        adapter.write(entry)
+        return calls
+
+    def test_the_session_id_is_sent(self) -> None:
+        assert self._write()[0]["body"]["session_id"] == "sess-caller"
+
+    def test_the_agent_id_is_still_sent(self) -> None:
+        assert self._write()[0]["body"]["agent_id"] == "agent-1"
+
+
 class TestBriefingProxy:
     def test_proxies_to_server_endpoint(self) -> None:
         adapter, calls = _make_adapter({

@@ -17,6 +17,11 @@ class WriteRequest(BaseModel):
     shared: bool = True
     branch: str = "main"
     agent_id: str | None = None
+    #: The caller's session, so stored provenance names the agent session that
+    #: made the write rather than the server process that served it. Decision
+    #: traces are keyed on this same id, and without it the two cannot be
+    #: joined. Optional: older clients omit it and fall back to the server's.
+    session_id: str | None = None
 
 
 class OutcomeRequest(BaseModel):
