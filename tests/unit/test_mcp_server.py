@@ -263,6 +263,26 @@ class TestMCPTools:
         assert result["entries_created"] == 1
         assert "read" in result["note"]
 
+    def test_reads_that_could_not_be_adjusted_are_not_called_unread(self) -> None:
+        """Reads and adjustments are different counts: the adapter skips any
+        causal entry it cannot resolve, so a session that read can still adjust
+        nothing. The explanation has to agree with the causal_entries printed
+        next to it instead of claiming nothing was read."""
+        import amfs_mcp.server as srv
+        from amfs_mcp.server import amfs_commit_outcome, amfs_read, amfs_write
+
+        amfs_write("svc", "key", "value")
+        amfs_read("svc", "key")
+
+        mem = srv._get_memory()
+        with patch.object(mem._adapter, "commit_outcome", return_value=[]):
+            result = json.loads(amfs_commit_outcome("task-44", "success"))
+
+        assert result["affected_entries"] == 0
+        assert result["causal_entries"] == 1
+        assert "Nothing was read" not in result["note"]
+        assert "causal_entries" in result["note"]
+
     def test_the_explanation_is_absent_once_something_was_read(self) -> None:
         from amfs_mcp.server import amfs_commit_outcome, amfs_read, amfs_write
 

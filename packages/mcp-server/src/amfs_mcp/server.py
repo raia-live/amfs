@@ -1160,12 +1160,27 @@ def amfs_commit_outcome(
             # A write-only session commits a complete trace and still reports
             # zero here, which reads like the call did nothing. Say what the
             # number actually measures so it is not mistaken for a failure.
-            result["note"] = (
-                "affected_entries counts only memories whose confidence this "
-                "outcome adjusted, which is the set that was read during the "
-                "session. Nothing was read, so there was nothing to adjust. "
-                "The trace was still saved, including any writes and contexts."
-            )
+            #
+            # Reads and adjustments are not the same count: the adapter skips
+            # any causal entry it cannot resolve, so a session that read can
+            # still adjust nothing. Saying "nothing was read" in that case
+            # would contradict the causal_entries beside it.
+            if trace.causal_entries:
+                result["note"] = (
+                    "affected_entries counts only memories whose confidence "
+                    "this outcome adjusted. This session's reads are listed "
+                    "in causal_entries, but none of them could be updated — "
+                    "usually because the entry no longer resolves. The trace "
+                    "was still saved."
+                )
+            else:
+                result["note"] = (
+                    "affected_entries counts only memories whose confidence "
+                    "this outcome adjusted, which is the set that was read "
+                    "during the session. Nothing was read, so there was "
+                    "nothing to adjust. The trace was still saved, including "
+                    "any writes and contexts."
+                )
     return json.dumps(result, default=str)
 
 
