@@ -29,13 +29,16 @@ RECALL_TOKENS_FLOOR = 200
 RECALL_TOKENS_CEIL = 4000
 CHARS_PER_TOKEN = 4
 
-# How many hits of a query-driven lookup (retrieve/search) count as reuse.
-# One: reuse should count the memory an agent took, not the candidate list it
-# was shown. Crediting the top three inflated the number roughly threefold —
-# one real session made 4 lookups, was credited 16 reuses, and exactly 1 of
-# those memories changed what the agent did. Mirrored by the MCP server's
-# value_ledger.py (REUSE_CREDIT_K) so the chat recap and the dashboard describe
-# the same query identically.
+# How many hits of a query-driven lookup (retrieve/search) bump recall_count.
+# One: per-entry reuse should count the memory an agent took, not the candidate
+# list it was shown. Crediting the top three inflated the number roughly
+# threefold — one real session made 4 lookups, was credited 16 reuses, and
+# exactly 1 of those memories changed what the agent did.
+#
+# The Pro MCP server's chat recap (value_ledger.py) deliberately no longer
+# mirrors this: it estimates what a single CALL delivered, so it credits every
+# entry returned. The two answer different questions — this one is the
+# dashboard's per-entry source of truth — and are not expected to match.
 REUSE_CREDIT_K = 1
 
 
