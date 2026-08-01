@@ -773,8 +773,11 @@ async def write_entry(
     mt = type_map.get(req.memory_type.lower(), MemoryType.FACT)
 
     original_agent = mem._tagger.agent_id if req.agent_id else None
+    original_session = mem._tagger.session_id if req.session_id else None
     if req.agent_id:
         mem._tagger.agent_id = req.agent_id
+    if req.session_id:
+        mem._tagger.session_id = req.session_id
 
     try:
         _used_async = False
@@ -864,6 +867,8 @@ async def write_entry(
     finally:
         if original_agent is not None:
             mem._tagger.agent_id = original_agent
+        if original_session is not None:
+            mem._tagger.session_id = original_session
     _sse_manager.broadcast(entry)
 
     _resource = f"{req.entity_path}/{req.key}"

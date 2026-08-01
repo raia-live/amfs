@@ -1101,6 +1101,11 @@ def amfs_commit_outcome(
     confidence changes: entries linked to successes stabilize, entries linked
     to failures get flagged for review.
 
+    Back-propagation applies to memories READ this session, since those are the
+    ones the outcome is evidence about. A session that only wrote therefore
+    returns affected_entries: 0 and still saves a full trace — check
+    entries_created, entries_updated and external_contexts for what it holds.
+
     Args:
         outcome_ref: Reference identifier (e.g. "INC-2047", "task-42", "PR-456")
         outcome_type: One of "success", "minor_failure", "failure", "critical_failure",
@@ -1137,11 +1142,45 @@ def amfs_commit_outcome(
         "affected_entries": len(entries),
         "entries": [_serialize_entry(e) for e in entries],
     }
-    if trace and getattr(trace, "id", None):
-        result["trace_id"] = trace.id
+    if trace is not None:
+        # Only the id is adapter-dependent — the filesystem adapter persists a
+        # trace without minting one. Gating the whole block on it dropped the
+        # counts too, which is what made a committed trace look like nothing
+        # had been recorded.
+        if getattr(trace, "id", None):
+            result["trace_id"] = trace.id
         result["causal_entries"] = len(trace.causal_entries)
         result["external_contexts"] = len(trace.external_contexts)
         result["session_duration_ms"] = trace.session_duration_ms
+        diff = getattr(trace, "state_diff", None)
+        if diff is not None:
+            result["entries_created"] = diff.entries_created
+            result["entries_updated"] = diff.entries_updated
+        if not entries:
+            # A write-only session commits a complete trace and still reports
+            # zero here, which reads like the call did nothing. Say what the
+            # number actually measures so it is not mistaken for a failure.
+            #
+            # Reads and adjustments are not the same count: the adapter skips
+            # any causal entry it cannot resolve, so a session that read can
+            # still adjust nothing. Saying "nothing was read" in that case
+            # would contradict the causal_entries beside it.
+            if trace.causal_entries:
+                result["note"] = (
+                    "affected_entries counts only memories whose confidence "
+                    "this outcome adjusted. This session's reads are listed "
+                    "in causal_entries, but none of them could be updated — "
+                    "usually because the entry no longer resolves. The trace "
+                    "was still saved."
+                )
+            else:
+                result["note"] = (
+                    "affected_entries counts only memories whose confidence "
+                    "this outcome adjusted, which is the set that was read "
+                    "during the session. Nothing was read, so there was "
+                    "nothing to adjust. The trace was still saved, including "
+                    "any writes and contexts."
+                )
     return json.dumps(result, default=str)
 
 

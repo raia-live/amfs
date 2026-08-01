@@ -249,6 +249,50 @@ class TestMCPTools:
         # SUCCESS reinforces confidence: 1.0 * 1.03 = 1.03, clamped to 1.0
         assert result["entries"][0]["confidence"] == pytest.approx(1.0)
 
+    def test_a_write_only_session_reports_zero_but_records_the_trace(self) -> None:
+        """Back-propagation adjusts memories the outcome is evidence about,
+        which is the set that was read. Writing alone leaves nothing to adjust,
+        so zero here is the honest answer rather than a lost trace — and the
+        response has to say so, because "0" on its own reads like a no-op."""
+        from amfs_mcp.server import amfs_commit_outcome, amfs_write
+
+        amfs_write("svc", "key", "value")
+
+        result = json.loads(amfs_commit_outcome("task-42", "success"))
+        assert result["affected_entries"] == 0
+        assert result["entries_created"] == 1
+        assert "read" in result["note"]
+
+    def test_reads_that_could_not_be_adjusted_are_not_called_unread(self) -> None:
+        """Reads and adjustments are different counts: the adapter skips any
+        causal entry it cannot resolve, so a session that read can still adjust
+        nothing. The explanation has to agree with the causal_entries printed
+        next to it instead of claiming nothing was read."""
+        import amfs_mcp.server as srv
+        from amfs_mcp.server import amfs_commit_outcome, amfs_read, amfs_write
+
+        amfs_write("svc", "key", "value")
+        amfs_read("svc", "key")
+
+        mem = srv._get_memory()
+        with patch.object(mem._adapter, "commit_outcome", return_value=[]):
+            result = json.loads(amfs_commit_outcome("task-44", "success"))
+
+        assert result["affected_entries"] == 0
+        assert result["causal_entries"] == 1
+        assert "Nothing was read" not in result["note"]
+        assert "causal_entries" in result["note"]
+
+    def test_the_explanation_is_absent_once_something_was_read(self) -> None:
+        from amfs_mcp.server import amfs_commit_outcome, amfs_read, amfs_write
+
+        amfs_write("svc", "key", "value")
+        amfs_read("svc", "key")
+
+        result = json.loads(amfs_commit_outcome("task-43", "success"))
+        assert result["affected_entries"] == 1
+        assert "note" not in result
+
     def test_embedding_stripped_from_output(self) -> None:
         from amfs_mcp.server import _serialize_entry
         from amfs_core.models import MemoryEntry, Provenance
