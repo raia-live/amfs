@@ -304,6 +304,92 @@ def test_the_http_adapter_forwards_the_capture_to_the_server() -> None:
     assert body["response_text"] == "the answer"
 
 
+def test_the_posted_traces_capture_is_scanned_as_its_own_agent() -> None:
+    """``POST /api/v1/traces`` knows whose text this is; it should say so.
+
+    The scan took its identity from the server's shared memory handle, which on
+    this entry point is the process default and not the client that posted the
+    trace. No redaction depends on it today — the gate matches on content and on
+    a fixed capture namespace — so this is provenance rather than a live bug. It
+    is asserted because the failure mode is silent: the first per-agent capture
+    rule would apply to the wrong agent, and nothing would say so.
+
+    Driven through the endpoint rather than the helper. Calling the helper with
+    the identity spelled out only proves it forwards what it is given, which was
+    never in doubt — the endpoint choosing to give it is the whole fix.
+    """
+    import asyncio
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from amfs_core.models import DecisionTrace
+    from amfs_http import server as http_server
+
+    seen: list[dict[str, str]] = []
+
+    def _record(text, *, adapter=None, agent_id="", session_id=""):
+        seen.append({"agent_id": agent_id, "session_id": session_id})
+        return text
+
+    trace = DecisionTrace(
+        session_id="posted-session",
+        agent_id="posting-agent",
+        started_at=datetime.now(UTC),
+        task_input="the ask",
+    )
+    mem = SimpleNamespace(
+        _adapter=SimpleNamespace(save_trace=lambda t: t),
+        agent_id="server-default",
+        session_id="server-session",
+        namespace="ns",
+    )
+
+    original_scan = http_server.scan_captured_text
+    original_mem = http_server._get_memory
+    original_link = http_server._link_agent_owner_once
+    http_server.scan_captured_text = _record  # type: ignore[assignment]
+    http_server._get_memory = lambda: mem  # type: ignore[assignment]
+    http_server._link_agent_owner_once = lambda *a, **k: None  # type: ignore[assignment]
+    try:
+        request = SimpleNamespace(
+            json=lambda: asyncio.sleep(0, result=trace.model_dump(mode="json"))
+        )
+        asyncio.run(http_server.save_trace(request))
+    finally:
+        http_server.scan_captured_text = original_scan  # type: ignore[assignment]
+        http_server._get_memory = original_mem  # type: ignore[assignment]
+        http_server._link_agent_owner_once = original_link  # type: ignore[assignment]
+
+    assert seen, "the endpoint must scan captured text"
+    assert all(s["agent_id"] == "posting-agent" for s in seen), seen
+    assert all(s["session_id"] == "posted-session" for s in seen), seen
+
+
+def test_the_scan_identity_still_falls_back_to_the_handle() -> None:
+    """Every other call site passes no identity and must keep the handle's."""
+    from types import SimpleNamespace
+
+    from amfs_http import server as http_server
+
+    seen: list[dict[str, str]] = []
+
+    def _record(text, *, adapter=None, agent_id="", session_id=""):
+        seen.append({"agent_id": agent_id, "session_id": session_id})
+        return text
+
+    original = http_server.scan_captured_text
+    http_server.scan_captured_text = _record  # type: ignore[assignment]
+    try:
+        http_server._scan_captured_text(
+            SimpleNamespace(_adapter=None, agent_id="handle-agent", session_id="s0"),
+            "the ask",
+        )
+    finally:
+        http_server.scan_captured_text = original  # type: ignore[assignment]
+
+    assert seen == [{"agent_id": "handle-agent", "session_id": "s0"}]
+
+
 def test_a_trace_without_capture_is_unaffected(tmp_path) -> None:
     """Committing an outcome with no captured text must not start failing."""
     adapter = FilesystemAdapter(root=tmp_path / ".amfs", namespace="test")
