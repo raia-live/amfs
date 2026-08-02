@@ -30,6 +30,13 @@ class OutcomeRequest(BaseModel):
     causal_entry_keys: list[str] | None = None
     causal_confidence: float = 1.0
     agent_id: str | None = None
+    #: The request that triggered the decision. Supervised training needs the
+    #: prompt side of the pair and the trace otherwise records only what was
+    #: decided. Scanned for secrets before it is persisted.
+    task_input: str | None = None
+    #: The agent's answer. Opt-in separately from ``task_input`` because it is
+    #: the larger disclosure and only the assistant-model dataset needs it.
+    response_text: str | None = None
 
 
 class SearchRequest(BaseModel):
