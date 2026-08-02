@@ -107,6 +107,24 @@ def test_an_oss_install_without_the_safety_package_stores_the_text() -> None:
         pytest.skip("amfs_safety installed; the ImportError branch is unreachable")
 
 
+def test_a_non_string_from_the_gate_is_dropped_not_replaced_with_the_original(
+    monkeypatch,
+) -> None:
+    """Allowed-but-not-a-string is still not something we can store.
+
+    Returning the caller's original text here would return the one value known
+    *not* to be what the gate approved: if it redacted into a non-string form, the
+    unredacted secret would go straight through.
+    """
+
+    class Gate:
+        def check_write(self, entry):
+            return _Decision(True, {"redacted": True})
+
+    _install_gate(monkeypatch, Gate())
+    assert capture.scan_captured_text("token=sk-live-123") is None
+
+
 def test_oversized_text_is_truncated_before_scanning(monkeypatch) -> None:
     seen: list[int] = []
 
@@ -177,6 +195,113 @@ def test_commit_outcome_drops_text_the_gate_blocks(monkeypatch, tmp_path) -> Non
     assert trace is not None
     assert trace.task_input is None
     assert trace.response_text is None
+
+
+def test_the_capture_travels_with_the_outcome_record(monkeypatch, tmp_path) -> None:
+    """The SaaS ordering bug.
+
+    On the HTTP adapter the outcome record reaches the server first, and the server
+    seals its immutable trace from that call — the copy Pro export and training
+    actually read. A capture that travelled only on the later ``save_trace`` was
+    absent from the sealed trace, so the flywheel saw empty prompts.
+    """
+
+    class Gate:
+        def check_write(self, entry):
+            return _Decision(True, entry.value)
+
+    _install_gate(monkeypatch, Gate())
+
+    seen: list[object] = []
+
+    class _RecordingAdapter(FilesystemAdapter):
+        def commit_outcome(self, record):
+            seen.append(record)
+            return super().commit_outcome(record)
+
+    adapter = _RecordingAdapter(root=tmp_path / ".amfs", namespace="test")
+    mem = AgentMemory(agent_id="a", adapter=adapter)
+    mem.commit_outcome(
+        "task-4",
+        OutcomeType.SUCCESS,
+        task_input="restart the worker",
+        response_text="scaled to zero and back",
+    )
+    _flush_bg()
+
+    assert seen, "the adapter's commit_outcome should have been called"
+    assert seen[0].task_input == "restart the worker"
+    assert seen[0].response_text == "scaled to zero and back"
+
+
+def test_the_record_carries_scanned_text_not_raw(monkeypatch, tmp_path) -> None:
+    """Nothing raw may leave the process.
+
+    The record goes over the wire before the trace does, so scanning only at trace
+    construction would put the unredacted secret on the first request.
+    """
+
+    class Gate:
+        def check_write(self, entry):
+            return _Decision(True, entry.value.replace("sk-live-123", "[REDACTED]"))
+
+    _install_gate(monkeypatch, Gate())
+
+    seen: list[object] = []
+
+    class _RecordingAdapter(FilesystemAdapter):
+        def commit_outcome(self, record):
+            seen.append(record)
+            return super().commit_outcome(record)
+
+    adapter = _RecordingAdapter(root=tmp_path / ".amfs", namespace="test")
+    mem = AgentMemory(agent_id="a", adapter=adapter)
+    mem.commit_outcome("task-5", OutcomeType.SUCCESS, task_input="key sk-live-123")
+    _flush_bg()
+
+    assert seen
+    assert "sk-live-123" not in (seen[0].task_input or "")
+
+
+def test_the_http_adapter_forwards_the_capture_to_the_server() -> None:
+    """The adapter builds the /outcomes body by hand, so the fields are droppable.
+
+    This asserts on the request body rather than the record, because the record
+    carrying the capture is useless if the transport leaves it out — which is
+    exactly what it did.
+    """
+    from datetime import UTC, datetime
+
+    from amfs_adapter_http.adapter import HttpAdapter
+    from amfs_core.models import OutcomeRecord
+
+    sent: dict[str, object] = {}
+
+    adapter = HttpAdapter.__new__(HttpAdapter)
+
+    def _post(path, body):
+        sent["path"] = path
+        sent["body"] = body
+        return {"entries": []}
+
+    adapter._post = _post  # type: ignore[method-assign]
+
+    adapter.commit_outcome(
+        OutcomeRecord(
+            outcome_ref="task-6",
+            outcome_type=OutcomeType.SUCCESS,
+            committed_at=datetime.now(UTC),
+            agent_id="a",
+            task_input="the ask",
+            response_text="the answer",
+        )
+    )
+
+    assert sent["path"] == "/api/v1/outcomes"
+    body = sent["body"]
+    assert isinstance(body, dict)
+    assert body["task_input"] == "the ask"
+    assert body["response_text"] == "the answer"
 
 
 def test_a_trace_without_capture_is_unaffected(tmp_path) -> None:

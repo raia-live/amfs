@@ -75,7 +75,17 @@ def scan_captured_text(
             logger.info("Captured text blocked by SafetyGate; dropping from trace")
             return None
         scanned = decision.entry.value
-        return scanned if isinstance(scanned, str) else text
+        if isinstance(scanned, str):
+            return scanned
+        # The gate allowed the write but handed back something that is not a
+        # string. Falling back to the caller's original text here would return the
+        # one value known *not* to be what the gate approved — if it redacted into
+        # a non-string form, the secret would go straight through. Drop instead.
+        logger.warning(
+            "SafetyGate returned a non-string value (%s); dropping capture",
+            type(scanned).__name__,
+        )
+        return None
     except ImportError:
         # OSS install without the Pro safety package. Capture is opt-in and the
         # caller asked for it, so store the text rather than silently dropping.

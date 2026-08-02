@@ -2143,8 +2143,10 @@ async def save_trace(
         _link_agent_owner_once(req, trace.agent_id, mem.namespace)
     # HttpAdapter posts the whole trace here rather than through /outcomes, so
     # this is the second entry point captured text can arrive on and it needs
-    # the same scan before anything is written.
-    if trace.task_input or trace.response_text:
+    # the same scan before anything is written. Unconditionally, with no truthiness
+    # guard: an empty string skipped the scan and was stored as "" while every
+    # other path normalises absent capture to None.
+    if trace.task_input is not None or trace.response_text is not None:
         trace = trace.model_copy(update={
             "task_input": _scan_captured_text(mem, trace.task_input),
             "response_text": _scan_captured_text(mem, trace.response_text),

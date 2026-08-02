@@ -249,6 +249,14 @@ class OutcomeRecord(BaseModel):
     committed_at: datetime
     causal_entry_keys: list[str] = Field(default_factory=list)
     agent_id: str
+    #: Captured prompt and response, carried alongside the outcome rather than
+    #: only on the trace. On the SaaS path the adapter's ``commit_outcome`` is what
+    #: reaches the server, and the server seals its immutable trace from that call
+    #: — so a capture that travelled only on the later ``save_trace`` was missing
+    #: from the sealed copy that training and export actually read. Not persisted
+    #: to the outcomes table; adapters write named columns.
+    task_input: str | None = None
+    response_text: str | None = None
 
 
 class TraceEntry(BaseModel):
