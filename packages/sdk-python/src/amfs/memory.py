@@ -930,11 +930,17 @@ class AgentMemory:
         *,
         causal_confidence: float = 1.0,
         decision_summary: str | None = None,
+        task_input: str | None = None,
+        response_text: str | None = None,
     ) -> list[MemoryEntry]:
         """Record an outcome and back-propagate confidence changes.
 
         If *causal_entry_keys* is ``None``, automatically uses the session's
         read log — every entry this agent read becomes a causal link.
+
+        *task_input* is the request that triggered the decision and
+        *response_text* the agent's answer. Both are optional and only stored
+        when supplied.
         """
         if causal_entry_keys is None:
             causal_entry_keys = self._read_tracker.causal_keys
@@ -1025,6 +1031,8 @@ class AgentMemory:
             outcome_ref=outcome_ref,
             outcome_type=outcome_type.value,
             decision_summary=decision_summary,
+            task_input=task_input,
+            response_text=response_text,
             causal_entries=causal_trace_entries,
             external_contexts=ext_contexts,
             query_events=query_events,

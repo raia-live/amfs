@@ -1883,6 +1883,59 @@ def _get_immutable_store():
 
 _seal_sequence: dict[str, int] = {}
 
+_CAPTURE_SAFETY_GATE: dict[str, Any] = {}
+#: Captured prompts and responses are unbounded caller-supplied text. Truncating
+#: before the safety scan keeps a runaway payload from becoming a storage or
+#: latency problem, and no training example is allowed near this size anyway.
+_MAX_CAPTURED_CHARS = 200_000
+
+
+def _scan_captured_text(mem: AgentMemory, text: str | None) -> str | None:
+    """Redact secrets from captured prompt/response text before it is persisted.
+
+    Returns ``None`` when the gate blocks the text outright: losing one training
+    example is always preferable to writing a customer credential into a
+    dataset that later leaves our infrastructure for a tuning job.
+    """
+    if not text:
+        return None
+    if len(text) > _MAX_CAPTURED_CHARS:
+        text = text[:_MAX_CAPTURED_CHARS]
+    try:
+        from amfs_core.models import Provenance
+
+        if "gate" not in _CAPTURE_SAFETY_GATE:
+            from amfs_safety import SafetyGate  # Pro package, optional
+
+            _CAPTURE_SAFETY_GATE["gate"] = SafetyGate(
+                adapter=getattr(mem, "_adapter", None)
+            )
+        gate = _CAPTURE_SAFETY_GATE["gate"]
+        entry = MemoryEntry(
+            entity_path="_capture/task_input",
+            key="scan",
+            value=text,
+            provenance=Provenance(
+                agent_id=mem.agent_id,
+                session_id=mem.session_id,
+                written_at=datetime.now(timezone.utc),
+            ),
+            confidence=0.5,
+        )
+        decision = gate.check_write(entry)
+        if not decision.allowed:
+            logger.info("Captured text blocked by SafetyGate; dropping from trace")
+            return None
+        scanned = decision.entry.value
+        return scanned if isinstance(scanned, str) else text
+    except ImportError:
+        # OSS install without the Pro safety package. Capture is opt-in and the
+        # caller asked for it, so store the text rather than silently dropping.
+        return text
+    except Exception:
+        logger.debug("SafetyGate scan of captured text failed", exc_info=True)
+        return text
+
 
 def _auto_seal_trace(mem: AgentMemory) -> str | None:
     """If Pro traces are available, auto-seal the last OSS trace as immutable."""
@@ -1945,6 +1998,8 @@ def _auto_seal_trace(mem: AgentMemory) -> str | None:
             outcome_ref=oss_trace.outcome_ref,
             outcome_type=oss_trace.outcome_type,
             decision_summary=getattr(oss_trace, "decision_summary", None),
+            task_input=getattr(oss_trace, "task_input", None),
+            response_text=getattr(oss_trace, "response_text", None),
             causal_entries=causal,
             external_contexts=contexts,
             created_at=now,
@@ -1995,6 +2050,8 @@ async def commit_outcome(
             otype,
             causal_entry_keys=req.causal_entry_keys,
             causal_confidence=req.causal_confidence,
+            task_input=_scan_captured_text(mem, req.task_input),
+            response_text=_scan_captured_text(mem, req.response_text),
         )
     finally:
         if original_agent is not None:
@@ -2112,6 +2169,14 @@ async def save_trace(
     mem = _get_memory()
     if trace.agent_id:
         _link_agent_owner_once(req, trace.agent_id, mem.namespace)
+    # HttpAdapter posts the whole trace here rather than through /outcomes, so
+    # this is the second entry point captured text can arrive on and it needs
+    # the same scan before anything is written.
+    if trace.task_input or trace.response_text:
+        trace = trace.model_copy(update={
+            "task_input": _scan_captured_text(mem, trace.task_input),
+            "response_text": _scan_captured_text(mem, trace.response_text),
+        })
     saved = mem._adapter.save_trace(trace)
     return saved.model_dump(mode="json")
 
