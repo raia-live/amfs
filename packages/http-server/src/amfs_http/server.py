@@ -205,6 +205,14 @@ def _get_server_embedder():
     return _server_embedder
 
 
+# Routers mounted from outside this package need the same model that produced
+# the vectors they search, or cosine similarity between them is meaningless.
+# Published as the accessor rather than the instance: resolving it loads an
+# ONNX model, and doing that at import time would move a multi-second cost into
+# startup for every deployment, including the ones that never embed anything.
+app.state.get_embedder = _get_server_embedder
+
+
 # ── Injectable retrieval enhancers (Pro layer) ─────────────────────────
 # The Pro layer registers a cross-encoder reranker and/or an LLM query
 # rewriter into the SINGLE /api/v1/retrieve path (see set_retrieval_enhancers,
