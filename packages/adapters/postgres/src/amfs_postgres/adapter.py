@@ -317,6 +317,17 @@ class PostgresAdapter(AdapterABC):
             ALTER TABLE amfs_decision_traces
             ADD COLUMN IF NOT EXISTS session_metadata JSONB DEFAULT '{}'
         """)
+        # The request that triggered the decision, and optionally the agent's
+        # response. Supervised training needs the prompt side of the pair, and
+        # the trace previously recorded only what was decided.
+        cur.execute("""
+            ALTER TABLE amfs_decision_traces
+            ADD COLUMN IF NOT EXISTS task_input TEXT
+        """)
+        cur.execute("""
+            ALTER TABLE amfs_decision_traces
+            ADD COLUMN IF NOT EXISTS response_text TEXT
+        """)
         cur.execute("""
             ALTER TABLE amfs_digests
             ADD COLUMN IF NOT EXISTS branch TEXT NOT NULL DEFAULT 'main'
@@ -2168,7 +2179,8 @@ class PostgresAdapter(AdapterABC):
                 cur.execute(
                     """
                     SELECT id, agent_id, session_id, outcome_ref, outcome_type,
-                           decision_summary, causal_entries, external_contexts,
+                           decision_summary, task_input, response_text,
+                           causal_entries, external_contexts,
                            query_events, session_started_at, session_ended_at,
                            session_duration_ms,
                            error_events, state_diff, created_at
@@ -2194,9 +2206,11 @@ class PostgresAdapter(AdapterABC):
                          decision_summary, causal_entries, external_contexts,
                          query_events, session_started_at, session_ended_at,
                          session_duration_ms,
-                         error_events, state_diff, session_metadata, created_at)
+                         error_events, state_diff, session_metadata, created_at,
+                         task_input, response_text)
                     VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb,
-                            %s::jsonb, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s)
+                            %s::jsonb, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s,
+                            %s, %s)
                     RETURNING id, created_at
                     """,
                     (
@@ -2216,6 +2230,8 @@ class PostgresAdapter(AdapterABC):
                         json.dumps(trace.state_diff.model_dump(mode="json")) if trace.state_diff else None,
                         json.dumps(trace.session_metadata) if trace.session_metadata else "{}",
                         trace.created_at,
+                        trace.task_input,
+                        trace.response_text,
                     ),
                 )
                 row = cur.fetchone()
@@ -2248,7 +2264,8 @@ class PostgresAdapter(AdapterABC):
         where = " AND ".join(conditions)
         sql = f"""
             SELECT id, agent_id, session_id, outcome_ref, outcome_type,
-                   decision_summary, causal_entries, external_contexts,
+                   decision_summary, task_input, response_text,
+                   causal_entries, external_contexts,
                    query_events, session_started_at, session_ended_at,
                    session_duration_ms,
                    error_events, state_diff, created_at
@@ -2302,6 +2319,8 @@ class PostgresAdapter(AdapterABC):
             outcome_ref=row.get("outcome_ref"),
             outcome_type=row.get("outcome_type"),
             decision_summary=row.get("decision_summary"),
+            task_input=row.get("task_input"),
+            response_text=row.get("response_text"),
             causal_entries=[TraceEntry(**e) for e in ce_raw],
             external_contexts=[ExternalContext(**c) for c in ec_raw],
             query_events=[QueryEvent(**q) for q in qe_raw],

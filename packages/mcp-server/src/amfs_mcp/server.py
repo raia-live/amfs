@@ -1089,6 +1089,7 @@ def amfs_stats() -> str:
 def amfs_commit_outcome(
     outcome_ref: str,
     outcome_type: str,
+    task_input: str | None = None,
 ) -> str:
     """Record an outcome and auto-link it to everything read this session.
 
@@ -1110,9 +1111,14 @@ def amfs_commit_outcome(
         outcome_ref: Reference identifier (e.g. "INC-2047", "task-42", "PR-456")
         outcome_type: One of "success", "minor_failure", "failure", "critical_failure",
             "clean_deploy", "regression", "p2_incident", "p1_incident"
+        task_input: Optional. The request that triggered this work, in the words
+            it arrived in (e.g. the user's ask, the alert payload, the ticket
+            body). Pass it whenever you have it: it is the prompt half of the
+            trace, and without it the trace records what you decided but not
+            what you were asked. Secrets are scanned and redacted before storage.
 
     Example: amfs_commit_outcome("task-42", "success")
-    Example: amfs_commit_outcome("deploy-v2", "failure")
+    Example: amfs_commit_outcome("INC-2047", "success", task_input="API p99 latency above 2s in us-east")
     """
     mem = _get_memory()
 
@@ -1134,7 +1140,7 @@ def amfs_commit_outcome(
             "error": f"Invalid outcome_type '{outcome_type}'. Must be one of: {valid}"
         })
 
-    entries = mem.commit_outcome(outcome_ref, otype)
+    entries = mem.commit_outcome(outcome_ref, otype, task_input=task_input)
     trace = getattr(mem, "_last_trace", None)
     result: dict[str, Any] = {
         "outcome_ref": outcome_ref,

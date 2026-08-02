@@ -87,6 +87,8 @@ class OutcomeBackPropagator:
         *,
         causal_confidence: float = 1.0,
         committed_at: datetime | None = None,
+        task_input: str | None = None,
+        response_text: str | None = None,
     ) -> OutcomeRecord:
         """Convenience factory for creating OutcomeRecord instances."""
         return OutcomeRecord(
@@ -96,4 +98,6 @@ class OutcomeBackPropagator:
             committed_at=committed_at or datetime.now(timezone.utc),
             causal_entry_keys=causal_entry_keys,
             agent_id=agent_id,
+            task_input=task_input,
+            response_text=response_text,
         )

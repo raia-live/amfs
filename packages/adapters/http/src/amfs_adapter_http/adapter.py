@@ -180,13 +180,20 @@ class HttpAdapter(AdapterABC):
         return WatchHandle(cancel_fn=lambda: None)
 
     def commit_outcome(self, record: OutcomeRecord) -> list[MemoryEntry]:
-        body = {
+        body: dict[str, Any] = {
             "outcome_ref": record.outcome_ref,
             "outcome_type": record.outcome_type.value if hasattr(record.outcome_type, "value") else str(record.outcome_type),
             "causal_entry_keys": record.causal_entry_keys,
             "causal_confidence": record.causal_confidence,
             "agent_id": record.agent_id,
         }
+        # The server seals its immutable trace from this call, so the capture has to
+        # travel with it. Sending it only on the later save_trace left the sealed
+        # copy — which is what Pro export and training read — with an empty prompt.
+        if record.task_input:
+            body["task_input"] = record.task_input
+        if record.response_text:
+            body["response_text"] = record.response_text
         data = self._post("/api/v1/outcomes", body)
         return [_parse_entry(e) for e in data.get("entries", [])]
 

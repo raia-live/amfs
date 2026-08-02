@@ -189,11 +189,13 @@ AMFS captures structured decision traces: what the agent read, what it decided, 
 
 ### How It Works
 
-The exporter queries historical outcomes and their causally-linked entries, then formats them as training datasets in three formats:
+The exporter queries historical outcomes and their causally-linked entries, then formats them as training datasets in four formats:
 
-**SFT (Supervised Fine-Tuning)** — Each successful decision trace becomes a training example. Context entries (what was read) pair with the decision entry (what was written). Only clean deploys produce SFT examples.
+**SFT (Supervised Fine-Tuning)** — Each successful decision trace becomes a training example. Context entries (what was read) pair with the decision entry (what was written). Only clean deploys produce SFT examples. The target here is the memory the agent recorded, not the work it did, so this format teaches a model to write good memory entries — not to perform the task.
 
-**DPO (Direct Preference Optimization)** — Pairs a successful decision trace (chosen) with a failed one (rejected) for the same entity. The outcome replaces human preference annotation.
+**Vertex SFT** — The behaviour-cloning format. The task that arrived (`task_input`) becomes the user turn and the tool calls the agent made become the model turn, so the target is the action taken. Only traces that recorded both a `task_input` and at least one tool call are eligible; traces with a failed outcome are excluded.
+
+**DPO (Direct Preference Optimization)** — Emits `{prompt, chosen, rejected}` triples. A successful and a failed trace that led with the same tool are paired one-to-one, preferring traces whose `task_input` is identical, and both responses are the serialized tool calls. Traces that cannot be paired are dropped rather than matched with something unrelated. The outcome replaces human preference annotation.
 
 **Reward Model** — Each entry is labeled with a score based on its outcome history: clean deploys score +1.0, P1 incidents score -1.0, with intermediate values for P2 and regressions.
 
@@ -203,6 +205,24 @@ Export as SFT:
 
 ```
 amfs_export_training_data(format="sft")
+```
+
+Export as Vertex SFT:
+
+```
+amfs_export_training_data(format="vertex_sft")
+```
+
+Each line is one chat example:
+
+```json
+{
+  "systemInstruction": {"parts": [{"text": "You are an agent operating with persistent memory. ..."}]},
+  "contents": [
+    {"role": "user", "parts": [{"text": "Roll back the checkout deploy"}]},
+    {"role": "model", "parts": [{"text": "[{\"arguments\":{\"service\":\"checkout\"},\"tool_name\":\"deploy_rollback\"}]"}]}
+  ]
+}
 ```
 
 Export as DPO:
@@ -247,21 +267,30 @@ exporter = TrainingDataExporter(adapter)
 result = exporter.export(format=ExportFormat.DPO, entity_path="checkout-service")
 print(f"Generated {result.num_examples} DPO pairs")
 
-# Export as JSONL (ready for fine-tuning pipelines)
-jsonl = exporter.export_jsonl(format=ExportFormat.SFT, limit=1000)
+# Export as JSONL (one record per line)
+jsonl = exporter.export_jsonl(format=ExportFormat.VERTEX_SFT, limit=1000)
 with open("training_data.jsonl", "w") as f:
     f.write(jsonl)
 ```
 
+Tool calls live in Pro's sealed traces, so the `vertex_sft` and `dpo` formats need a trace source: any object exposing `list_traces(entity_path=..., limit=...)` whose traces carry `task_input` and `tool_calls`. The adapter is used by default, which is why those two formats come back empty on adapters that don't record tool calls.
+
+```python
+exporter = TrainingDataExporter(adapter, trace_source=sealed_traces)
+```
+
 ### Integration with Fine-Tuning Pipelines
 
-AMFS generates the data; you bring the training infrastructure. The exported formats are compatible with common fine-tuning workflows:
+AMFS generates the data; you bring the training infrastructure. Each format targets one trainer, and feeding a format to the wrong trainer will not work — the record shapes are not interchangeable:
 
-| Format | Compatible With |
-|:-------|:----------------|
-| SFT | OpenAI fine-tuning API, Hugging Face `SFTTrainer`, Axolotl |
-| DPO | TRL `DPOTrainer`, OpenRLHF |
-| Reward Model | TRL `RewardTrainer`, custom reward model training |
+| Format | Goes To | Record Shape |
+|:-------|:--------|:-------------|
+| Vertex SFT | Vertex AI supervised tuning; also accepted by any trainer that reads Gemini-style chat JSONL | `{systemInstruction, contents}` with alternating `user`/`model` turns |
+| SFT | Nothing directly — a memory-entry dataset that needs mapping to your trainer's prompt/completion columns first | `{context_entries, decision_key, decision_value, ...}` |
+| DPO | TRL `DPOTrainer`, OpenRLHF | `{prompt, chosen, rejected}` |
+| Reward Model | TRL `RewardTrainer`, custom reward model training | `{entry, label, ...}` |
+
+Vertex SFT is the format SenseLab Managed Models trains on. Both it and DPO are built from tool calls, so they only produce examples for traces that recorded a `task_input`: pass it to `amfs_commit_outcome` and the prompt side of the pair is captured. Traces committed without one are silently skipped, which is the usual reason an export comes back empty.
 
 ---
 
@@ -274,7 +303,8 @@ The ML layer needs outcome data to learn from. Here's the minimum for each featu
 | Learned Ranking | 20 outcome-linked entries | 100+ entries with mixed outcomes |
 | Confidence Calibration | 5 outcomes per type | 20+ per type for reliable calibration |
 | Training Data Export (SFT) | 1 clean deploy with 2+ causal entries | Dozens of successful traces |
-| Training Data Export (DPO) | 1 positive + 1 negative outcome per entity | Multiple of each per entity |
+| Training Data Export (Vertex SFT) | 1 successful trace with a `task_input` and a tool call | Hundreds of traces across the tasks you want cloned |
+| Training Data Export (DPO) | 1 successful + 1 failed trace leading with the same tool | Multiple of each per task shape |
 | Training Data Export (Reward) | 1 outcome-linked entry | Hundreds of entries for a useful dataset |
 
 {: .tip }
