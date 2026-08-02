@@ -2179,7 +2179,8 @@ class PostgresAdapter(AdapterABC):
                 cur.execute(
                     """
                     SELECT id, agent_id, session_id, outcome_ref, outcome_type,
-                           decision_summary, causal_entries, external_contexts,
+                           decision_summary, task_input, response_text,
+                           causal_entries, external_contexts,
                            query_events, session_started_at, session_ended_at,
                            session_duration_ms,
                            error_events, state_diff, created_at
@@ -2263,7 +2264,8 @@ class PostgresAdapter(AdapterABC):
         where = " AND ".join(conditions)
         sql = f"""
             SELECT id, agent_id, session_id, outcome_ref, outcome_type,
-                   decision_summary, causal_entries, external_contexts,
+                   decision_summary, task_input, response_text,
+                   causal_entries, external_contexts,
                    query_events, session_started_at, session_ended_at,
                    session_duration_ms,
                    error_events, state_diff, created_at

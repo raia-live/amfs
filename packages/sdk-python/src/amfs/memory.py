@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from amfs_core.abc import AdapterABC, WatchHandle
+from amfs_core.capture import scan_captured_text
 from amfs_core.content import embedding_input
 from amfs_core.embedder import EmbedderABC
 from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker
@@ -940,7 +941,8 @@ class AgentMemory:
 
         *task_input* is the request that triggered the decision and
         *response_text* the agent's answer. Both are optional and only stored
-        when supplied.
+        when supplied, and both are scanned for secrets before being persisted —
+        a value the safety gate blocks is dropped rather than stored.
         """
         if causal_entry_keys is None:
             causal_entry_keys = self._read_tracker.causal_keys
@@ -1031,8 +1033,24 @@ class AgentMemory:
             outcome_ref=outcome_ref,
             outcome_type=outcome_type.value,
             decision_summary=decision_summary,
-            task_input=task_input,
-            response_text=response_text,
+            # Scanned here, at construction, rather than by each caller. Every
+            # path that records a trace goes through this method — the SDK
+            # directly, and the MCP tool that wraps it — and the MCP tool's own
+            # documentation promises the text has been redacted. Leaving it to
+            # callers is what made that promise false for anyone not going through
+            # the HTTP server.
+            task_input=scan_captured_text(
+                task_input,
+                adapter=self._adapter,
+                agent_id=self.agent_id,
+                session_id=self.session_id,
+            ),
+            response_text=scan_captured_text(
+                response_text,
+                adapter=self._adapter,
+                agent_id=self.agent_id,
+                session_id=self.session_id,
+            ),
             causal_entries=causal_trace_entries,
             external_contexts=ext_contexts,
             query_events=query_events,

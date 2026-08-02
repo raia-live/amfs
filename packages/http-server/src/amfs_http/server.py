@@ -36,6 +36,7 @@ from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
 from pydantic import BaseModel, Field
 from amfs_core.aggregates import REUSE_CREDIT_K
+from amfs_core.capture import scan_captured_text
 from amfs_core.models import (
     AgentGroup,
     AMFSConfig,
@@ -1891,58 +1892,19 @@ def _get_immutable_store():
 
 _seal_sequence: dict[str, int] = {}
 
-_CAPTURE_SAFETY_GATE: dict[str, Any] = {}
-#: Captured prompts and responses are unbounded caller-supplied text. Truncating
-#: before the safety scan keeps a runaway payload from becoming a storage or
-#: latency problem, and no training example is allowed near this size anyway.
-_MAX_CAPTURED_CHARS = 200_000
-
-
 def _scan_captured_text(mem: AgentMemory, text: str | None) -> str | None:
-    """Redact secrets from captured prompt/response text before it is persisted.
+    """Redact secrets from captured text. Thin wrapper over the shared scanner.
 
-    Returns ``None`` when the gate blocks the text outright: losing one training
-    example is always preferable to writing a customer credential into a
-    dataset that later leaves our infrastructure for a tuning job.
+    The implementation lives in :mod:`amfs_core.capture` so the SDK and MCP paths
+    apply exactly the same rules; this only supplies the identity and adapter from
+    the request's memory handle.
     """
-    if not text:
-        return None
-    if len(text) > _MAX_CAPTURED_CHARS:
-        text = text[:_MAX_CAPTURED_CHARS]
-    try:
-        from amfs_core.models import Provenance
-
-        if "gate" not in _CAPTURE_SAFETY_GATE:
-            from amfs_safety import SafetyGate  # Pro package, optional
-
-            _CAPTURE_SAFETY_GATE["gate"] = SafetyGate(
-                adapter=getattr(mem, "_adapter", None)
-            )
-        gate = _CAPTURE_SAFETY_GATE["gate"]
-        entry = MemoryEntry(
-            entity_path="_capture/task_input",
-            key="scan",
-            value=text,
-            provenance=Provenance(
-                agent_id=mem.agent_id,
-                session_id=mem.session_id,
-                written_at=datetime.now(timezone.utc),
-            ),
-            confidence=0.5,
-        )
-        decision = gate.check_write(entry)
-        if not decision.allowed:
-            logger.info("Captured text blocked by SafetyGate; dropping from trace")
-            return None
-        scanned = decision.entry.value
-        return scanned if isinstance(scanned, str) else text
-    except ImportError:
-        # OSS install without the Pro safety package. Capture is opt-in and the
-        # caller asked for it, so store the text rather than silently dropping.
-        return text
-    except Exception:
-        logger.debug("SafetyGate scan of captured text failed", exc_info=True)
-        return text
+    return scan_captured_text(
+        text,
+        adapter=getattr(mem, "_adapter", None),
+        agent_id=mem.agent_id,
+        session_id=mem.session_id,
+    )
 
 
 def _auto_seal_trace(mem: AgentMemory) -> str | None:
@@ -2058,8 +2020,12 @@ async def commit_outcome(
             otype,
             causal_entry_keys=req.causal_entry_keys,
             causal_confidence=req.causal_confidence,
-            task_input=_scan_captured_text(mem, req.task_input),
-            response_text=_scan_captured_text(mem, req.response_text),
+            # Not scanned here: commit_outcome scans at trace construction, so
+            # every caller gets it. Scanning again would be harmless but would
+            # imply this endpoint is where the guarantee lives, which is the
+            # assumption that left the MCP path unscanned.
+            task_input=req.task_input,
+            response_text=req.response_text,
         )
     finally:
         if original_agent is not None:
