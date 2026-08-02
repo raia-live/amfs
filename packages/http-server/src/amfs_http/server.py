@@ -398,6 +398,12 @@ except ImportError:
     pass
 
 try:
+    from amfs_managed_models import mount_managed_models
+    mount_managed_models(app, get_memory=_get_memory)
+except ImportError:
+    pass
+
+try:
     from amfs_http.openrouter_proxy import mount_openrouter_proxy
     mount_openrouter_proxy(app, get_memory=_get_memory)
 except Exception:  # noqa: BLE001 - proxy is optional; never block startup
