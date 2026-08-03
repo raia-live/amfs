@@ -36,7 +36,7 @@ from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
 from pydantic import BaseModel, Field
 from amfs_core.aggregates import REUSE_CREDIT_K
-from amfs_core.capture import scan_captured_text
+from amfs_core.capture import scan_captured_arguments, scan_captured_text
 from amfs_core.models import (
     AgentGroup,
     AMFSConfig,
@@ -283,6 +283,9 @@ try:
     from amfs_traces.store import PostgresImmutableTraceStore
     from amfs_traces.crypto import seal, get_signing_key, get_signing_key_id
     from amfs_traces.models import ImmutableDecisionTrace, TraceEntry, TraceExternalContext
+    # Aliased because the OSS ``ToolCall`` of the same name is what arrives on the
+    # trace being sealed, and the two are easy to confuse at the mapping site.
+    from amfs_traces.models import ToolCall as ProToolCall
     _HAS_PRO_TRACES = True
 except ImportError:
     _HAS_PRO_TRACES = False
@@ -1924,6 +1927,39 @@ def _scan_captured_text(
     )
 
 
+def _scan_captured_actions(
+    mem: AgentMemory,
+    actions: list[Any],
+    *,
+    agent_id: str | None = None,
+    session_id: str | None = None,
+) -> list[Any]:
+    """Clear secrets from recorded actions, dropping any that cannot be cleared.
+
+    Companion to :func:`_scan_captured_text` with the same identity handling. An
+    action survives only if every one of its arguments clears the gate, so a
+    dropped action leaves no partial example behind. Its result is scanned too but
+    only emptied on a block, since the training target is the tool and its
+    arguments and a result-less action is still a usable example.
+    """
+    scan_identity = {
+        "adapter": getattr(mem, "_adapter", None),
+        "agent_id": agent_id if agent_id is not None else mem.agent_id,
+        "session_id": session_id if session_id is not None else mem.session_id,
+    }
+    kept = []
+    for action in actions:
+        arguments = scan_captured_arguments(action.arguments, **scan_identity)
+        if arguments is None:
+            continue
+        summary = scan_captured_text(action.result_summary, **scan_identity)
+        kept.append(action.model_copy(update={
+            "arguments": arguments,
+            "result_summary": summary or "",
+        }))
+    return kept
+
+
 def _auto_seal_trace(mem: AgentMemory) -> str | None:
     """If Pro traces are available, auto-seal the last OSS trace as immutable."""
     if not _HAS_PRO_TRACES:
@@ -1960,6 +1996,22 @@ def _auto_seal_trace(mem: AgentMemory) -> str | None:
             )
             for c in (oss_trace.external_contexts or [])
         ]
+        # The action side of the training pair. Mapped field by field rather than
+        # by model_dump so that a shape change on either model surfaces here as a
+        # type error instead of a silently empty column.
+        actions = [
+            ProToolCall(
+                tool_name=t.tool_name,
+                arguments=t.arguments,
+                result_summary=t.result_summary,
+                result_hash=t.result_hash,
+                started_at=t.started_at or now,
+                duration_ms=t.duration_ms,
+                source=t.source,
+                success=t.success,
+            )
+            for t in (getattr(oss_trace, "tool_calls", None) or [])
+        ]
 
         session_id = mem.session_id
         seq = _seal_sequence.get(session_id, 0)
@@ -1989,6 +2041,7 @@ def _auto_seal_trace(mem: AgentMemory) -> str | None:
             response_text=getattr(oss_trace, "response_text", None),
             causal_entries=causal,
             external_contexts=contexts,
+            tool_calls=actions,
             created_at=now,
         )
         sealed = seal(
@@ -2043,6 +2096,10 @@ async def commit_outcome(
             # assumption that left the MCP path unscanned.
             task_input=req.task_input,
             response_text=req.response_text,
+            # Passed explicitly, and never omitted: ``mem`` is shared across
+            # requests, so letting this fall through to its tracker would attribute
+            # whatever actions happen to be buffered there to this caller.
+            tool_calls=req.tool_calls,
         )
     finally:
         if original_agent is not None:
@@ -2183,6 +2240,18 @@ async def save_trace(
             "response_text": _scan_captured_text(
                 mem,
                 trace.response_text,
+                agent_id=trace.agent_id,
+                session_id=trace.session_id,
+            ),
+        })
+    # Action arguments are caller-supplied on the same footing as the capture above
+    # and get the same treatment, under the same identity. An action whose
+    # arguments cannot be cleared is dropped rather than stored partially.
+    if trace.tool_calls:
+        trace = trace.model_copy(update={
+            "tool_calls": _scan_captured_actions(
+                mem,
+                trace.tool_calls,
                 agent_id=trace.agent_id,
                 session_id=trace.session_id,
             ),

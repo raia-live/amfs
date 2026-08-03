@@ -61,6 +61,7 @@ from amfs_core.models import (
     SearchQuery,
     SemanticQuery,
     Tag,
+    ToolCall,
     TraceEntry,
 )
 from amfs_core.outcome import OutcomeBackPropagator
@@ -132,6 +133,7 @@ __all__ = [
     "SemanticQuery",
     "StaleWriteError",
     "Tag",
+    "ToolCall",
     "TraceEntry",
     "VersionConflictError",
     "WatchHandle",

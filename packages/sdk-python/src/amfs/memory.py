@@ -11,8 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from pydantic import ValidationError
+
 from amfs_core.abc import AdapterABC, WatchHandle
-from amfs_core.capture import scan_captured_text
+from amfs_core.capture import scan_captured_arguments, scan_captured_text
 from amfs_core.content import embedding_input
 from amfs_core.embedder import EmbedderABC
 from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker
@@ -40,6 +42,7 @@ from amfs_core.models import (
     SearchQuery,
     SemanticQuery,
     SessionMetadata,
+    ToolCall,
     TraceEntry,
 )
 from amfs_core.outcome import OutcomeBackPropagator
@@ -923,6 +926,68 @@ class AgentMemory:
     # Outcomes
     # ------------------------------------------------------------------
 
+    def _scanned_actions(
+        self, explicit: list[dict[str, Any]] | None = None
+    ) -> list[dict[str, Any]]:
+        """Recorded actions, with arguments and results cleared for secrets.
+
+        An action whose arguments cannot be cleared is left out entirely rather
+        than included with a hole in it, since a tool call missing a parameter is
+        still a plausible-looking training example and would teach the wrong call.
+        A result that cannot be cleared only costs the result, which is context
+        rather than the target.
+
+        *explicit* is used verbatim when given, including when empty. The HTTP
+        server relays a client's actions through this method on a shared ``mem``
+        whose own tracker belongs to no particular caller, so falling back to the
+        tracker on an empty list would attribute one session's actions to another.
+
+        Each action is validated here and returned in JSON-safe form, so it is also
+        the one place a malformed action can be turned away. Actions arriving over
+        HTTP are free-form JSON from the caller, and one that failed validation
+        further down would take the whole commit with it, losing the memories being
+        written alongside it.
+        """
+        source = self._read_tracker.actions if explicit is None else explicit
+        scanned: list[dict[str, Any]] = []
+        for action in source:
+            if not isinstance(action, dict) or not action.get("tool_name"):
+                continue
+            arguments = scan_captured_arguments(
+                action.get("arguments"),
+                adapter=self._adapter,
+                agent_id=self.agent_id,
+                session_id=self.session_id,
+            )
+            if arguments is None:
+                continue
+            # The result is caller text exactly as much as the arguments are — a
+            # tool that mints a credential echoes it back here. Unlike a dropped
+            # argument, a dropped result costs nothing: the training target is the
+            # tool and its parameters, so the action is kept without its result
+            # rather than discarded.
+            summary = scan_captured_text(
+                action.get("result_summary"),
+                adapter=self._adapter,
+                agent_id=self.agent_id,
+                session_id=self.session_id,
+            )
+            fields = {
+                **action,
+                "arguments": arguments,
+                "result_summary": summary or "",
+            }
+            # A JSON caller sending an explicit null means "not told", which for a
+            # success flag is the default rather than a reason to drop the action.
+            if fields.get("success") is None:
+                fields.pop("success", None)
+            try:
+                validated = ToolCall(**fields)
+            except ValidationError:
+                continue
+            scanned.append(validated.model_dump(mode="json"))
+        return scanned
+
     def commit_outcome(
         self,
         outcome_ref: str,
@@ -933,6 +998,7 @@ class AgentMemory:
         decision_summary: str | None = None,
         task_input: str | None = None,
         response_text: str | None = None,
+        tool_calls: list[dict[str, Any]] | None = None,
     ) -> list[MemoryEntry]:
         """Record an outcome and back-propagate confidence changes.
 
@@ -943,6 +1009,11 @@ class AgentMemory:
         *response_text* the agent's answer. Both are optional and only stored
         when supplied, and both are scanned for secrets before being persisted —
         a value the safety gate blocks is dropped rather than stored.
+
+        *tool_calls* are the actions taken. Like *causal_entry_keys* it defaults
+        to the session's own log, filled in by ``record_action``; pass a list to
+        supply them directly, which is what the HTTP server does when relaying a
+        remote client's actions.
         """
         if causal_entry_keys is None:
             causal_entry_keys = self._read_tracker.causal_keys
@@ -963,6 +1034,11 @@ class AgentMemory:
             agent_id=self.agent_id,
             session_id=self.session_id,
         )
+        # Scanned here for the same reason and at the same moment as the capture
+        # above: the record leaves for the server before the trace is built, so a
+        # scan deferred to trace construction would ship raw arguments over the
+        # wire on the SaaS path.
+        tool_calls = self._scanned_actions(tool_calls)
 
         record = OutcomeBackPropagator.make_record(
             outcome_ref=outcome_ref,
@@ -976,6 +1052,7 @@ class AgentMemory:
             # sealed copy — the one export and training read — without it.
             task_input=task_input,
             response_text=response_text,
+            tool_calls=tool_calls,
         )
         updated = self._propagator.propagate(record)
 
@@ -1063,6 +1140,7 @@ class AgentMemory:
             # promises the text has been redacted.
             task_input=task_input,
             response_text=response_text,
+            tool_calls=[ToolCall(**tc) for tc in tool_calls],
             causal_entries=causal_trace_entries,
             external_contexts=ext_contexts,
             query_events=query_events,
@@ -1218,6 +1296,45 @@ class AgentMemory:
             )
         """
         self._read_tracker.record_context(label, summary, source=source)
+
+    def record_action(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        result: str = "",
+        source: str | None = None,
+        duration_ms: int = 0,
+        success: bool = True,
+    ) -> None:
+        """Record an action taken during this session, sealed into the trace on commit.
+
+        ``record_context`` captures what the agent learned; this captures what it
+        did. Recorded by the caller because AMFS observes only its own tools — a
+        call to your deploy or refund tool is invisible to it otherwise.
+
+        Together with ``task_input`` on ``commit_outcome`` this forms a complete
+        supervised example: the request in, the action out. Arguments are scanned
+        for secrets when the trace is built, and an action whose arguments cannot
+        be cleared is dropped whole.
+
+        Example::
+
+            mem.record_action(
+                "deploy_rollback",
+                {"service": "checkout", "to_version": "v41"},
+                result='{"status": "rolled_back"}',
+                duration_ms=1430,
+            )
+        """
+        self._read_tracker.record_action(
+            tool_name,
+            arguments,
+            result=result,
+            source=source,
+            duration_ms=duration_ms,
+            success=success,
+        )
 
     def explain(self, outcome_ref: str | None = None) -> dict[str, Any]:
         """Return the causal chain for the current session or a specific outcome.

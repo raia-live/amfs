@@ -37,6 +37,10 @@ class OutcomeRequest(BaseModel):
     #: The agent's answer. Opt-in separately from ``task_input`` because it is
     #: the larger disclosure and only the assistant-model dataset needs it.
     response_text: str | None = None
+    #: The actions taken, which is what training predicts from ``task_input``.
+    #: Already scanned by the client before they reach here, and scanned again on
+    #: the way in, because this endpoint is reachable by anything with a key.
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SearchRequest(BaseModel):

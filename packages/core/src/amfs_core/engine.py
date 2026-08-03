@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -38,6 +39,11 @@ class CausalTagger:
         )
 
 
+#: An action's result is summarised, not stored. Long enough to be recognisable in
+#: a trace timeline, short enough that a chatty tool cannot bloat every row.
+_MAX_ACTION_RESULT_CHARS = 2000
+
+
 class ReadTracker:
     """Automatically records every read within a session for causal linking
     and conflict detection.
@@ -59,6 +65,7 @@ class ReadTracker:
         self._session_started_at: datetime = datetime.now(timezone.utc)
         self._errors: list[dict] = []
         self._writes: list[dict] = []
+        self._actions: list[dict] = []
 
     def record(self, entry: MemoryEntry) -> None:
         """Record that an entry was read during this session."""
@@ -92,6 +99,45 @@ class ReadTracker:
             "source": source,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         })
+
+    def record_action(
+        self,
+        tool_name: str,
+        arguments: dict | None = None,
+        *,
+        result: str = "",
+        source: str | None = None,
+        duration_ms: int = 0,
+        success: bool = True,
+    ) -> None:
+        """Record an action the agent took during this session.
+
+        Distinct from ``record_context``, which captures what the agent *learned*
+        from an external system. This captures what it *did* — the half of a
+        decision that supervised training predicts. Both end up in the trace.
+
+        The result is hashed in full and stored only as a prefix: a trace is a
+        record of the decision, not a cache of everybody's API responses.
+        """
+        result_hash = hashlib.sha256(result.encode("utf-8")).hexdigest() if result else ""
+        summary = result[:_MAX_ACTION_RESULT_CHARS]
+        if len(result) > _MAX_ACTION_RESULT_CHARS:
+            summary += "... (truncated)"
+        self._actions.append({
+            "tool_name": tool_name,
+            "arguments": arguments or {},
+            "result_summary": summary,
+            "result_hash": result_hash,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "duration_ms": duration_ms,
+            "source": source,
+            "success": success,
+        })
+
+    @property
+    def actions(self) -> list[dict]:
+        """All actions recorded in this session, in the order they were taken."""
+        return list(self._actions)
 
     @property
     def causal_keys(self) -> list[str]:
@@ -182,6 +228,7 @@ class ReadTracker:
         self._queries.clear()
         self._errors.clear()
         self._writes.clear()
+        self._actions.clear()
         # The window this tracker describes restarts here, so a trace committed
         # after a clear reports the duration of its own work rather than the
         # lifetime of the process.
