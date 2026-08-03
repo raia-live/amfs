@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from pydantic import ValidationError
+
 from amfs_core.abc import AdapterABC, WatchHandle
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
 from amfs_core.content import embedding_input
@@ -937,10 +939,18 @@ class AgentMemory:
         server relays a client's actions through this method on a shared ``mem``
         whose own tracker belongs to no particular caller, so falling back to the
         tracker on an empty list would attribute one session's actions to another.
+
+        Each action is validated here and returned in JSON-safe form, so it is also
+        the one place a malformed action can be turned away. Actions arriving over
+        HTTP are free-form JSON from the caller, and one that failed validation
+        further down would take the whole commit with it, losing the memories being
+        written alongside it.
         """
         source = self._read_tracker.actions if explicit is None else explicit
         scanned: list[dict[str, Any]] = []
         for action in source:
+            if not isinstance(action, dict) or not action.get("tool_name"):
+                continue
             arguments = scan_captured_arguments(
                 action.get("arguments"),
                 adapter=self._adapter,
@@ -949,7 +959,11 @@ class AgentMemory:
             )
             if arguments is None:
                 continue
-            scanned.append({**action, "arguments": arguments})
+            try:
+                validated = ToolCall(**{**action, "arguments": arguments})
+            except ValidationError:
+                continue
+            scanned.append(validated.model_dump(mode="json"))
         return scanned
 
     def commit_outcome(

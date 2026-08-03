@@ -283,6 +283,32 @@ def test_supplied_actions_are_used_instead_of_the_session_log(tmp_path) -> None:
     assert names == ["relayed_action"]
 
 
+def test_a_malformed_relayed_action_does_not_cost_the_commit(tmp_path) -> None:
+    """Actions over HTTP are free-form JSON, so this arrives from outside.
+
+    The memories being written matter more than the malformed action, so the bad
+    entry is dropped and everything else still lands. Constructing the trace
+    without this guard raises and the whole commit is lost.
+    """
+    adapter = FilesystemAdapter(root=tmp_path / ".amfs", namespace="test")
+    mem = AgentMemory(agent_id="a", adapter=adapter)
+    mem.write("repo/mod", "k", "a memory worth keeping")
+    mem.commit_outcome(
+        "task-8b",
+        OutcomeType.SUCCESS,
+        tool_calls=[
+            {"arguments": {"a": 1}},  # no tool name
+            {"tool_name": "bad_duration", "duration_ms": "not-a-number"},
+            "not even a dict",
+            {"tool_name": "good_action", "arguments": {"a": 1}},
+        ],
+    )
+    _flush_bg()
+
+    assert [t.tool_name for t in mem._last_trace.tool_calls] == ["good_action"]
+    assert mem.read("repo/mod", "k").value == "a memory worth keeping"
+
+
 def test_an_empty_supplied_list_means_no_actions(tmp_path) -> None:
     """Not "fall back to the tracker".
 
