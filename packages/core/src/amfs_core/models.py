@@ -249,6 +249,14 @@ class OutcomeRecord(BaseModel):
     committed_at: datetime
     causal_entry_keys: list[str] = Field(default_factory=list)
     agent_id: str
+    #: Captured prompt and response, carried alongside the outcome rather than
+    #: only on the trace. On the SaaS path the adapter's ``commit_outcome`` is what
+    #: reaches the server, and the server seals its immutable trace from that call
+    #: — so a capture that travelled only on the later ``save_trace`` was missing
+    #: from the sealed copy that training and export actually read. Not persisted
+    #: to the outcomes table; adapters write named columns.
+    task_input: str | None = None
+    response_text: str | None = None
 
 
 class TraceEntry(BaseModel):
@@ -321,6 +329,13 @@ class DecisionTrace(BaseModel):
     outcome_ref: str | None = None
     outcome_type: str | None = None
     decision_summary: str | None = None
+    # The request that triggered the decision, and optionally the agent's
+    # answer. Without the prompt side of the pair a trace records what was
+    # decided but not what was being asked, which is exactly what supervised
+    # training needs. Both are opt-in per call and scanned for secrets before
+    # they are persisted.
+    task_input: str | None = None
+    response_text: str | None = None
     causal_entries: list[TraceEntry] = Field(default_factory=list)
     external_contexts: list[ExternalContext] = Field(default_factory=list)
     query_events: list[QueryEvent] = Field(default_factory=list)

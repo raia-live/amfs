@@ -1,11 +1,15 @@
 [project]
 name = "amfs-mcp-server"
-version = "0.7.11"
+version = "0.7.12"
 description = "AMFS MCP Server — expose Agent Memory as MCP tools for Cursor and Claude Code"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-    "amfs",
+    # Floored, not bare. amfs_commit_outcome forwards task_input to the SDK as a
+    # keyword on every call, so an older amfs resolved from a cache would raise
+    # TypeError on the one call agents are told to make at the end of every task.
+    # An unbounded dependency is how the equivalent skew reached Pro users.
+    "amfs>=0.5.6",
     "amfs-adapter-http>=0.1.2",
     "fastmcp>=2.0",
 ]

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from amfs_core.abc import AdapterABC, WatchHandle
+from amfs_core.capture import scan_captured_text
 from amfs_core.content import embedding_input
 from amfs_core.embedder import EmbedderABC
 from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker
@@ -930,20 +931,51 @@ class AgentMemory:
         *,
         causal_confidence: float = 1.0,
         decision_summary: str | None = None,
+        task_input: str | None = None,
+        response_text: str | None = None,
     ) -> list[MemoryEntry]:
         """Record an outcome and back-propagate confidence changes.
 
         If *causal_entry_keys* is ``None``, automatically uses the session's
         read log — every entry this agent read becomes a causal link.
+
+        *task_input* is the request that triggered the decision and
+        *response_text* the agent's answer. Both are optional and only stored
+        when supplied, and both are scanned for secrets before being persisted —
+        a value the safety gate blocks is dropped rather than stored.
         """
         if causal_entry_keys is None:
             causal_entry_keys = self._read_tracker.causal_keys
+
+        # Scanned here, before anything leaves the process, and reused for both the
+        # outcome record and the trace below. Scanning only at trace construction
+        # would send the raw text to the server on the SaaS path, since the record
+        # goes over the wire first.
+        task_input = scan_captured_text(
+            task_input,
+            adapter=self._adapter,
+            agent_id=self.agent_id,
+            session_id=self.session_id,
+        )
+        response_text = scan_captured_text(
+            response_text,
+            adapter=self._adapter,
+            agent_id=self.agent_id,
+            session_id=self.session_id,
+        )
+
         record = OutcomeBackPropagator.make_record(
             outcome_ref=outcome_ref,
             outcome_type=outcome_type,
             causal_entry_keys=causal_entry_keys,
             agent_id=self.agent_id,
             causal_confidence=causal_confidence,
+            # Carried on the record because the adapter's commit_outcome is what
+            # reaches the server, and the server seals its immutable trace from
+            # that call. Sending the capture only on the later save_trace left the
+            # sealed copy — the one export and training read — without it.
+            task_input=task_input,
+            response_text=response_text,
         )
         updated = self._propagator.propagate(record)
 
@@ -1025,6 +1057,12 @@ class AgentMemory:
             outcome_ref=outcome_ref,
             outcome_type=outcome_type.value,
             decision_summary=decision_summary,
+            # Already scanned at the top of this method, before the record went to
+            # the adapter. Scanning is centralised here rather than left to callers
+            # because the MCP tool calls straight through and its documentation
+            # promises the text has been redacted.
+            task_input=task_input,
+            response_text=response_text,
             causal_entries=causal_trace_entries,
             external_contexts=ext_contexts,
             query_events=query_events,

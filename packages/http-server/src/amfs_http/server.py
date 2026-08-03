@@ -36,6 +36,7 @@ from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
 from pydantic import BaseModel, Field
 from amfs_core.aggregates import REUSE_CREDIT_K
+from amfs_core.capture import scan_captured_text
 from amfs_core.models import (
     AgentGroup,
     AMFSConfig,
@@ -1891,6 +1892,31 @@ def _get_immutable_store():
 
 _seal_sequence: dict[str, int] = {}
 
+def _scan_captured_text(
+    mem: AgentMemory,
+    text: str | None,
+    *,
+    agent_id: str | None = None,
+    session_id: str | None = None,
+) -> str | None:
+    """Redact secrets from captured text. Thin wrapper over the shared scanner.
+
+    The implementation lives in :mod:`amfs_core.capture` so the SDK and MCP paths
+    apply exactly the same rules; this only supplies the identity and adapter from
+    the request's memory handle.
+
+    The identity defaults to the handle's, which is the server's shared singleton
+    on this process. Callers that already know whose text this is should pass it:
+    on ``POST /api/v1/traces`` the trace carries its own agent, and the singleton's
+    is the server default rather than the client's.
+    """
+    return scan_captured_text(
+        text,
+        adapter=getattr(mem, "_adapter", None),
+        agent_id=agent_id if agent_id is not None else mem.agent_id,
+        session_id=session_id if session_id is not None else mem.session_id,
+    )
+
 
 def _auto_seal_trace(mem: AgentMemory) -> str | None:
     """If Pro traces are available, auto-seal the last OSS trace as immutable."""
@@ -1953,6 +1979,8 @@ def _auto_seal_trace(mem: AgentMemory) -> str | None:
             outcome_ref=oss_trace.outcome_ref,
             outcome_type=oss_trace.outcome_type,
             decision_summary=getattr(oss_trace, "decision_summary", None),
+            task_input=getattr(oss_trace, "task_input", None),
+            response_text=getattr(oss_trace, "response_text", None),
             causal_entries=causal,
             external_contexts=contexts,
             created_at=now,
@@ -2003,6 +2031,12 @@ async def commit_outcome(
             otype,
             causal_entry_keys=req.causal_entry_keys,
             causal_confidence=req.causal_confidence,
+            # Not scanned here: commit_outcome scans at trace construction, so
+            # every caller gets it. Scanning again would be harmless but would
+            # imply this endpoint is where the guarantee lives, which is the
+            # assumption that left the MCP path unscanned.
+            task_input=req.task_input,
+            response_text=req.response_text,
         )
     finally:
         if original_agent is not None:
@@ -2120,6 +2154,33 @@ async def save_trace(
     mem = _get_memory()
     if trace.agent_id:
         _link_agent_owner_once(req, trace.agent_id, mem.namespace)
+    # HttpAdapter posts the whole trace here rather than through /outcomes, so
+    # this is the second entry point captured text can arrive on and it needs
+    # the same scan before anything is written. Unconditionally, with no truthiness
+    # guard: an empty string skipped the scan and was stored as "" while every
+    # other path normalises absent capture to None.
+    #
+    # Scanned under the *trace's* identity, not the server singleton's. No rule
+    # reads it today — SafetyGate matches on content and on the fixed capture
+    # namespace — so this changes no redaction now. It is the identity the
+    # provenance should have carried all along, and getting it right here means a
+    # later per-agent policy applies to the agent that produced the text rather
+    # than to whichever identity this process happens to hold.
+    if trace.task_input is not None or trace.response_text is not None:
+        trace = trace.model_copy(update={
+            "task_input": _scan_captured_text(
+                mem,
+                trace.task_input,
+                agent_id=trace.agent_id,
+                session_id=trace.session_id,
+            ),
+            "response_text": _scan_captured_text(
+                mem,
+                trace.response_text,
+                agent_id=trace.agent_id,
+                session_id=trace.session_id,
+            ),
+        })
     saved = mem._adapter.save_trace(trace)
     return saved.model_dump(mode="json")
 

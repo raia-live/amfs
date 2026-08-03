@@ -1,11 +1,13 @@
 [project]
 name = "amfs"
-version = "0.5.5"
+version = "0.5.6"
 description = "AMFS Python SDK — Agent Memory File System"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-    "amfs-core",
+    # 0.3.13 carries DecisionTrace.task_input and amfs_core.capture, both of which
+    # commit_outcome below uses unconditionally.
+    "amfs-core>=0.3.13",
     "amfs-adapter-filesystem",
     "pyyaml>=6.0,<7",
 ]
