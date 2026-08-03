@@ -959,8 +959,13 @@ class AgentMemory:
             )
             if arguments is None:
                 continue
+            fields = {**action, "arguments": arguments}
+            # A JSON caller sending an explicit null means "not told", which for a
+            # success flag is the default rather than a reason to drop the action.
+            if fields.get("success") is None:
+                fields.pop("success", None)
             try:
-                validated = ToolCall(**{**action, "arguments": arguments})
+                validated = ToolCall(**fields)
             except ValidationError:
                 continue
             scanned.append(validated.model_dump(mode="json"))

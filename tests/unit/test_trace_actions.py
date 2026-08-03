@@ -300,12 +300,15 @@ def test_a_malformed_relayed_action_does_not_cost_the_commit(tmp_path) -> None:
             {"arguments": {"a": 1}},  # no tool name
             {"tool_name": "bad_duration", "duration_ms": "not-a-number"},
             "not even a dict",
+            {"tool_name": "null_success", "success": None},  # kept, defaulted
             {"tool_name": "good_action", "arguments": {"a": 1}},
         ],
     )
     _flush_bg()
 
-    assert [t.tool_name for t in mem._last_trace.tool_calls] == ["good_action"]
+    kept = mem._last_trace.tool_calls
+    assert [t.tool_name for t in kept] == ["null_success", "good_action"]
+    assert kept[0].success is True, "an explicit null means 'not told', not 'drop it'"
     assert mem.read("repo/mod", "k").value == "a memory worth keeping"
 
 
