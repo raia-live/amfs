@@ -1938,19 +1938,25 @@ def _scan_captured_actions(
 
     Companion to :func:`_scan_captured_text` with the same identity handling. An
     action survives only if every one of its arguments clears the gate, so a
-    dropped action leaves no partial example behind.
+    dropped action leaves no partial example behind. Its result is scanned too but
+    only emptied on a block, since the training target is the tool and its
+    arguments and a result-less action is still a usable example.
     """
+    scan_identity = {
+        "adapter": getattr(mem, "_adapter", None),
+        "agent_id": agent_id if agent_id is not None else mem.agent_id,
+        "session_id": session_id if session_id is not None else mem.session_id,
+    }
     kept = []
     for action in actions:
-        arguments = scan_captured_arguments(
-            action.arguments,
-            adapter=getattr(mem, "_adapter", None),
-            agent_id=agent_id if agent_id is not None else mem.agent_id,
-            session_id=session_id if session_id is not None else mem.session_id,
-        )
+        arguments = scan_captured_arguments(action.arguments, **scan_identity)
         if arguments is None:
             continue
-        kept.append(action.model_copy(update={"arguments": arguments}))
+        summary = scan_captured_text(action.result_summary, **scan_identity)
+        kept.append(action.model_copy(update={
+            "arguments": arguments,
+            "result_summary": summary or "",
+        }))
     return kept
 
 

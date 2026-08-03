@@ -135,6 +135,76 @@ def test_an_empty_string_argument_is_not_mistaken_for_a_block() -> None:
     assert capture.scan_captured_arguments({"note": ""}) == {"note": ""}
 
 
+# --- Scanning results -------------------------------------------------------
+
+
+def test_a_secret_in_an_action_result_is_redacted(tmp_path, monkeypatch) -> None:
+    """The result is caller text as much as the arguments are.
+
+    A tool that mints a credential echoes it back in its result, so a result that
+    skipped the gate would put the credential into a trace and from there into a
+    dataset that leaves our infrastructure for a tuning job.
+    """
+
+    class Gate:
+        def check_write(self, entry):
+            return _Decision(True, entry.value.replace("sk-live-99", "[REDACTED]"))
+
+    _install_gate(monkeypatch, Gate())
+    adapter = FilesystemAdapter(root=tmp_path / ".amfs", namespace="test")
+    mem = AgentMemory(agent_id="a", adapter=adapter)
+    mem.record_action("create_api_key", {"scope": "read"}, result="key sk-live-99")
+    mem.commit_outcome("task-r1", OutcomeType.SUCCESS)
+    _flush_bg()
+
+    assert mem._last_trace.tool_calls[0].result_summary == "key [REDACTED]"
+
+
+def test_a_blocked_result_costs_the_result_not_the_action(tmp_path, monkeypatch) -> None:
+    """Deliberately unlike a blocked argument, which drops the whole action.
+
+    The training target is the tool and its arguments, so an action without its
+    result is still a usable example — dropping the action would throw away a good
+    one to avoid text we are already discarding.
+    """
+
+    class Gate:
+        def check_write(self, entry):
+            return _Decision("AWS_SECRET" not in entry.value, entry.value)
+
+    _install_gate(monkeypatch, Gate())
+    adapter = FilesystemAdapter(root=tmp_path / ".amfs", namespace="test")
+    mem = AgentMemory(agent_id="a", adapter=adapter)
+    mem.record_action("read_env", {"path": "/etc/app"}, result="AWS_SECRET=abc")
+    mem.commit_outcome("task-r2", OutcomeType.SUCCESS)
+    _flush_bg()
+
+    action = mem._last_trace.tool_calls[0]
+    assert action.tool_name == "read_env"
+    assert action.arguments == {"path": "/etc/app"}
+    assert action.result_summary == ""
+
+
+def test_a_relayed_result_is_scanned_too(tmp_path, monkeypatch) -> None:
+    """The relay path takes results straight from an HTTP body."""
+
+    class Gate:
+        def check_write(self, entry):
+            return _Decision(True, entry.value.replace("sk-live-99", "[REDACTED]"))
+
+    _install_gate(monkeypatch, Gate())
+    adapter = FilesystemAdapter(root=tmp_path / ".amfs", namespace="test")
+    mem = AgentMemory(agent_id="a", adapter=adapter)
+    mem.commit_outcome(
+        "task-r3",
+        OutcomeType.SUCCESS,
+        tool_calls=[{"tool_name": "mint", "result_summary": "sk-live-99"}],
+    )
+    _flush_bg()
+
+    assert mem._last_trace.tool_calls[0].result_summary == "[REDACTED]"
+
+
 # --- The SDK path -----------------------------------------------------------
 
 

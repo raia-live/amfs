@@ -929,11 +929,13 @@ class AgentMemory:
     def _scanned_actions(
         self, explicit: list[dict[str, Any]] | None = None
     ) -> list[dict[str, Any]]:
-        """Recorded actions, with arguments cleared for secrets.
+        """Recorded actions, with arguments and results cleared for secrets.
 
         An action whose arguments cannot be cleared is left out entirely rather
         than included with a hole in it, since a tool call missing a parameter is
         still a plausible-looking training example and would teach the wrong call.
+        A result that cannot be cleared only costs the result, which is context
+        rather than the target.
 
         *explicit* is used verbatim when given, including when empty. The HTTP
         server relays a client's actions through this method on a shared ``mem``
@@ -959,7 +961,22 @@ class AgentMemory:
             )
             if arguments is None:
                 continue
-            fields = {**action, "arguments": arguments}
+            # The result is caller text exactly as much as the arguments are — a
+            # tool that mints a credential echoes it back here. Unlike a dropped
+            # argument, a dropped result costs nothing: the training target is the
+            # tool and its parameters, so the action is kept without its result
+            # rather than discarded.
+            summary = scan_captured_text(
+                action.get("result_summary"),
+                adapter=self._adapter,
+                agent_id=self.agent_id,
+                session_id=self.session_id,
+            )
+            fields = {
+                **action,
+                "arguments": arguments,
+                "result_summary": summary or "",
+            }
             # A JSON caller sending an explicit null means "not told", which for a
             # success flag is the default rather than a reason to drop the action.
             if fields.get("success") is None:
