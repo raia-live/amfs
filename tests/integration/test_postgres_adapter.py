@@ -95,3 +95,47 @@ def test_a_trace_without_captured_text_round_trips_as_none(adapter) -> None:
     assert fetched is not None
     assert fetched.task_input is None
     assert fetched.response_text is None
+    assert fetched.tool_calls == []
+
+
+def test_recorded_actions_survive_a_round_trip(adapter) -> None:
+    """The same omission, on the column that completes the training pair.
+
+    ``tool_calls`` is written by ``save_trace`` and has to appear in both SELECT
+    lists to come back. ``_row_to_trace`` reads it with ``row.get``, so a missing
+    column yields an empty list rather than an error — the exact shape that made
+    the captured-text bug invisible, and the reason this is asserted through
+    ``get_trace`` and ``list_traces`` separately.
+    """
+    from amfs_core.models import DecisionTrace, ToolCall
+
+    saved = adapter.save_trace(
+        DecisionTrace(
+            agent_id="action-agent",
+            session_id="action-session",
+            outcome_ref="round-trip-3",
+            outcome_type="success",
+            task_input="checkout is erroring after the deploy",
+            tool_calls=[
+                ToolCall(
+                    tool_name="deploy_rollback",
+                    arguments={"service": "checkout", "to_version": "v41"},
+                    result_summary="rolled back",
+                    duration_ms=1430,
+                )
+            ],
+        )
+    )
+
+    fetched = adapter.get_trace(saved.id)
+    assert fetched is not None
+    assert [t.tool_name for t in fetched.tool_calls] == ["deploy_rollback"]
+    assert fetched.tool_calls[0].arguments == {
+        "service": "checkout",
+        "to_version": "v41",
+    }
+    assert fetched.tool_calls[0].duration_ms == 1430
+
+    listed = [t for t in adapter.list_traces(agent_id="action-agent")]
+    assert listed, "the trace should be listable"
+    assert [t.tool_name for t in listed[0].tool_calls] == ["deploy_rollback"]

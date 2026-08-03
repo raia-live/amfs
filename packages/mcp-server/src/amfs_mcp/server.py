@@ -69,6 +69,7 @@ Use kebab-case role/domain names that persist across conversations (e.g. "dashbo
 Every operation has a cost — be deliberate:
 - **Read** (1 op): `amfs_read`, `amfs_search`, `amfs_list`, `amfs_recall`, `amfs_briefing`, `amfs_retrieve`
 - **Write** (2 ops): `amfs_write`, `amfs_record_context`
+- **Free**: `amfs_record_action` — costs nothing, so record every consequential action
 - **Commit** (FREE): `amfs_commit_outcome` — always commit, never skip
 
 ## Finding / recalling memories (READ THIS)
@@ -106,8 +107,9 @@ you have no memory of something without checking first.
 1. **Get briefed**: `amfs_briefing(entity_path="<repo>/<module>")` — one briefing (1 op) replaces many individual reads. Always start here.
 2. **Recall**: `amfs_retrieve(query="...")` to find anything by meaning (no path/key needed); `amfs_search(query="...")` for filtered/keyword search; `amfs_read(path, key)` only when you know the exact coordinates; `amfs_graph_neighbors` for related entities.
 3. **Record decisions as they happen**: `amfs_record_context("user-decision", "User chose X over Y", source="chat")`. Only record meaningful decisions — not every micro-step.
-4. **Write knowledge**: `amfs_write("<repo>/<module>", "task-summary-<desc>", "<what and why>")`. Use `memory_type="belief"` for hypotheses, `"experience"` for actions taken.
-5. **Commit outcomes**: `amfs_commit_outcome("<ref>", "success")` after completing significant work. This is FREE and snapshots the full decision trace.
+4. **Record actions as you take them**: `amfs_record_action("deploy_rollback", {"service": "checkout"})` right after a consequential action — deploy, rollback, refund, file edit, PR. Record failed ones too with `success=False`. AMFS sees only its own tools, so your other tools are invisible unless you record them.
+5. **Write knowledge**: `amfs_write("<repo>/<module>", "task-summary-<desc>", "<what and why>")`. Use `memory_type="belief"` for hypotheses, `"experience"` for actions taken.
+6. **Commit outcomes**: `amfs_commit_outcome("<ref>", "success", task_input="<the request that started this>")` after completing significant work. This is FREE and snapshots the full decision trace. Pass `task_input` whenever you have it — without it the trace records what you decided but not what you were asked.
 
 ## What to Save (worth 2 ops)
 
@@ -1260,6 +1262,50 @@ def amfs_record_context(
     mem = _get_memory()
     mem.record_context(label, summary, source=source or None)
     return json.dumps({"recorded": label, "source": source or None})
+
+
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "destructiveHint": False})
+def amfs_record_action(
+    tool_name: str,
+    arguments: dict[str, Any] | None = None,
+    result: str = "",
+    success: bool = True,
+) -> str:
+    """Record an action you took — the tool you called and what you passed it.
+
+    Call this AS IT HAPPENS, right after taking a consequential action: deploying,
+    rolling back, editing a file, refunding, sending, opening a PR, changing a
+    setting. Not for reading or searching — record what you *did*, not what you
+    looked at. Use amfs_record_context for what you learned.
+
+    This is the counterpart to task_input on amfs_commit_outcome. Together they
+    form a complete record of the decision: what you were asked, and what you did
+    about it. AMFS cannot see this by itself — it observes only its own tools, so
+    a call to your deploy or refund tool is invisible unless you record it.
+
+    Args:
+        tool_name: The tool or operation you invoked (e.g. "deploy_rollback",
+            "refund_payment", "edit_file"). Use the real name, consistently —
+            the same action should always be recorded under the same name.
+        arguments: What you passed it, as a dict (e.g. {"service": "checkout",
+            "to_version": "v41"}). Secrets are scanned and redacted before
+            storage; an action whose arguments cannot be cleared is dropped.
+        result: Optional. What came back, or a short description of the effect.
+            Stored truncated — it is a record, not a cache.
+        success: Whether the action succeeded. Record failed actions too; a trace
+            committed as a failure is more useful when it shows what was tried.
+
+    Example: amfs_record_action("deploy_rollback", {"service": "checkout", "to_version": "v41"})
+    Example: amfs_record_action("refund_payment", {"charge_id": "ch_123"}, result="refunded", success=True)
+    """
+    mem = _get_memory()
+    mem.record_action(
+        tool_name,
+        arguments or {},
+        result=result,
+        success=success,
+    )
+    return json.dumps({"recorded_action": tool_name, "success": success})
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})

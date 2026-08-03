@@ -55,6 +55,7 @@ from amfs_core.models import (
     SearchQuery,
     SemanticQuery,
     Tag,
+    ToolCall,
     TraceEntry,
 )
 
@@ -327,6 +328,12 @@ class PostgresAdapter(AdapterABC):
         cur.execute("""
             ALTER TABLE amfs_decision_traces
             ADD COLUMN IF NOT EXISTS response_text TEXT
+        """)
+        # The action side of that pair. Training predicts the action from the
+        # request, so a trace carrying only the request is half an example.
+        cur.execute("""
+            ALTER TABLE amfs_decision_traces
+            ADD COLUMN IF NOT EXISTS tool_calls JSONB DEFAULT '[]'
         """)
         cur.execute("""
             ALTER TABLE amfs_digests
@@ -2179,7 +2186,7 @@ class PostgresAdapter(AdapterABC):
                 cur.execute(
                     """
                     SELECT id, agent_id, session_id, outcome_ref, outcome_type,
-                           decision_summary, task_input, response_text,
+                           decision_summary, task_input, response_text, tool_calls,
                            causal_entries, external_contexts,
                            query_events, session_started_at, session_ended_at,
                            session_duration_ms,
@@ -2207,10 +2214,10 @@ class PostgresAdapter(AdapterABC):
                          query_events, session_started_at, session_ended_at,
                          session_duration_ms,
                          error_events, state_diff, session_metadata, created_at,
-                         task_input, response_text)
+                         task_input, response_text, tool_calls)
                     VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb,
                             %s::jsonb, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s,
-                            %s, %s)
+                            %s, %s, %s::jsonb)
                     RETURNING id, created_at
                     """,
                     (
@@ -2232,6 +2239,7 @@ class PostgresAdapter(AdapterABC):
                         trace.created_at,
                         trace.task_input,
                         trace.response_text,
+                        json.dumps([t.model_dump(mode="json") for t in trace.tool_calls]),
                     ),
                 )
                 row = cur.fetchone()
@@ -2264,7 +2272,7 @@ class PostgresAdapter(AdapterABC):
         where = " AND ".join(conditions)
         sql = f"""
             SELECT id, agent_id, session_id, outcome_ref, outcome_type,
-                   decision_summary, task_input, response_text,
+                   decision_summary, task_input, response_text, tool_calls,
                    causal_entries, external_contexts,
                    query_events, session_started_at, session_ended_at,
                    session_duration_ms,
@@ -2292,7 +2300,10 @@ class PostgresAdapter(AdapterABC):
         ec_raw = row["external_contexts"] or []
         qe_raw = row.get("query_events") or []
         ee_raw = row.get("error_events") or []
+        tc_raw = row.get("tool_calls") or []
         sd_raw = row.get("state_diff")
+        if isinstance(tc_raw, str):
+            tc_raw = json.loads(tc_raw)
         if isinstance(ce_raw, str):
             ce_raw = json.loads(ce_raw)
         if isinstance(ec_raw, str):
@@ -2321,6 +2332,7 @@ class PostgresAdapter(AdapterABC):
             decision_summary=row.get("decision_summary"),
             task_input=row.get("task_input"),
             response_text=row.get("response_text"),
+            tool_calls=[ToolCall(**t) for t in tc_raw],
             causal_entries=[TraceEntry(**e) for e in ce_raw],
             external_contexts=[ExternalContext(**c) for c in ec_raw],
             query_events=[QueryEvent(**q) for q in qe_raw],
