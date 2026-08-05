@@ -2031,7 +2031,15 @@ def _auto_seal_trace(mem: AgentMemory) -> str | None:
         imm = ImmutableDecisionTrace(
             **({"id": trace_id} if trace_id else {}),
             **({"account_id": account_id} if account_id else {}),
-            agent_id=mem.agent_id,
+            # From the trace, not from ``mem``. ``mem`` is shared by every
+            # request: the caller's agent is written onto its tagger for the
+            # duration of the commit and restored in a ``finally``, and this runs
+            # after that restore — so reading it here sealed every trace under
+            # the server's own default agent. Tuning datasets are built from the
+            # sealed traces and selected by agent, so the loss is silent: the
+            # model trains on an empty set. The trace was built while the tagger
+            # still pointed at the caller.
+            agent_id=getattr(oss_trace, "agent_id", None) or mem.agent_id,
             session_id=session_id,
             sequence_number=seq,
             outcome_ref=oss_trace.outcome_ref,
