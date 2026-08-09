@@ -128,7 +128,23 @@ class HttpAdapter(AdapterABC):
         params: dict[str, Any] = {}
         if branch and branch != "main":
             params["branch"] = branch
-        data = self._get(f"/api/v1/entries/{entity_path}/{key}", **params)
+        if "/" in key:
+            # The path form cannot express this. Its converter is greedy, so
+            # everything up to the final segment becomes the entity path, and a
+            # read of sweep/abc + active-negotiation/xyz asks the server for
+            # sweep/abc/active-negotiation + xyz — coordinates nothing was
+            # written at, which comes back as an ordinary "not found" rather
+            # than as an error anyone would notice.
+            #
+            # Only slashed keys take the query route, so a server too old to
+            # have it keeps serving every read it was already serving
+            # correctly. The ones it would 404 on are the ones it could never
+            # answer anyway.
+            data = self._get(
+                "/api/v1/entry", entity_path=entity_path, key=key, **params
+            )
+        else:
+            data = self._get(f"/api/v1/entries/{entity_path}/{key}", **params)
         if data.get("status") == "not_found":
             return None
         entry = _parse_entry(data)
