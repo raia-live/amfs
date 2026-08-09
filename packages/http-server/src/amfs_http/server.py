@@ -1492,21 +1492,88 @@ async def verify_integrity(
 # ──────────────────────────────────────────────────────────────────────
 
 
+#: Per-write options this endpoint forwards to the transaction.
+#:
+#: An allow-list, so a key a caller invents cannot reach ``tx.write`` as an
+#: unexpected keyword and turn a batch into a 500.
+_COMMIT_WRITE_OPTIONS = ("confidence", "memory_type", "pattern_refs", "shared")
+
+
 @app.post("/api/v1/commits")
 async def create_commit(
     body: dict[str, Any],
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    """Run a transaction here, rather than assembling one on the client.
+
+    A client-side transaction over HTTP wrote each entry with its own request
+    and then called ``save_commit``, which the HTTP adapter has never
+    implemented — there is no endpoint that accepts a commit somebody else
+    minted. So the id came back to the caller and the commit itself was
+    dropped, and nothing tied the entries together afterwards.
+
+    Doing it here is what makes the group a single round trip that either
+    reaches the server or does not, instead of n requests from a client that
+    can half-succeed and no way for the caller to find out which half.
+
+    It is not yet one database transaction, and the difference matters. The
+    Postgres adapter does not override ``write_batch``, so it inherits the
+    default that writes each entry on its own connection, and ``save_commit``
+    runs on a further one after those have committed. A failure part-way
+    leaves the earlier entries written. What is fixed here is the client-side
+    fan-out; what remains is the storage-side one.
+
+    The per-write options are the reason this was not simply switched over
+    earlier. This endpoint used to forward only path, key and value, so moving
+    a batch here would have silently discarded confidence, memory type,
+    pattern refs and sharing on every entry — writing the right entries with
+    the wrong metadata, which is worse than not writing them.
+    """
+    from amfs_core.models import MemoryType
+
     mem = _get_memory()
     writes = body.get("writes", [])
     message = body.get("message", "")
+    if not writes:
+        # Refused rather than accepted as a no-op, because the two are
+        # indistinguishable to the caller otherwise. An empty batch never
+        # reaches flush, so the response carries no commit — which is the same
+        # response a server too old to mint one sends back. The client reads
+        # that as "committed, details unavailable" and moves on, when in fact
+        # nothing was written at all.
+        raise HTTPException(
+            status_code=422, detail="writes is empty — nothing to commit."
+        )
     with mem.transaction(message) as tx:
         for w in writes:
-            tx.write(w["entity_path"], w["key"], w.get("value"))
+            options = {k: w[k] for k in _COMMIT_WRITE_OPTIONS if k in w}
+            # Arrives over the wire as a string, and the write path wants the
+            # enum. An unknown one is refused rather than dropped: writing the
+            # entry with a default type would put the wrong metadata on the
+            # right memory, and nothing later can tell that happened.
+            if "memory_type" in options:
+                raw = str(options["memory_type"])
+                try:
+                    options["memory_type"] = MemoryType(raw)
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"Invalid memory_type {raw!r}. Valid: "
+                            + ", ".join(m.value for m in MemoryType)
+                        ),
+                    ) from exc
+            tx.write(w["entity_path"], w["key"], w.get("value"), **options)
+
+    commit = tx.commit
     return {
-        "commit_id": tx.commit.id if tx.commit else None,
+        "commit_id": commit.id if commit else None,
         "message": message,
-        "entries_written": len(writes),
+        "entries_written": len(tx.entries),
+        # The whole commit, so a caller does not have to fetch what was just
+        # created to learn the versions its entries landed on.
+        "commit": json.loads(json.dumps(commit.model_dump(mode="json"), default=str))
+        if commit else None,
     }
 
 
