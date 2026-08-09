@@ -494,3 +494,44 @@ DROP TRIGGER IF EXISTS trg_notify_digest ON amfs_digests;
 CREATE TRIGGER trg_notify_digest
     AFTER INSERT OR UPDATE ON amfs_digests
     FOR EACH ROW EXECUTE FUNCTION amfs_notify_digest();
+
+-- ──────────────────────────────────────────────────────────────────────
+-- Commits — atomic groups of writes
+-- ──────────────────────────────────────────────────────────────────────
+--
+-- Added late. Commits have existed in the model since the beginning, and
+-- TransactionBuffer has always assembled one and handed it to save_commit —
+-- which every adapter but the filesystem one inherited as a no-op. So a
+-- transaction returned a real commit id that resolved to nothing, commit_log
+-- was empty for every account, and common_ancestor found no ancestor for any
+-- pair. All three read as an honest answer about an empty history, which is
+-- why nothing complained for so long.
+--
+-- ``id`` is TEXT rather than UUID: the id is minted by the SDK as a content
+-- hash of the commit, not by the database, and it is what a caller has already
+-- been handed by the time this row is written.
+--
+-- ``entries`` and ``parent_ids`` are JSONB rather than child tables. A commit
+-- is immutable once written and is always read whole, so there is nothing to
+-- join for and nothing to update in place. Parent ids are a list because a
+-- merge commit has two.
+
+CREATE TABLE IF NOT EXISTS amfs_commits (
+    id TEXT PRIMARY KEY,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    branch TEXT NOT NULL DEFAULT 'main',
+    message TEXT NOT NULL DEFAULT '',
+    author_agent_id TEXT NOT NULL,
+    session_id TEXT,
+    entries JSONB NOT NULL DEFAULT '[]',
+    tree_hash TEXT,
+    parent_ids JSONB NOT NULL DEFAULT '[]',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The commit log query: newest first, within one namespace and branch.
+CREATE INDEX IF NOT EXISTS idx_commits_log
+    ON amfs_commits (namespace, branch, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_commits_author
+    ON amfs_commits (namespace, author_agent_id);

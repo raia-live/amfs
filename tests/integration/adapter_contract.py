@@ -197,3 +197,111 @@ class AdapterContractTests:
         # After cancel, should not receive new entries
         # (may have received 0 or some depending on timing, but handle is cancelled)
         assert handle.cancelled
+
+    # ------------------------------------------------------------------
+    # commits
+    # ------------------------------------------------------------------
+    #
+    # Added after the connector functional sweep found there was no way to
+    # obtain two commit ids to give amfs_merge_base. The cause was that
+    # save_commit, get_commit and list_commits are concrete on AdapterABC with
+    # placeholder bodies — a no-op, None, and [] — so an adapter that never
+    # implemented them still satisfied the interface. Postgres never did, which
+    # means every hosted account's commit log had been empty since the
+    # beginning while reading as an honest answer about a history nobody had
+    # written yet.
+    #
+    # Nothing in this suite asked. That is the actual defect: a contract that
+    # tests only the methods an adapter chose to write cannot tell "not
+    # implemented" from "nothing there". These four ask.
+
+    @staticmethod
+    def _make_commit(commit_id: str, *parents: str, message: str = "batch"):
+        from amfs_core.models import Commit, CommitEntry
+
+        return Commit(
+            id=commit_id,
+            message=message,
+            author_agent_id="review-agent",
+            session_id="sess-001",
+            entries=[
+                CommitEntry(entity_path="checkout-service", key="retry-pattern",
+                            version=1, content_hash="h1"),
+            ],
+            tree_hash=f"tree-{commit_id}",
+            parent_ids=list(parents),
+        )
+
+    def test_a_saved_commit_can_be_read_back(self, adapter: AdapterABC) -> None:
+        adapter.save_commit(self._make_commit("c-round-trip"))
+
+        got = adapter.get_commit("c-round-trip")
+
+        assert got is not None, (
+            "save_commit accepted the commit and get_commit cannot find it — "
+            "the placeholder no-op is still in place"
+        )
+        assert got.id == "c-round-trip"
+        assert got.author_agent_id == "review-agent"
+        assert got.tree_hash == "tree-c-round-trip"
+
+    def test_the_entries_survive_the_round_trip(self, adapter: AdapterABC) -> None:
+        """A commit whose entries are lost cannot say what it committed."""
+        adapter.save_commit(self._make_commit("c-entries"))
+
+        got = adapter.get_commit("c-entries")
+
+        assert got is not None
+        assert len(got.entries) == 1
+        assert got.entries[0].entity_path == "checkout-service"
+        assert got.entries[0].key == "retry-pattern"
+
+    def test_parents_survive_so_the_history_is_a_chain(self, adapter: AdapterABC) -> None:
+        """Without parents every commit is a root and no pair has an ancestor.
+
+        This is the property common_ancestor walks, and losing it is invisible:
+        the answer "these two share no ancestor" is a perfectly plausible thing
+        for a repository to say.
+        """
+        adapter.save_commit(self._make_commit("c-parent"))
+        adapter.save_commit(self._make_commit("c-child", "c-parent"))
+
+        got = adapter.get_commit("c-child")
+
+        assert got is not None
+        assert got.parent_ids == ["c-parent"]
+
+    def test_list_commits_returns_what_was_saved_newest_first(
+        self, adapter: AdapterABC
+    ) -> None:
+        adapter.save_commit(self._make_commit("c-one"))
+        adapter.save_commit(self._make_commit("c-two", "c-one"))
+
+        listed = adapter.list_commits(limit=10)
+
+        ids = [c.id for c in listed]
+        assert "c-one" in ids and "c-two" in ids, (
+            f"list_commits returned {ids} after two saves"
+        )
+        assert ids.index("c-two") < ids.index("c-one"), "newest first"
+
+    def test_an_unknown_commit_is_none_rather_than_an_error(
+        self, adapter: AdapterABC
+    ) -> None:
+        assert adapter.get_commit("c-never-written") is None
+
+    def test_saving_the_same_commit_twice_does_not_duplicate_it(
+        self, adapter: AdapterABC
+    ) -> None:
+        """The id is a content hash, so a retried flush is the same commit.
+
+        Without this an interrupted transaction that is retried leaves two rows
+        claiming to be one commit, and the log shows work that happened once as
+        having happened twice.
+        """
+        adapter.save_commit(self._make_commit("c-idempotent"))
+        adapter.save_commit(self._make_commit("c-idempotent"))
+
+        listed = [c for c in adapter.list_commits(limit=50) if c.id == "c-idempotent"]
+
+        assert len(listed) == 1

@@ -378,20 +378,54 @@ class HttpAdapter(AdapterABC):
     # one. Both read as an honest answer about an empty repository, so nothing
     # ever complained.
     #
-    # ``save_commit`` is still the inherited no-op, and that is a known gap
-    # rather than a finished thought. ``TransactionBuffer.flush`` assembles a
-    # Commit client-side and calls ``save_commit`` to persist it, so over HTTP
-    # the object is built, its id is returned to the caller, and it is then
-    # dropped — leaving an id that ``get_commit`` cannot resolve. There is no
-    # endpoint that accepts a client-assembled commit; ``POST /api/v1/commits``
-    # runs its own transaction and mints its own id. Closing this means moving
-    # the whole transaction server-side, which needs that endpoint to carry the
-    # metadata it currently discards (confidence, memory_type, pattern_refs,
-    # shared), so it is deliberately not attempted here.
+    # ``save_commit`` remains the inherited no-op, and now deliberately rather
+    # than as an unfinished thought. It was one because a client-side
+    # transaction assembled a Commit here and had nowhere to send it: no
+    # endpoint accepted a commit somebody else had minted, so the id went back
+    # to the caller and the object was dropped, leaving an id ``get_commit``
+    # could not resolve.
+    #
+    # The way out was not to add that endpoint, which would mean trusting a
+    # client-assembled id and tree hash, but to stop assembling commits on this
+    # side at all. ``commit_batch`` posts the writes and the server runs the
+    # transaction, mints the commit and persists it. That is also what makes
+    # the group atomic: one transaction on one connection, rather than n
+    # separate requests that can half-succeed.
+    #
+    # What that leaves is a ``save_commit`` nobody should reach. It is not made
+    # to raise, because ``TransactionBuffer.flush`` still calls it on the paths
+    # that have not moved over, and turning those into errors would break
+    # working code to make a point.
     #
     # One consequence of ``list_commits`` working: ``flush`` calls it to find a
     # parent, so a transaction over HTTP now costs one more request than before
     # and its commits form a real chain instead of every one being a root.
+
+    def commit_batch(
+        self,
+        writes: list[dict[str, Any]],
+        message: str = "",
+    ) -> Commit | None:
+        """Write a group of entries as one commit, run server-side.
+
+        Returns the commit the server minted, or ``None`` from a server old
+        enough not to send one back. ``None`` means "committed, details
+        unavailable" rather than "failed": by the time the response is read the
+        transaction has already landed, and treating it as an error would have
+        a caller retry writes that are already there.
+
+        That reading only holds because a 200 now means something was written.
+        An empty ``writes`` list never reached flush, so the server answered
+        200 with no commit — the same answer an old server gives — and the
+        caller could not tell "nothing happened" from "landed, silently". The
+        server refuses an empty batch instead, which leaves ``None`` with one
+        meaning rather than two.
+        """
+        if not writes:
+            raise ValueError("writes is empty — nothing to commit.")
+        data = self._post("/api/v1/commits", {"writes": writes, "message": message})
+        commit = data.get("commit")
+        return Commit.model_validate(commit) if commit else None
 
     def get_commit(self, commit_id: str) -> Commit | None:
         try:
