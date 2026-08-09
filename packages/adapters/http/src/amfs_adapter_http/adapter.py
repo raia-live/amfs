@@ -411,12 +411,35 @@ class HttpAdapter(AdapterABC):
     ) -> list[Commit]:
         """Commits, newest first.
 
-        ``branch`` and ``namespace`` are not sent: the endpoint takes neither,
-        and scopes by the account the key belongs to. Filtering here instead of
-        pretending the server did it, so a caller asking for one branch is not
-        silently handed every branch.
+        ``branch`` and ``namespace`` are sent, so the server filters before it
+        applies the limit. Filtering here afterwards instead — which is what
+        this did first — takes the newest N account-wide and then discards the
+        ones the caller did not want, so a page full of another branch's
+        commits comes back empty even though the requested branch has plenty.
+
+        The case that makes it more than a paging nicety is
+        ``TransactionBuffer.flush``, which asks for exactly one commit to use
+        as the new commit's parent. One commit on the wrong branch means no
+        parent, so every commit over HTTP is a root, no two share an ancestor,
+        and ``common_ancestor`` answers "none" forever — indistinguishable from
+        an honest answer about unrelated history.
+
+        The local filter stays as a guard, not as the mechanism. A server old
+        enough to ignore the query parameters returns an unfiltered page, and
+        handing a caller another branch's commits because the server did not
+        understand the question is worse than handing it too few. Against such
+        a server a result can still be short, which is a completeness problem;
+        without the guard it would be a correctness one.
         """
-        data = self._get("/api/v1/commits", limit=limit)
+        data = self._get(
+            "/api/v1/commits",
+            limit=limit,
+            # Empty means "do not filter" to the guard below, so it has to mean
+            # the same to the server rather than arriving as branch="" and
+            # matching nothing.
+            branch=branch or None,
+            namespace=namespace or None,
+        )
         commits = [Commit.model_validate(c) for c in data.get("commits", [])]
         return [
             c for c in commits

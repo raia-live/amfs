@@ -1514,10 +1514,41 @@ async def create_commit(
 async def list_commits(
     request: Request,
     limit: int = Query(50, ge=1, le=500),
+    branch: str | None = Query(None),
+    namespace: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    """Commits, newest first, filtered before the limit is applied.
+
+    ``branch`` and ``namespace`` are new, and the reason is a real bug rather
+    than completeness. Without them the caller can only take the newest N
+    account-wide and filter what it wanted out of the page it was given, so a
+    page full of another branch's commits comes back empty even though the
+    branch it asked about has plenty.
+
+    That is not hypothetical: ``TransactionBuffer.flush`` asks for exactly one
+    commit to use as the new commit's parent. One commit on the wrong branch
+    means no parent, which means every commit over HTTP is a root, no two
+    commits share an ancestor, and ``common_ancestor`` answers "none" forever —
+    while looking exactly like an honest answer about unrelated history.
+
+    Both default to None rather than to "main" and "default", so a caller that
+    does not pass them keeps the behaviour it had: whatever branch and
+    namespace this server's own memory is configured for.
+    """
     mem = _get_memory()
-    commits = mem.commit_log(limit=limit)
+    if branch is None and namespace is None:
+        commits = mem.commit_log(limit=limit)
+    else:
+        # Straight to the adapter, because commit_log deliberately takes
+        # neither — it reads the server's own branch and namespace, which are
+        # not the caller's to begin with. The route already reaches for
+        # _adapter for stats_extended.
+        commits = mem._adapter.list_commits(
+            branch=branch or mem._branch,
+            limit=limit,
+            namespace=namespace or mem._config.namespace,
+        )
     allowed = _visible_agent_ids(request)
     if allowed is not None:
         commits = [c for c in commits if c.author_agent_id in allowed]
