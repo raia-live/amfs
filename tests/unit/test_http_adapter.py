@@ -532,3 +532,100 @@ class TestTheBranchFilterReachesTheServer:
         assert "branch" not in calls[0]["params"]
         assert "namespace" not in calls[0]["params"]
         assert [c.id for c in commits] == ["c-main", "c-exp"]
+
+
+class TestCommitBatchRunsServerSide:
+    """Writing a group of entries as one commit, without assembling it here.
+
+    The client used to build the Commit itself and hand it to ``save_commit``,
+    which this adapter has never implemented — there was no endpoint that
+    accepted a commit somebody else had minted. So the caller got an id back
+    for an object that was dropped, and n separate write requests that could
+    half-succeed were described to them as atomic.
+
+    ``commit_batch`` posts the writes instead and lets the server transact,
+    mint and persist. What these pin is that the metadata survives the trip,
+    because the reason this was not done sooner is that the endpoint used to
+    forward only path, key and value — moving a batch across without fixing
+    that would have written the right entries with the wrong metadata, which
+    is worse than not writing them.
+    """
+
+    def test_the_writes_are_posted_as_one_request(self) -> None:
+        adapter, calls = _make_adapter({
+            "POST /api/v1/commits": {"commit_id": "c1", "commit": _commit("c1")},
+        })
+
+        adapter.commit_batch(
+            [
+                {"entity_path": "app/a", "key": "k1", "value": "v1"},
+                {"entity_path": "app/b", "key": "k2", "value": "v2"},
+            ],
+            "two entries",
+        )
+
+        assert len(calls) == 1, "a batch must not become one request per entry"
+        assert calls[0]["path"] == "/api/v1/commits"
+        assert calls[0]["method"] == "POST"
+        assert len(calls[0]["body"]["writes"]) == 2
+        assert calls[0]["body"]["message"] == "two entries"
+
+    def test_per_write_metadata_survives_the_trip(self) -> None:
+        """The regression that kept this on the client for so long."""
+        adapter, calls = _make_adapter({
+            "POST /api/v1/commits": {"commit": _commit("c1")},
+        })
+
+        adapter.commit_batch([{
+            "entity_path": "app/a",
+            "key": "k1",
+            "value": "v1",
+            "confidence": 0.4,
+            "memory_type": "belief",
+            "pattern_refs": ["risk-x"],
+            "shared": True,
+        }])
+
+        sent = calls[0]["body"]["writes"][0]
+        assert sent["confidence"] == 0.4
+        assert sent["memory_type"] == "belief"
+        assert sent["pattern_refs"] == ["risk-x"]
+        assert sent["shared"] is True
+
+    def test_the_minted_commit_comes_back(self) -> None:
+        adapter, _ = _make_adapter({
+            "POST /api/v1/commits": {"commit": _commit("c-abc", "c-parent")},
+        })
+
+        commit = adapter.commit_batch([{"entity_path": "a/b", "key": "k"}])
+
+        assert commit is not None
+        assert commit.id == "c-abc"
+        assert commit.parent_ids == ["c-parent"]
+
+    def test_a_server_that_returns_no_commit_is_not_a_failure(self) -> None:
+        """An older server writes the entries and says nothing about a commit.
+
+        The transaction has already landed by the time the response is read, so
+        raising here would have a caller retry writes that are already there.
+        ``None`` means "committed, details unavailable".
+        """
+        adapter, _ = _make_adapter({
+            "POST /api/v1/commits": {"commit_id": "c1", "entries_written": 1},
+        })
+
+        assert adapter.commit_batch([{"entity_path": "a/b", "key": "k"}]) is None
+
+    def test_save_commit_stays_a_no_op_rather_than_raising(self) -> None:
+        """TransactionBuffer.flush still calls it on paths that have not moved.
+
+        Making it raise would break working code to make a point about an
+        arrangement this adapter has now stopped relying on.
+        """
+        from amfs_core.models import Commit
+
+        adapter, calls = _make_adapter()
+
+        adapter.save_commit(Commit(id="c1", author_agent_id="a"))
+
+        assert calls == [], "save_commit must not reach the network"

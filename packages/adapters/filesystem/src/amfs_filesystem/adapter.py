@@ -154,7 +154,12 @@ class FilesystemAdapter(AdapterABC):
     # ------------------------------------------------------------------
 
     def _commits_dir(self) -> Path:
-        d = self._layout._root / "_commits"
+        # ``root``, not ``_root``. PathLayout has never had the private name,
+        # so every one of these three raised AttributeError on first use — the
+        # filesystem adapter was the one place commits were supposed to work
+        # and it did not either. Nothing noticed because the adapter contract
+        # suite did not ask about commits until now.
+        d = self._layout.root / "_commits"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -177,19 +182,23 @@ class FilesystemAdapter(AdapterABC):
         limit: int = 50,
         namespace: str = "default",
     ) -> list[Commit]:
-        commits_dir = self._commits_dir()
         commits: list[Commit] = []
-        for f in sorted(commits_dir.glob("*.json"), reverse=True):
+        for f in self._commits_dir().glob("*.json"):
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
                 c = Commit.model_validate(data)
                 if c.branch == branch and c.namespace == namespace:
                     commits.append(c)
-                    if len(commits) >= limit:
-                        break
             except Exception:
                 logger.warning("Skipping unreadable commit: %s", f)
-        return commits
+
+        # Sorted by when the commit was made, not by the filename. The filename
+        # is the commit id, which is a content hash, so ordering by it returned
+        # a history in an order nobody asked for that happened to look sorted.
+        # The limit is applied after, or "newest first" would mean "whichever
+        # ones were read first".
+        commits.sort(key=lambda c: c.created_at, reverse=True)
+        return commits[:limit]
 
     # ------------------------------------------------------------------
     # list

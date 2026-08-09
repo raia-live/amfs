@@ -27,6 +27,8 @@ from amfs_core.models import (
     BranchAccess,
     BranchAccessPermission,
     BranchStatus,
+    Commit,
+    CommitEntry,
     DecisionTrace,
     DiffEntry,
     Digest,
@@ -2284,8 +2286,126 @@ class PostgresAdapter(AdapterABC):
         return [self._row_to_trace(row) for row in rows]
 
     # ------------------------------------------------------------------
+    # commits
+    # ------------------------------------------------------------------
+    #
+    # These three inherited the base class's placeholders — a no-op save,
+    # ``None``, and ``[]`` — for as long as this adapter has existed. The
+    # effect was silent and complete: ``TransactionBuffer.flush`` assembled a
+    # Commit, handed it to ``save_commit``, and it was dropped, so every
+    # transaction returned a real id that resolved to nothing. ``commit_log``
+    # was empty for every account and ``common_ancestor`` found no ancestor for
+    # any pair of commits, including two that obviously shared one. All three
+    # read as an honest answer about a history that had not been written yet,
+    # which is why nothing complained.
+
+    def save_commit(self, commit: Commit) -> None:
+        """Persist a commit.
+
+        Idempotent on the id. The id is a content hash the SDK mints before
+        this is called, so a retried flush produces the same commit rather than
+        a second one, and ``ON CONFLICT DO NOTHING`` is what makes replaying a
+        flush safe. Nothing about a commit is mutable, so there is no update
+        branch to reach for.
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_commits
+                        (id, namespace, branch, message, author_agent_id,
+                         session_id, entries, tree_hash, parent_ids, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s)
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    (
+                        commit.id,
+                        self._namespace,
+                        commit.branch,
+                        commit.message,
+                        commit.author_agent_id,
+                        commit.session_id,
+                        json.dumps([e.model_dump(mode="json") for e in commit.entries]),
+                        commit.tree_hash,
+                        json.dumps(list(commit.parent_ids)),
+                        commit.created_at,
+                    ),
+                )
+
+    def get_commit(self, commit_id: str) -> Commit | None:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, namespace, branch, message, author_agent_id,
+                           session_id, entries, tree_hash, parent_ids, created_at
+                    FROM amfs_commits
+                    WHERE id = %s AND namespace = %s
+                    """,
+                    (commit_id, self._namespace),
+                )
+                row = cur.fetchone()
+
+        return self._row_to_commit(row) if row is not None else None
+
+    def list_commits(
+        self,
+        *,
+        branch: str = "main",
+        limit: int = 50,
+        namespace: str = "default",
+    ) -> list[Commit]:
+        """Commits, newest first.
+
+        ``namespace`` is accepted for the interface but the adapter's own
+        namespace is what is queried, as everywhere else here: it is fixed at
+        construction and is the tenant boundary this connection was opened for.
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, namespace, branch, message, author_agent_id,
+                           session_id, entries, tree_hash, parent_ids, created_at
+                    FROM amfs_commits
+                    WHERE namespace = %s AND branch = %s
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT %s
+                    """,
+                    (self._namespace, branch, limit),
+                )
+                rows = cur.fetchall()
+
+        return [self._row_to_commit(row) for row in rows]
+
+    # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _row_to_commit(row: dict[str, Any]) -> Commit:
+        # psycopg returns JSONB already decoded, but the same rows arrive as
+        # strings through a plain cursor, so both are handled — the trace
+        # reader above does the same for the same reason.
+        entries = row.get("entries") or []
+        parents = row.get("parent_ids") or []
+        if isinstance(entries, str):
+            entries = json.loads(entries)
+        if isinstance(parents, str):
+            parents = json.loads(parents)
+
+        return Commit(
+            id=row["id"],
+            namespace=row["namespace"],
+            branch=row["branch"],
+            message=row["message"] or "",
+            author_agent_id=row["author_agent_id"],
+            session_id=row.get("session_id"),
+            entries=[CommitEntry.model_validate(e) for e in entries],
+            tree_hash=row.get("tree_hash"),
+            parent_ids=list(parents),
+            created_at=row["created_at"],
+        )
 
     def _row_to_trace(self, row: dict[str, Any]) -> DecisionTrace:
         ce_raw = row["causal_entries"] or []
