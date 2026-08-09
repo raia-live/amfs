@@ -1512,8 +1512,16 @@ async def create_commit(
     minted. So the id came back to the caller and the commit itself was
     dropped, and nothing tied the entries together afterwards.
 
-    Doing it here is what makes the group atomic in the first place: one
-    transaction, against one connection, that either lands or does not.
+    Doing it here is what makes the group a single round trip that either
+    reaches the server or does not, instead of n requests from a client that
+    can half-succeed and no way for the caller to find out which half.
+
+    It is not yet one database transaction, and the difference matters. The
+    Postgres adapter does not override ``write_batch``, so it inherits the
+    default that writes each entry on its own connection, and ``save_commit``
+    runs on a further one after those have committed. A failure part-way
+    leaves the earlier entries written. What is fixed here is the client-side
+    fan-out; what remains is the storage-side one.
 
     The per-write options are the reason this was not simply switched over
     earlier. This endpoint used to forward only path, key and value, so moving
@@ -1526,6 +1534,16 @@ async def create_commit(
     mem = _get_memory()
     writes = body.get("writes", [])
     message = body.get("message", "")
+    if not writes:
+        # Refused rather than accepted as a no-op, because the two are
+        # indistinguishable to the caller otherwise. An empty batch never
+        # reaches flush, so the response carries no commit — which is the same
+        # response a server too old to mint one sends back. The client reads
+        # that as "committed, details unavailable" and moves on, when in fact
+        # nothing was written at all.
+        raise HTTPException(
+            status_code=422, detail="writes is empty — nothing to commit."
+        )
     with mem.transaction(message) as tx:
         for w in writes:
             options = {k: w[k] for k in _COMMIT_WRITE_OPTIONS if k in w}

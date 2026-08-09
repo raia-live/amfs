@@ -629,3 +629,35 @@ class TestCommitBatchRunsServerSide:
         adapter.save_commit(Commit(id="c1", author_agent_id="a"))
 
         assert calls == [], "save_commit must not reach the network"
+
+
+class TestAnEmptyBatchIsNotACommit:
+    """"Nothing happened" and "landed, silently" must not look the same.
+
+    ``commit_batch`` returns None for a server too old to send a commit back,
+    and reads that as "committed, details unavailable" — which is right, since
+    by then the transaction has landed and raising would have the caller retry
+    writes that already exist.
+
+    An empty writes list broke that reading. It never reached flush, so the
+    server answered 200 with no commit: the same response, and the caller
+    concluded a commit it never made had succeeded.
+    """
+
+    def test_an_empty_batch_is_refused_before_it_is_sent(self) -> None:
+        adapter, calls = _make_adapter({})
+
+        with pytest.raises(ValueError, match="nothing to commit"):
+            adapter.commit_batch([], "empty")
+
+        assert calls == [], "a request was sent for a batch with no writes"
+
+    def test_none_still_means_an_old_server_rather_than_an_error(self) -> None:
+        """The one remaining meaning of None, which is why the above matters."""
+        adapter, _ = _make_adapter({
+            "POST /api/v1/commits": {"commit_id": "c1", "entries_written": 1},
+        })
+
+        assert adapter.commit_batch(
+            [{"entity_path": "app/a", "key": "k", "value": "v"}], "one"
+        ) is None

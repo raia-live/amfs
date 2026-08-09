@@ -413,7 +413,16 @@ class HttpAdapter(AdapterABC):
         unavailable" rather than "failed": by the time the response is read the
         transaction has already landed, and treating it as an error would have
         a caller retry writes that are already there.
+
+        That reading only holds because a 200 now means something was written.
+        An empty ``writes`` list never reached flush, so the server answered
+        200 with no commit — the same answer an old server gives — and the
+        caller could not tell "nothing happened" from "landed, silently". The
+        server refuses an empty batch instead, which leaves ``None`` with one
+        meaning rather than two.
         """
+        if not writes:
+            raise ValueError("writes is empty — nothing to commit.")
         data = self._post("/api/v1/commits", {"writes": writes, "message": message})
         commit = data.get("commit")
         return Commit.model_validate(commit) if commit else None

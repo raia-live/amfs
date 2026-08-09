@@ -2302,11 +2302,19 @@ class PostgresAdapter(AdapterABC):
     def save_commit(self, commit: Commit) -> None:
         """Persist a commit.
 
-        Idempotent on the id. The id is a content hash the SDK mints before
-        this is called, so a retried flush produces the same commit rather than
-        a second one, and ``ON CONFLICT DO NOTHING`` is what makes replaying a
-        flush safe. Nothing about a commit is mutable, so there is no update
-        branch to reach for.
+        Idempotent on the id, so saving the same commit object twice is safe
+        and nothing about a commit is mutable enough to need an update branch.
+
+        That is narrower than it sounds, and worth being exact about: the id is
+        a fresh uuid4 minted per flush, not a hash of the contents. A retried
+        flush is therefore a *different* commit, and ``ON CONFLICT`` will not
+        collapse the two. It protects a replay of one commit object, not a
+        retry of the operation that produced it.
+
+        This also runs on its own connection, after ``write_batch`` has already
+        committed the entries. If this insert fails, the entries stay and the
+        commit row does not, leaving versions that name a commit nobody can
+        look up. See ``TransactionBuffer.flush``.
         """
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
