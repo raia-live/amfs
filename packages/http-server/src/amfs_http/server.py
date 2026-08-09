@@ -683,6 +683,37 @@ async def whoami(
 # ──────────────────────────────────────────────────────────────────────
 
 
+@app.get("/api/v1/entry")
+async def read_entry_by_query(
+    request: Request,
+    entity_path: str = Query(...),
+    key: str = Query(...),
+    branch: str = Query("main"),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """The same read, with the coordinates where they cannot be confused.
+
+    ``/api/v1/entries/{entity_path:path}/{key}`` cannot express a key that
+    contains a slash. The path converter is greedy, so it takes everything up
+    to the final segment as the entity path, and a read of
+    ``sweep/abc`` / ``active-negotiation/xyz`` arrives as
+    ``sweep/abc/active-negotiation`` / ``xyz`` — coordinates nothing was ever
+    written at, answered with a confident "not found".
+
+    Slashed keys are not exotic here: 314 of 4,726 entries in production have
+    one, written by the negotiation engine and by anything else that namespaces
+    its keys. None of them could be read back. The OpenAI ``fetch`` tool is the
+    sharpest edge of that, because it exists to resolve an id that ``search``
+    just handed out — so search would offer an entry and fetch would deny it
+    existed.
+
+    The old route stays exactly as it was. It is unambiguous whenever the key
+    has no slash, which is most of the time, and rewriting every caller to gain
+    nothing is a worse trade than leaving them alone.
+    """
+    return await _read_entry(request, entity_path, key, branch)
+
+
 @app.get("/api/v1/entries/{entity_path:path}/{key}")
 async def read_entry(
     request: Request,
@@ -690,6 +721,15 @@ async def read_entry(
     key: str,
     branch: str = Query("main"),
     _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    return await _read_entry(request, entity_path, key, branch)
+
+
+async def _read_entry(
+    request: Request,
+    entity_path: str,
+    key: str,
+    branch: str,
 ) -> dict[str, Any]:
     mem = _get_memory()
     if _async_adapter is not None:

@@ -701,3 +701,72 @@ class TestABatchSaysWhoWroteIt:
         body = calls[0]["body"]
         assert "agent_id" not in body
         assert "session_id" not in body
+
+
+class TestAKeyWithASlashInIt:
+    """The path route cannot express one, so read must not use it.
+
+    /api/v1/entries/{entity_path:path}/{key} is greedy: everything up to the
+    final segment becomes the entity path. Reading sweep/abc + the key
+    active-negotiation/xyz asks for sweep/abc/active-negotiation + xyz, which
+    nothing was written at, and the answer is an ordinary "not found" rather
+    than anything that looks like a bug. 314 of 4,726 entries in production
+    have such a key, and none could be read back.
+    """
+
+    def test_it_goes_by_query_rather_than_by_path(self) -> None:
+        adapter, calls = _make_adapter({
+            "/api/v1/entry": {"status": "not_found"},
+        })
+
+        adapter.read("sweep/abc", "active-negotiation/xyz")
+
+        assert calls[0]["path"] == "/api/v1/entry"
+        assert calls[0]["params"]["entity_path"] == "sweep/abc"
+        assert calls[0]["params"]["key"] == "active-negotiation/xyz"
+
+    def test_the_entry_comes_back_whole(self) -> None:
+        adapter, _calls = _make_adapter({
+            "/api/v1/entry": {
+                "entity_path": "sweep/abc",
+                "key": "active-negotiation/xyz",
+                "version": 1,
+                "value": "a proposal",
+                "provenance": {
+                    "agent_id": "a",
+                    "session_id": "s",
+                    "written_at": "2026-01-01T00:00:00Z",
+                },
+                "confidence": 0.9,
+            },
+        })
+
+        entry = adapter.read("sweep/abc", "active-negotiation/xyz")
+
+        assert entry is not None
+        assert entry.key == "active-negotiation/xyz"
+
+    def test_the_branch_still_travels(self) -> None:
+        adapter, calls = _make_adapter({"/api/v1/entry": {"status": "not_found"}})
+
+        adapter.read("sweep/abc", "active-negotiation/xyz", branch="feature")
+
+        assert calls[0]["params"]["branch"] == "feature"
+
+
+class TestAnOrdinaryKeyIsLeftAlone:
+    """Most keys have no slash, and the path route answers those correctly.
+
+    Moving them too would change every read against every deployed server to
+    gain nothing.
+    """
+
+    def test_it_still_goes_by_path(self) -> None:
+        adapter, calls = _make_adapter({
+            "/api/v1/entries/app/svc/plain-key": {"status": "not_found"},
+        })
+
+        adapter.read("app/svc", "plain-key")
+
+        assert calls[0]["path"] == "/api/v1/entries/app/svc/plain-key"
+        assert "key" not in calls[0]["params"]
