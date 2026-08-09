@@ -405,6 +405,8 @@ class HttpAdapter(AdapterABC):
         self,
         writes: list[dict[str, Any]],
         message: str = "",
+        agent_id: str | None = None,
+        session_id: str | None = None,
     ) -> Commit | None:
         """Write a group of entries as one commit, run server-side.
 
@@ -420,10 +422,21 @@ class HttpAdapter(AdapterABC):
         caller could not tell "nothing happened" from "landed, silently". The
         server refuses an empty batch instead, which leaves ``None`` with one
         meaning rather than two.
+
+        ``agent_id`` and ``session_id`` say who is committing, the same way
+        ``write`` does. Without them the server transacts as itself, which
+        credits the entries and the commit to the server process rather than to
+        the caller — and a commit the caller does not appear to have authored
+        is one they are not shown when they ask for their own log.
         """
         if not writes:
             raise ValueError("writes is empty — nothing to commit.")
-        data = self._post("/api/v1/commits", {"writes": writes, "message": message})
+        body: dict[str, Any] = {"writes": writes, "message": message}
+        if agent_id:
+            body["agent_id"] = agent_id
+        if session_id:
+            body["session_id"] = session_id
+        data = self._post("/api/v1/commits", body)
         commit = data.get("commit")
         return Commit.model_validate(commit) if commit else None
 

@@ -1502,6 +1502,7 @@ _COMMIT_WRITE_OPTIONS = ("confidence", "memory_type", "pattern_refs", "shared")
 @app.post("/api/v1/commits")
 async def create_commit(
     body: dict[str, Any],
+    request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Run a transaction here, rather than assembling one on the client.
@@ -1544,26 +1545,75 @@ async def create_commit(
         raise HTTPException(
             status_code=422, detail="writes is empty — nothing to commit."
         )
-    with mem.transaction(message) as tx:
-        for w in writes:
-            options = {k: w[k] for k in _COMMIT_WRITE_OPTIONS if k in w}
-            # Arrives over the wire as a string, and the write path wants the
-            # enum. An unknown one is refused rather than dropped: writing the
-            # entry with a default type would put the wrong metadata on the
-            # right memory, and nothing later can tell that happened.
-            if "memory_type" in options:
-                raw = str(options["memory_type"])
-                try:
-                    options["memory_type"] = MemoryType(raw)
-                except ValueError as exc:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=(
-                            f"Invalid memory_type {raw!r}. Valid: "
-                            + ", ".join(m.value for m in MemoryType)
-                        ),
-                    ) from exc
-            tx.write(w["entity_path"], w["key"], w.get("value"), **options)
+
+    # Whose writes these are. Running the transaction here moved the work off
+    # the client and took the caller's name off it with it: everything went in
+    # as this process's own agent, because that is who _get_memory() is. The
+    # entries were credited to the server and so was the commit — and since
+    # GET /api/v1/commits hides commits whose author the caller cannot see, the
+    # caller could not then see the commit they had just made. amfs_commit_log
+    # answered zero for an account with commits sitting in it.
+    #
+    # Swapping the tagger is how POST /api/v1/entries has always done this.
+    # AgentMemory.agent_id reads through to the tagger, so one swap covers both
+    # the entries' provenance and the commit's author.
+    #
+    # The header is a fallback for a client that does not send the field yet:
+    # the MCP gateway has always set X-AMFS-Agent-Id on every request, so
+    # reading it means a gateway already in production is attributed correctly
+    # from the moment this deploys. The body wins when both are present.
+    agent_id = body.get("agent_id") or request.headers.get("x-amfs-agent-id")
+    session_id = body.get("session_id")
+    original_agent = mem._tagger.agent_id if agent_id else None
+    original_session = mem._tagger.session_id if session_id else None
+
+    try:
+        if agent_id:
+            mem._tagger.agent_id = agent_id
+            try:
+                # The gateway ensures its agent when the session opens, so this
+                # is normally a no-op. It is here for a client committing as an
+                # agent this server has not seen, where the entry insert would
+                # otherwise fail on a name nothing has registered.
+                mem._adapter.ensure_agent(agent_id, mem.namespace)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "ensure_agent failed for %s — committing anyway", agent_id,
+                    exc_info=True,
+                )
+            _link_agent_owner_once(request, agent_id, mem.namespace)
+        if session_id:
+            mem._tagger.session_id = session_id
+
+        with mem.transaction(message) as tx:
+            for w in writes:
+                options = {k: w[k] for k in _COMMIT_WRITE_OPTIONS if k in w}
+                # Arrives over the wire as a string, and the write path wants
+                # the enum. An unknown one is refused rather than dropped:
+                # writing the entry with a default type would put the wrong
+                # metadata on the right memory, and nothing later can tell that
+                # happened.
+                if "memory_type" in options:
+                    raw = str(options["memory_type"])
+                    try:
+                        options["memory_type"] = MemoryType(raw)
+                    except ValueError as exc:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"Invalid memory_type {raw!r}. Valid: "
+                                + ", ".join(m.value for m in MemoryType)
+                            ),
+                        ) from exc
+                tx.write(w["entity_path"], w["key"], w.get("value"), **options)
+    finally:
+        # Restored even when the transaction raised. This memory is a process
+        # singleton, so a tagger left holding one caller's name would sign the
+        # next caller's writes with it.
+        if original_agent is not None:
+            mem._tagger.agent_id = original_agent
+        if original_session is not None:
+            mem._tagger.session_id = original_session
 
     commit = tx.commit
     return {
