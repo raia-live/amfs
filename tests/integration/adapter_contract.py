@@ -216,9 +216,14 @@ class AdapterContractTests:
     # implemented" from "nothing there". These four ask.
 
     @staticmethod
-    def _make_commit(commit_id: str, *parents: str, message: str = "batch"):
+    def _make_commit(
+        commit_id: str, *parents: str, message: str = "batch", created_at=None
+    ):
         from amfs_core.models import Commit, CommitEntry
 
+        fields = {}
+        if created_at is not None:
+            fields["created_at"] = created_at
         return Commit(
             id=commit_id,
             message=message,
@@ -230,6 +235,7 @@ class AdapterContractTests:
             ],
             tree_hash=f"tree-{commit_id}",
             parent_ids=list(parents),
+            **fields,
         )
 
     def test_a_saved_commit_can_be_read_back(self, adapter: AdapterABC) -> None:
@@ -284,6 +290,44 @@ class AdapterContractTests:
             f"list_commits returned {ids} after two saves"
         )
         assert ids.index("c-two") < ids.index("c-one"), "newest first"
+
+    def test_commits_made_in_the_same_tick_still_have_one_order(
+        self, adapter: AdapterABC
+    ) -> None:
+        """A tie on created_at must not leave the winner up to chance.
+
+        flush asks for exactly one commit to use as the next parent. If two
+        commits share a timestamp and nothing breaks the tie, which one comes
+        back depends on the order storage happened to hand them over — so the
+        parent pointer varies between runs and the chain forks where it should
+        not. The id is arbitrary but consistent, and it is what Postgres
+        already tie-breaks on, so every adapter has to agree.
+        """
+        from datetime import datetime, timezone
+
+        tick = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        # Enough of them that an implementation which leaves ties in whatever
+        # order storage produced cannot pass by coincidence. With two it can:
+        # a directory walk returning them the right way round makes a broken
+        # sort look correct, which is how this went unnoticed.
+        ids = [f"c-tie-{s}" for s in ("aaa", "bbb", "ccc", "ddd", "eee", "fff")]
+        for commit_id in ids:
+            adapter.save_commit(self._make_commit(commit_id, created_at=tick))
+
+        tied = [
+            c.id for c in adapter.list_commits(limit=50)
+            if c.id.startswith("c-tie-")
+        ]
+
+        assert tied == sorted(ids, reverse=True), (
+            f"tied commits came back as {tied}; expected the id to break the "
+            "tie, descending, as Postgres does"
+        )
+        again = [
+            c.id for c in adapter.list_commits(limit=50)
+            if c.id.startswith("c-tie-")
+        ]
+        assert again == tied, "the order changed between two identical calls"
 
     def test_an_unknown_commit_is_none_rather_than_an_error(
         self, adapter: AdapterABC

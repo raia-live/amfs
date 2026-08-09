@@ -193,11 +193,21 @@ class FilesystemAdapter(AdapterABC):
                 logger.warning("Skipping unreadable commit: %s", f)
 
         # Sorted by when the commit was made, not by the filename. The filename
-        # is the commit id, which is a content hash, so ordering by it returned
+        # is the commit id, a uuid4 minted per flush, so ordering by it returned
         # a history in an order nobody asked for that happened to look sorted.
         # The limit is applied after, or "newest first" would mean "whichever
         # ones were read first".
-        commits.sort(key=lambda c: c.created_at, reverse=True)
+        #
+        # The id breaks ties, because created_at alone does not. Two commits
+        # made inside the same clock tick sort equal, and a stable sort then
+        # leaves them in the order the directory happened to be walked in —
+        # which is arbitrary. flush asks for exactly one commit to use as the
+        # next parent, so an arbitrary winner there is a parent pointer that
+        # varies run to run and a chain that forks where it should not. The id
+        # is arbitrary too, but it is the same arbitrary every time, and it is
+        # what Postgres already tie-breaks on (ORDER BY created_at DESC,
+        # id DESC), so the two adapters agree.
+        commits.sort(key=lambda c: (c.created_at, c.id), reverse=True)
         return commits[:limit]
 
     # ------------------------------------------------------------------
