@@ -375,6 +375,21 @@ class AdapterABC(ABC):
         """Retrieve a commit by its ID. Returns None if not found."""
         return None
 
+    def common_ancestor(self, commit_a_id: str, commit_b_id: str) -> str | None:
+        """The most recent commit both given commits descend from.
+
+        Lives here, rather than only in the caller, so that a store which can
+        answer the question directly may say so. The default walks the DAG from
+        both ends calling :meth:`get_commit` at every node, which is the right
+        shape for a local store and the wrong shape for a remote one: there,
+        each step is a round trip, and the cost of the answer grows with the
+        history the two commits share. An adapter in that position overrides
+        this and asks its server once.
+        """
+        from amfs_core.dag import find_common_ancestor
+
+        return find_common_ancestor(commit_a_id, commit_b_id, self.get_commit)
+
     def list_commits(
         self,
         *,

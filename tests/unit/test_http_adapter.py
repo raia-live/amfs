@@ -19,7 +19,13 @@ from amfs_core.models import (
 
 
 def _make_adapter(responses: dict[str, Any] | None = None):
-    """Create an HttpAdapter with a mock transport that returns canned responses."""
+    """Create an HttpAdapter with a mock transport that returns canned responses.
+
+    A canned value is normally the JSON body to return with a 200. Pass a
+    ``(status, body)`` tuple instead when the status is the thing under test —
+    a 404 for a commit that does not exist, or for an endpoint an older server
+    has never heard of.
+    """
     from amfs_adapter_http.adapter import HttpAdapter
 
     canned = responses or {}
@@ -45,6 +51,9 @@ def _make_adapter(responses: dict[str, Any] | None = None):
         })
 
         resp_data = canned.get(key, canned.get(path, {}))
+        if isinstance(resp_data, tuple):
+            status, resp_data = resp_data
+            return httpx.Response(status, json=resp_data)
         return httpx.Response(200, json=resp_data)
 
     adapter = HttpAdapter.__new__(HttpAdapter)
@@ -316,3 +325,210 @@ class TestErrorDetailSurfaced:
             adapter._request("GET", "/api/v1/missing")
 
         assert exc_info.value.response.status_code == 404
+
+
+def _commit(commit_id: str, *parents: str, branch: str = "main") -> dict[str, Any]:
+    """The JSON the server returns for one commit."""
+    return {
+        "id": commit_id,
+        "message": f"commit {commit_id}",
+        "author_agent_id": "some-agent",
+        "parent_ids": list(parents),
+        "branch": branch,
+        "namespace": "default",
+    }
+
+
+class TestCommitsOverHttp:
+    """The commit methods, which until now were inherited placeholders.
+
+    ``get_commit``, ``list_commits`` and ``common_ancestor`` all fell through to
+    ``AdapterABC``, whose implementations return ``None``, ``[]`` and — via the
+    walk that calls ``get_commit`` — ``None`` again. Every one of those is a
+    plausible answer about an account with no history, so over HTTP the commit
+    log was empty for everybody and no two commits ever had a common ancestor,
+    and nothing anywhere reported a problem.
+    """
+
+    def test_the_placeholders_are_no_longer_what_runs(self) -> None:
+        """Guards the actual regression: inheriting these silently is the bug.
+
+        A future refactor that removes an override brings back a wrong answer
+        that looks like a right one, so pin where each method comes from.
+        """
+        from amfs_adapter_http.adapter import HttpAdapter
+
+        def defined_in(name: str) -> str:
+            return next(k.__name__ for k in HttpAdapter.__mro__ if name in k.__dict__)
+
+        assert defined_in("get_commit") == "HttpAdapter"
+        assert defined_in("list_commits") == "HttpAdapter"
+        assert defined_in("common_ancestor") == "HttpAdapter"
+        # Still deliberately inherited: commits are minted by the server inside
+        # its own transaction, so there is nothing for a client to save.
+        assert defined_in("save_commit") == "AdapterABC"
+
+    def test_a_commit_is_fetched_and_parsed(self) -> None:
+        adapter, calls = _make_adapter({
+            "GET /api/v1/commits/c-2": _commit("c-2", "c-1"),
+        })
+
+        commit = adapter.get_commit("c-2")
+
+        assert commit is not None
+        assert commit.id == "c-2"
+        assert commit.parent_ids == ["c-1"]
+        assert calls[0]["path"] == "/api/v1/commits/c-2"
+
+    def test_a_missing_commit_is_none_rather_than_an_exception(self) -> None:
+        """404 is the ordinary answer for an id that does not exist.
+
+        The signature promises ``Commit | None`` and the DAG walk depends on it:
+        raising here would abort a traversal that should simply stop following
+        that branch.
+        """
+        adapter, _calls = _make_adapter({
+            "GET /api/v1/commits/nope": (404, {"detail": "Commit not found"}),
+        })
+
+        assert adapter.get_commit("nope") is None
+
+    def test_a_real_error_still_raises(self) -> None:
+        """Only 404 means "no such commit". A 500 must not read as absence."""
+        adapter, _calls = _make_adapter({
+            "GET /api/v1/commits/c-1": (500, {"detail": "database is down"}),
+        })
+
+        with pytest.raises(httpx.HTTPStatusError):
+            adapter.get_commit("c-1")
+
+    def test_the_commit_log_comes_back_populated(self) -> None:
+        adapter, calls = _make_adapter({
+            "GET /api/v1/commits": {
+                "commits": [_commit("c-2", "c-1"), _commit("c-1")],
+                "count": 2,
+            },
+        })
+
+        commits = adapter.list_commits(limit=10)
+
+        assert [c.id for c in commits] == ["c-2", "c-1"]
+        assert calls[0]["params"]["limit"] == "10"
+
+    def test_the_ancestor_is_one_request_not_a_walk(self) -> None:
+        """The reason for the override.
+
+        The inherited walk asks for every commit it visits, so over HTTP the
+        cost of the answer grows with the history the two commits share — and
+        each of those round trips is a billable operation. The server holds the
+        whole graph and answers this exact question, so it is asked once.
+        """
+        adapter, calls = _make_adapter({
+            "POST /api/v1/merge-base": {
+                "ancestor_commit_id": "c-1",
+                "commit_a": "c-a",
+                "commit_b": "c-b",
+            },
+        })
+
+        assert adapter.common_ancestor("c-a", "c-b") == "c-1"
+        assert len(calls) == 1
+        assert calls[0]["path"] == "/api/v1/merge-base"
+        assert calls[0]["body"] == {"commit_a": "c-a", "commit_b": "c-b"}
+
+    def test_an_older_server_still_gets_an_answer(self) -> None:
+        """A 404 on the endpoint means the server predates it, not that there
+        is no ancestor. Fall back to the walk, which only needs ``get_commit``.
+        """
+        adapter, calls = _make_adapter({
+            "POST /api/v1/merge-base": (404, {"detail": "Not Found"}),
+            "GET /api/v1/commits/c-a": _commit("c-a", "c-shared"),
+            "GET /api/v1/commits/c-b": _commit("c-b", "c-shared"),
+            "GET /api/v1/commits/c-shared": _commit("c-shared"),
+        })
+
+        assert adapter.common_ancestor("c-a", "c-b") == "c-shared"
+        # Which is the expensive shape the override exists to avoid.
+        assert len(calls) > 1
+
+
+class TestTheBranchFilterReachesTheServer:
+    """Filtering after the limit is applied is not filtering.
+
+    The first version of ``list_commits`` sent only ``limit`` and filtered the
+    page it got back. That takes the newest N commits account-wide and discards
+    the ones the caller did not ask for, so a page full of another branch's
+    commits comes back empty while the requested branch has plenty.
+
+    What makes it more than a paging nicety is ``TransactionBuffer.flush``,
+    which asks for exactly one commit to use as the new commit's parent. One
+    commit on the wrong branch means no parent — so every commit written over
+    HTTP is a root, no two share an ancestor, and ``common_ancestor`` answers
+    "none" forever. That answer is indistinguishable from an honest one about
+    unrelated history, which is how it would have shipped unnoticed.
+    """
+
+    def test_branch_and_namespace_are_sent_as_query_parameters(self) -> None:
+        adapter, calls = _make_adapter({"GET /api/v1/commits": {"commits": []}})
+
+        adapter.list_commits(branch="feature-x", limit=10, namespace="ns1")
+
+        params = calls[0]["params"]
+        assert params["branch"] == "feature-x"
+        assert params["namespace"] == "ns1"
+        assert params["limit"] == "10"
+
+    def test_the_parent_lookup_asks_the_server_for_its_branch(self) -> None:
+        """flush's limit=1 call, which is where this actually bit."""
+        adapter, calls = _make_adapter({
+            "GET /api/v1/commits": {"commits": [_commit("c-tip", branch="feature-x")]},
+        })
+
+        found = adapter.list_commits(branch="feature-x", limit=1)
+
+        assert calls[0]["params"]["branch"] == "feature-x"
+        assert [c.id for c in found] == ["c-tip"], (
+            "the branch tip was not returned, so a commit written now would "
+            "have no parent"
+        )
+
+    def test_another_branch_is_still_dropped_if_a_server_ignores_the_filter(
+        self,
+    ) -> None:
+        """The local filter stays, as a guard rather than as the mechanism.
+
+        A server old enough not to know these parameters returns an unfiltered
+        page. Handing the caller another branch's commits because the server
+        did not understand the question is worse than handing it too few: the
+        result would be wrong rather than short.
+        """
+        adapter, _ = _make_adapter({
+            "GET /api/v1/commits": {"commits": [
+                _commit("c-main", branch="main"),
+                _commit("c-feature", branch="feature-x"),
+            ]},
+        })
+
+        found = adapter.list_commits(branch="feature-x", limit=10)
+
+        assert [c.id for c in found] == ["c-feature"]
+
+    def test_no_filter_means_no_parameter_rather_than_an_empty_one(self) -> None:
+        """Empty means "every branch" to the guard, so it cannot go on the wire.
+
+        Sent as branch="", it would reach a server that reads it as a branch
+        named nothing and matches no commit at all — turning "show me
+        everything" into "show me nothing".
+        """
+        adapter, calls = _make_adapter({
+            "GET /api/v1/commits": {"commits": [
+                _commit("c-main", branch="main"),
+                _commit("c-exp", branch="experiment"),
+            ]},
+        })
+
+        commits = adapter.list_commits(branch="", limit=5, namespace="")
+
+        assert "branch" not in calls[0]["params"]
+        assert "namespace" not in calls[0]["params"]
+        assert [c.id for c in commits] == ["c-main", "c-exp"]

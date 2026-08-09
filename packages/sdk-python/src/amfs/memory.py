@@ -745,7 +745,22 @@ class AgentMemory:
         return self._adapter.get_commit(commit_id)
 
     def common_ancestor(self, commit_a_id: str, commit_b_id: str) -> str | None:
-        """Find the most recent common ancestor of two commits."""
+        """Find the most recent common ancestor of two commits.
+
+        Delegated to the adapter, which holds the same breadth-first walk as its
+        default. The indirection is so that a remote store can answer in one
+        call instead of one call per commit visited — see
+        ``AdapterABC.common_ancestor``.
+
+        The walk stays here as a fallback for an adapter that predates that
+        method. Every adapter in this repository subclasses ``AdapterABC`` and
+        so inherits it, but this is a published interface and an adapter written
+        against the old one only had to provide ``get_commit``.
+        """
+        delegate = getattr(self._adapter, "common_ancestor", None)
+        if delegate is not None:
+            return delegate(commit_a_id, commit_b_id)
+
         from amfs_core.dag import find_common_ancestor
 
         return find_common_ancestor(
