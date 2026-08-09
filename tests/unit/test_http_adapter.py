@@ -661,3 +661,43 @@ class TestAnEmptyBatchIsNotACommit:
         assert adapter.commit_batch(
             [{"entity_path": "app/a", "key": "k", "value": "v"}], "one"
         ) is None
+
+
+class TestABatchSaysWhoWroteIt:
+    """The server transacts, so it has to be told whose writes these are.
+
+    Moving the transaction server-side took the caller's name off the work:
+    everything went in as the server process's own agent. The entries were
+    credited to the server and so was the commit, and since the commit log
+    hides commits whose author the caller cannot see, the caller could not see
+    the commit they had just made — amfs_commit_log answered zero for an
+    account that had commits in it.
+    """
+
+    def test_the_agent_and_session_are_sent(self) -> None:
+        adapter, calls = _make_adapter({
+            "POST /api/v1/commits": {"commit_id": "c1", "entries_written": 1},
+        })
+
+        adapter.commit_batch(
+            [{"entity_path": "app/a", "key": "k", "value": "v"}],
+            "one",
+            agent_id="builder-agent",
+            session_id="sess-9",
+        )
+
+        body = calls[0]["body"]
+        assert body["agent_id"] == "builder-agent"
+        assert body["session_id"] == "sess-9"
+
+    def test_they_are_left_out_when_not_given(self) -> None:
+        """An absent field means "use the default", not an agent called None."""
+        adapter, calls = _make_adapter({
+            "POST /api/v1/commits": {"commit_id": "c1", "entries_written": 1},
+        })
+
+        adapter.commit_batch([{"entity_path": "app/a", "key": "k", "value": "v"}])
+
+        body = calls[0]["body"]
+        assert "agent_id" not in body
+        assert "session_id" not in body
