@@ -2014,14 +2014,12 @@ async def create_patch(
 # ──────────────────────────────────────────────────────────────────────
 
 
-@app.get("/api/v1/history/{entity_path:path}/{key}")
-async def get_history(
+async def _history_payload(
     request: Request,
     entity_path: str,
     key: str,
-    since: str | None = Query(None),
-    until: str | None = Query(None),
-    _auth: str | None = Depends(verify_api_key),
+    since: str | None,
+    until: str | None,
 ) -> dict[str, Any]:
     mem = _get_memory()
     since_dt = datetime.fromisoformat(since) if since else None
@@ -2037,6 +2035,45 @@ async def get_history(
         "version_count": len(versions),
         "versions": [_entry_to_response(e) for e in versions],
     }
+
+
+@app.get("/api/v1/history")
+async def get_history_by_query(
+    request: Request,
+    entity_path: str = Query(...),
+    key: str = Query(...),
+    since: str | None = Query(None),
+    until: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """History with the coordinates where they cannot be confused.
+
+    The same greedy-path problem ``/api/v1/entry`` was added for: a key
+    containing a slash cannot be expressed as a path segment, so a history
+    lookup for one silently reported no versions. Reading an entry back was
+    fixed first because it was the louder failure; this is the same defect on
+    the same coordinates, and the version chain is what the lineage panel is
+    built on.
+    """
+    return await _history_payload(request, entity_path, key, since, until)
+
+
+@app.get("/api/v1/history/{entity_path:path}/{key}")
+async def get_history(
+    request: Request,
+    entity_path: str,
+    key: str,
+    since: str | None = Query(None),
+    until: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Unchanged, and unambiguous whenever the key has no slash.
+
+    Kept as it is for the callers already on it, exactly as the entries route
+    was: rewriting every one of them to gain nothing on the common case is the
+    worse trade.
+    """
+    return await _history_payload(request, entity_path, key, since, until)
 
 
 # ──────────────────────────────────────────────────────────────────────
