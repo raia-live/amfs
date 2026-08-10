@@ -5378,7 +5378,12 @@ def _filter_briefing_digests(vis: Any, digests: list) -> list:
         else:
             has_room_access = scope in room_map
             has_visible_hot = bool(digest.summary.get("hot_context"))
-            if not has_room_access and not has_visible_hot:
+            # A surviving who_to_ask names only agents already cleared above,
+            # so keeping the digest for its sake discloses nothing further —
+            # and dropping it would throw away the routing this caller is
+            # allowed to act on, which is the whole point of the block.
+            has_visible_ask = bool(digest.summary.get("who_to_ask"))
+            if not has_room_access and not has_visible_hot and not has_visible_ask:
                 continue
 
         filtered.append(digest)

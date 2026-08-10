@@ -361,3 +361,92 @@ class TestPrioritySort:
 
         results = mem.search(entity_path="svc", sort_by="confidence")
         assert results[0].key == "high"
+
+
+# ──────────────────────────────────────────────────────────────
+# who_to_ask injection
+# ──────────────────────────────────────────────────────────────
+
+
+def _agent_brief_digest(agent: str) -> Digest:
+    return Digest(
+        digest_type=DigestType.AGENT_BRIEF,
+        scope=agent,
+        summary={"narrative": f"What {agent} knows"},
+        entry_count=3,
+        source_agents=[agent],
+        compiled_at=_now(),
+        namespace="default",
+        branch="main",
+    )
+
+
+def _stats_row(agent_id: str, *, entity_path: str = "svc", entry_count: int = 4):
+    return {
+        "agent_id": agent_id,
+        "entity_path": entity_path,
+        "entry_count": entry_count,
+        "avg_confidence": 0.9,
+        "last_written": _now() - timedelta(days=1),
+        "first_written": _now() - timedelta(days=20),
+        "total_recalls": 2,
+        "outcome_linked_count": 1,
+    }
+
+
+class TestWhoToAskInjection:
+    def test_it_attaches_to_the_matching_entity_digest(self) -> None:
+        adapter = _mock_adapter(
+            digests=[_entity_digest("svc")], search_results=[_entry("k1")]
+        )
+        adapter.agent_entity_stats.return_value = [_stats_row("owner")]
+
+        result = BriefingService(adapter).briefing(entity_path="svc", agent_id="me")
+
+        assert [w["agent_id"] for w in result[0].summary["who_to_ask"]] == ["owner"]
+
+    def test_it_is_carried_on_its_own_digest_when_none_matches(self) -> None:
+        """Digests came back for this agent but none is the entity's own, so
+        there is nothing compiled to hang the block on. Dropping it there would
+        lose the routing precisely when the caller has least other context."""
+        adapter = _mock_adapter(
+            digests=[_agent_brief_digest("me")], search_results=[_entry("k1")]
+        )
+        adapter.agent_entity_stats.return_value = [_stats_row("owner")]
+
+        result = BriefingService(adapter).briefing(entity_path="svc", agent_id="me")
+
+        carriers = [
+            d for d in result
+            if d.digest_type == DigestType.ENTITY and d.scope == "svc"
+        ]
+        assert len(carriers) == 1
+        assert [w["agent_id"] for w in carriers[0].summary["who_to_ask"]] == ["owner"]
+
+    def test_the_caller_is_not_told_to_ask_itself(self) -> None:
+        adapter = _mock_adapter(
+            digests=[_entity_digest("svc")], search_results=[_entry("k1")]
+        )
+        adapter.agent_entity_stats.return_value = [_stats_row("me")]
+
+        result = BriefingService(adapter).briefing(entity_path="svc", agent_id="me")
+
+        assert "who_to_ask" not in result[0].summary
+
+    def test_top_keys_are_looked_up_on_the_callers_branch(self) -> None:
+        """Defaulting to main here names an author but no key to read, on every
+        branch that is not main — the recommendation arrives half-useless."""
+        adapter = _mock_adapter(
+            digests=[_entity_digest("svc")], search_results=[_entry("k1")]
+        )
+        adapter.agent_entity_stats.return_value = [_stats_row("owner")]
+
+        BriefingService(adapter).briefing(
+            entity_path="svc", agent_id="me", branch="feature-x"
+        )
+
+        # Every search the briefing issues, not just the ones that already
+        # pass a branch — an omitted kwarg is the bug, and filtering those out
+        # would be filtering out the thing under test.
+        branches = [call.kwargs.get("branch") for call in adapter.search.call_args_list]
+        assert branches and all(b == "feature-x" for b in branches)

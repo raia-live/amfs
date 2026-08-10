@@ -256,3 +256,35 @@ class TestOSSNoFilter:
     def test_no_visibility_filter_on_request(self):
         """When _get_visibility_filter returns None (OSS), no filtering occurs."""
         pass
+
+class TestAskOnlyDigestsSurvive:
+    """A serve-time who_to_ask can be the only thing on a digest.
+
+    The block is injected onto a synthesised digest when nothing has been
+    compiled for the path yet, and that digest has no source agents and no hot
+    context. Retention keyed on those two alone throws the routing away right
+    after deciding the caller was allowed to see it.
+    """
+
+    def test_a_visible_ask_keeps_a_digest_with_nothing_else_on_it(self):
+        vis = _mock_vis({"my-agent"})
+        d = _digest(source_agents=[], who_to_ask=[_who("my-agent")])
+
+        result = _filter_briefing_digests(vis, [d])
+
+        assert len(result) == 1
+        assert [w["agent_id"] for w in result[0].summary["who_to_ask"]] == ["my-agent"]
+
+    def test_an_invisible_ask_does_not_keep_it(self):
+        """The block is emptied by the filter above, which leaves the digest
+        with nothing the caller may see — so it goes."""
+        vis = _mock_vis({"my-agent"})
+        d = _digest(source_agents=[], who_to_ask=[_who("foreign-agent")])
+
+        assert _filter_briefing_digests(vis, [d]) == []
+
+    def test_a_bare_digest_is_still_dropped(self):
+        vis = _mock_vis({"my-agent"})
+        d = _digest(source_agents=[])
+
+        assert _filter_briefing_digests(vis, [d]) == []

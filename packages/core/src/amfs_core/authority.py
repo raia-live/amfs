@@ -146,6 +146,36 @@ def _build_reason(
     return ", ".join(parts)
 
 
+def _merge_by_agent(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse an agent's rows into one, summing its evidence.
+
+    Rolling a subtree up gives one row per (agent, child path); left as they
+    are, an agent that wrote across three child paths would be ranked three
+    times and its evidence split between the copies.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        agent_id = str(row.get("agent_id") or "")
+        acc = merged.get(agent_id)
+        if acc is None:
+            merged[agent_id] = {
+                "agent_id": agent_id,
+                "entry_count": int(row.get("entry_count") or 0),
+                "outcome_linked_count": int(row.get("outcome_linked_count") or 0),
+                "total_recalls": int(row.get("total_recalls") or 0),
+                "last_written": row.get("last_written"),
+            }
+            continue
+        acc["entry_count"] += int(row.get("entry_count") or 0)
+        acc["outcome_linked_count"] += int(row.get("outcome_linked_count") or 0)
+        acc["total_recalls"] += int(row.get("total_recalls") or 0)
+        newer = _as_aware(row.get("last_written"))
+        current = _as_aware(acc.get("last_written"))
+        if newer and (current is None or newer > current):
+            acc["last_written"] = row.get("last_written")
+    return list(merged.values())
+
+
 def rank_authors(
     entity_path: str,
     *,
@@ -153,6 +183,7 @@ def rank_authors(
     limit: int | None = 3,
     now: datetime | None = None,
     top_keys: dict[str, list[str]] | None = None,
+    include_descendants: bool = False,
 ) -> list[AuthorRank]:
     """Rank the agents that have written to *entity_path*, strongest first.
 
@@ -160,14 +191,32 @@ def rank_authors(
     entities are ignored, so the caller can pass the whole account's stats once
     and rank many topics from it without a query per topic.
 
+    *include_descendants* folds rows beneath *entity_path* into it, so an agent
+    that has only written to ``a/b/tokens`` still ranks as an authority on
+    ``a/b``. Callers that treat each path as its own column — the expertise
+    grid — want the default, where a child path is a topic in its own right.
+    Callers asking "who should I ask about this area" want it on, and it
+    matches the prefix scoping ``agent_entity_stats`` already applies to the
+    query, so subtree rows are ranked rather than fetched and thrown away.
+
     *top_keys* optionally maps an agent id to its most relevant keys on this
     entity, so a recommendation can name what to read rather than only whom to
     ask. *limit* of ``None`` returns every author.
     """
     now = now or datetime.now(timezone.utc)
-    rows = [r for r in stats if r.get("entity_path") == entity_path]
-    if not rows:
+    prefix = entity_path.rstrip("/") + "/"
+    matched = [
+        r for r in stats
+        if r.get("entity_path") == entity_path
+        or (
+            include_descendants
+            and str(r.get("entity_path") or "").startswith(prefix)
+        )
+    ]
+    if not matched:
         return []
+
+    rows = _merge_by_agent(matched)
 
     total_entries = sum(int(r.get("entry_count") or 0) for r in rows)
     peak_validated = max(float(r.get("outcome_linked_count") or 0) for r in rows)

@@ -71,7 +71,7 @@ class BriefingService:
                 self._inject_consolidation_notice(digests, entity_path, branch)
             else:
                 self._inject_standalone_hot_context(digests, entity_path, branch)
-            self._inject_who_to_ask(digests, entity_path, agent_id)
+            self._inject_who_to_ask(digests, entity_path, agent_id, branch)
 
         return digests
 
@@ -80,6 +80,7 @@ class BriefingService:
         digests: list[Digest],
         entity_path: str,
         agent_id: str | None,
+        branch: str,
     ) -> None:
         """Name the agents worth asking about this entity, and what to read.
 
@@ -99,7 +100,15 @@ class BriefingService:
             logger.debug("who_to_ask injection failed for %s", entity_path, exc_info=True)
             return
 
-        ranked = rank_authors(entity_path, stats=stats, limit=_WHO_TO_ASK_LIMIT)
+        # Descendants are rolled up because the query already scopes by prefix,
+        # and because an agent that owns `<path>/tokens` is exactly who you
+        # want named when you ask about `<path>`.
+        ranked = rank_authors(
+            entity_path,
+            stats=stats,
+            limit=_WHO_TO_ASK_LIMIT,
+            include_descendants=True,
+        )
 
         # Asking an agent to read from itself is noise, not routing. Drop the
         # caller only after ranking, so its own writes still set the share
@@ -109,7 +118,9 @@ class BriefingService:
         if not ranked:
             return
 
-        top_keys = self._top_keys_by_agent(entity_path, [a.agent_id for a in ranked])
+        top_keys = self._top_keys_by_agent(
+            entity_path, [a.agent_id for a in ranked], branch
+        )
 
         block = []
         for author in ranked:
@@ -135,10 +146,30 @@ class BriefingService:
                 d.summary["who_to_ask"] = block
                 return
 
+        # Nothing compiled for this path to hang the block on — the briefing
+        # came back with digests scoped elsewhere, or with agent briefs only.
+        # Carry the recommendations on a digest of our own instead of dropping
+        # them, the same way standalone hot context does when the compiled
+        # digest is missing entirely.
+        digests.append(Digest(
+            digest_type=DigestType.ENTITY,
+            scope=entity_path,
+            summary={
+                "narrative": f"No compiled digest yet for {entity_path}.",
+                "who_to_ask": block,
+            },
+            entry_count=0,
+            source_agents=[],
+            compiled_at=datetime.now(timezone.utc),
+            namespace=self._namespace,
+            branch=branch,
+        ))
+
     def _top_keys_by_agent(
         self,
         entity_path: str,
         agent_ids: list[str],
+        branch: str,
     ) -> dict[str, list[str]]:
         """Highest-priority keys each named agent wrote on this entity."""
         result: dict[str, list[str]] = {}
@@ -152,6 +183,10 @@ class BriefingService:
                         limit=_WHO_TO_ASK_KEYS,
                         include_artifacts=False,
                     ),
+                    # Without this the lookup silently reads main while the
+                    # rest of the briefing is on the caller's branch, and the
+                    # recommendation names an author but no key to read.
+                    branch=branch,
                 )
             except Exception:
                 logger.debug("who_to_ask key lookup failed for %s", aid, exc_info=True)

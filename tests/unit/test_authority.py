@@ -205,3 +205,78 @@ class TestSerialisation:
             top_keys={"a": ["decision-token-rotation"]},
         )
         assert ranked[0].top_keys == ["decision-token-rotation"]
+
+class TestDescendantRollup:
+    """``agent_entity_stats`` scopes by prefix, so the ranker has to decide what
+    to do with the child rows it gets back. Off, each path is its own topic —
+    what the expertise grid wants, since it draws them as separate columns. On,
+    the subtree is one area of ownership — what "who should I ask about this"
+    wants, and the reason the query fetched the children at all."""
+
+    def test_child_only_authors_are_ignored_by_default(self):
+        ranked = rank_authors(
+            ENTITY,
+            stats=[_row("child-only", entity_path=f"{ENTITY}/tokens")],
+            now=NOW,
+        )
+        assert ranked == []
+
+    def test_child_only_authors_rank_when_rolled_up(self):
+        ranked = rank_authors(
+            ENTITY,
+            stats=[_row("child-only", entity_path=f"{ENTITY}/tokens")],
+            now=NOW,
+            include_descendants=True,
+        )
+        assert [a.agent_id for a in ranked] == ["child-only"]
+
+    def test_an_agents_child_rows_are_summed_not_ranked_separately(self):
+        """Three child paths must not become three copies of one agent, each
+        holding a third of the evidence it actually has."""
+        ranked = rank_authors(
+            ENTITY,
+            stats=[
+                _row("spread", entity_path=f"{ENTITY}/tokens", entry_count=2,
+                     validated=1, recalls=3, days_ago=9),
+                _row("spread", entity_path=f"{ENTITY}/sessions", entry_count=3,
+                     validated=2, recalls=1, days_ago=2),
+                _row("spread", entity_path=f"{ENTITY}/mfa", entry_count=1,
+                     days_ago=40),
+            ],
+            now=NOW,
+            include_descendants=True,
+        )
+        assert len(ranked) == 1
+        author = ranked[0]
+        assert author.entry_count == 6
+        assert author.validated_outcomes == 3
+        assert author.total_recalls == 4
+        # The most recent of its rows, so a live author is not aged out by an
+        # old memory it happens to also own.
+        assert author.last_written == NOW - timedelta(days=2)
+
+    def test_share_is_computed_over_the_whole_subtree(self):
+        ranked = rank_authors(
+            ENTITY,
+            stats=[
+                _row("owner", entity_path=f"{ENTITY}/tokens", entry_count=3),
+                _row("owner", entity_path=ENTITY, entry_count=6),
+                _row("other", entity_path=f"{ENTITY}/mfa", entry_count=1),
+            ],
+            now=NOW,
+            include_descendants=True,
+        )
+        by_id = {a.agent_id: a for a in ranked}
+        assert by_id["owner"].share == pytest.approx(0.9)
+        assert by_id["other"].share == pytest.approx(0.1)
+
+    def test_a_sibling_prefix_is_not_a_descendant(self):
+        """`myapp/authz` starts with `myapp/auth` as a string but is a
+        different topic; only a `/` boundary counts."""
+        ranked = rank_authors(
+            ENTITY,
+            stats=[_row("sibling", entity_path="myapp/authz")],
+            now=NOW,
+            include_descendants=True,
+        )
+        assert ranked == []
