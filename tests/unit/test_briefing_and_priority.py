@@ -450,3 +450,82 @@ class TestWhoToAskInjection:
         # would be filtering out the thing under test.
         branches = [call.kwargs.get("branch") for call in adapter.search.call_args_list]
         assert branches and all(b == "feature-x" for b in branches)
+
+class TestWhoToAskAddressesTheRightPath:
+    """Ranking spans the subtree, so a recommended author may have written
+    nothing at the path that was asked about. Both the keys offered and the
+    path the call names have to come from where their work actually is."""
+
+    def test_a_child_path_author_still_gets_keys(self) -> None:
+        adapter = _mock_adapter(
+            digests=[_entity_digest("svc")], search_results=[_entry("k1")]
+        )
+        adapter.agent_entity_stats.return_value = [
+            _stats_row("owner", entity_path="svc/tokens")
+        ]
+
+        result = BriefingService(adapter).briefing(entity_path="svc", agent_id="me")
+
+        rec = result[0].summary["who_to_ask"][0]
+        assert rec["top_keys"] == ["k1"]
+        assert rec["entity_path"] == "svc/tokens"
+
+    def test_the_key_lookup_is_addressed_to_the_child_path(self) -> None:
+        """search matches entity_path exactly, so asking about the parent
+        returns nothing for an author whose work sits underneath it."""
+        adapter = _mock_adapter(
+            digests=[_entity_digest("svc")], search_results=[_entry("k1")]
+        )
+        adapter.agent_entity_stats.return_value = [
+            _stats_row("owner", entity_path="svc/tokens")
+        ]
+
+        BriefingService(adapter).briefing(entity_path="svc", agent_id="me")
+
+        searched = {
+            call.args[0].entity_path
+            for call in adapter.search.call_args_list
+            if call.args and getattr(call.args[0], "agent_id", None) == "owner"
+        }
+        assert searched == {"svc/tokens"}
+
+    def test_the_call_names_the_path_the_key_is_stored_under(self) -> None:
+        """Addressed to the parent the read finds nothing, which makes the
+        recommendation worse than not making one."""
+        adapter = _mock_adapter(
+            digests=[_entity_digest("svc")], search_results=[_entry("k1")]
+        )
+        adapter.agent_entity_stats.return_value = [
+            _stats_row("owner", entity_path="svc/tokens")
+        ]
+
+        result = BriefingService(adapter).briefing(entity_path="svc", agent_id="me")
+
+        assert result[0].summary["who_to_ask"][0]["call"] == (
+            'amfs_read_from("owner", "svc/tokens", "k1")'
+        )
+
+    def test_the_busiest_child_wins_when_an_agent_spans_several(self) -> None:
+        adapter = _mock_adapter(
+            digests=[_entity_digest("svc")], search_results=[_entry("k1")]
+        )
+        adapter.agent_entity_stats.return_value = [
+            _stats_row("owner", entity_path="svc/tokens", entry_count=2),
+            _stats_row("owner", entity_path="svc/sessions", entry_count=9),
+        ]
+
+        result = BriefingService(adapter).briefing(entity_path="svc", agent_id="me")
+
+        assert result[0].summary["who_to_ask"][0]["entity_path"] == "svc/sessions"
+
+    def test_an_author_on_the_asked_path_is_unaffected(self) -> None:
+        adapter = _mock_adapter(
+            digests=[_entity_digest("svc")], search_results=[_entry("k1")]
+        )
+        adapter.agent_entity_stats.return_value = [_stats_row("owner")]
+
+        result = BriefingService(adapter).briefing(entity_path="svc", agent_id="me")
+
+        rec = result[0].summary["who_to_ask"][0]
+        assert rec["entity_path"] == "svc"
+        assert rec["call"] == 'amfs_read_from("owner", "svc", "k1")'

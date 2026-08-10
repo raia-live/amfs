@@ -28,6 +28,34 @@ _WHO_TO_ASK_LIMIT = 3
 _WHO_TO_ASK_KEYS = 3
 
 
+def _busiest_path_by_agent(
+    stats: list[dict[str, Any]],
+    entity_path: str,
+    agent_ids: set[str],
+) -> dict[str, str]:
+    """The path in this subtree each agent has written to most.
+
+    Ranking spans descendants, so a recommended author may have written
+    nothing at the path that was asked about. The keys to offer them, and the
+    path to address a read to, both have to come from where their work
+    actually is. Ties go to the shallower path, so an agent that spread its
+    work evenly is pointed at the more general topic.
+    """
+    prefix = entity_path.rstrip("/") + "/"
+    best: dict[str, tuple[int, int, str]] = {}
+    for row in stats:
+        agent = str(row.get("agent_id") or "")
+        if agent not in agent_ids:
+            continue
+        path = str(row.get("entity_path") or "")
+        if path != entity_path and not path.startswith(prefix):
+            continue
+        rank = (int(row.get("entry_count") or 0), -path.count("/"), path)
+        if agent not in best or rank > best[agent]:
+            best[agent] = rank
+    return {agent: rank[2] for agent, rank in best.items()}
+
+
 class BriefingService:
     """Serves pre-compiled digests ranked by relevance for a given context."""
 
@@ -118,12 +146,16 @@ class BriefingService:
         if not ranked:
             return
 
-        top_keys = self._top_keys_by_agent(
-            entity_path, [a.agent_id for a in ranked], branch
+        # Where each author's keys actually live, which is not necessarily the
+        # path that was asked about now that the ranking spans the subtree.
+        source_paths = _busiest_path_by_agent(
+            stats, entity_path, {a.agent_id for a in ranked}
         )
+        top_keys = self._top_keys_by_agent(source_paths, branch)
 
         block = []
         for author in ranked:
+            source = source_paths.get(author.agent_id, entity_path)
             keys = top_keys.get(author.agent_id, [])
             item: dict[str, Any] = {
                 "agent_id": author.agent_id,
@@ -131,13 +163,19 @@ class BriefingService:
                 "entry_count": author.entry_count,
                 "share": round(author.share, 3),
                 "validated_outcomes": author.validated_outcomes,
+                # Named because it can sit below the path asked about, and a
+                # reader wanting a key other than the first one needs to know
+                # where to look for it.
+                "entity_path": source,
                 "top_keys": keys,
             }
             # The literal call closes the "I know who, but not what to read"
-            # gap that makes a bare recommendation useless.
+            # gap that makes a bare recommendation useless. It has to name the
+            # path the key is stored under: addressed to the parent, the read
+            # finds nothing and the recommendation is worse than none.
             if keys:
                 item["call"] = (
-                    f'amfs_read_from("{author.agent_id}", "{entity_path}", "{keys[0]}")'
+                    f'amfs_read_from("{author.agent_id}", "{source}", "{keys[0]}")'
                 )
             block.append(item)
 
@@ -167,17 +205,21 @@ class BriefingService:
 
     def _top_keys_by_agent(
         self,
-        entity_path: str,
-        agent_ids: list[str],
+        source_paths: dict[str, str],
         branch: str,
     ) -> dict[str, list[str]]:
-        """Highest-priority keys each named agent wrote on this entity."""
+        """Highest-priority keys each named agent wrote, on its own path.
+
+        One search per agent, as before. The path varies per agent because
+        ``search`` matches ``entity_path`` exactly, so asking about the parent
+        returns nothing for an author whose work sits in a child of it.
+        """
         result: dict[str, list[str]] = {}
-        for aid in agent_ids:
+        for aid, path in source_paths.items():
             try:
                 entries = self._adapter.search(
                     SearchQuery(
-                        entity_path=entity_path,
+                        entity_path=path,
                         agent_id=aid,
                         sort_by="priority",
                         limit=_WHO_TO_ASK_KEYS,
