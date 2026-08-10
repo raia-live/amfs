@@ -81,6 +81,15 @@ CREATE INDEX IF NOT EXISTS idx_traces_outcome
     ON amfs_decision_traces (namespace, outcome_type)
     WHERE outcome_type IS NOT NULL;
 
+-- Resolves an entry back to the trace that committed it. An entry carries the
+-- session that wrote it (provenance.session_id) and so does a trace, which is
+-- the only link between the two — causal_entries records reads, not writes.
+-- Without this, knowledge lineage would filter traces by an unindexed JSONB
+-- scan over every trace on the account.
+CREATE INDEX IF NOT EXISTS idx_traces_session
+    ON amfs_decision_traces (namespace, agent_id, session_id)
+    WHERE session_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS amfs_api_keys (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     namespace TEXT NOT NULL DEFAULT 'default',

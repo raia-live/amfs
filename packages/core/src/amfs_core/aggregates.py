@@ -83,6 +83,39 @@ def entity_summaries_from_entries(entries: "list[MemoryEntry]") -> list[dict]:
     return summaries
 
 
+def agent_entity_stats_from_entries(entries: "list[MemoryEntry]") -> list[dict]:
+    """Group entries per (agent, entity) pair — who has written where.
+
+    One row per pair, carrying the evidence an authority ranking needs:
+    volume (``entry_count``), reuse (``total_recalls``), validation
+    (``outcome_linked_count``), recency (``last_written``) and stated certainty
+    (``avg_confidence``). Scoring lives in ``authority.py``; this only counts.
+    """
+    grouped: dict[tuple[str, str], list] = {}
+    for entry in entries:
+        key = (entry.provenance.agent_id, entry.entity_path)
+        grouped.setdefault(key, []).append(entry)
+
+    rows: list[dict] = []
+    for (agent_id, entity_path), group in grouped.items():
+        rows.append(
+            {
+                "agent_id": agent_id,
+                "entity_path": entity_path,
+                "entry_count": len(group),
+                "avg_confidence": sum(e.confidence for e in group) / len(group),
+                "last_written": max(e.provenance.written_at for e in group),
+                "first_written": min(e.provenance.written_at for e in group),
+                "total_recalls": sum(e.recall_count or 0 for e in group),
+                "outcome_linked_count": sum(
+                    1 for e in group if (e.outcome_count or 0) > 0
+                ),
+            }
+        )
+    rows.sort(key=lambda r: (r["entity_path"], -r["entry_count"], r["agent_id"]))
+    return rows
+
+
 def extended_stats_from_entries(entries: "list[MemoryEntry]") -> dict:
     """MemoryStats fields plus recall totals, weekly deltas, and type counts."""
     now = datetime.now(timezone.utc)

@@ -24,10 +24,13 @@ def _digest(
     source_agents: list[str] | None = None,
     hot_context: list[dict] | None = None,
     digest_type: DigestType = DigestType.ENTITY,
+    who_to_ask: list[dict] | None = None,
 ) -> Digest:
     summary: dict = {"narrative": "test digest"}
     if hot_context is not None:
         summary["hot_context"] = hot_context
+    if who_to_ask is not None:
+        summary["who_to_ask"] = who_to_ask
     return Digest(
         digest_type=digest_type,
         scope=scope,
@@ -48,6 +51,18 @@ def _hot(agent: str, key: str = "some-key") -> dict:
         "agent": agent,
         "outcome_count": 1,
         "recall_count": 2,
+    }
+
+
+def _who(agent_id: str, key: str = "decision-token-rotation") -> dict:
+    return {
+        "agent_id": agent_id,
+        "reason": "wrote 4 memories here, active 2 days ago",
+        "entry_count": 4,
+        "share": 0.8,
+        "validated_outcomes": 1,
+        "top_keys": [key],
+        "call": f'amfs_read_from("{agent_id}", "myapp/auth", "{key}")',
     }
 
 
@@ -176,6 +191,57 @@ class TestFilterBriefingDigests:
         assert _filter_briefing_digests(vis, []) == []
 
 
+class TestWhoToAskVisibility:
+    """who_to_ask names other agents and tells the caller to read from them.
+
+    Unfiltered it would recommend a read that read_from then refuses, and
+    disclose that an agent the caller has no access to exists at all — so these
+    are tenant-isolation assertions, not presentation ones.
+    """
+
+    def test_own_agent_recommendation_kept(self):
+        vis = _mock_vis({"my-agent"})
+        d = _digest(source_agents=["my-agent"], who_to_ask=[_who("my-agent")])
+        result = _filter_briefing_digests(vis, [d])
+        assert len(result[0].summary["who_to_ask"]) == 1
+
+    def test_foreign_agent_recommendation_removed(self):
+        vis = _mock_vis({"my-agent"})
+        d = _digest(
+            source_agents=["my-agent"],
+            who_to_ask=[_who("my-agent"), _who("foreign-agent")],
+        )
+        result = _filter_briefing_digests(vis, [d])
+        remaining = result[0].summary["who_to_ask"]
+        assert [w["agent_id"] for w in remaining] == ["my-agent"]
+
+    def test_room_co_member_recommendation_kept(self):
+        """A teammate in the same room is exactly who this should surface."""
+        vis = _mock_vis(
+            {"my-agent"},
+            room_map={"myapp/auth": {"my-agent", "teammate"}},
+        )
+        d = _digest(
+            scope="myapp/auth",
+            source_agents=["my-agent"],
+            who_to_ask=[_who("teammate")],
+        )
+        result = _filter_briefing_digests(vis, [d])
+        assert [w["agent_id"] for w in result[0].summary["who_to_ask"]] == ["teammate"]
+
+    def test_block_dropped_entirely_when_nothing_is_visible(self):
+        """An empty who_to_ask would still say "someone knows this" — omit it."""
+        vis = _mock_vis({"my-agent"})
+        d = _digest(source_agents=["my-agent"], who_to_ask=[_who("foreign-agent")])
+        result = _filter_briefing_digests(vis, [d])
+        assert "who_to_ask" not in result[0].summary
+
+    def test_hidden_digest_takes_its_recommendations_with_it(self):
+        vis = _mock_vis({"my-agent"})
+        d = _digest(source_agents=["foreign-agent"], who_to_ask=[_who("foreign-agent")])
+        assert _filter_briefing_digests(vis, [d]) == []
+
+
 class TestAdminBypass:
 
     def test_admin_should_filter_false(self):
@@ -190,3 +256,35 @@ class TestOSSNoFilter:
     def test_no_visibility_filter_on_request(self):
         """When _get_visibility_filter returns None (OSS), no filtering occurs."""
         pass
+
+class TestAskOnlyDigestsSurvive:
+    """A serve-time who_to_ask can be the only thing on a digest.
+
+    The block is injected onto a synthesised digest when nothing has been
+    compiled for the path yet, and that digest has no source agents and no hot
+    context. Retention keyed on those two alone throws the routing away right
+    after deciding the caller was allowed to see it.
+    """
+
+    def test_a_visible_ask_keeps_a_digest_with_nothing_else_on_it(self):
+        vis = _mock_vis({"my-agent"})
+        d = _digest(source_agents=[], who_to_ask=[_who("my-agent")])
+
+        result = _filter_briefing_digests(vis, [d])
+
+        assert len(result) == 1
+        assert [w["agent_id"] for w in result[0].summary["who_to_ask"]] == ["my-agent"]
+
+    def test_an_invisible_ask_does_not_keep_it(self):
+        """The block is emptied by the filter above, which leaves the digest
+        with nothing the caller may see — so it goes."""
+        vis = _mock_vis({"my-agent"})
+        d = _digest(source_agents=[], who_to_ask=[_who("foreign-agent")])
+
+        assert _filter_briefing_digests(vis, [d]) == []
+
+    def test_a_bare_digest_is_still_dropped(self):
+        vis = _mock_vis({"my-agent"})
+        d = _digest(source_agents=[])
+
+        assert _filter_briefing_digests(vis, [d]) == []

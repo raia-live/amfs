@@ -2014,14 +2014,12 @@ async def create_patch(
 # ──────────────────────────────────────────────────────────────────────
 
 
-@app.get("/api/v1/history/{entity_path:path}/{key}")
-async def get_history(
+async def _history_payload(
     request: Request,
     entity_path: str,
     key: str,
-    since: str | None = Query(None),
-    until: str | None = Query(None),
-    _auth: str | None = Depends(verify_api_key),
+    since: str | None,
+    until: str | None,
 ) -> dict[str, Any]:
     mem = _get_memory()
     since_dt = datetime.fromisoformat(since) if since else None
@@ -2037,6 +2035,45 @@ async def get_history(
         "version_count": len(versions),
         "versions": [_entry_to_response(e) for e in versions],
     }
+
+
+@app.get("/api/v1/history")
+async def get_history_by_query(
+    request: Request,
+    entity_path: str = Query(...),
+    key: str = Query(...),
+    since: str | None = Query(None),
+    until: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """History with the coordinates where they cannot be confused.
+
+    The same greedy-path problem ``/api/v1/entry`` was added for: a key
+    containing a slash cannot be expressed as a path segment, so a history
+    lookup for one silently reported no versions. Reading an entry back was
+    fixed first because it was the louder failure; this is the same defect on
+    the same coordinates, and the version chain is what the lineage panel is
+    built on.
+    """
+    return await _history_payload(request, entity_path, key, since, until)
+
+
+@app.get("/api/v1/history/{entity_path:path}/{key}")
+async def get_history(
+    request: Request,
+    entity_path: str,
+    key: str,
+    since: str | None = Query(None),
+    until: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Unchanged, and unambiguous whenever the key has no slash.
+
+    Kept as it is for the callers already on it, exactly as the entries route
+    was: rewriting every one of them to gain nothing on the common case is the
+    worse trade.
+    """
+    return await _history_payload(request, entity_path, key, since, until)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -3028,12 +3065,28 @@ async def agent_read_from(
                 "entityPath": entity_path, "key": key}
 
     mem = _get_memory()
-    entries = mem.search(entity_path=entity_path, agent_id=source_agent_id)
-    matching = [e for e in entries if e.key == key]
-    if not matching:
+    # Route through read_from rather than repeating its search inline. The
+    # difference is everything this endpoint exists to record: the two
+    # CROSS_AGENT_READ events, the read tracker entry that puts the read in the
+    # session's causal chain, and the learned_from edge. Doing the search here
+    # returned the same entry while leaving no trace that one agent had learned
+    # from another — and that edge is what the authority ranking is built on,
+    # so a cross-agent read over HTTP never counted for anything.
+    #
+    # Swapping the tagger is how the rest of this file attributes work to the
+    # caller (see agent_recall above): the memory is a process singleton, so a
+    # tagger left holding one caller's name would sign the next caller's reads.
+    original_agent = mem._tagger.agent_id
+    mem._tagger.agent_id = agent_id
+    try:
+        entry = mem.read_from(source_agent_id, entity_path, key)
+    finally:
+        mem._tagger.agent_id = original_agent
+
+    if entry is None:
         return {"status": "not_found", "sourceAgentId": source_agent_id,
                 "entityPath": entity_path, "key": key}
-    return _entry_to_response(matching[0])
+    return _entry_to_response(entry)
 
 
 @app.get("/api/v1/agents/{agent_id:path}/activity")
@@ -5299,6 +5352,22 @@ def _filter_briefing_digests(vis: Any, digests: list) -> list:
                 )
             ]
 
+        # who_to_ask names agents by id and tells the caller to read from them.
+        # Unfiltered, it would both recommend a read that read_from then denies
+        # and disclose that an agent the caller cannot see exists — so this is
+        # a tenant-isolation control, not presentation.
+        if "who_to_ask" in digest.summary:
+            visible_authors = [
+                w for w in digest.summary["who_to_ask"]
+                if _is_agent_visible_for_entity(
+                    w.get("agent_id", ""), scope, user_agents, room_map,
+                )
+            ]
+            if visible_authors:
+                digest.summary["who_to_ask"] = visible_authors
+            else:
+                digest.summary.pop("who_to_ask")
+
         if source_agents:
             has_visible = any(
                 _is_agent_visible_for_entity(a, scope, user_agents, room_map)
@@ -5309,7 +5378,12 @@ def _filter_briefing_digests(vis: Any, digests: list) -> list:
         else:
             has_room_access = scope in room_map
             has_visible_hot = bool(digest.summary.get("hot_context"))
-            if not has_room_access and not has_visible_hot:
+            # A surviving who_to_ask names only agents already cleared above,
+            # so keeping the digest for its sake discloses nothing further —
+            # and dropping it would throw away the routing this caller is
+            # allowed to act on, which is the whole point of the block.
+            has_visible_ask = bool(digest.summary.get("who_to_ask"))
+            if not has_room_access and not has_visible_hot and not has_visible_ask:
                 continue
 
         filtered.append(digest)

@@ -42,7 +42,15 @@ def asked() -> list[tuple[str, str]]:
 
 
 @pytest.fixture()
-def client(monkeypatch: pytest.MonkeyPatch, asked: list) -> TestClient:
+def asked_history() -> list[tuple[str, str]]:
+    """The coordinates the history lookup reached storage with."""
+    return []
+
+
+@pytest.fixture()
+def client(
+    monkeypatch: pytest.MonkeyPatch, asked: list, asked_history: list
+) -> TestClient:
     stored = {
         (ENTITY, SLASHED_KEY): MemoryEntry(
             entity_path=ENTITY,
@@ -60,10 +68,16 @@ def client(monkeypatch: pytest.MonkeyPatch, asked: list) -> TestClient:
         asked.append((entity_path, key))
         return stored.get((entity_path, key))
 
+    def _history(entity_path, key, **_kw):
+        asked_history.append((entity_path, key))
+        entry = stored.get((entity_path, key))
+        return [entry] if entry else []
+
     mem = MagicMock()
     mem.namespace = "test-ns"
     mem._tagger = SimpleNamespace(agent_id="srv", session_id="sess")
     mem.read.side_effect = _read
+    mem.history.side_effect = _history
 
     monkeypatch.setattr(server, "_memory", mem)
     monkeypatch.setattr(server, "_get_memory", lambda: mem)
@@ -121,3 +135,38 @@ class TestOrdinaryKeysAreUnaffected:
         client.get(f"/api/v1/entries/{ENTITY}/plain-key")
 
         assert asked == [(ENTITY, "plain-key")]
+
+
+class TestHistoryHasTheSameProblem:
+    """The version chain is reached by the same coordinates, and was as wrong.
+
+    Reading an entry back was fixed first because it was the louder failure,
+    but a slashed key's history was equally unreachable — and the version chain
+    is the one lineage layer that is always present, so a knowledge-lineage
+    panel would have shown nothing at all for those entries.
+    """
+
+    def test_the_query_route_asks_for_the_right_coordinates(
+        self, client, asked_history
+    ) -> None:
+        resp = client.get(
+            "/api/v1/history", params={"entity_path": ENTITY, "key": SLASHED_KEY}
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert asked_history == [(ENTITY, SLASHED_KEY)]
+
+    def test_the_path_route_still_splits_at_the_last_segment(
+        self, client, asked_history
+    ) -> None:
+        client.get(f"/api/v1/history/{ENTITY}/{SLASHED_KEY}")
+
+        assert asked_history == [("sweep/abc/active-negotiation", "xyz")]
+
+    def test_an_ordinary_key_is_unaffected_on_both_routes(
+        self, client, asked_history
+    ) -> None:
+        client.get(f"/api/v1/history/{ENTITY}/plain-key")
+        client.get("/api/v1/history", params={"entity_path": ENTITY, "key": "plain-key"})
+
+        assert asked_history == [(ENTITY, "plain-key"), (ENTITY, "plain-key")]
