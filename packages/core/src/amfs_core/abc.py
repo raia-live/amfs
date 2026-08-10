@@ -171,6 +171,30 @@ class AdapterABC(ABC):
         """Return persisted decision traces. Default returns an empty list."""
         return []
 
+    def list_traces_for_entry(
+        self,
+        *,
+        agent_id: str,
+        session_id: str | None,
+        written_at: datetime | None = None,
+        limit: int = 5,
+    ) -> list[DecisionTrace]:
+        """Traces plausibly responsible for writing an entry, best match first.
+
+        An entry records the session that wrote it and a trace records the
+        session it was committed from, and that shared id is the only link
+        between the two — ``causal_entries`` holds the reads a session made,
+        never its writes. So resolution is: same agent, same session, and among
+        those the trace committed soonest *after* the write.
+
+        The match is exact when a session committed one outcome and a heuristic
+        when it committed several, so callers must present the result as the
+        likely committing trace rather than a certainty.
+
+        Default returns an empty list; adapters with persisted traces override.
+        """
+        return []
+
     def search(self, query: SearchQuery) -> list[MemoryEntry]:
         """Search entries with rich filters. Default: filter over list().
 
@@ -289,6 +313,40 @@ class AdapterABC(ABC):
             allowed = set(agent_ids)
             entries = [e for e in entries if e.provenance.agent_id in allowed]
         return entity_summaries_from_entries(entries)
+
+    def agent_entity_stats(
+        self,
+        *,
+        entity_path: str | None = None,
+        agent_ids: list[str] | None = None,
+    ) -> list[dict]:
+        """Per-(agent, entity) aggregates — who has written where, and how much.
+
+        Returns ``{agent_id, entity_path, entry_count, avg_confidence,
+        last_written, first_written, total_recalls, outcome_linked_count}``,
+        sorted by entity path then descending entry count.
+
+        *entity_path*, when given, restricts to that entity and its descendants
+        (``a/b`` matches ``a/b`` and ``a/b/c``, never ``a/bc``). *agent_ids*
+        restricts to those writers, for per-user visibility layers.
+
+        Default implementation groups over ``list()``; adapters with SQL
+        storage should override with GROUP BY aggregates.
+        """
+        from amfs_core.aggregates import agent_entity_stats_from_entries
+
+        entries = self.list()
+        if agent_ids is not None:
+            allowed = set(agent_ids)
+            entries = [e for e in entries if e.provenance.agent_id in allowed]
+        if entity_path:
+            prefix = entity_path.rstrip("/")
+            entries = [
+                e
+                for e in entries
+                if e.entity_path == prefix or e.entity_path.startswith(prefix + "/")
+            ]
+        return agent_entity_stats_from_entries(entries)
 
     def stats_extended(
         self,

@@ -3028,12 +3028,28 @@ async def agent_read_from(
                 "entityPath": entity_path, "key": key}
 
     mem = _get_memory()
-    entries = mem.search(entity_path=entity_path, agent_id=source_agent_id)
-    matching = [e for e in entries if e.key == key]
-    if not matching:
+    # Route through read_from rather than repeating its search inline. The
+    # difference is everything this endpoint exists to record: the two
+    # CROSS_AGENT_READ events, the read tracker entry that puts the read in the
+    # session's causal chain, and the learned_from edge. Doing the search here
+    # returned the same entry while leaving no trace that one agent had learned
+    # from another — and that edge is what the authority ranking is built on,
+    # so a cross-agent read over HTTP never counted for anything.
+    #
+    # Swapping the tagger is how the rest of this file attributes work to the
+    # caller (see agent_recall above): the memory is a process singleton, so a
+    # tagger left holding one caller's name would sign the next caller's reads.
+    original_agent = mem._tagger.agent_id
+    mem._tagger.agent_id = agent_id
+    try:
+        entry = mem.read_from(source_agent_id, entity_path, key)
+    finally:
+        mem._tagger.agent_id = original_agent
+
+    if entry is None:
         return {"status": "not_found", "sourceAgentId": source_agent_id,
                 "entityPath": entity_path, "key": key}
-    return _entry_to_response(matching[0])
+    return _entry_to_response(entry)
 
 
 @app.get("/api/v1/agents/{agent_id:path}/activity")
@@ -5298,6 +5314,22 @@ def _filter_briefing_digests(vis: Any, digests: list) -> list:
                     h.get("agent", ""), scope, user_agents, room_map,
                 )
             ]
+
+        # who_to_ask names agents by id and tells the caller to read from them.
+        # Unfiltered, it would both recommend a read that read_from then denies
+        # and disclose that an agent the caller cannot see exists — so this is
+        # a tenant-isolation control, not presentation.
+        if "who_to_ask" in digest.summary:
+            visible_authors = [
+                w for w in digest.summary["who_to_ask"]
+                if _is_agent_visible_for_entity(
+                    w.get("agent_id", ""), scope, user_agents, room_map,
+                )
+            ]
+            if visible_authors:
+                digest.summary["who_to_ask"] = visible_authors
+            else:
+                digest.summary.pop("who_to_ask")
 
         if source_agents:
             has_visible = any(

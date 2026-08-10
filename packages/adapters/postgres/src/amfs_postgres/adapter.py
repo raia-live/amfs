@@ -330,6 +330,14 @@ class PostgresAdapter(AdapterABC):
             ALTER TABLE amfs_decision_traces
             ADD COLUMN IF NOT EXISTS response_text TEXT
         """)
+        # Entry-to-trace resolution for knowledge lineage. The shared session id
+        # is the only link from a written entry back to the trace that committed
+        # it, since causal_entries records reads rather than writes.
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_traces_session
+            ON amfs_decision_traces (namespace, agent_id, session_id)
+            WHERE session_id IS NOT NULL
+        """)
         cur.execute("""
             ALTER TABLE amfs_digests
             ADD COLUMN IF NOT EXISTS branch TEXT NOT NULL DEFAULT 'main'
@@ -1843,6 +1851,71 @@ class PostgresAdapter(AdapterABC):
             for r in rows
         ]
 
+    def agent_entity_stats(
+        self,
+        *,
+        entity_path: str | None = None,
+        agent_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Per-(agent, entity) aggregates via GROUP BY — never loads values.
+
+        The authority ranking runs over every pair on the account, so this must
+        not be a full scan pulled into Python: an account with 5k entries would
+        otherwise ship all of them over the wire to count rows.
+        """
+        conditions = ["namespace = %s", "branch = 'main'", "superseded_at IS NULL"]
+        params: list[Any] = [self._namespace]
+        if agent_ids is not None:
+            conditions.append("agent_id = ANY(%s)")
+            params.append(list(agent_ids))
+        if entity_path:
+            # Descendants included: a/b covers a/b/c but never a/bc, which is
+            # why this is an equality OR a prefix-with-separator rather than a
+            # bare LIKE 'a/b%'.
+            prefix = entity_path.rstrip("/")
+            conditions.append("(entity_path = %s OR entity_path LIKE %s)")
+            params.extend([prefix, prefix + "/%"])
+        else:
+            # Same reasoning as entity_summaries: unscoped, this groups by
+            # entity_path, so a shared namespace's topics would be listed as
+            # though they were this account's own. Naming a path is the act of
+            # opting into it.
+            conditions.append(_EXCLUDE_SHARED_PATHS)
+        where = " AND ".join(conditions)
+
+        sql = f"""
+            SELECT agent_id,
+                   entity_path,
+                   COUNT(*) AS entry_count,
+                   AVG(confidence) AS avg_confidence,
+                   MAX(written_at) AS last_written,
+                   MIN(written_at) AS first_written,
+                   COALESCE(SUM(recall_count), 0) AS total_recalls,
+                   COUNT(*) FILTER (WHERE outcome_count > 0) AS outcome_linked_count
+            FROM amfs_memory_entries
+            WHERE {where}
+            GROUP BY agent_id, entity_path
+            ORDER BY entity_path, entry_count DESC, agent_id
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        return [
+            {
+                "agent_id": r["agent_id"],
+                "entity_path": r["entity_path"],
+                "entry_count": int(r["entry_count"]),
+                "avg_confidence": float(r["avg_confidence"] or 0),
+                "last_written": r["last_written"],
+                "first_written": r["first_written"],
+                "total_recalls": int(r["total_recalls"] or 0),
+                "outcome_linked_count": int(r["outcome_linked_count"] or 0),
+            }
+            for r in rows
+        ]
+
     def stats_extended(
         self,
         *,
@@ -2185,7 +2258,7 @@ class PostgresAdapter(AdapterABC):
                            causal_entries, external_contexts,
                            query_events, session_started_at, session_ended_at,
                            session_duration_ms,
-                           error_events, state_diff, created_at
+                           error_events, state_diff, session_metadata, created_at
                     FROM amfs_decision_traces
                     WHERE id = %s AND namespace = %s
                     """,
@@ -2270,10 +2343,59 @@ class PostgresAdapter(AdapterABC):
                    causal_entries, external_contexts,
                    query_events, session_started_at, session_ended_at,
                    session_duration_ms,
-                   error_events, state_diff, created_at
+                   error_events, state_diff, session_metadata, created_at
             FROM amfs_decision_traces
             WHERE {where}
             ORDER BY created_at DESC
+            LIMIT %s
+        """
+        params.append(limit)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        return [self._row_to_trace(row) for row in rows]
+
+    def list_traces_for_entry(
+        self,
+        *,
+        agent_id: str,
+        session_id: str | None,
+        written_at: datetime | None = None,
+        limit: int = 5,
+    ) -> list[DecisionTrace]:
+        """Traces from the session that wrote an entry, nearest write first.
+
+        Uses idx_traces_session (namespace, agent_id, session_id).
+        """
+        if not session_id:
+            return []
+
+        conditions = ["namespace = %s", "agent_id = %s", "session_id = %s"]
+        params: list[Any] = [self._namespace, agent_id, session_id]
+
+        if written_at is not None:
+            # A trace committed *before* the write cannot be the one that
+            # committed it. Ordering by distance after the write picks the
+            # right trace when a long session committed several outcomes.
+            order = "ORDER BY (created_at >= %s) DESC, ABS(EXTRACT(EPOCH FROM (created_at - %s))) ASC"
+            params.extend([written_at, written_at])
+        else:
+            order = "ORDER BY created_at DESC"
+
+        where = " AND ".join(conditions)
+        sql = f"""
+            SELECT id, agent_id, session_id, outcome_ref, outcome_type,
+                   decision_summary, task_input, response_text,
+                   causal_entries, external_contexts,
+                   query_events, session_started_at, session_ended_at,
+                   session_duration_ms,
+                   error_events, state_diff, session_metadata, created_at
+            FROM amfs_decision_traces
+            WHERE {where}
+            {order}
             LIMIT %s
         """
         params.append(limit)

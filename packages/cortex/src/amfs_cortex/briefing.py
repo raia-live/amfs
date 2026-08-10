@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from amfs_core.authority import rank_authors
 from amfs_core.models import Digest, DigestType, MemoryEntry, SearchQuery
 
 if TYPE_CHECKING:
@@ -19,6 +20,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _HOT_CONTEXT_LIMIT = 3
+
+# Three authors, three keys each. This rides along on the one call every agent
+# is told to make first, so it is paying for itself in context window on every
+# task — enough to route, not enough to be worth skimming past.
+_WHO_TO_ASK_LIMIT = 3
+_WHO_TO_ASK_KEYS = 3
 
 
 class BriefingService:
@@ -64,8 +71,93 @@ class BriefingService:
                 self._inject_consolidation_notice(digests, entity_path, branch)
             else:
                 self._inject_standalone_hot_context(digests, entity_path, branch)
+            self._inject_who_to_ask(digests, entity_path, agent_id)
 
         return digests
+
+    def _inject_who_to_ask(
+        self,
+        digests: list[Digest],
+        entity_path: str,
+        agent_id: str | None,
+    ) -> None:
+        """Name the agents worth asking about this entity, and what to read.
+
+        Injected at serve time rather than compiled into the digest, for two
+        reasons that both rule compilation out. Authority depends on recency,
+        and the worker recompiles on a debounce, so a compiled ranking is stale
+        by construction. And this names *other* agents, so it has to be
+        filtered per caller — a compiled digest is shared by everyone who asks
+        for it, which is the wrong granularity for a disclosure surface.
+
+        The caller-side visibility filter is the control that enforces the
+        second point; see the http-server's briefing handler.
+        """
+        try:
+            stats = self._adapter.agent_entity_stats(entity_path=entity_path)
+        except Exception:
+            logger.debug("who_to_ask injection failed for %s", entity_path, exc_info=True)
+            return
+
+        ranked = rank_authors(entity_path, stats=stats, limit=_WHO_TO_ASK_LIMIT)
+
+        # Asking an agent to read from itself is noise, not routing. Drop the
+        # caller only after ranking, so its own writes still set the share
+        # denominator and a colleague's contribution is not overstated.
+        if agent_id:
+            ranked = [a for a in ranked if a.agent_id != agent_id]
+        if not ranked:
+            return
+
+        top_keys = self._top_keys_by_agent(entity_path, [a.agent_id for a in ranked])
+
+        block = []
+        for author in ranked:
+            keys = top_keys.get(author.agent_id, [])
+            item: dict[str, Any] = {
+                "agent_id": author.agent_id,
+                "reason": author.reason,
+                "entry_count": author.entry_count,
+                "share": round(author.share, 3),
+                "validated_outcomes": author.validated_outcomes,
+                "top_keys": keys,
+            }
+            # The literal call closes the "I know who, but not what to read"
+            # gap that makes a bare recommendation useless.
+            if keys:
+                item["call"] = (
+                    f'amfs_read_from("{author.agent_id}", "{entity_path}", "{keys[0]}")'
+                )
+            block.append(item)
+
+        for d in digests:
+            if d.digest_type == DigestType.ENTITY and d.scope == entity_path:
+                d.summary["who_to_ask"] = block
+                return
+
+    def _top_keys_by_agent(
+        self,
+        entity_path: str,
+        agent_ids: list[str],
+    ) -> dict[str, list[str]]:
+        """Highest-priority keys each named agent wrote on this entity."""
+        result: dict[str, list[str]] = {}
+        for aid in agent_ids:
+            try:
+                entries = self._adapter.search(
+                    SearchQuery(
+                        entity_path=entity_path,
+                        agent_id=aid,
+                        sort_by="priority",
+                        limit=_WHO_TO_ASK_KEYS,
+                        include_artifacts=False,
+                    ),
+                )
+            except Exception:
+                logger.debug("who_to_ask key lookup failed for %s", aid, exc_info=True)
+                continue
+            result[aid] = [e.key for e in entries]
+        return result
 
     def _inject_hot_context(
         self,
