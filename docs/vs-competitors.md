@@ -32,6 +32,11 @@ Every other memory system is a smarter store. SenseLab is the only one that trea
 | Branch-level access control | Pro | No | No | No | No | No | No |
 | Fork (clone brain to new agent) | Pro | No | No | No | No | No | No |
 | Git-like timeline (event log) | Yes | No | No | No | No | No | No |
+| **Team collaboration** | | | | | | | |
+| Shared rooms (many people, one topic) | Pro | No | No | No | No | No | No |
+| Joining briefing for a new agent | Pro | No | No | No | No | No | No |
+| Viewer / collaborator roles at the database | Pro | No | No | No | No | No | No |
+| Cross-agent reads, logged on both sides | Yes | No | No | No | No | No | No |
 | **Memory fundamentals** | | | | | | | |
 | Persistent memory | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
 | Versioning (full history) | CoW | No | Temporal | No | No | No | No |
@@ -82,18 +87,21 @@ Every other memory system is a smarter store. SenseLab is the only one that trea
 **The difference in one sentence:** Graphiti models *what was true, and when*. SenseLab models *who learned it, whether it turned out to be right, and how a team shares it.*
 
 **Where SenseLab differs:**
+- **Rooms: a team, not a tenant** -- This is the largest gap between the two products. A room covers a set of topics, and every member's agent reads and writes the same entries under them — Claude, ChatGPT, Cursor and Claude Code side by side on one body of knowledge. Nothing is copied to anyone, so no member ends up holding a private version that drifts. Membership is collaborator or viewer, enforced by Postgres policies rather than by the interface, and every write is logged with its author to the room's activity. Graphiti's `group_id` is the nearest thing and it is a different idea: it partitions one system's graphs so they do not mix. It does not give six people's agents a shared place to work, and there is no notion of who may write to it.
+- **Joining briefings** -- An agent that joins a room is handed what the room already knows before it starts work — up to fifty entries across the topics, plus recent activity, delivered automatically on join and re-runnable on demand. A new hire's agent starts where the team is instead of at the README. Graphiti has no equivalent: a new consumer of the graph must know what to query for.
 - **Outcome back-propagation** -- Commit an outcome and every entry read on the way to it has its confidence adjusted: successes multiply it up, failures down, and outcome-validated entries then decay at half the rate. Graphiti tracks when a fact was valid, but nothing flows back from what happened after an agent acted on it.
-- **Per-agent provenance** -- Every version records the agent, session and timestamp that produced it, and one agent can read another's memory as a tracked transfer. Graphiti partitions graphs by `group_id`, which separates whose data is whose, but an edge does not record which agent asserted it.
+- **Per-agent provenance** -- Every version records the agent, session and timestamp that produced it, and one agent reading another's memory is logged on both timelines. A Graphiti edge does not record which agent asserted it.
 - **Decision traces** -- `record_context()` and `commit_outcome()` capture the full causal chain behind an action: what was read, at what confidence, what external input arrived, what was decided. Pro persists traces with integrity checking. There is no Graphiti equivalent.
 - **Disagreement is kept, not resolved** -- A write never overwrites; it supersedes. When two agents write the same key, both versions survive with their authors, and the disagreement surfaces in history or an on-demand scan. This is the opposite of Graphiti's edge invalidation, deliberately: nothing decides for you which agent was right.
 - **Git-like history and review** -- Diff, full version history and merge-base are in the OSS package; branching, pull requests, tags, fork and cherry-pick are Pro. Graphiti has bi-temporal versioning but no branching or review model.
-- **Team sharing** -- Rooms give a group of people one shared body of knowledge their agents read and write directly, with joining briefings for new members. Hosted product, not in the OSS package.
 
 **Where Zep is the better choice:** Your input is unstructured and you want extraction done for you; multi-hop traversal over a richly connected entity graph is your main query pattern; or you need point-in-time reconstruction of a fact's validity. SenseLab asks the agent to decide what is worth remembering, which is less magic and more control — if you want the graph built for you, take Graphiti.
 
 **On benchmarks:** Zep publishes retrieval accuracy results. SenseLab does not, and we would rather say so than quote a figure we have not measured. If accuracy on a public benchmark is your deciding criterion, test both on your own data — we would sooner lose a measured comparison than win an unmeasured one.
 
 **Running both:** They are not mutually exclusive. Graphiti is a library that builds a graph from episodes; SenseLab is a memory platform with an MCP server, provenance, outcomes and team rooms. Keeping Graphiti for entity-level retrieval and using SenseLab for the durable record of what agents decided and whether it worked is a coherent setup, not a migration.
+
+**Where this is going:** the traces behind the outcome loop are also training data. See [models tuned on your own decision traces](#in-development-models-tuned-on-your-own-decision-traces) below — on a development branch, not released.
 
 ---
 
@@ -167,6 +175,27 @@ Every other memory system is a smarter store. SenseLab is the only one that trea
 - **Production feedback** -- Memvid stores and retrieves. SenseLab learns from outcomes.
 
 Memvid is the right choice for single-user, offline, or edge scenarios where infrastructure is a non-starter. SenseLab is for production multi-agent systems that need versioning, feedback, and collaboration.
+
+---
+
+## In development: models tuned on your own decision traces
+
+**Status: not released.** This is on a development branch. It is not in the production image, has not served customer traffic, and is not in the feature matrix above, which lists only what is available today. It is described here because it is the direction the outcome loop is built for, and because a fair comparison should say what is coming as well as what has shipped.
+
+Every memory system in this document, SenseLab included, stops at retrieval: it decides what the model gets to see. Decision traces make a further step possible, because a trace already records what an agent read, what it decided, which tool it called and whether that turned out well. That is supervised training data, generated as a by-product of working.
+
+How it is built:
+
+- **Positive outcomes only.** Training pairs come from decisions recorded as successful. Failures are deliberately withheld into a holdout so there is something honest to score against.
+- **A readiness gate before anything trains.** Ninety days of history, a floor of 100 and a target of 200 eligible decisions, at least three distinct primary tools, and at least 60% positive outcomes. Below the gate, no run starts.
+- **Scored before promotion.** Candidates are evaluated on a temporal holdout against a tool-agreement threshold, and only promoted automatically when the gate passes, the subscription is active, and the account is under its live model limit.
+- **Served behind the API you already use.** OpenAI-compatible at `/api/v1/chat/completions` and the Anthropic dialect at `/api/v1/messages`, with the model field naming your model — `senselab-s1` or `senselab-s1-pro`.
+- **Fallback is automatic.** An unparseable action, a tool outside the agent's recent set, a safety block or an upstream error falls back to a general model rather than failing the call.
+- **Plan limits.** One live model on Pro, three on Teams, one hundred on Enterprise.
+
+Two things we will not put a number on until they are measured on real traffic: cost and accuracy. A saving multiple depends on facts we do not control, and quoting one before we have shadow-mode measurements would be a number invented for a marketing page. When there is a figure, it will come from your own holdout.
+
+No competitor in this comparison closes this loop. Mem0, Zep, Hindsight, Letta, Cognee and LangMem all improve what the model reads; none of them improve the model.
 
 ---
 
