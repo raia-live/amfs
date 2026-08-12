@@ -412,8 +412,15 @@ except ImportError:
 try:
     from amfs_managed_models import mount_managed_models
     mount_managed_models(app, get_memory=_get_memory)
+    logger.info("Managed Models endpoints mounted")
 except ImportError:
-    pass
+    # Said at info, not debug, because the two outcomes are indistinguishable
+    # from the outside: every route under /api/v1/models answers 404 either way.
+    # An image built without the package is the failure this feature actually
+    # shipped with, and the log is where an operator would look for it.
+    logger.info(
+        "amfs_managed_models not installed — /api/v1/models stays unmounted"
+    )
 
 try:
     from amfs_http.openrouter_proxy import mount_openrouter_proxy

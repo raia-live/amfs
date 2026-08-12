@@ -283,6 +283,37 @@ class TestMCPTools:
         assert "Nothing was read" not in result["note"]
         assert "causal_entries" in result["note"]
 
+    def test_the_recorded_actions_are_counted_back(self) -> None:
+        """The only signal an agent gets that its actions reached the trace.
+
+        Actions are the half of a training example that has to be recorded
+        deliberately, and the safety gate drops any whose arguments cannot be
+        redacted. Without this count a session that recorded actions and landed
+        none is indistinguishable from one that landed them all, and the loss
+        surfaces later as a training export with nothing in it.
+        """
+        from amfs_mcp.server import (
+            amfs_commit_outcome,
+            amfs_record_action,
+            amfs_write,
+        )
+
+        amfs_write("svc", "key", "value")
+        amfs_record_action("deploy", {"target": "production"}, result="live")
+        amfs_record_action("rollback", {"to": "v41"}, success=False)
+
+        result = json.loads(amfs_commit_outcome("task-45", "success"))
+        assert result["tool_calls"] == 2
+
+    def test_a_session_with_no_actions_says_zero_rather_than_nothing(self) -> None:
+        """Absent and zero are different answers, and only one is checkable."""
+        from amfs_mcp.server import amfs_commit_outcome, amfs_write
+
+        amfs_write("svc", "key", "value")
+
+        result = json.loads(amfs_commit_outcome("task-46", "success"))
+        assert result["tool_calls"] == 0
+
     def test_the_explanation_is_absent_once_something_was_read(self) -> None:
         from amfs_mcp.server import amfs_commit_outcome, amfs_read, amfs_write
 

@@ -1159,6 +1159,14 @@ def amfs_commit_outcome(
             result["trace_id"] = trace.id
         result["causal_entries"] = len(trace.causal_entries)
         result["external_contexts"] = len(trace.external_contexts)
+        # Reported for the same reason as the two counts above it, and it is the
+        # only one an agent can check its own recording against: actions are the
+        # half of a training example that has to be recorded deliberately, and
+        # the safety gate drops any whose arguments cannot be redacted. Without
+        # this number a session that recorded ten actions and landed none looks
+        # exactly like one that landed all ten, and the absence surfaces much
+        # later as an export with nothing in it.
+        result["tool_calls"] = len(getattr(trace, "tool_calls", None) or [])
         result["session_duration_ms"] = trace.session_duration_ms
         diff = getattr(trace, "state_diff", None)
         if diff is not None:
