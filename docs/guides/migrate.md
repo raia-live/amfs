@@ -31,7 +31,7 @@ Nothing is removed from Mem0 or Zep. An import reads; it never deletes, and you 
 
 ## Run the import
 
-Open **Migrate** in the dashboard and pick the source. It's three steps.
+In the dashboard, open the account menu (your avatar, top right) and choose **Migrate**, then pick the source. It's three steps.
 
 **1. Connect.** Paste the API key. It's checked against the source immediately, so a wrong or expired key fails here rather than twenty minutes into a run. Once the key works you'll see which account it belongs to — worth a glance if you have more than one project.
 
