@@ -232,6 +232,7 @@ AMFS is GitHub for agent memory, split into two layers. The open-source core giv
 | Usage analytics & quota monitoring | — | Yes |
 | Snapshot capture, compare, and export | — | Yes |
 | Memory Tiers dashboard (distribution, entry browser) | — | Yes |
+| Guided migration from Mem0 and Zep (preview, resume, undo) | — | Yes |
 | Extended MCP server (Pro tools) | — | Yes |
 
 ---
