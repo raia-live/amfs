@@ -97,18 +97,17 @@ _EXCLUDE_SHARED_PATHS = "entity_path NOT LIKE '@%%/%%'"
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
 
 
-@lru_cache(maxsize=1)
-def _schema_tables() -> frozenset[str]:
-    """Every table schema.sql creates, read out of the file itself.
+def _tables_created_by(sql: str) -> frozenset[str]:
+    """The tables a chunk of DDL creates.
 
-    Used to confirm a database still has what the schema-state marker claims it
-    has. Derived rather than listed so a table added to schema.sql is covered
-    without anyone remembering to update a second place.
+    Reads the SQL rather than taking a list, so that adding a table anywhere the
+    bootstrap runs is covered without anyone remembering to update a second
+    place — which is the kind of upkeep that silently stops happening.
     """
     return frozenset(
         re.findall(
             r"CREATE TABLE IF NOT EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)",
-            _SCHEMA_SQL,
+            sql,
             re.IGNORECASE,
         )
     )
@@ -300,6 +299,21 @@ class PostgresAdapter(AdapterABC):
         self._listen_stop = threading.Event()
         self._watchers: dict[str, list[Callable[[MemoryEntry], None]]] = {}
 
+    def _migrations_source(self) -> str | None:
+        """The text of _apply_migrations, or None if it cannot be read.
+
+        The migrations are Python rather than a file, so both the fingerprint and
+        the table-presence check have to reach for them through inspect. None on a
+        frozen or zipped install, where callers fall back to the behaviour from
+        before any of this existed: apply the schema.
+        """
+        try:
+            import inspect
+
+            return inspect.getsource(type(self)._apply_migrations)
+        except Exception:  # noqa: BLE001
+            return None
+
     def _schema_fingerprint(self) -> str | None:
         """Identity of the schema this build would apply, or None if unknowable.
 
@@ -309,20 +323,26 @@ class PostgresAdapter(AdapterABC):
         source is how that stays automatic; a hand-bumped revision constant is a
         step someone eventually forgets, and forgetting it here means a column
         silently never gets added.
-
-        None when the source cannot be read (a frozen or zipped install), which
-        the caller treats as "apply the schema", i.e. the behaviour from before
-        this existed.
         """
-        try:
-            import inspect
-
-            migrations = inspect.getsource(type(self)._apply_migrations)
-        except Exception:  # noqa: BLE001
+        migrations = self._migrations_source()
+        if migrations is None:
             return None
         return hashlib.sha256(
             (_SCHEMA_SQL + migrations).encode("utf-8")
         ).hexdigest()
+
+    def _expected_tables(self) -> frozenset[str]:
+        """Every table the bootstrap creates, from both places it creates them.
+
+        schema.sql is not the whole schema: _apply_migrations adds the agent-group
+        tables. Checking only the file would leave those three outside the
+        presence check, so dropping one of them while the fingerprint still
+        matched would be waved through — the exact hole the presence check was
+        added to close, just further from the eye.
+        """
+        return _tables_created_by(_SCHEMA_SQL) | _tables_created_by(
+            self._migrations_source() or ""
+        )
 
     def _apply_schema(self, *, retries: int = 3) -> None:
         """Bring the database up to this build's schema, at most once per build.
@@ -392,8 +412,8 @@ class PostgresAdapter(AdapterABC):
         removes the tables it vouches for — a dropped table, a restore from an
         older dump, a test fixture resetting state — and the next process would
         sail past the DDL and then fail on the first query against a table that
-        is no longer there. So the tables are checked too, against the catalog,
-        which costs one indexed lookup and takes no locks.
+        is no longer there. So every table the bootstrap creates is checked too,
+        against the catalog, which costs one indexed lookup and takes no locks.
 
         Deliberately silent about every failure. Anything unreadable means "not
         current", which costs one pass of idempotent DDL — the behaviour from
@@ -401,7 +421,7 @@ class PostgresAdapter(AdapterABC):
         row into a process that will not boot.
         """
         try:
-            expected = _schema_tables()
+            expected = self._expected_tables()
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -428,11 +448,23 @@ class PostgresAdapter(AdapterABC):
 
     @staticmethod
     def _record_schema_fingerprint(cur: psycopg.Cursor, fingerprint: str) -> None:
-        """Note which schema this database is now at.
+        """Note that this database has been given this build's schema.
 
-        One row, replaced rather than appended: this answers "can the next
-        container skip the DDL", not "what happened here over time", and the
-        audit log is where history belongs.
+        A row per schema, not one row for "the current schema". Two builds are
+        alive at once during any rolling deploy, and a single row makes them
+        fight over it: the older instance finds the newer hash, decides it is out
+        of date, re-applies its DDL and overwrites the marker, at which point the
+        newer instance does the same in reverse. Every scale-up on either
+        revision would then take ACCESS EXCLUSIVE locks — the convoy this whole
+        mechanism exists to prevent, arriving exactly at deploy time, when the
+        most instances are starting at once.
+
+        Recording each schema separately means both builds see themselves as
+        applied and neither re-applies. The DDL is additive, so a database that
+        has been given two schemas satisfies both. Growth is one row per distinct
+        schema version the deployment has ever run, which is not a table anyone
+        needs to prune; it is also not a history worth reading, so a row is
+        replaced rather than duplicated when the same schema is applied again.
 
         Deliberately carries no account_id and no row-level security policy,
         unlike every table that holds tenant data. It records a hash of this
@@ -448,7 +480,14 @@ class PostgresAdapter(AdapterABC):
             )
             """
         )
-        cur.execute("DELETE FROM amfs_schema_state")
+        # Scoped to this fingerprint: an unqualified DELETE is what let one build
+        # erase another's marker. Not an upsert, to avoid depending on a unique
+        # index that databases created by the first version of this code do not
+        # have.
+        cur.execute(
+            "DELETE FROM amfs_schema_state WHERE fingerprint = %s",
+            (fingerprint,),
+        )
         cur.execute(
             "INSERT INTO amfs_schema_state (fingerprint) VALUES (%s)",
             (fingerprint,),

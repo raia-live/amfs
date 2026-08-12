@@ -55,18 +55,31 @@ class TestAWarmDatabaseIsLeftAlone:
 
         assert first is not None
 
-    def test_a_changed_fingerprint_makes_it_apply_again(self) -> None:
-        PostgresAdapter(DSN, namespace="bootstrap-refresh")
+    def test_a_build_the_database_has_not_seen_applies_and_records_itself(
+        self,
+    ) -> None:
+        adapter = PostgresAdapter(DSN, namespace="bootstrap-refresh")
+        mine = adapter._schema_fingerprint()
         with psycopg.connect(DSN, autocommit=True) as conn:
-            conn.execute("UPDATE amfs_schema_state SET fingerprint = 'stale'")
+            conn.execute("DELETE FROM amfs_schema_state")
+            conn.execute(
+                "INSERT INTO amfs_schema_state (fingerprint) VALUES ('stale')"
+            )
+
             PostgresAdapter(DSN, namespace="bootstrap-refresh")
-            current = conn.execute(
-                "SELECT fingerprint FROM amfs_schema_state"
-            ).fetchall()
-        # One row, and not the stale one: a build whose DDL differs from what the
-        # database was last given must not be waved through.
-        assert len(current) == 1
-        assert current[0][0] != "stale"
+
+            rows = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT fingerprint FROM amfs_schema_state"
+                ).fetchall()
+            }
+        # A build whose DDL the database has not been given must apply it and say
+        # so. The unrecognised marker is left where it is on purpose: it may
+        # belong to the other half of a rolling deploy, and deleting it is what
+        # made the two builds re-apply in turn.
+        assert mine in rows
+        assert "stale" in rows
 
 
 class TestTheConnectionGoesBackClean:
@@ -79,6 +92,69 @@ class TestTheConnectionGoesBackClean:
             with conn.cursor() as cur:
                 cur.execute("SHOW lock_timeout")
                 assert cur.fetchone()["lock_timeout"] == "0"
+
+
+class TestTwoBuildsAtOnce:
+    """A rolling deploy always has two builds alive, and they share this table."""
+
+    def test_neither_build_makes_the_other_re_apply(self) -> None:
+        adapter = PostgresAdapter(DSN, namespace="bootstrap-rolling")
+        mine = adapter._schema_fingerprint()
+        assert mine is not None
+
+        # Stands in for the other revision, whose DDL differs and which records
+        # its own marker as it starts.
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO amfs_schema_state (fingerprint) VALUES ('other-build')"
+            )
+
+            # The point: this build must still consider itself applied. When one
+            # row meant "the current schema", the other revision's marker made
+            # every instance here re-run the DDL and overwrite it, and the two
+            # took ACCESS EXCLUSIVE locks in turn for as long as the rollout
+            # lasted.
+            assert adapter._schema_is_current(mine) is True
+
+            fresh = PostgresAdapter(DSN, namespace="bootstrap-rolling")
+            assert fresh._schema_is_current(mine) is True
+
+            rows = conn.execute("SELECT fingerprint FROM amfs_schema_state").fetchall()
+            assert "other-build" in {r[0] for r in rows}
+
+    def test_applying_the_same_schema_twice_leaves_one_row(self) -> None:
+        adapter = PostgresAdapter(DSN, namespace="bootstrap-dup")
+        mine = adapter._schema_fingerprint()
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute("DELETE FROM amfs_schema_state")
+            for _ in range(2):
+                PostgresAdapter(DSN, namespace="bootstrap-dup")
+            rows = conn.execute(
+                "SELECT count(*) FROM amfs_schema_state WHERE fingerprint = %s",
+                (mine,),
+            ).fetchone()
+        assert rows[0] == 1
+
+
+class TestTablesTheMigrationsCreate:
+    """schema.sql is not the whole schema; _apply_migrations makes tables too."""
+
+    def test_they_are_covered_by_the_presence_check(self) -> None:
+        adapter = PostgresAdapter(DSN, namespace="bootstrap-migrated")
+        assert "amfs_agent_groups" in adapter._expected_tables()
+
+    def test_dropping_one_makes_the_bootstrap_run_again(self) -> None:
+        adapter = PostgresAdapter(DSN, namespace="bootstrap-migrated")
+        with psycopg.connect(DSN, autocommit=True) as conn:
+            conn.execute("DROP TABLE IF EXISTS amfs_agent_group_members CASCADE")
+            fingerprint = adapter._schema_fingerprint()
+            assert adapter._schema_is_current(fingerprint) is False
+
+            PostgresAdapter(DSN, namespace="bootstrap-migrated")
+            back = conn.execute(
+                "SELECT to_regclass('amfs_agent_group_members') IS NOT NULL"
+            ).fetchone()[0]
+        assert back is True
 
 
 class TestTheStatementCeiling:
