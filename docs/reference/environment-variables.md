@@ -23,6 +23,31 @@ AMFS supports the following environment variables. They override values set in `
 
 ---
 
+## Postgres tuning
+
+Only relevant when `AMFS_POSTGRES_DSN` is set. The defaults are fine for a single
+process; these exist for deployments that run many of them.
+
+| Variable | Description | Default |
+|:---------|:------------|:--------|
+| `AMFS_POSTGRES_POOL_MAX` | Most connections one adapter may hold | `10` |
+| `AMFS_POSTGRES_POOL_MIN` | Connections kept open when idle | `2` |
+| `AMFS_POSTGRES_STATEMENT_TIMEOUT` | Ceiling on any one statement, as Postgres accepts it (`300s`, `5min`) | none |
+
+{: .important }
+Each process holding an adapter holds its own pool, so the connections you need
+are `pool max × processes`, and Postgres has a fixed `max_connections`. If you
+run the API behind an autoscaler, budget for the maximum number of instances,
+not the usual one — exhausting `max_connections` refuses new connections for
+everything sharing that database, including your own psql session.
+
+Set `AMFS_POSTGRES_STATEMENT_TIMEOUT` on anything serving HTTP, at or near the
+request timeout in front of it. Without one, a query whose caller has already
+given up keeps running and keeps its locks, and other statements queue behind
+it — a slow read becomes an outage rather than a slow read.
+
+---
+
 ## HTTP Adapter (SaaS / Multi-Tenant)
 
 When connecting to AMFS as a hosted service (SaaS), set these variables to route all memory operations through the authenticated HTTP API instead of a direct database connection.
