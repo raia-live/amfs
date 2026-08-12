@@ -1,11 +1,14 @@
 [project]
 name = "amfs"
-version = "0.5.5"
+version = "0.5.7"
 description = "AMFS Python SDK — Agent Memory File System"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-    "amfs-core",
+    # 0.3.14 adds ToolCall, ReadTracker.record_action and
+    # capture.scan_captured_arguments. record_action and commit_outcome below use
+    # all three unconditionally, so an older core raises rather than degrading.
+    "amfs-core>=0.3.14",
     "amfs-adapter-filesystem",
     "pyyaml>=6.0,<7",
 ]

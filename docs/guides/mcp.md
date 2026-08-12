@@ -114,7 +114,26 @@ After setup, your AI agents have tools across five categories:
 
 ## AMFS Pro (SaaS) and Cursor
 
-On **Sense Lab**, the AMFS dashboard (**Agents** page, MCP Connection card) is the source of truth. Cursor talks to hosted AMFS by running the **`amfs-mcp-server`** process locally with **stdio** (e.g. `uvx`), while the server uses **`AMFS_HTTP_URL`** (dashboard **Server URL**, e.g. `https://amfs-login.sense-lab.ai`) and **`AMFS_API_KEY`** to call the HTTP API. That URL is the **API base**, not an MCP Streamable HTTP path—there is **no `/mcp`** on it for this setup. The `/mcp` path applies only when you run the MCP server in **HTTP transport mode** as its own listening service (see [Streamable HTTP](#streamable-http-team--remote) below).
+On **Sense Lab**, the AMFS dashboard (**Agents** page, MCP Connection card) is the source of truth. There are two ways to connect, and the dashboard shows both.
+
+**Local process (stdio).** Cursor runs the **`amfs-mcp-server`** process locally, and that process uses **`AMFS_HTTP_URL`** (dashboard **Server URL**, e.g. `https://amfs-login.sense-lab.ai`) and **`AMFS_API_KEY`** to call the HTTP API. Point `AMFS_HTTP_URL` at the **API base** only — without `/mcp` — because this is the address the server calls, not an MCP endpoint a client connects to. This is the setup the snippet below describes.
+
+**Hosted endpoint (Streamable HTTP).** Hosted AMFS also serves MCP directly at **`https://mcp.sense-lab.ai/mcp`**, so a client that speaks Streamable HTTP can connect with no local process at all. Authenticate with your API key as a bearer token:
+
+```json
+{
+  "mcpServers": {
+    "senselab": {
+      "url": "https://mcp.sense-lab.ai/mcp",
+      "headers": { "Authorization": "Bearer ${env:AMFS_API_KEY}" }
+    }
+  }
+}
+```
+
+This endpoint exposes a focused set of memory tools rather than the full stdio surface. Use the local process when you want everything.
+
+To run **your own** HTTP server rather than using the hosted one, see [Streamable HTTP](#streamable-http-team--remote) below.
 
 Use the official **[Cursor plugin](https://github.com/raia-live/cursor-plugin)** (same shape as the dashboard JSON) or copy the snippet from the dashboard. Set **`AMFS_API_KEY`** in your environment and reference it with [Cursor interpolation](https://cursor.com/docs/mcp.md#config-interpolation). See also [SaaS / hosted AMFS](https://raia-live.github.io/amfs/guides/saas/).
 

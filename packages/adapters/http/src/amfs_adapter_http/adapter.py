@@ -17,6 +17,7 @@ import httpx
 
 from amfs_core.abc import AdapterABC, Agent, WatchHandle
 from amfs_core.models import (
+    Commit,
     DecisionTrace,
     Digest,
     Event,
@@ -127,7 +128,23 @@ class HttpAdapter(AdapterABC):
         params: dict[str, Any] = {}
         if branch and branch != "main":
             params["branch"] = branch
-        data = self._get(f"/api/v1/entries/{entity_path}/{key}", **params)
+        if "/" in key:
+            # The path form cannot express this. Its converter is greedy, so
+            # everything up to the final segment becomes the entity path, and a
+            # read of sweep/abc + active-negotiation/xyz asks the server for
+            # sweep/abc/active-negotiation + xyz — coordinates nothing was
+            # written at, which comes back as an ordinary "not found" rather
+            # than as an error anyone would notice.
+            #
+            # Only slashed keys take the query route, so a server too old to
+            # have it keeps serving every read it was already serving
+            # correctly. The ones it would 404 on are the ones it could never
+            # answer anyway.
+            data = self._get(
+                "/api/v1/entry", entity_path=entity_path, key=key, **params
+            )
+        else:
+            data = self._get(f"/api/v1/entries/{entity_path}/{key}", **params)
         if data.get("status") == "not_found":
             return None
         entry = _parse_entry(data)
@@ -368,6 +385,157 @@ class HttpAdapter(AdapterABC):
         if data.get("error"):
             return None
         return DecisionTrace.model_validate(data)
+
+    # ── commits ───────────────────────────────────────────────────────
+    #
+    # These inherited the base class's placeholders — ``None`` and ``[]`` — for
+    # as long as this adapter has existed, which is silent and total failure for
+    # everything built on them. Over HTTP, ``commit_log()`` returned an empty
+    # history for every account, and ``common_ancestor()`` reported no common
+    # ancestor for every pair of commits, including two that obviously share
+    # one. Both read as an honest answer about an empty repository, so nothing
+    # ever complained.
+    #
+    # ``save_commit`` remains the inherited no-op, and now deliberately rather
+    # than as an unfinished thought. It was one because a client-side
+    # transaction assembled a Commit here and had nowhere to send it: no
+    # endpoint accepted a commit somebody else had minted, so the id went back
+    # to the caller and the object was dropped, leaving an id ``get_commit``
+    # could not resolve.
+    #
+    # The way out was not to add that endpoint, which would mean trusting a
+    # client-assembled id and tree hash, but to stop assembling commits on this
+    # side at all. ``commit_batch`` posts the writes and the server runs the
+    # transaction, mints the commit and persists it. That is also what makes
+    # the group atomic: one transaction on one connection, rather than n
+    # separate requests that can half-succeed.
+    #
+    # What that leaves is a ``save_commit`` nobody should reach. It is not made
+    # to raise, because ``TransactionBuffer.flush`` still calls it on the paths
+    # that have not moved over, and turning those into errors would break
+    # working code to make a point.
+    #
+    # One consequence of ``list_commits`` working: ``flush`` calls it to find a
+    # parent, so a transaction over HTTP now costs one more request than before
+    # and its commits form a real chain instead of every one being a root.
+
+    def commit_batch(
+        self,
+        writes: list[dict[str, Any]],
+        message: str = "",
+        agent_id: str | None = None,
+        session_id: str | None = None,
+    ) -> Commit | None:
+        """Write a group of entries as one commit, run server-side.
+
+        Returns the commit the server minted, or ``None`` from a server old
+        enough not to send one back. ``None`` means "committed, details
+        unavailable" rather than "failed": by the time the response is read the
+        transaction has already landed, and treating it as an error would have
+        a caller retry writes that are already there.
+
+        That reading only holds because a 200 now means something was written.
+        An empty ``writes`` list never reached flush, so the server answered
+        200 with no commit — the same answer an old server gives — and the
+        caller could not tell "nothing happened" from "landed, silently". The
+        server refuses an empty batch instead, which leaves ``None`` with one
+        meaning rather than two.
+
+        ``agent_id`` and ``session_id`` say who is committing, the same way
+        ``write`` does. Without them the server transacts as itself, which
+        credits the entries and the commit to the server process rather than to
+        the caller — and a commit the caller does not appear to have authored
+        is one they are not shown when they ask for their own log.
+        """
+        if not writes:
+            raise ValueError("writes is empty — nothing to commit.")
+        body: dict[str, Any] = {"writes": writes, "message": message}
+        if agent_id:
+            body["agent_id"] = agent_id
+        if session_id:
+            body["session_id"] = session_id
+        data = self._post("/api/v1/commits", body)
+        commit = data.get("commit")
+        return Commit.model_validate(commit) if commit else None
+
+    def get_commit(self, commit_id: str) -> Commit | None:
+        try:
+            data = self._get(f"/api/v1/commits/{commit_id}")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        return Commit.model_validate(data)
+
+    def list_commits(
+        self,
+        *,
+        branch: str = "main",
+        limit: int = 50,
+        namespace: str = "default",
+    ) -> list[Commit]:
+        """Commits, newest first.
+
+        ``branch`` and ``namespace`` are sent, so the server filters before it
+        applies the limit. Filtering here afterwards instead — which is what
+        this did first — takes the newest N account-wide and then discards the
+        ones the caller did not want, so a page full of another branch's
+        commits comes back empty even though the requested branch has plenty.
+
+        The case that makes it more than a paging nicety is
+        ``TransactionBuffer.flush``, which asks for exactly one commit to use
+        as the new commit's parent. One commit on the wrong branch means no
+        parent, so every commit over HTTP is a root, no two share an ancestor,
+        and ``common_ancestor`` answers "none" forever — indistinguishable from
+        an honest answer about unrelated history.
+
+        The local filter stays as a guard, not as the mechanism. A server old
+        enough to ignore the query parameters returns an unfiltered page, and
+        handing a caller another branch's commits because the server did not
+        understand the question is worse than handing it too few. Against such
+        a server a result can still be short, which is a completeness problem;
+        without the guard it would be a correctness one.
+        """
+        data = self._get(
+            "/api/v1/commits",
+            limit=limit,
+            # Empty means "do not filter" to the guard below, so it has to mean
+            # the same to the server rather than arriving as branch="" and
+            # matching nothing.
+            branch=branch or None,
+            namespace=namespace or None,
+        )
+        commits = [Commit.model_validate(c) for c in data.get("commits", [])]
+        return [
+            c for c in commits
+            if (not branch or c.branch == branch)
+            and (not namespace or c.namespace == namespace)
+        ]
+
+    def common_ancestor(self, commit_a_id: str, commit_b_id: str) -> str | None:
+        """The latest commit both descend from, resolved by the server.
+
+        An override rather than a missing method. The generic implementation
+        walks the DAG breadth-first calling ``get_commit`` at every node, which
+        is reasonable against a local store and wasteful against this one: each
+        step becomes an HTTP round trip, and each round trip is a billable
+        operation, so the cost of the answer scales with how much history the
+        two commits happen to share. The server has the whole graph in one
+        place and exposes exactly this question, so ask it once.
+
+        Falls back to the inherited walk if the endpoint is missing, which is
+        what an older server looks like from here.
+        """
+        try:
+            data = self._post(
+                "/api/v1/merge-base",
+                {"commit_a": commit_a_id, "commit_b": commit_b_id},
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return super().common_ancestor(commit_a_id, commit_b_id)
+            raise
+        return data.get("ancestor_commit_id")
 
     def log_event(self, event: Event) -> Event:
         body: dict[str, Any] = {

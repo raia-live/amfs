@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from amfs_core.authority import rank_authors
 from amfs_core.models import Digest, DigestType, MemoryEntry, SearchQuery
 
 if TYPE_CHECKING:
@@ -19,6 +20,40 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _HOT_CONTEXT_LIMIT = 3
+
+# Three authors, three keys each. This rides along on the one call every agent
+# is told to make first, so it is paying for itself in context window on every
+# task — enough to route, not enough to be worth skimming past.
+_WHO_TO_ASK_LIMIT = 3
+_WHO_TO_ASK_KEYS = 3
+
+
+def _busiest_path_by_agent(
+    stats: list[dict[str, Any]],
+    entity_path: str,
+    agent_ids: set[str],
+) -> dict[str, str]:
+    """The path in this subtree each agent has written to most.
+
+    Ranking spans descendants, so a recommended author may have written
+    nothing at the path that was asked about. The keys to offer them, and the
+    path to address a read to, both have to come from where their work
+    actually is. Ties go to the shallower path, so an agent that spread its
+    work evenly is pointed at the more general topic.
+    """
+    prefix = entity_path.rstrip("/") + "/"
+    best: dict[str, tuple[int, int, str]] = {}
+    for row in stats:
+        agent = str(row.get("agent_id") or "")
+        if agent not in agent_ids:
+            continue
+        path = str(row.get("entity_path") or "")
+        if path != entity_path and not path.startswith(prefix):
+            continue
+        rank = (int(row.get("entry_count") or 0), -path.count("/"), path)
+        if agent not in best or rank > best[agent]:
+            best[agent] = rank
+    return {agent: rank[2] for agent, rank in best.items()}
 
 
 class BriefingService:
@@ -64,8 +99,142 @@ class BriefingService:
                 self._inject_consolidation_notice(digests, entity_path, branch)
             else:
                 self._inject_standalone_hot_context(digests, entity_path, branch)
+            self._inject_who_to_ask(digests, entity_path, agent_id, branch)
 
         return digests
+
+    def _inject_who_to_ask(
+        self,
+        digests: list[Digest],
+        entity_path: str,
+        agent_id: str | None,
+        branch: str,
+    ) -> None:
+        """Name the agents worth asking about this entity, and what to read.
+
+        Injected at serve time rather than compiled into the digest, for two
+        reasons that both rule compilation out. Authority depends on recency,
+        and the worker recompiles on a debounce, so a compiled ranking is stale
+        by construction. And this names *other* agents, so it has to be
+        filtered per caller — a compiled digest is shared by everyone who asks
+        for it, which is the wrong granularity for a disclosure surface.
+
+        The caller-side visibility filter is the control that enforces the
+        second point; see the http-server's briefing handler.
+        """
+        try:
+            stats = self._adapter.agent_entity_stats(entity_path=entity_path)
+        except Exception:
+            logger.debug("who_to_ask injection failed for %s", entity_path, exc_info=True)
+            return
+
+        # Descendants are rolled up because the query already scopes by prefix,
+        # and because an agent that owns `<path>/tokens` is exactly who you
+        # want named when you ask about `<path>`.
+        ranked = rank_authors(
+            entity_path,
+            stats=stats,
+            limit=_WHO_TO_ASK_LIMIT,
+            include_descendants=True,
+        )
+
+        # Asking an agent to read from itself is noise, not routing. Drop the
+        # caller only after ranking, so its own writes still set the share
+        # denominator and a colleague's contribution is not overstated.
+        if agent_id:
+            ranked = [a for a in ranked if a.agent_id != agent_id]
+        if not ranked:
+            return
+
+        # Where each author's keys actually live, which is not necessarily the
+        # path that was asked about now that the ranking spans the subtree.
+        source_paths = _busiest_path_by_agent(
+            stats, entity_path, {a.agent_id for a in ranked}
+        )
+        top_keys = self._top_keys_by_agent(source_paths, branch)
+
+        block = []
+        for author in ranked:
+            source = source_paths.get(author.agent_id, entity_path)
+            keys = top_keys.get(author.agent_id, [])
+            item: dict[str, Any] = {
+                "agent_id": author.agent_id,
+                "reason": author.reason,
+                "entry_count": author.entry_count,
+                "share": round(author.share, 3),
+                "validated_outcomes": author.validated_outcomes,
+                # Named because it can sit below the path asked about, and a
+                # reader wanting a key other than the first one needs to know
+                # where to look for it.
+                "entity_path": source,
+                "top_keys": keys,
+            }
+            # The literal call closes the "I know who, but not what to read"
+            # gap that makes a bare recommendation useless. It has to name the
+            # path the key is stored under: addressed to the parent, the read
+            # finds nothing and the recommendation is worse than none.
+            if keys:
+                item["call"] = (
+                    f'amfs_read_from("{author.agent_id}", "{source}", "{keys[0]}")'
+                )
+            block.append(item)
+
+        for d in digests:
+            if d.digest_type == DigestType.ENTITY and d.scope == entity_path:
+                d.summary["who_to_ask"] = block
+                return
+
+        # Nothing compiled for this path to hang the block on — the briefing
+        # came back with digests scoped elsewhere, or with agent briefs only.
+        # Carry the recommendations on a digest of our own instead of dropping
+        # them, the same way standalone hot context does when the compiled
+        # digest is missing entirely.
+        digests.append(Digest(
+            digest_type=DigestType.ENTITY,
+            scope=entity_path,
+            summary={
+                "narrative": f"No compiled digest yet for {entity_path}.",
+                "who_to_ask": block,
+            },
+            entry_count=0,
+            source_agents=[],
+            compiled_at=datetime.now(timezone.utc),
+            namespace=self._namespace,
+            branch=branch,
+        ))
+
+    def _top_keys_by_agent(
+        self,
+        source_paths: dict[str, str],
+        branch: str,
+    ) -> dict[str, list[str]]:
+        """Highest-priority keys each named agent wrote, on its own path.
+
+        One search per agent, as before. The path varies per agent because
+        ``search`` matches ``entity_path`` exactly, so asking about the parent
+        returns nothing for an author whose work sits in a child of it.
+        """
+        result: dict[str, list[str]] = {}
+        for aid, path in source_paths.items():
+            try:
+                entries = self._adapter.search(
+                    SearchQuery(
+                        entity_path=path,
+                        agent_id=aid,
+                        sort_by="priority",
+                        limit=_WHO_TO_ASK_KEYS,
+                        include_artifacts=False,
+                    ),
+                    # Without this the lookup silently reads main while the
+                    # rest of the briefing is on the caller's branch, and the
+                    # recommendation names an author but no key to read.
+                    branch=branch,
+                )
+            except Exception:
+                logger.debug("who_to_ask key lookup failed for %s", aid, exc_info=True)
+                continue
+            result[aid] = [e.key for e in entries]
+        return result
 
     def _inject_hot_context(
         self,

@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, MutableMapping
+from weakref import WeakKeyDictionary
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,40 @@ logger = logging.getLogger(__name__)
 #: latency problem, and no training example is allowed near this size anyway.
 MAX_CAPTURED_CHARS = 200_000
 
-_GATE_CACHE: dict[str, Any] = {}
+#: One gate per adapter, not one per process. ``SafetyGate`` keeps the adapter it
+#: was built with and its validator reads through it, so a single shared instance
+#: would vet every caller's capture through whichever adapter happened to arrive
+#: first — in the hosted server, that is one tenant's connection answering every
+#: other tenant's request. Keyed weakly so a gate is collected with its adapter
+#: rather than pinning it for the life of the process.
+_GATE_CACHE: MutableMapping[Any, Any] = WeakKeyDictionary()
+
+#: ``None`` cannot be a weak key, and an adapterless gate is shared by definition.
+_ADAPTERLESS_GATE: list[Any] = []
+
+
+def _gate_for(adapter: Any) -> Any:
+    """The SafetyGate bound to this adapter, built once and reused.
+
+    Raises ``ImportError`` when the Pro safety package is absent, which the
+    callers below treat as "no gate available" rather than as a failed scan.
+    """
+    from amfs_safety import SafetyGate  # Pro package, optional
+
+    if adapter is None:
+        if not _ADAPTERLESS_GATE:
+            _ADAPTERLESS_GATE.append(SafetyGate(adapter=None))
+        return _ADAPTERLESS_GATE[0]
+    try:
+        gate = _GATE_CACHE.get(adapter)
+        if gate is None:
+            gate = SafetyGate(adapter=adapter)
+            _GATE_CACHE[adapter] = gate
+        return gate
+    except TypeError:
+        # An adapter that cannot be hashed or weakly referenced still needs a
+        # correctly bound gate. It just does not get a cached one.
+        return SafetyGate(adapter=adapter)
 
 
 def scan_captured_text(
@@ -54,11 +88,7 @@ def scan_captured_text(
     try:
         from amfs_core.models import MemoryEntry, Provenance
 
-        if "gate" not in _GATE_CACHE:
-            from amfs_safety import SafetyGate  # Pro package, optional
-
-            _GATE_CACHE["gate"] = SafetyGate(adapter=adapter)
-        gate = _GATE_CACHE["gate"]
+        gate = _gate_for(adapter)
         entry = MemoryEntry(
             entity_path="_capture/task_input",
             key="scan",
@@ -99,7 +129,6 @@ def scan_captured_text(
             "SafetyGate scan of captured text failed; dropping capture", exc_info=True
         )
         return None
-
 
 def scan_captured_arguments(
     arguments: Any,

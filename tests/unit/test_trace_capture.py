@@ -19,6 +19,9 @@ which is why they survived to review.
 
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 from amfs import AgentMemory
 from amfs.memory import _get_sdk_executor
@@ -29,10 +32,12 @@ from amfs_filesystem.adapter import FilesystemAdapter
 
 @pytest.fixture(autouse=True)
 def _clear_gate_cache():
-    """The gate is cached process-wide; a stub must not leak between tests."""
+    """Gates are cached across calls; a stub must not leak between tests."""
     capture._GATE_CACHE.clear()
+    capture._ADAPTERLESS_GATE.clear()
     yield
     capture._GATE_CACHE.clear()
+    capture._ADAPTERLESS_GATE.clear()
 
 
 class _Decision:
@@ -42,8 +47,13 @@ class _Decision:
 
 
 def _install_gate(monkeypatch, gate) -> None:
-    """Seed the cache so no import of the optional Pro package is attempted."""
-    capture._GATE_CACHE["gate"] = gate
+    """Stand in for the gate so no import of the optional Pro package is attempted.
+
+    Replaces the lookup rather than seeding a cache entry, because the real cache
+    is keyed by adapter and these tests reach it down several paths — some with no
+    adapter, some through an ``AgentMemory`` holding a real one.
+    """
+    monkeypatch.setattr(capture, "_gate_for", lambda adapter: gate)
 
 
 # --- The scanner itself -----------------------------------------------------
@@ -94,7 +104,8 @@ def test_an_oss_install_without_the_safety_package_stores_the_text() -> None:
     is stored rather than silently discarded. This is why the ImportError branch
     cannot simply be folded into the general failure branch.
     """
-    assert capture._GATE_CACHE == {}
+    assert len(capture._GATE_CACHE) == 0
+    assert capture._ADAPTERLESS_GATE == []
     # SafetyGate is a Pro package; in this environment the import fails and the
     # text passes through unchanged.
     pytest.importorskip
@@ -105,6 +116,55 @@ def test_an_oss_install_without_the_safety_package_stores_the_text() -> None:
         assert result == "plain prompt text"
     else:
         pytest.skip("amfs_safety installed; the ImportError branch is unreachable")
+
+
+def test_each_adapter_gets_a_gate_bound_to_itself(monkeypatch) -> None:
+    """One gate per adapter, not one per process.
+
+    ``SafetyGate`` keeps the adapter it was built with and its validator reads
+    through it, so a single shared instance would vet every caller's capture
+    through whichever adapter arrived first. In the hosted server that is one
+    tenant's connection answering every other tenant's request.
+    """
+    built = []
+
+    class Gate:
+        def __init__(self, adapter=None):
+            self.adapter = adapter
+            built.append(adapter)
+
+    module = types.ModuleType("amfs_safety")
+    module.SafetyGate = Gate
+    monkeypatch.setitem(sys.modules, "amfs_safety", module)
+
+    class Adapter:
+        pass
+
+    first, second = Adapter(), Adapter()
+    assert capture._gate_for(first).adapter is first
+    assert capture._gate_for(second).adapter is second
+    # Still cached: the same adapter reuses its gate instead of rebuilding the
+    # detectors on every captured field.
+    assert capture._gate_for(first) is capture._gate_for(first)
+    assert built == [first, second]
+
+
+def test_an_unhashable_adapter_still_gets_a_correctly_bound_gate(monkeypatch) -> None:
+    """Losing the cache is acceptable; binding the wrong adapter is not."""
+
+    class Gate:
+        def __init__(self, adapter=None):
+            self.adapter = adapter
+
+    module = types.ModuleType("amfs_safety")
+    module.SafetyGate = Gate
+    monkeypatch.setitem(sys.modules, "amfs_safety", module)
+
+    class Unhashable:
+        __hash__ = None  # type: ignore[assignment]
+
+    adapter = Unhashable()
+    assert capture._gate_for(adapter).adapter is adapter
 
 
 def test_a_non_string_from_the_gate_is_dropped_not_replaced_with_the_original(

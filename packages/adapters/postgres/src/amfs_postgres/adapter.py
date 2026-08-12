@@ -27,6 +27,8 @@ from amfs_core.models import (
     BranchAccess,
     BranchAccessPermission,
     BranchStatus,
+    Commit,
+    CommitEntry,
     DecisionTrace,
     DiffEntry,
     Digest,
@@ -334,6 +336,14 @@ class PostgresAdapter(AdapterABC):
         cur.execute("""
             ALTER TABLE amfs_decision_traces
             ADD COLUMN IF NOT EXISTS tool_calls JSONB DEFAULT '[]'
+        """)
+        # Entry-to-trace resolution for knowledge lineage. The shared session id
+        # is the only link from a written entry back to the trace that committed
+        # it, since causal_entries records reads rather than writes.
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_traces_session
+            ON amfs_decision_traces (namespace, agent_id, session_id)
+            WHERE session_id IS NOT NULL
         """)
         cur.execute("""
             ALTER TABLE amfs_digests
@@ -1848,6 +1858,71 @@ class PostgresAdapter(AdapterABC):
             for r in rows
         ]
 
+    def agent_entity_stats(
+        self,
+        *,
+        entity_path: str | None = None,
+        agent_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Per-(agent, entity) aggregates via GROUP BY — never loads values.
+
+        The authority ranking runs over every pair on the account, so this must
+        not be a full scan pulled into Python: an account with 5k entries would
+        otherwise ship all of them over the wire to count rows.
+        """
+        conditions = ["namespace = %s", "branch = 'main'", "superseded_at IS NULL"]
+        params: list[Any] = [self._namespace]
+        if agent_ids is not None:
+            conditions.append("agent_id = ANY(%s)")
+            params.append(list(agent_ids))
+        if entity_path:
+            # Descendants included: a/b covers a/b/c but never a/bc, which is
+            # why this is an equality OR a prefix-with-separator rather than a
+            # bare LIKE 'a/b%'.
+            prefix = entity_path.rstrip("/")
+            conditions.append("(entity_path = %s OR entity_path LIKE %s)")
+            params.extend([prefix, prefix + "/%"])
+        else:
+            # Same reasoning as entity_summaries: unscoped, this groups by
+            # entity_path, so a shared namespace's topics would be listed as
+            # though they were this account's own. Naming a path is the act of
+            # opting into it.
+            conditions.append(_EXCLUDE_SHARED_PATHS)
+        where = " AND ".join(conditions)
+
+        sql = f"""
+            SELECT agent_id,
+                   entity_path,
+                   COUNT(*) AS entry_count,
+                   AVG(confidence) AS avg_confidence,
+                   MAX(written_at) AS last_written,
+                   MIN(written_at) AS first_written,
+                   COALESCE(SUM(recall_count), 0) AS total_recalls,
+                   COUNT(*) FILTER (WHERE outcome_count > 0) AS outcome_linked_count
+            FROM amfs_memory_entries
+            WHERE {where}
+            GROUP BY agent_id, entity_path
+            ORDER BY entity_path, entry_count DESC, agent_id
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        return [
+            {
+                "agent_id": r["agent_id"],
+                "entity_path": r["entity_path"],
+                "entry_count": int(r["entry_count"]),
+                "avg_confidence": float(r["avg_confidence"] or 0),
+                "last_written": r["last_written"],
+                "first_written": r["first_written"],
+                "total_recalls": int(r["total_recalls"] or 0),
+                "outcome_linked_count": int(r["outcome_linked_count"] or 0),
+            }
+            for r in rows
+        ]
+
     def stats_extended(
         self,
         *,
@@ -2190,7 +2265,7 @@ class PostgresAdapter(AdapterABC):
                            causal_entries, external_contexts,
                            query_events, session_started_at, session_ended_at,
                            session_duration_ms,
-                           error_events, state_diff, created_at
+                           error_events, state_diff, session_metadata, created_at
                     FROM amfs_decision_traces
                     WHERE id = %s AND namespace = %s
                     """,
@@ -2276,7 +2351,7 @@ class PostgresAdapter(AdapterABC):
                    causal_entries, external_contexts,
                    query_events, session_started_at, session_ended_at,
                    session_duration_ms,
-                   error_events, state_diff, created_at
+                   error_events, state_diff, session_metadata, created_at
             FROM amfs_decision_traces
             WHERE {where}
             ORDER BY created_at DESC
@@ -2291,9 +2366,184 @@ class PostgresAdapter(AdapterABC):
 
         return [self._row_to_trace(row) for row in rows]
 
+    def list_traces_for_entry(
+        self,
+        *,
+        agent_id: str,
+        session_id: str | None,
+        written_at: datetime | None = None,
+        limit: int = 5,
+    ) -> list[DecisionTrace]:
+        """Traces from the session that wrote an entry, nearest write first.
+
+        Uses idx_traces_session (namespace, agent_id, session_id).
+        """
+        if not session_id:
+            return []
+
+        conditions = ["namespace = %s", "agent_id = %s", "session_id = %s"]
+        params: list[Any] = [self._namespace, agent_id, session_id]
+
+        if written_at is not None:
+            # A trace committed *before* the write cannot be the one that
+            # committed it. Ordering by distance after the write picks the
+            # right trace when a long session committed several outcomes.
+            order = "ORDER BY (created_at >= %s) DESC, ABS(EXTRACT(EPOCH FROM (created_at - %s))) ASC"
+            params.extend([written_at, written_at])
+        else:
+            order = "ORDER BY created_at DESC"
+
+        where = " AND ".join(conditions)
+        sql = f"""
+            SELECT id, agent_id, session_id, outcome_ref, outcome_type,
+                   decision_summary, task_input, response_text,
+                   causal_entries, external_contexts,
+                   query_events, session_started_at, session_ended_at,
+                   session_duration_ms,
+                   error_events, state_diff, session_metadata, created_at
+            FROM amfs_decision_traces
+            WHERE {where}
+            {order}
+            LIMIT %s
+        """
+        params.append(limit)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        return [self._row_to_trace(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # commits
+    # ------------------------------------------------------------------
+    #
+    # These three inherited the base class's placeholders — a no-op save,
+    # ``None``, and ``[]`` — for as long as this adapter has existed. The
+    # effect was silent and complete: ``TransactionBuffer.flush`` assembled a
+    # Commit, handed it to ``save_commit``, and it was dropped, so every
+    # transaction returned a real id that resolved to nothing. ``commit_log``
+    # was empty for every account and ``common_ancestor`` found no ancestor for
+    # any pair of commits, including two that obviously shared one. All three
+    # read as an honest answer about a history that had not been written yet,
+    # which is why nothing complained.
+
+    def save_commit(self, commit: Commit) -> None:
+        """Persist a commit.
+
+        Idempotent on the id, so saving the same commit object twice is safe
+        and nothing about a commit is mutable enough to need an update branch.
+
+        That is narrower than it sounds, and worth being exact about: the id is
+        a fresh uuid4 minted per flush, not a hash of the contents. A retried
+        flush is therefore a *different* commit, and ``ON CONFLICT`` will not
+        collapse the two. It protects a replay of one commit object, not a
+        retry of the operation that produced it.
+
+        This also runs on its own connection, after ``write_batch`` has already
+        committed the entries. If this insert fails, the entries stay and the
+        commit row does not, leaving versions that name a commit nobody can
+        look up. See ``TransactionBuffer.flush``.
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO amfs_commits
+                        (id, namespace, branch, message, author_agent_id,
+                         session_id, entries, tree_hash, parent_ids, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s)
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    (
+                        commit.id,
+                        self._namespace,
+                        commit.branch,
+                        commit.message,
+                        commit.author_agent_id,
+                        commit.session_id,
+                        json.dumps([e.model_dump(mode="json") for e in commit.entries]),
+                        commit.tree_hash,
+                        json.dumps(list(commit.parent_ids)),
+                        commit.created_at,
+                    ),
+                )
+
+    def get_commit(self, commit_id: str) -> Commit | None:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, namespace, branch, message, author_agent_id,
+                           session_id, entries, tree_hash, parent_ids, created_at
+                    FROM amfs_commits
+                    WHERE id = %s AND namespace = %s
+                    """,
+                    (commit_id, self._namespace),
+                )
+                row = cur.fetchone()
+
+        return self._row_to_commit(row) if row is not None else None
+
+    def list_commits(
+        self,
+        *,
+        branch: str = "main",
+        limit: int = 50,
+        namespace: str = "default",
+    ) -> list[Commit]:
+        """Commits, newest first.
+
+        ``namespace`` is accepted for the interface but the adapter's own
+        namespace is what is queried, as everywhere else here: it is fixed at
+        construction and is the tenant boundary this connection was opened for.
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, namespace, branch, message, author_agent_id,
+                           session_id, entries, tree_hash, parent_ids, created_at
+                    FROM amfs_commits
+                    WHERE namespace = %s AND branch = %s
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT %s
+                    """,
+                    (self._namespace, branch, limit),
+                )
+                rows = cur.fetchall()
+
+        return [self._row_to_commit(row) for row in rows]
+
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _row_to_commit(row: dict[str, Any]) -> Commit:
+        # psycopg returns JSONB already decoded, but the same rows arrive as
+        # strings through a plain cursor, so both are handled — the trace
+        # reader above does the same for the same reason.
+        entries = row.get("entries") or []
+        parents = row.get("parent_ids") or []
+        if isinstance(entries, str):
+            entries = json.loads(entries)
+        if isinstance(parents, str):
+            parents = json.loads(parents)
+
+        return Commit(
+            id=row["id"],
+            namespace=row["namespace"],
+            branch=row["branch"],
+            message=row["message"] or "",
+            author_agent_id=row["author_agent_id"],
+            session_id=row.get("session_id"),
+            entries=[CommitEntry.model_validate(e) for e in entries],
+            tree_hash=row.get("tree_hash"),
+            parent_ids=list(parents),
+            created_at=row["created_at"],
+        )
 
     def _row_to_trace(self, row: dict[str, Any]) -> DecisionTrace:
         ce_raw = row["causal_entries"] or []

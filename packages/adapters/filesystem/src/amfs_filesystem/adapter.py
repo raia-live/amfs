@@ -154,7 +154,12 @@ class FilesystemAdapter(AdapterABC):
     # ------------------------------------------------------------------
 
     def _commits_dir(self) -> Path:
-        d = self._layout._root / "_commits"
+        # ``root``, not ``_root``. PathLayout has never had the private name,
+        # so every one of these three raised AttributeError on first use — the
+        # filesystem adapter was the one place commits were supposed to work
+        # and it did not either. Nothing noticed because the adapter contract
+        # suite did not ask about commits until now.
+        d = self._layout.root / "_commits"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -177,19 +182,33 @@ class FilesystemAdapter(AdapterABC):
         limit: int = 50,
         namespace: str = "default",
     ) -> list[Commit]:
-        commits_dir = self._commits_dir()
         commits: list[Commit] = []
-        for f in sorted(commits_dir.glob("*.json"), reverse=True):
+        for f in self._commits_dir().glob("*.json"):
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
                 c = Commit.model_validate(data)
                 if c.branch == branch and c.namespace == namespace:
                     commits.append(c)
-                    if len(commits) >= limit:
-                        break
             except Exception:
                 logger.warning("Skipping unreadable commit: %s", f)
-        return commits
+
+        # Sorted by when the commit was made, not by the filename. The filename
+        # is the commit id, a uuid4 minted per flush, so ordering by it returned
+        # a history in an order nobody asked for that happened to look sorted.
+        # The limit is applied after, or "newest first" would mean "whichever
+        # ones were read first".
+        #
+        # The id breaks ties, because created_at alone does not. Two commits
+        # made inside the same clock tick sort equal, and a stable sort then
+        # leaves them in the order the directory happened to be walked in —
+        # which is arbitrary. flush asks for exactly one commit to use as the
+        # next parent, so an arbitrary winner there is a parent pointer that
+        # varies run to run and a chain that forks where it should not. The id
+        # is arbitrary too, but it is the same arbitrary every time, and it is
+        # what Postgres already tie-breaks on (ORDER BY created_at DESC,
+        # id DESC), so the two adapters agree.
+        commits.sort(key=lambda c: (c.created_at, c.id), reverse=True)
+        return commits[:limit]
 
     # ------------------------------------------------------------------
     # list

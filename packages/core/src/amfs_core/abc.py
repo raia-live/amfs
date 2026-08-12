@@ -171,6 +171,30 @@ class AdapterABC(ABC):
         """Return persisted decision traces. Default returns an empty list."""
         return []
 
+    def list_traces_for_entry(
+        self,
+        *,
+        agent_id: str,
+        session_id: str | None,
+        written_at: datetime | None = None,
+        limit: int = 5,
+    ) -> list[DecisionTrace]:
+        """Traces plausibly responsible for writing an entry, best match first.
+
+        An entry records the session that wrote it and a trace records the
+        session it was committed from, and that shared id is the only link
+        between the two — ``causal_entries`` holds the reads a session made,
+        never its writes. So resolution is: same agent, same session, and among
+        those the trace committed soonest *after* the write.
+
+        The match is exact when a session committed one outcome and a heuristic
+        when it committed several, so callers must present the result as the
+        likely committing trace rather than a certainty.
+
+        Default returns an empty list; adapters with persisted traces override.
+        """
+        return []
+
     def search(self, query: SearchQuery) -> list[MemoryEntry]:
         """Search entries with rich filters. Default: filter over list().
 
@@ -290,6 +314,40 @@ class AdapterABC(ABC):
             entries = [e for e in entries if e.provenance.agent_id in allowed]
         return entity_summaries_from_entries(entries)
 
+    def agent_entity_stats(
+        self,
+        *,
+        entity_path: str | None = None,
+        agent_ids: list[str] | None = None,
+    ) -> list[dict]:
+        """Per-(agent, entity) aggregates — who has written where, and how much.
+
+        Returns ``{agent_id, entity_path, entry_count, avg_confidence,
+        last_written, first_written, total_recalls, outcome_linked_count}``,
+        sorted by entity path then descending entry count.
+
+        *entity_path*, when given, restricts to that entity and its descendants
+        (``a/b`` matches ``a/b`` and ``a/b/c``, never ``a/bc``). *agent_ids*
+        restricts to those writers, for per-user visibility layers.
+
+        Default implementation groups over ``list()``; adapters with SQL
+        storage should override with GROUP BY aggregates.
+        """
+        from amfs_core.aggregates import agent_entity_stats_from_entries
+
+        entries = self.list()
+        if agent_ids is not None:
+            allowed = set(agent_ids)
+            entries = [e for e in entries if e.provenance.agent_id in allowed]
+        if entity_path:
+            prefix = entity_path.rstrip("/")
+            entries = [
+                e
+                for e in entries
+                if e.entity_path == prefix or e.entity_path.startswith(prefix + "/")
+            ]
+        return agent_entity_stats_from_entries(entries)
+
     def stats_extended(
         self,
         *,
@@ -374,6 +432,21 @@ class AdapterABC(ABC):
     def get_commit(self, commit_id: str) -> "Commit | None":
         """Retrieve a commit by its ID. Returns None if not found."""
         return None
+
+    def common_ancestor(self, commit_a_id: str, commit_b_id: str) -> str | None:
+        """The most recent commit both given commits descend from.
+
+        Lives here, rather than only in the caller, so that a store which can
+        answer the question directly may say so. The default walks the DAG from
+        both ends calling :meth:`get_commit` at every node, which is the right
+        shape for a local store and the wrong shape for a remote one: there,
+        each step is a round trip, and the cost of the answer grows with the
+        history the two commits share. An adapter in that position overrides
+        this and asks its server once.
+        """
+        from amfs_core.dag import find_common_ancestor
+
+        return find_common_ancestor(commit_a_id, commit_b_id, self.get_commit)
 
     def list_commits(
         self,

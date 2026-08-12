@@ -132,6 +132,23 @@ Or with the OSS MCP server (when `amfs-adapter-http` is installed):
 }
 ```
 
+Or without a local process at all, using the hosted Streamable HTTP endpoint:
+
+```json
+{
+  "mcpServers": {
+    "senselab": {
+      "url": "https://mcp.sense-lab.ai/mcp",
+      "headers": { "Authorization": "Bearer amfs_sk_your_key_here" }
+    }
+  }
+}
+```
+
+The hosted endpoint exposes a focused set of memory tools rather than the full
+stdio surface, and needs nothing installed. Use a local process when you want
+every tool.
+
 ### Claude Code
 
 Add to `~/.claude/claude_desktop_config.json`:

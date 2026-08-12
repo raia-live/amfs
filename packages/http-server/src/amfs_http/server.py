@@ -692,6 +692,37 @@ async def whoami(
 # ──────────────────────────────────────────────────────────────────────
 
 
+@app.get("/api/v1/entry")
+async def read_entry_by_query(
+    request: Request,
+    entity_path: str = Query(...),
+    key: str = Query(...),
+    branch: str = Query("main"),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """The same read, with the coordinates where they cannot be confused.
+
+    ``/api/v1/entries/{entity_path:path}/{key}`` cannot express a key that
+    contains a slash. The path converter is greedy, so it takes everything up
+    to the final segment as the entity path, and a read of
+    ``sweep/abc`` / ``active-negotiation/xyz`` arrives as
+    ``sweep/abc/active-negotiation`` / ``xyz`` — coordinates nothing was ever
+    written at, answered with a confident "not found".
+
+    Slashed keys are not exotic here: 314 of 4,726 entries in production have
+    one, written by the negotiation engine and by anything else that namespaces
+    its keys. None of them could be read back. The OpenAI ``fetch`` tool is the
+    sharpest edge of that, because it exists to resolve an id that ``search``
+    just handed out — so search would offer an entry and fetch would deny it
+    existed.
+
+    The old route stays exactly as it was. It is unambiguous whenever the key
+    has no slash, which is most of the time, and rewriting every caller to gain
+    nothing is a worse trade than leaving them alone.
+    """
+    return await _read_entry(request, entity_path, key, branch)
+
+
 @app.get("/api/v1/entries/{entity_path:path}/{key}")
 async def read_entry(
     request: Request,
@@ -699,6 +730,15 @@ async def read_entry(
     key: str,
     branch: str = Query("main"),
     _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    return await _read_entry(request, entity_path, key, branch)
+
+
+async def _read_entry(
+    request: Request,
+    entity_path: str,
+    key: str,
+    branch: str,
 ) -> dict[str, Any]:
     mem = _get_memory()
     if _async_adapter is not None:
@@ -1501,21 +1541,138 @@ async def verify_integrity(
 # ──────────────────────────────────────────────────────────────────────
 
 
+#: Per-write options this endpoint forwards to the transaction.
+#:
+#: An allow-list, so a key a caller invents cannot reach ``tx.write`` as an
+#: unexpected keyword and turn a batch into a 500.
+_COMMIT_WRITE_OPTIONS = ("confidence", "memory_type", "pattern_refs", "shared")
+
+
 @app.post("/api/v1/commits")
 async def create_commit(
     body: dict[str, Any],
+    request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    """Run a transaction here, rather than assembling one on the client.
+
+    A client-side transaction over HTTP wrote each entry with its own request
+    and then called ``save_commit``, which the HTTP adapter has never
+    implemented — there is no endpoint that accepts a commit somebody else
+    minted. So the id came back to the caller and the commit itself was
+    dropped, and nothing tied the entries together afterwards.
+
+    Doing it here is what makes the group a single round trip that either
+    reaches the server or does not, instead of n requests from a client that
+    can half-succeed and no way for the caller to find out which half.
+
+    It is not yet one database transaction, and the difference matters. The
+    Postgres adapter does not override ``write_batch``, so it inherits the
+    default that writes each entry on its own connection, and ``save_commit``
+    runs on a further one after those have committed. A failure part-way
+    leaves the earlier entries written. What is fixed here is the client-side
+    fan-out; what remains is the storage-side one.
+
+    The per-write options are the reason this was not simply switched over
+    earlier. This endpoint used to forward only path, key and value, so moving
+    a batch here would have silently discarded confidence, memory type,
+    pattern refs and sharing on every entry — writing the right entries with
+    the wrong metadata, which is worse than not writing them.
+    """
+    from amfs_core.models import MemoryType
+
     mem = _get_memory()
     writes = body.get("writes", [])
     message = body.get("message", "")
-    with mem.transaction(message) as tx:
-        for w in writes:
-            tx.write(w["entity_path"], w["key"], w.get("value"))
+    if not writes:
+        # Refused rather than accepted as a no-op, because the two are
+        # indistinguishable to the caller otherwise. An empty batch never
+        # reaches flush, so the response carries no commit — which is the same
+        # response a server too old to mint one sends back. The client reads
+        # that as "committed, details unavailable" and moves on, when in fact
+        # nothing was written at all.
+        raise HTTPException(
+            status_code=422, detail="writes is empty — nothing to commit."
+        )
+
+    # Whose writes these are. Running the transaction here moved the work off
+    # the client and took the caller's name off it with it: everything went in
+    # as this process's own agent, because that is who _get_memory() is. The
+    # entries were credited to the server and so was the commit — and since
+    # GET /api/v1/commits hides commits whose author the caller cannot see, the
+    # caller could not then see the commit they had just made. amfs_commit_log
+    # answered zero for an account with commits sitting in it.
+    #
+    # Swapping the tagger is how POST /api/v1/entries has always done this.
+    # AgentMemory.agent_id reads through to the tagger, so one swap covers both
+    # the entries' provenance and the commit's author.
+    #
+    # The header is a fallback for a client that does not send the field yet:
+    # the MCP gateway has always set X-AMFS-Agent-Id on every request, so
+    # reading it means a gateway already in production is attributed correctly
+    # from the moment this deploys. The body wins when both are present.
+    agent_id = body.get("agent_id") or request.headers.get("x-amfs-agent-id")
+    session_id = body.get("session_id")
+    original_agent = mem._tagger.agent_id if agent_id else None
+    original_session = mem._tagger.session_id if session_id else None
+
+    try:
+        if agent_id:
+            mem._tagger.agent_id = agent_id
+            try:
+                # The gateway ensures its agent when the session opens, so this
+                # is normally a no-op. It is here for a client committing as an
+                # agent this server has not seen, where the entry insert would
+                # otherwise fail on a name nothing has registered.
+                mem._adapter.ensure_agent(agent_id, mem.namespace)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "ensure_agent failed for %s — committing anyway", agent_id,
+                    exc_info=True,
+                )
+            _link_agent_owner_once(request, agent_id, mem.namespace)
+        if session_id:
+            mem._tagger.session_id = session_id
+
+        with mem.transaction(message) as tx:
+            for w in writes:
+                options = {k: w[k] for k in _COMMIT_WRITE_OPTIONS if k in w}
+                # Arrives over the wire as a string, and the write path wants
+                # the enum. An unknown one is refused rather than dropped:
+                # writing the entry with a default type would put the wrong
+                # metadata on the right memory, and nothing later can tell that
+                # happened.
+                if "memory_type" in options:
+                    raw = str(options["memory_type"])
+                    try:
+                        options["memory_type"] = MemoryType(raw)
+                    except ValueError as exc:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"Invalid memory_type {raw!r}. Valid: "
+                                + ", ".join(m.value for m in MemoryType)
+                            ),
+                        ) from exc
+                tx.write(w["entity_path"], w["key"], w.get("value"), **options)
+    finally:
+        # Restored even when the transaction raised. This memory is a process
+        # singleton, so a tagger left holding one caller's name would sign the
+        # next caller's writes with it.
+        if original_agent is not None:
+            mem._tagger.agent_id = original_agent
+        if original_session is not None:
+            mem._tagger.session_id = original_session
+
+    commit = tx.commit
     return {
-        "commit_id": tx.commit.id if tx.commit else None,
+        "commit_id": commit.id if commit else None,
         "message": message,
-        "entries_written": len(writes),
+        "entries_written": len(tx.entries),
+        # The whole commit, so a caller does not have to fetch what was just
+        # created to learn the versions its entries landed on.
+        "commit": json.loads(json.dumps(commit.model_dump(mode="json"), default=str))
+        if commit else None,
     }
 
 
@@ -1523,10 +1680,41 @@ async def create_commit(
 async def list_commits(
     request: Request,
     limit: int = Query(50, ge=1, le=500),
+    branch: str | None = Query(None),
+    namespace: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    """Commits, newest first, filtered before the limit is applied.
+
+    ``branch`` and ``namespace`` are new, and the reason is a real bug rather
+    than completeness. Without them the caller can only take the newest N
+    account-wide and filter what it wanted out of the page it was given, so a
+    page full of another branch's commits comes back empty even though the
+    branch it asked about has plenty.
+
+    That is not hypothetical: ``TransactionBuffer.flush`` asks for exactly one
+    commit to use as the new commit's parent. One commit on the wrong branch
+    means no parent, which means every commit over HTTP is a root, no two
+    commits share an ancestor, and ``common_ancestor`` answers "none" forever —
+    while looking exactly like an honest answer about unrelated history.
+
+    Both default to None rather than to "main" and "default", so a caller that
+    does not pass them keeps the behaviour it had: whatever branch and
+    namespace this server's own memory is configured for.
+    """
     mem = _get_memory()
-    commits = mem.commit_log(limit=limit)
+    if branch is None and namespace is None:
+        commits = mem.commit_log(limit=limit)
+    else:
+        # Straight to the adapter, because commit_log deliberately takes
+        # neither — it reads the server's own branch and namespace, which are
+        # not the caller's to begin with. The route already reaches for
+        # _adapter for stats_extended.
+        commits = mem._adapter.list_commits(
+            branch=branch or mem._branch,
+            limit=limit,
+            namespace=namespace or mem._config.namespace,
+        )
     allowed = _visible_agent_ids(request)
     if allowed is not None:
         commits = [c for c in commits if c.author_agent_id in allowed]
@@ -1835,14 +2023,12 @@ async def create_patch(
 # ──────────────────────────────────────────────────────────────────────
 
 
-@app.get("/api/v1/history/{entity_path:path}/{key}")
-async def get_history(
+async def _history_payload(
     request: Request,
     entity_path: str,
     key: str,
-    since: str | None = Query(None),
-    until: str | None = Query(None),
-    _auth: str | None = Depends(verify_api_key),
+    since: str | None,
+    until: str | None,
 ) -> dict[str, Any]:
     mem = _get_memory()
     since_dt = datetime.fromisoformat(since) if since else None
@@ -1858,6 +2044,45 @@ async def get_history(
         "version_count": len(versions),
         "versions": [_entry_to_response(e) for e in versions],
     }
+
+
+@app.get("/api/v1/history")
+async def get_history_by_query(
+    request: Request,
+    entity_path: str = Query(...),
+    key: str = Query(...),
+    since: str | None = Query(None),
+    until: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """History with the coordinates where they cannot be confused.
+
+    The same greedy-path problem ``/api/v1/entry`` was added for: a key
+    containing a slash cannot be expressed as a path segment, so a history
+    lookup for one silently reported no versions. Reading an entry back was
+    fixed first because it was the louder failure; this is the same defect on
+    the same coordinates, and the version chain is what the lineage panel is
+    built on.
+    """
+    return await _history_payload(request, entity_path, key, since, until)
+
+
+@app.get("/api/v1/history/{entity_path:path}/{key}")
+async def get_history(
+    request: Request,
+    entity_path: str,
+    key: str,
+    since: str | None = Query(None),
+    until: str | None = Query(None),
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Unchanged, and unambiguous whenever the key has no slash.
+
+    Kept as it is for the callers already on it, exactly as the entries route
+    was: rewriting every one of them to gain nothing on the common case is the
+    worse trade.
+    """
+    return await _history_payload(request, entity_path, key, since, until)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -2923,12 +3148,28 @@ async def agent_read_from(
                 "entityPath": entity_path, "key": key}
 
     mem = _get_memory()
-    entries = mem.search(entity_path=entity_path, agent_id=source_agent_id)
-    matching = [e for e in entries if e.key == key]
-    if not matching:
+    # Route through read_from rather than repeating its search inline. The
+    # difference is everything this endpoint exists to record: the two
+    # CROSS_AGENT_READ events, the read tracker entry that puts the read in the
+    # session's causal chain, and the learned_from edge. Doing the search here
+    # returned the same entry while leaving no trace that one agent had learned
+    # from another — and that edge is what the authority ranking is built on,
+    # so a cross-agent read over HTTP never counted for anything.
+    #
+    # Swapping the tagger is how the rest of this file attributes work to the
+    # caller (see agent_recall above): the memory is a process singleton, so a
+    # tagger left holding one caller's name would sign the next caller's reads.
+    original_agent = mem._tagger.agent_id
+    mem._tagger.agent_id = agent_id
+    try:
+        entry = mem.read_from(source_agent_id, entity_path, key)
+    finally:
+        mem._tagger.agent_id = original_agent
+
+    if entry is None:
         return {"status": "not_found", "sourceAgentId": source_agent_id,
                 "entityPath": entity_path, "key": key}
-    return _entry_to_response(matching[0])
+    return _entry_to_response(entry)
 
 
 @app.get("/api/v1/agents/{agent_id:path}/activity")
@@ -5194,6 +5435,22 @@ def _filter_briefing_digests(vis: Any, digests: list) -> list:
                 )
             ]
 
+        # who_to_ask names agents by id and tells the caller to read from them.
+        # Unfiltered, it would both recommend a read that read_from then denies
+        # and disclose that an agent the caller cannot see exists — so this is
+        # a tenant-isolation control, not presentation.
+        if "who_to_ask" in digest.summary:
+            visible_authors = [
+                w for w in digest.summary["who_to_ask"]
+                if _is_agent_visible_for_entity(
+                    w.get("agent_id", ""), scope, user_agents, room_map,
+                )
+            ]
+            if visible_authors:
+                digest.summary["who_to_ask"] = visible_authors
+            else:
+                digest.summary.pop("who_to_ask")
+
         if source_agents:
             has_visible = any(
                 _is_agent_visible_for_entity(a, scope, user_agents, room_map)
@@ -5204,7 +5461,12 @@ def _filter_briefing_digests(vis: Any, digests: list) -> list:
         else:
             has_room_access = scope in room_map
             has_visible_hot = bool(digest.summary.get("hot_context"))
-            if not has_room_access and not has_visible_hot:
+            # A surviving who_to_ask names only agents already cleared above,
+            # so keeping the digest for its sake discloses nothing further —
+            # and dropping it would throw away the routing this caller is
+            # allowed to act on, which is the whole point of the block.
+            has_visible_ask = bool(digest.summary.get("who_to_ask"))
+            if not has_room_access and not has_visible_hot and not has_visible_ask:
                 continue
 
         filtered.append(digest)

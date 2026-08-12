@@ -32,10 +32,12 @@ from amfs_filesystem.adapter import FilesystemAdapter
 
 @pytest.fixture(autouse=True)
 def _clear_gate_cache():
-    """The gate is cached process-wide; a stub must not leak between tests."""
+    """Gates are cached across calls; a stub must not leak between tests."""
     capture._GATE_CACHE.clear()
+    capture._ADAPTERLESS_GATE.clear()
     yield
     capture._GATE_CACHE.clear()
+    capture._ADAPTERLESS_GATE.clear()
 
 
 class _Decision:
@@ -45,7 +47,13 @@ class _Decision:
 
 
 def _install_gate(monkeypatch, gate) -> None:
-    capture._GATE_CACHE["gate"] = gate
+    """Stand in for the gate so no import of the optional Pro package is attempted.
+
+    Replaces the lookup rather than seeding a cache entry, because the real cache
+    is keyed by adapter and these tests reach it down several paths — some with no
+    adapter, some through an ``AgentMemory`` holding a real one.
+    """
+    monkeypatch.setattr(capture, "_gate_for", lambda adapter: gate)
 
 
 def _flush_bg() -> None:
