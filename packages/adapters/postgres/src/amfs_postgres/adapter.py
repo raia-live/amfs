@@ -1994,11 +1994,23 @@ class PostgresAdapter(AdapterABC):
                 # Weekly reuse deltas from the timestamped event log (READ /
                 # CROSS_AGENT_READ events). recall_count on entries is a bare
                 # counter, so this is the only source of *when* reuse happened.
+                #
+                # Scoped explicitly by account, as in graph_stats: amfs_events
+                # has no row-level security, so unlike every other query here
+                # this one is not isolated by RLS. Without the filter each
+                # account is shown the whole deployment's reuse — measured on
+                # production, one account's true +106% rendered as +472%.
                 event_conditions = [
                     "namespace = %s",
                     "event_type IN ('read', 'cross_agent_read')",
                 ]
                 event_params: list[Any] = [self._namespace]
+                event_account_id = self._get_current_account_id()
+                if event_account_id:
+                    event_conditions.append("account_id = %s")
+                    event_params.append(event_account_id)
+                else:
+                    event_conditions.append("account_id IS NULL")
                 if agent_ids is not None:
                     event_conditions.append("agent_id = ANY(%s)")
                     event_params.append(list(agent_ids))
@@ -3522,16 +3534,35 @@ class PostgresAdapter(AdapterABC):
         return [self._row_to_event(r) for r in rows]
 
     def get_event(self, event_id: str, namespace: str = "default") -> Event | None:
-        sql = """
+        """Fetch one event by id, scoped to the caller's account.
+
+        The id comes from the client: the rollback endpoints resolve
+        ``target_event_id`` through here and take the timestamp — and, in the
+        branching plugin, the agent — off whatever comes back. amfs_events has
+        no RLS, so without the filter that lookup reaches into other accounts
+        and an id from one becomes a rollback target in another. Missing tenant
+        context matches only untenanted rows rather than everything: a 404 is
+        the safe failure here, an unscoped read is not.
+        """
+        conditions = ["id = %s", "namespace = %s"]
+        params: list[Any] = [event_id, namespace]
+        account_id = self._get_current_account_id()
+        if account_id:
+            conditions.append("account_id = %s")
+            params.append(account_id)
+        else:
+            conditions.append("account_id IS NULL")
+
+        sql = f"""
             SELECT id, namespace, agent_id, branch, event_type,
                    summary, details, actor_agent_id, created_at
             FROM amfs_events
-            WHERE id = %s AND namespace = %s
+            WHERE {" AND ".join(conditions)}
             LIMIT 1
         """
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, (event_id, namespace))
+                cur.execute(sql, params)
                 row = cur.fetchone()
         if row is None:
             return None
