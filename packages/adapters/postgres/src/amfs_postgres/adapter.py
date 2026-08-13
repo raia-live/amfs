@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
+import os
+import re
 import threading
 import uuid
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
@@ -91,6 +95,95 @@ logger = logging.getLogger(__name__)
 _EXCLUDE_SHARED_PATHS = "entity_path NOT LIKE '@%%/%%'"
 
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
+
+_DEFAULT_POOL_MIN = 2
+_DEFAULT_POOL_MAX = 10
+
+
+def _pool_size_from_env(name: str, default: int) -> int:
+    """A pool bound read from the environment, or the default.
+
+    A bad value is a misconfiguration, not a reason to refuse to start: a typo
+    in a deployment variable would otherwise take a service down at boot, which
+    is worse than running on the default and saying so.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        size = int(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number — using %d", name, raw, default)
+        return default
+    if size < 1:
+        logger.warning("%s=%d is below 1 — using %d", name, size, default)
+        return default
+    return size
+
+
+def pool_bounds(
+    min_pool_size: int | None = None, max_pool_size: int | None = None
+) -> tuple[int, int]:
+    """How many connections one adapter may hold.
+
+    Every process holding a pool multiplies against every instance of it, and
+    the database has a fixed ``max_connections``. That budget is a property of
+    the deployment, not of the code, so it belongs in the environment —
+    ``AMFS_POSTGRES_POOL_MIN`` and ``AMFS_POSTGRES_POOL_MAX`` — where an
+    operator scaling a service out can spend it without a release.
+
+    An explicit argument still wins, because a caller that names a size is
+    describing what that particular adapter is for: a background worker asking
+    for two connections should get two, whatever the request path is allowed.
+    """
+    low = (
+        min_pool_size
+        if min_pool_size is not None
+        else _pool_size_from_env("AMFS_POSTGRES_POOL_MIN", _DEFAULT_POOL_MIN)
+    )
+    high = (
+        max_pool_size
+        if max_pool_size is not None
+        else _pool_size_from_env("AMFS_POSTGRES_POOL_MAX", _DEFAULT_POOL_MAX)
+    )
+    # psycopg_pool refuses a minimum above the maximum. Reaching that means the
+    # two numbers came from different places — one argument, one variable — and
+    # the ceiling is the one to respect, since it is what the database can bear.
+    return min(low, high), high
+
+
+def statement_timeout_options() -> str | None:
+    """The libpq ``options`` string carrying the statement ceiling, if set.
+
+    A ceiling on how long any one statement may run. Off unless asked for,
+    because the right ceiling depends on the deployment: a request-serving
+    process wants one near its own request timeout, while a consolidation or
+    backfill job may legitimately run for much longer, and a default here would
+    abort the second kind of work in installations that never asked for it.
+
+    Worth setting on anything serving HTTP. A statement that outlives the
+    request that asked for it holds its locks with nobody left to want the
+    answer, which is how a single slow query became a production outage on
+    2026-08-12; see _apply_schema.
+    """
+    timeout = os.environ.get("AMFS_POSTGRES_STATEMENT_TIMEOUT", "").strip()
+    return f"-c statement_timeout={timeout}" if timeout else None
+
+
+def _tables_created_by(sql: str) -> frozenset[str]:
+    """The tables a chunk of DDL creates.
+
+    Reads the SQL rather than taking a list, so that adding a table anywhere the
+    bootstrap runs is covered without anyone remembering to update a second
+    place — which is the kind of upkeep that silently stops happening.
+    """
+    return frozenset(
+        re.findall(
+            r"CREATE TABLE IF NOT EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)",
+            sql,
+            re.IGNORECASE,
+        )
+    )
 
 # SQL mirror of amfs_core.aggregates.recall_tokens_saved: per reuse, credit
 # the measured content size (~CHARS_PER_TOKEN chars/token) clamped to
@@ -214,8 +307,10 @@ class PostgresAdapter(AdapterABC):
         If True, create tables/triggers on init.
     min_pool_size:
         Minimum number of connections in the pool (requires ``psycopg_pool``).
+        Defaults to ``AMFS_POSTGRES_POOL_MIN``, or 2.
     max_pool_size:
         Maximum number of connections in the pool (requires ``psycopg_pool``).
+        Defaults to ``AMFS_POSTGRES_POOL_MAX``, or 10.
     """
 
     def __init__(
@@ -224,8 +319,8 @@ class PostgresAdapter(AdapterABC):
         namespace: str = "default",
         *,
         auto_schema: bool = True,
-        min_pool_size: int = 2,
-        max_pool_size: int = 10,
+        min_pool_size: int | None = None,
+        max_pool_size: int | None = None,
         embedder: EmbedderABC | None = None,
         embedding_dim: int = 384,
     ) -> None:
@@ -240,14 +335,20 @@ class PostgresAdapter(AdapterABC):
         # dimension (see ensure_embedding_column). None => write-time embedding off.
         self._embedder = embedder
         self._embedding_dim = embedding_dim
-        pool_kwargs: dict[str, Any] = {
-            "kwargs": {"row_factory": dict_row, "autocommit": True},
+        connect_kwargs: dict[str, Any] = {
+            "row_factory": dict_row,
+            "autocommit": True,
         }
+        options = statement_timeout_options()
+        if options:
+            connect_kwargs["options"] = options
+        pool_kwargs: dict[str, Any] = {"kwargs": connect_kwargs}
         if _ConnectionPool is not None:
+            min_size, max_size = pool_bounds(min_pool_size, max_pool_size)
             self._pool = _ConnectionPool(
                 dsn,
-                min_size=min_pool_size,
-                max_size=max_pool_size,
+                min_size=min_size,
+                max_size=max_size,
                 **pool_kwargs,
             )
         else:
@@ -263,15 +364,98 @@ class PostgresAdapter(AdapterABC):
         self._listen_stop = threading.Event()
         self._watchers: dict[str, list[Callable[[MemoryEntry], None]]] = {}
 
+    def _migrations_source(self) -> str | None:
+        """The text of _apply_migrations, or None if it cannot be read.
+
+        The migrations are Python rather than a file, so both the fingerprint and
+        the table-presence check have to reach for them through inspect. None on a
+        frozen or zipped install, where callers fall back to the behaviour from
+        before any of this existed: apply the schema.
+        """
+        try:
+            import inspect
+
+            return inspect.getsource(type(self)._apply_migrations)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _schema_fingerprint(self) -> str | None:
+        """Identity of the schema this build would apply, or None if unknowable.
+
+        Covers the migrations as well as schema.sql, because they add columns and
+        indexes of their own — fingerprinting only the file would skip a container
+        whose code carries a migration the database has not seen. Reading the
+        source is how that stays automatic; a hand-bumped revision constant is a
+        step someone eventually forgets, and forgetting it here means a column
+        silently never gets added.
+        """
+        migrations = self._migrations_source()
+        if migrations is None:
+            return None
+        return hashlib.sha256(
+            (_SCHEMA_SQL + migrations).encode("utf-8")
+        ).hexdigest()
+
+    def _expected_tables(self) -> frozenset[str]:
+        """Every table the bootstrap creates, from both places it creates them.
+
+        schema.sql is not the whole schema: _apply_migrations adds the agent-group
+        tables. Checking only the file would leave those three outside the
+        presence check, so dropping one of them while the fingerprint still
+        matched would be waved through — the exact hole the presence check was
+        added to close, just further from the eye.
+        """
+        return _tables_created_by(_SCHEMA_SQL) | _tables_created_by(
+            self._migrations_source() or ""
+        )
+
     def _apply_schema(self, *, retries: int = 3) -> None:
+        """Bring the database up to this build's schema, at most once per build.
+
+        Every process that constructs an adapter runs this, which on a warm
+        database used to mean re-running the whole DDL on every container start.
+        That is not free even when every statement is a no-op: ALTER TABLE and
+        CREATE INDEX ask for ACCESS EXCLUSIVE, and a *waiting* exclusive lock
+        blocks every reader that arrives behind it. One long-running SELECT is
+        then enough to stall the table, and because a stalled table stalls
+        startup, the platform responds by starting more containers, each adding
+        another exclusive lock to the queue. That took production down on
+        2026-08-12: 29 queued copies of this DDL behind a single orphaned query.
+
+        So the fast path checks a fingerprint and touches nothing, and the slow
+        path refuses to queue: lock_timeout means a container that cannot get the
+        lock promptly fails this attempt instead of joining the convoy it would
+        otherwise extend.
+        """
         import time as _time
+
+        fingerprint = self._schema_fingerprint()
+        if fingerprint and self._schema_is_current(fingerprint):
+            return
 
         for attempt in range(1, retries + 1):
             try:
                 with self._pool.connection() as conn:
                     with conn.cursor() as cur:
-                        cur.execute(_SCHEMA_SQL)
-                        self._apply_migrations(cur)
+                        # Bounds the wait for a lock, not the work: a genuine
+                        # first-run CREATE INDEX on a large table is allowed to
+                        # take as long as it takes.
+                        #
+                        # Reset in the finally because the pool runs autocommit,
+                        # which makes plain SET last for the life of the session.
+                        # Left set, this connection would go back to the pool and
+                        # hand a 5s lock timeout to ordinary writes, turning
+                        # everyday contention into failed requests. SET LOCAL is
+                        # not the answer either: outside a transaction it is a
+                        # no-op, and schema.sql is not something to wrap in one.
+                        cur.execute("SET lock_timeout = '5s'")
+                        try:
+                            cur.execute(_SCHEMA_SQL)
+                            self._apply_migrations(cur)
+                            if fingerprint:
+                                self._record_schema_fingerprint(cur, fingerprint)
+                        finally:
+                            cur.execute("SET lock_timeout = DEFAULT")
                 return
             except Exception as exc:
                 is_retryable = "deadlock" in str(exc).lower() or "lock" in str(exc).lower()
@@ -284,6 +468,95 @@ class PostgresAdapter(AdapterABC):
                     _time.sleep(wait)
                 else:
                     raise
+
+    def _schema_is_current(self, fingerprint: str) -> bool:
+        """Whether this database already has the schema this build would apply.
+
+        The marker alone is not enough to answer this, and trusting it on its own
+        was a bug: it lives in a table of its own, so it survives anything that
+        removes the tables it vouches for — a dropped table, a restore from an
+        older dump, a test fixture resetting state — and the next process would
+        sail past the DDL and then fail on the first query against a table that
+        is no longer there. So every table the bootstrap creates is checked too,
+        against the catalog, which costs one indexed lookup and takes no locks.
+
+        Deliberately silent about every failure. Anything unreadable means "not
+        current", which costs one pass of idempotent DDL — the behaviour from
+        before this check existed. Raising instead would turn a missing metadata
+        row into a process that will not boot.
+        """
+        try:
+            expected = self._expected_tables()
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM amfs_schema_state WHERE fingerprint = %s",
+                        (fingerprint,),
+                    )
+                    if cur.fetchone() is None:
+                        return False
+                    cur.execute(
+                        """
+                        SELECT count(*) AS present
+                        FROM pg_catalog.pg_class c
+                        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                        WHERE c.relkind = 'r'
+                          AND n.nspname = ANY (current_schemas(false))
+                          AND c.relname = ANY (%s)
+                        """,
+                        (list(expected),),
+                    )
+                    row = cur.fetchone()
+                    return bool(expected) and row["present"] == len(expected)
+        except Exception:  # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _record_schema_fingerprint(cur: psycopg.Cursor, fingerprint: str) -> None:
+        """Note that this database has been given this build's schema.
+
+        A row per schema, not one row for "the current schema". Two builds are
+        alive at once during any rolling deploy, and a single row makes them
+        fight over it: the older instance finds the newer hash, decides it is out
+        of date, re-applies its DDL and overwrites the marker, at which point the
+        newer instance does the same in reverse. Every scale-up on either
+        revision would then take ACCESS EXCLUSIVE locks — the convoy this whole
+        mechanism exists to prevent, arriving exactly at deploy time, when the
+        most instances are starting at once.
+
+        Recording each schema separately means both builds see themselves as
+        applied and neither re-applies. The DDL is additive, so a database that
+        has been given two schemas satisfies both. Growth is one row per distinct
+        schema version the deployment has ever run, which is not a table anyone
+        needs to prune; it is also not a history worth reading, so a row is
+        replaced rather than duplicated when the same schema is applied again.
+
+        Deliberately carries no account_id and no row-level security policy,
+        unlike every table that holds tenant data. It records a hash of this
+        build's DDL, which is the same for every tenant on the deployment and is
+        not anybody's data. Nothing tenant-scoped may be added to it later
+        without giving it a policy first.
+        """
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS amfs_schema_state (
+                fingerprint TEXT NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        # Scoped to this fingerprint: an unqualified DELETE is what let one build
+        # erase another's marker. Not an upsert, to avoid depending on a unique
+        # index that databases created by the first version of this code do not
+        # have.
+        cur.execute(
+            "DELETE FROM amfs_schema_state WHERE fingerprint = %s",
+            (fingerprint,),
+        )
+        cur.execute(
+            "INSERT INTO amfs_schema_state (fingerprint) VALUES (%s)",
+            (fingerprint,),
+        )
 
     @staticmethod
     def _apply_migrations(cur: psycopg.Cursor) -> None:

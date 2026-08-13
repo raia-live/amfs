@@ -34,7 +34,12 @@ from amfs_core.models import (
     SemanticQuery,
 )
 
-from amfs_postgres.adapter import _EXCLUDE_SHARED_PATHS, PostgresAdapter
+from amfs_postgres.adapter import (
+    _EXCLUDE_SHARED_PATHS,
+    PostgresAdapter,
+    pool_bounds,
+    statement_timeout_options,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,20 +141,30 @@ class AsyncPostgresAdapter:
         dsn: str,
         namespace: str = "default",
         *,
-        min_pool_size: int = 2,
-        max_pool_size: int = 10,
+        min_pool_size: int | None = None,
+        max_pool_size: int | None = None,
     ) -> None:
         self._dsn = dsn
         self._namespace = namespace
         self._has_embedding_col = False
         self._has_search_tsv = False
         self._has_is_artifact_col = False
+        connect_kwargs: dict[str, Any] = {"row_factory": dict_row, "autocommit": True}
+        # The ceiling belongs here most of all. This adapter serves the hot-path
+        # REST endpoints, so it holds the statements a caller is actually waiting
+        # on — and until this line existed, AMFS_POSTGRES_STATEMENT_TIMEOUT
+        # reached only the sync adapter, leaving the request path it was
+        # introduced to protect without one.
+        options = statement_timeout_options()
+        if options:
+            connect_kwargs["options"] = options
+        min_size, max_size = pool_bounds(min_pool_size, max_pool_size)
         self._pool = _AsyncTenantRLSPoolWrapper(
             AsyncConnectionPool(
                 dsn,
-                min_size=min_pool_size,
-                max_size=max_pool_size,
-                kwargs={"row_factory": dict_row, "autocommit": True},
+                min_size=min_size,
+                max_size=max_size,
+                kwargs=connect_kwargs,
                 open=False,
             )
         )

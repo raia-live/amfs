@@ -5940,7 +5940,14 @@ def main() -> None:
                 from amfs_cortex.worker import CortexWorker
 
                 namespace = os.environ.get("AMFS_NAMESPACE", "default")
-                adapter = PostgresAdapter(dsn=dsn, namespace=namespace)
+                # One background thread compiling digests on a timer, sharing a
+                # process with the request path. Sized for that rather than left
+                # on the pool default, which would have it hold as many
+                # connections as the endpoints do while using one at a time —
+                # multiplied by every instance the service scales out to.
+                adapter = PostgresAdapter(
+                    dsn=dsn, namespace=namespace, min_pool_size=1, max_pool_size=2
+                )
 
                 strategies = []
                 try:
