@@ -51,6 +51,7 @@ Every other memory system is a smarter store. AMFS is the only one that treats a
 | Cortex drift gate | Yes | No | No | No | No | No | No |
 | MCP server | Yes | Yes | No | Yes | No | No | No |
 | Self-hosted / OSS | Apache 2.0 | OSS+Cloud | OSS+Cloud | OSS | OSS | OSS+Cloud | OSS |
+| Import from another memory system | Mem0, Zep | No | No | No | No | No | No |
 | Multi-tenant with RLS | Pro | Cloud | Cloud | No | No | Cloud | Cloud |
 | Enterprise dashboard | Pro | Cloud | Cloud | No | No | Cloud | Cloud |
 | Learned ranking from outcomes | Pro | No | No | No | No | No | No |
@@ -70,6 +71,8 @@ Every other memory system is a smarter store. AMFS is the only one that treats a
 - **Multi-agent provenance** -- AMFS tracks authorship, detects conflicts, and auto-links causality. Mem0 is single-user oriented.
 - **Four-signal decay** -- Time + type + outcomes + access frequency. Mem0 has no decay model.
 - **Tiered memory** -- Hot/Warm/Archive with progressive retrieval. Mem0 searches everything.
+
+**Already on Mem0:** Pro imports a project directly — memories, entities and optionally each memory's version history. See [Migrate from Mem0 or Zep](/amfs/guides/migrate/).
 
 ---
 
@@ -158,6 +161,16 @@ Every other memory system is a smarter store. AMFS is the only one that treats a
 - **Production feedback** -- Memvid stores and retrieves. AMFS learns from outcomes.
 
 Memvid is the right choice for single-user, offline, or edge scenarios where infrastructure is a non-starter. AMFS is for production multi-agent systems that need versioning, feedback, and collaboration.
+
+---
+
+## Coming from Mem0 or Zep
+
+A comparison is only worth reading if you can act on it, so Pro imports directly from both. Paste an API key, look at the counts and what they'd cost against your plan, and start it — or run five users first and see what lands. Nothing is removed from the system you're leaving, and everything an import wrote can be removed again in one action if you decide against it.
+
+What neither source has is a confidence score, so AMFS derives one: what a source holds verbatim comes in at 1.0, what it currently believes at 0.8, its own model's summaries at 0.6, and facts it has stopped believing at 0.3. Original timestamps are preserved. From there the [outcome loop](/amfs/concepts/confidence/) takes over and those starting numbers stop being guesses.
+
+[Migrate from Mem0 or Zep](/amfs/guides/migrate/){: .btn .btn-outline }
 
 ---
 
