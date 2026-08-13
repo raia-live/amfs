@@ -31,11 +31,11 @@ Nothing is removed from Mem0 or Zep. An import reads; it never deletes, and you 
 
 ## Run the import
 
-Open **Migrate** in the dashboard and pick the source. It's three steps.
+In the dashboard, open the account menu (your avatar, top right) and choose **Migrate**, then pick the source. It's three steps.
 
 **1. Connect.** Paste the API key. It's checked against the source immediately, so a wrong or expired key fails here rather than twenty minutes into a run. Once the key works you'll see which account it belongs to — worth a glance if you have more than one project.
 
-**2. Review.** This is the whole point of the flow. You get counts of what's there, how many memories that becomes in AMFS, roughly how long it will take, and whether your plan has room for it. Adjust the options (below), refresh, and the numbers re-price for the import you actually chose.
+**2. Review.** This is the whole point of the flow. You get counts of what's there, how many memories that becomes in AMFS, roughly how long it will take, and whether your plan has room for it. Adjust the options (below), refresh, and the numbers re-price for the import you actually chose. Counting reads your source at a deliberately slow pace, so give it a few seconds; if the source is rate limiting you, the counts may be unavailable and you can still go ahead.
 
 **3. Import.** It runs on our infrastructure, not in your browser. Close the tab, come back tomorrow, reopen the page — the progress is where you left it. You can stop it at any point.
 
@@ -71,6 +71,8 @@ The alternative would be 1.0 across the board, which puts another product's gues
 
 These are a starting point, not a verdict. Once your agents start reading these entries and committing outcomes, [confidence moves with what actually happened](/amfs/concepts/confidence/) and the imported guesses stop being guesses.
 
+**Importing twice is safe, and the second import can lower a score as well as raise one.** Keys are derived from the source's own record ids, so a re-run updates what it wrote the first time instead of duplicating it. That applies to graph relationships too: if a fact was true when you first imported and the source has since stopped believing it, re-importing brings that relationship down to the expired score rather than leaving it stuck at its highest historical value. What an import cannot do is talk down a relationship one of *your* agents asserted — that one keeps its own confidence, whatever the source now says.
+
 ### Timestamps and authorship
 
 Entries keep the timestamps they had at the source, so a fact your assistant learned in March is dated March here, not the day you migrated. Everything an import writes is attributed to a synthetic author — `imported-from-zep`, `imported-from-mem0` — which is what makes it distinguishable from your agents' own work forever after.
@@ -87,10 +89,13 @@ Imported entries live under a path named for the source: `zep/subjects/alice`, `
 
 ## Limits
 
-- **Zep counts are estimates.** Zep gives an exact user count but no way to count facts without walking them, so the preview samples and extrapolates. Anything estimated is labelled "about". Mem0 previews are exact.
+- **Zep counts are estimates.** Zep gives an exact user count but no way to count facts without walking them, so the preview samples and extrapolates. Anything estimated is labelled "about". Mem0 previews are exact when Mem0 lets us count — see below.
 - **Very long Zep histories can't be walked to the end.** Zep's episode endpoint serves a fixed window with no cursor past it. The preview says so rather than quietly truncating.
+- **Your source may not let us count.** Mem0's free plan allows about ten API requests a minute, and counting a project takes three, so a busy account can be told to wait. The preview says so and offers to try again — and you can start the import without counts. It runs in the background at a pace the source allows, and reports the real numbers as it goes.
 - **One import per source at a time**, per account.
-- **Imported memories count against your plan** like any other write, which is why the plan check runs in the preview instead of failing you four fifths of the way through.
+- **Imported memories count against your plan** like any other write, which is why the plan check runs in the preview instead of failing you four fifths of the way through. If you fill your plan mid-import anyway — because your agents kept writing, or because a Zep estimate was low — the import stops cleanly and keeps everything it wrote. Move to a larger plan and resume, and it carries on from where it stopped.
+
+Every import and every removal is recorded in your account's audit log, with who started it and what it wrote, so a bulk change to your memory is never invisible after the fact.
 
 ## What AMFS won't do for you
 
