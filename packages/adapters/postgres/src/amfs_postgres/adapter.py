@@ -97,6 +97,79 @@ _EXCLUDE_SHARED_PATHS = "entity_path NOT LIKE '@%%/%%'"
 
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
 
+_DEFAULT_POOL_MIN = 2
+_DEFAULT_POOL_MAX = 10
+
+
+def _pool_size_from_env(name: str, default: int) -> int:
+    """A pool bound read from the environment, or the default.
+
+    A bad value is a misconfiguration, not a reason to refuse to start: a typo
+    in a deployment variable would otherwise take a service down at boot, which
+    is worse than running on the default and saying so.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        size = int(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number — using %d", name, raw, default)
+        return default
+    if size < 1:
+        logger.warning("%s=%d is below 1 — using %d", name, size, default)
+        return default
+    return size
+
+
+def pool_bounds(
+    min_pool_size: int | None = None, max_pool_size: int | None = None
+) -> tuple[int, int]:
+    """How many connections one adapter may hold.
+
+    Every process holding a pool multiplies against every instance of it, and
+    the database has a fixed ``max_connections``. That budget is a property of
+    the deployment, not of the code, so it belongs in the environment —
+    ``AMFS_POSTGRES_POOL_MIN`` and ``AMFS_POSTGRES_POOL_MAX`` — where an
+    operator scaling a service out can spend it without a release.
+
+    An explicit argument still wins, because a caller that names a size is
+    describing what that particular adapter is for: a background worker asking
+    for two connections should get two, whatever the request path is allowed.
+    """
+    low = (
+        min_pool_size
+        if min_pool_size is not None
+        else _pool_size_from_env("AMFS_POSTGRES_POOL_MIN", _DEFAULT_POOL_MIN)
+    )
+    high = (
+        max_pool_size
+        if max_pool_size is not None
+        else _pool_size_from_env("AMFS_POSTGRES_POOL_MAX", _DEFAULT_POOL_MAX)
+    )
+    # psycopg_pool refuses a minimum above the maximum. Reaching that means the
+    # two numbers came from different places — one argument, one variable — and
+    # the ceiling is the one to respect, since it is what the database can bear.
+    return min(low, high), high
+
+
+def statement_timeout_options() -> str | None:
+    """The libpq ``options`` string carrying the statement ceiling, if set.
+
+    A ceiling on how long any one statement may run. Off unless asked for,
+    because the right ceiling depends on the deployment: a request-serving
+    process wants one near its own request timeout, while a consolidation or
+    backfill job may legitimately run for much longer, and a default here would
+    abort the second kind of work in installations that never asked for it.
+
+    Worth setting on anything serving HTTP. A statement that outlives the
+    request that asked for it holds its locks with nobody left to want the
+    answer, which is how a single slow query became a production outage on
+    2026-08-12; see _apply_schema.
+    """
+    timeout = os.environ.get("AMFS_POSTGRES_STATEMENT_TIMEOUT", "").strip()
+    return f"-c statement_timeout={timeout}" if timeout else None
+
 
 def _tables_created_by(sql: str) -> frozenset[str]:
     """The tables a chunk of DDL creates.
@@ -235,8 +308,10 @@ class PostgresAdapter(AdapterABC):
         If True, create tables/triggers on init.
     min_pool_size:
         Minimum number of connections in the pool (requires ``psycopg_pool``).
+        Defaults to ``AMFS_POSTGRES_POOL_MIN``, or 2.
     max_pool_size:
         Maximum number of connections in the pool (requires ``psycopg_pool``).
+        Defaults to ``AMFS_POSTGRES_POOL_MAX``, or 10.
     """
 
     def __init__(
@@ -245,8 +320,8 @@ class PostgresAdapter(AdapterABC):
         namespace: str = "default",
         *,
         auto_schema: bool = True,
-        min_pool_size: int = 2,
-        max_pool_size: int = 10,
+        min_pool_size: int | None = None,
+        max_pool_size: int | None = None,
         embedder: EmbedderABC | None = None,
         embedding_dim: int = 384,
     ) -> None:
@@ -265,26 +340,16 @@ class PostgresAdapter(AdapterABC):
             "row_factory": dict_row,
             "autocommit": True,
         }
-        # A ceiling on how long any one statement may run, applied to every
-        # connection this adapter opens. Off unless asked for, because the right
-        # ceiling depends on the deployment: a request-serving process wants one
-        # near its own request timeout, while a consolidation or backfill job may
-        # legitimately run for much longer, and a default here would abort the
-        # second kind of work in installations that never asked for it.
-        #
-        # Worth setting on anything serving HTTP. A statement that outlives the
-        # request that asked for it holds its locks with nobody left to want the
-        # answer, which is how a single slow query became a production outage on
-        # 2026-08-12; see _apply_schema.
-        timeout = os.environ.get("AMFS_POSTGRES_STATEMENT_TIMEOUT", "").strip()
-        if timeout:
-            connect_kwargs["options"] = f"-c statement_timeout={timeout}"
+        options = statement_timeout_options()
+        if options:
+            connect_kwargs["options"] = options
         pool_kwargs: dict[str, Any] = {"kwargs": connect_kwargs}
         if _ConnectionPool is not None:
+            min_size, max_size = pool_bounds(min_pool_size, max_pool_size)
             self._pool = _ConnectionPool(
                 dsn,
-                min_size=min_pool_size,
-                max_size=max_pool_size,
+                min_size=min_size,
+                max_size=max_size,
                 **pool_kwargs,
             )
         else:
@@ -2209,11 +2274,23 @@ class PostgresAdapter(AdapterABC):
                 # Weekly reuse deltas from the timestamped event log (READ /
                 # CROSS_AGENT_READ events). recall_count on entries is a bare
                 # counter, so this is the only source of *when* reuse happened.
+                #
+                # Scoped explicitly by account, as in graph_stats: amfs_events
+                # has no row-level security, so unlike every other query here
+                # this one is not isolated by RLS. Without the filter each
+                # account is shown the whole deployment's reuse — measured on
+                # production, one account's true +106% rendered as +472%.
                 event_conditions = [
                     "namespace = %s",
                     "event_type IN ('read', 'cross_agent_read')",
                 ]
                 event_params: list[Any] = [self._namespace]
+                event_account_id = self._get_current_account_id()
+                if event_account_id:
+                    event_conditions.append("account_id = %s")
+                    event_params.append(event_account_id)
+                else:
+                    event_conditions.append("account_id IS NULL")
                 if agent_ids is not None:
                     event_conditions.append("agent_id = ANY(%s)")
                     event_params.append(list(agent_ids))
@@ -3742,16 +3819,35 @@ class PostgresAdapter(AdapterABC):
         return [self._row_to_event(r) for r in rows]
 
     def get_event(self, event_id: str, namespace: str = "default") -> Event | None:
-        sql = """
+        """Fetch one event by id, scoped to the caller's account.
+
+        The id comes from the client: the rollback endpoints resolve
+        ``target_event_id`` through here and take the timestamp — and, in the
+        branching plugin, the agent — off whatever comes back. amfs_events has
+        no RLS, so without the filter that lookup reaches into other accounts
+        and an id from one becomes a rollback target in another. Missing tenant
+        context matches only untenanted rows rather than everything: a 404 is
+        the safe failure here, an unscoped read is not.
+        """
+        conditions = ["id = %s", "namespace = %s"]
+        params: list[Any] = [event_id, namespace]
+        account_id = self._get_current_account_id()
+        if account_id:
+            conditions.append("account_id = %s")
+            params.append(account_id)
+        else:
+            conditions.append("account_id IS NULL")
+
+        sql = f"""
             SELECT id, namespace, agent_id, branch, event_type,
                    summary, details, actor_agent_id, created_at
             FROM amfs_events
-            WHERE id = %s AND namespace = %s
+            WHERE {" AND ".join(conditions)}
             LIMIT 1
         """
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, (event_id, namespace))
+                cur.execute(sql, params)
                 row = cur.fetchone()
         if row is None:
             return None
