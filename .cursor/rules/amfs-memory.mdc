@@ -99,13 +99,26 @@ Use `amfs_whoami()` to check the active identity. Use `amfs_reset_identity()` to
   ```
 - Record contexts **as they happen** during the session, not all at the end. This preserves the causal order.
 
+## When to RECORD ACTIONS (what you did, not what you learned)
+
+- **Right after taking a consequential action**: deploying, rolling back, editing a file, refunding, sending, opening a PR, changing a setting.
+  ```
+  amfs_record_action("deploy_rollback", {"service": "checkout", "to_version": "v41"})
+  amfs_record_action("refund_payment", {"charge_id": "ch_123"}, result="refunded")
+  ```
+- **Record failures too** — pass `success=False`. A trace committed as a failure is far more useful when it shows what was attempted.
+- **Not for reads or searches.** Use `amfs_record_context` for what you *learned*; this is for what you *did*.
+- **Use the real tool name, consistently.** The same action should always be recorded under the same name.
+- AMFS cannot observe this by itself — it sees only its own tools, so a call to your deploy or refund tool is invisible unless you record it. Together with `task_input` below it forms a complete record: what you were asked, and what you did about it.
+
 ## When to COMMIT OUTCOMES (capture the full trace)
 
-- **After completing a significant task**: This snapshots all reads, writes, decisions, and contexts from the session into a persisted `DecisionTrace`. Always do this at the end of meaningful work.
+- **After completing a significant task**: This snapshots all reads, writes, decisions, contexts, and recorded actions from the session into a persisted `DecisionTrace`. Always do this at the end of meaningful work.
   ```
-  amfs_commit_outcome("tenant-rls-fix", "success")
+  amfs_commit_outcome("tenant-rls-fix", "success", task_input="tenant queries leaking across accounts")
   amfs_commit_outcome("mcp-pypi-publish", "success")
   ```
+- **Pass `task_input` whenever you have it** — the request that started the work, in the words it arrived in (the user's ask, the alert payload, the ticket body). Without it the trace records what you decided but not what you were asked, which is the half that makes it reusable. Secrets are scanned and redacted before storage.
 - After a **bug or minor setback**: `amfs_commit_outcome("<ticket>", "minor_failure")`
 - After a **severe failure**: `amfs_commit_outcome("<incident-id>", "critical_failure")` or `"failure"`
 - **Don't skip this step** — without `commit_outcome`, the decision trace is lost when the session ends.

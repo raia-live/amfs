@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS amfs_decision_traces (
     decision_summary TEXT,
     task_input TEXT,
     response_text TEXT,
+    tool_calls JSONB DEFAULT '[]',
     causal_entries JSONB DEFAULT '[]',
     external_contexts JSONB DEFAULT '[]',
     query_events JSONB DEFAULT '[]',

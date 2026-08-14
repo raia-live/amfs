@@ -1,12 +1,13 @@
 [project]
 name = "amfs-adapter-postgres"
-version = "0.2.0"
+version = "0.2.1"
 description = "AMFS Postgres adapter with back-propagation triggers"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-    # 0.3.13 adds the capture fields this adapter now persists and selects back.
-    "amfs-core>=0.3.13",
+    # 0.3.14 adds the capture fields this adapter now persists and selects back,
+    # tool_calls among them.
+    "amfs-core>=0.3.14",
     "psycopg[binary]>=3.1,<4",
     "psycopg-pool>=3.1",
 ]

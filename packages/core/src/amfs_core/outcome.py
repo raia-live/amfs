@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 from amfs_core.abc import AdapterABC
 from amfs_core.models import (
@@ -89,6 +90,7 @@ class OutcomeBackPropagator:
         committed_at: datetime | None = None,
         task_input: str | None = None,
         response_text: str | None = None,
+        tool_calls: list[dict[str, Any]] | None = None,
     ) -> OutcomeRecord:
         """Convenience factory for creating OutcomeRecord instances."""
         return OutcomeRecord(
@@ -100,4 +102,5 @@ class OutcomeBackPropagator:
             agent_id=agent_id,
             task_input=task_input,
             response_text=response_text,
+            tool_calls=tool_calls or [],
         )

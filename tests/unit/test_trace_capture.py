@@ -425,6 +425,69 @@ def test_the_posted_traces_capture_is_scanned_as_its_own_agent() -> None:
     assert all(s["session_id"] == "posted-session" for s in seen), seen
 
 
+def test_a_posted_actions_result_is_scanned_by_the_endpoint() -> None:
+    """The result reaches this endpoint as raw text in an HTTP body.
+
+    Arguments were scanned here from the start and the result was not, so a tool
+    that echoed a credential back had it stored verbatim. Driven through the
+    endpoint because the omission was in what the endpoint chose to scan.
+    """
+    import asyncio
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from amfs_core.models import DecisionTrace, ToolCall
+    from amfs_http import server as http_server
+
+    trace = DecisionTrace(
+        session_id="posted-session",
+        agent_id="posting-agent",
+        started_at=datetime.now(UTC),
+        tool_calls=[
+            ToolCall(
+                tool_name="create_api_key",
+                arguments={"scope": "read"},
+                result_summary="issued sk-live-99",
+            )
+        ],
+    )
+    mem = SimpleNamespace(
+        _adapter=SimpleNamespace(save_trace=lambda t: t),
+        agent_id="server-default",
+        session_id="server-session",
+        namespace="ns",
+    )
+
+    def _redact(text, *, adapter=None, agent_id="", session_id=""):
+        return None if text is None else text.replace("sk-live-99", "[REDACTED]")
+
+    original_scan = http_server.scan_captured_text
+    original_args = http_server.scan_captured_arguments
+    original_mem = http_server._get_memory
+    original_link = http_server._link_agent_owner_once
+    http_server.scan_captured_text = _redact  # type: ignore[assignment]
+    # Held aside so a blocked argument cannot be what drops the action; the result
+    # is the subject here.
+    http_server.scan_captured_arguments = (  # type: ignore[assignment]
+        lambda args, **kwargs: args
+    )
+    http_server._get_memory = lambda: mem  # type: ignore[assignment]
+    http_server._link_agent_owner_once = lambda *a, **k: None  # type: ignore[assignment]
+    try:
+        request = SimpleNamespace(
+            json=lambda: asyncio.sleep(0, result=trace.model_dump(mode="json"))
+        )
+        result = asyncio.run(http_server.save_trace(request))
+    finally:
+        http_server.scan_captured_text = original_scan  # type: ignore[assignment]
+        http_server.scan_captured_arguments = original_args  # type: ignore[assignment]
+        http_server._get_memory = original_mem  # type: ignore[assignment]
+        http_server._link_agent_owner_once = original_link  # type: ignore[assignment]
+
+    assert result["tool_calls"][0]["result_summary"] == "issued [REDACTED]"
+    assert result["tool_calls"][0]["tool_name"] == "create_api_key"
+
+
 def test_the_scan_identity_still_falls_back_to_the_handle() -> None:
     """Every other call site passes no identity and must keep the handle's."""
     from types import SimpleNamespace

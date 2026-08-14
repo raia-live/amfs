@@ -211,6 +211,8 @@ class HttpAdapter(AdapterABC):
             body["task_input"] = record.task_input
         if record.response_text:
             body["response_text"] = record.response_text
+        if record.tool_calls:
+            body["tool_calls"] = record.tool_calls
         data = self._post("/api/v1/outcomes", body)
         return [_parse_entry(e) for e in data.get("entries", [])]
 

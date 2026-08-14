@@ -1,6 +1,6 @@
 [project]
 name = "amfs-mcp-server"
-version = "0.7.12"
+version = "0.7.13"
 description = "AMFS MCP Server — expose Agent Memory as MCP tools for Cursor and Claude Code"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -9,8 +9,16 @@ dependencies = [
     # keyword on every call, so an older amfs resolved from a cache would raise
     # TypeError on the one call agents are told to make at the end of every task.
     # An unbounded dependency is how the equivalent skew reached Pro users.
-    "amfs>=0.5.6",
-    "amfs-adapter-http>=0.1.2",
+    # 0.5.7 adds AgentMemory.record_action, which amfs_record_action calls.
+    "amfs>=0.5.7",
+    # 0.1.10 for the same reason, one layer down: this adapter builds the
+    # /outcomes body field by field, and anything earlier does not copy
+    # tool_calls into it. The floor was 0.1.2, which a cached 0.1.9 satisfies —
+    # and then every recorded action is dropped in transit, the server seals the
+    # trace with an empty list, and the dataset built from those traces has
+    # nothing to learn from. Nothing raises: the commit succeeds, and the only
+    # symptom is a model that never becomes ready.
+    "amfs-adapter-http>=0.1.10",
     "fastmcp>=2.0",
 ]
 

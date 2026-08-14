@@ -22,8 +22,9 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
 - `amfs_stats()` — memory overview
 
 ### Tracing and explainability
-- `amfs_commit_outcome(outcome_ref, outcome_type)` — **critical**: snapshots the full decision trace (all reads, writes, decisions, contexts) and persists it. Call this after completing significant work.
+- `amfs_commit_outcome(outcome_ref, outcome_type, task_input?)` — **critical**: snapshots the full decision trace (all reads, writes, decisions, contexts, actions) and persists it. Call this after completing significant work, and pass `task_input` whenever you have it.
 - `amfs_record_context(label, summary, source?)` — capture decisions, external tool results, or user choices in the causal chain. Call this **as decisions happen**, not at the end.
+- `amfs_record_action(tool_name, arguments?, result?, success?)` — record a consequential action you took. Call this **right after taking it**.
 - `amfs_history(entity_path, key, since?, until?)` — retrieve version history of an entry
 - `amfs_explain(outcome_ref?)` — inspect the current session's decision trace: reads + external contexts
 - `amfs_list_traces(entity_path?, agent_id?, limit?)` — browse persisted decision traces from past sessions
@@ -102,13 +103,29 @@ amfs_record_context("architecture-decision", "Using uvx for distribution", sourc
 amfs_record_context("pagerduty-incidents", "3 SEV-1 in last 24h", source="PagerDuty API")
 ```
 
-### After completing significant work (commit the trace)
-**Always call `commit_outcome`** after finishing a task. This snapshots all reads, writes, decisions, and contexts into a persisted `DecisionTrace`:
+### When you take an action (record what you did)
+Record consequential actions **right after taking them** — deploys, rollbacks, file
+edits, refunds, PRs, setting changes. AMFS sees only its own tools, so a call to
+your deploy or refund tool is invisible unless you record it:
 ```
-amfs_commit_outcome("tenant-rls-fix", "success")
+amfs_record_action("deploy_rollback", {"service": "checkout", "to_version": "v41"})
+amfs_record_action("refund_payment", {"charge_id": "ch_123"}, result="refunded")
+amfs_record_action("deploy", {"service": "api"}, result="timed out", success=False)
+```
+Not for reads or searches — `record_context` covers what you learned, this covers
+what you did. Use the real tool name, and use it consistently.
+
+### After completing significant work (commit the trace)
+**Always call `commit_outcome`** after finishing a task. This snapshots all reads, writes, decisions, contexts, and recorded actions into a persisted `DecisionTrace`:
+```
+amfs_commit_outcome("tenant-rls-fix", "success", task_input="tenant queries leaking across accounts")
 amfs_commit_outcome("<ticket>", "minor_failure")
 amfs_commit_outcome("<incident-id>", "critical_failure")
 ```
+Pass `task_input` whenever you have it — the request that started the work, in the
+words it arrived in. Without it the trace records what you decided but not what you
+were asked. Secrets are scanned and redacted before storage.
+
 Without this, the decision trace is lost when the session ends.
 
 ### Before making similar decisions (browse past traces)

@@ -1,10 +1,10 @@
-"""Sanitising captured prompt and response text before it is persisted.
+"""Sanitising captured prompt, response and action text before it is persisted.
 
 ``DecisionTrace.task_input`` and ``DecisionTrace.response_text`` hold the request
-an agent was given and the answer it produced. That is the most useful material
-in the trace — it is the prompt half of a training example — and also the most
-dangerous, because it is raw caller text that routinely contains API keys,
-connection strings and customer data.
+an agent was given and the answer it produced, and ``tool_calls`` holds the actions
+it took. That is the most useful material in the trace — together they are a
+complete training example — and also the most dangerous, because it is raw caller
+text that routinely contains API keys, connection strings and customer data.
 
 This lives in core rather than next to any one entry point because a trace can be
 built from several: the SDK's ``commit_outcome``, the HTTP server's trace
@@ -129,3 +129,59 @@ def scan_captured_text(
             "SafetyGate scan of captured text failed; dropping capture", exc_info=True
         )
         return None
+
+def scan_captured_arguments(
+    arguments: Any,
+    *,
+    adapter: Any = None,
+    agent_id: str = "",
+    session_id: str = "",
+) -> dict[str, Any] | None:
+    """Redact secrets from a recorded action's arguments before they are persisted.
+
+    Returns ``None`` when any single value has to be dropped, discarding the whole
+    action rather than the one argument. A tool call missing an argument is worse
+    than no tool call at all: it still looks like a valid example, so a model would
+    learn to invoke the tool with the parameter absent. Dropping the action loses
+    one example, which the module docstring already treats as the cheaper mistake.
+
+    Nested containers are walked, because arguments are arbitrary caller structures
+    and a credential one level down is still a credential. Non-string scalars are
+    left alone — there is nothing in an int or a bool for the gate to redact.
+    """
+    if not isinstance(arguments, dict):
+        return {}
+
+    sentinel = object()
+
+    def walk(value: Any) -> Any:
+        if isinstance(value, str):
+            if not value:
+                return value
+            scanned = scan_captured_text(
+                value, adapter=adapter, agent_id=agent_id, session_id=session_id
+            )
+            return sentinel if scanned is None else scanned
+        if isinstance(value, dict):
+            out: dict[Any, Any] = {}
+            for k, v in value.items():
+                walked = walk(v)
+                if walked is sentinel:
+                    return sentinel
+                out[k] = walked
+            return out
+        if isinstance(value, (list, tuple)):
+            out_list = []
+            for v in value:
+                walked = walk(v)
+                if walked is sentinel:
+                    return sentinel
+                out_list.append(walked)
+            return out_list
+        return value
+
+    result = walk(arguments)
+    if result is sentinel:
+        logger.info("Action arguments blocked by SafetyGate; dropping the action")
+        return None
+    return result  # type: ignore[return-value]

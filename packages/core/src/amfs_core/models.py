@@ -257,6 +257,10 @@ class OutcomeRecord(BaseModel):
     #: to the outcomes table; adapters write named columns.
     task_input: str | None = None
     response_text: str | None = None
+    #: The actions taken, carried here for the same reason as the capture above.
+    #: Typed as plain dicts because ``ToolCall`` is declared further down this
+    #: module; they are the ``model_dump`` of one.
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TraceEntry(BaseModel):
@@ -280,6 +284,32 @@ class ExternalContext(BaseModel):
     summary: str
     source: str | None = None
     recorded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ToolCall(BaseModel):
+    """An action the agent took during a decision session.
+
+    The action half of a supervised training pair: ``task_input`` on the trace is
+    what was asked, and this is what the agent did about it. Recorded explicitly
+    by the agent, because a memory layer sees only its own tools — it has no way
+    to observe a call to the caller's deploy or refund tool.
+
+    ``arguments`` is scanned for secrets before it is persisted, on the same
+    grounds as the captured prompt: an action's parameters routinely carry
+    credentials, and unlike free text they are structured in a way that makes
+    them easy to feed straight into a dataset.
+    """
+
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    #: Truncated rather than full, so a trace cannot become a copy of an API
+    #: response. The hash below is what proves the result was not altered.
+    result_summary: str = ""
+    result_hash: str = ""
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    duration_ms: int = 0
+    source: str | None = None
+    success: bool = True
 
 
 class QueryEvent(BaseModel):
@@ -336,6 +366,10 @@ class DecisionTrace(BaseModel):
     # they are persisted.
     task_input: str | None = None
     response_text: str | None = None
+    #: The action side of the pair above. Empty on a trace whose agent recorded no
+    #: action, which is the common case for a session that only read and wrote
+    #: memory; supervised training needs both halves and skips such a trace.
+    tool_calls: list[ToolCall] = Field(default_factory=list)
     causal_entries: list[TraceEntry] = Field(default_factory=list)
     external_contexts: list[ExternalContext] = Field(default_factory=list)
     query_events: list[QueryEvent] = Field(default_factory=list)

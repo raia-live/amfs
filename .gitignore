@@ -17,3 +17,6 @@ test.py
 
 # pytest temp dirs (created when basetemp lands in the repo)
 pytest-of-*/
+
+# macOS finder metadata, committed three times by accident already.
+.DS_Store

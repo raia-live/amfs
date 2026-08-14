@@ -1,13 +1,14 @@
 [project]
 name = "amfs-http-server"
-version = "0.3.13"
+version = "0.3.14"
 description = "AMFS HTTP/REST API server with SSE support"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-    # The trace endpoints call amfs_core.capture and read/write task_input.
-    "amfs>=0.5.6",
-    "amfs-core>=0.3.13",
+    # The trace endpoints call amfs_core.capture and read/write task_input, and
+    # 0.3.14 / 0.5.7 add the action half: scan_captured_arguments and ToolCall.
+    "amfs>=0.5.7",
+    "amfs-core>=0.3.14",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "sse-starlette>=2.0",
