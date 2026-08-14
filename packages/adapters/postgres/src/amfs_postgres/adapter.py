@@ -60,6 +60,7 @@ from amfs_core.models import (
     QueryEvent,
     SearchQuery,
     SemanticQuery,
+    SessionMetadata,
     Tag,
     ToolCall,
     TraceEntry,
@@ -2595,7 +2596,18 @@ class PostgresAdapter(AdapterABC):
                         trace.session_duration_ms,
                         json.dumps([e.model_dump(mode="json") for e in trace.error_events]),
                         json.dumps(trace.state_diff.model_dump(mode="json")) if trace.state_diff else None,
-                        json.dumps(trace.session_metadata) if trace.session_metadata else "{}",
+                        # Dumped like every other model field on this row. The
+                        # field is typed, so anything arriving over
+                        # ``POST /api/v1/traces`` is a ``SessionMetadata`` by the
+                        # time it reaches here and ``json.dumps`` cannot encode
+                        # it — the trace was lost with a 500. A plain dict still
+                        # gets through ``model_copy(update=...)``, which does not
+                        # validate, so both shapes are accepted.
+                        json.dumps(
+                            trace.session_metadata.model_dump(mode="json")
+                            if isinstance(trace.session_metadata, SessionMetadata)
+                            else trace.session_metadata
+                        ) if trace.session_metadata else "{}",
                         trace.created_at,
                         trace.task_input,
                         trace.response_text,
