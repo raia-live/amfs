@@ -177,6 +177,64 @@ class TestContradictoryFlagsAreRefused:
         assert built["env"]["AMFS_API_KEY"] == "amfs_k"
 
 
+class TestClientsThatCannotHoldAUrl:
+    """Claude Desktop and Windsurf, in remote mode.
+
+    Claude Desktop's config file takes stdio servers only, and Windsurf calls the
+    field `serverUrl`. Writing `{"type": "http", "url": …}` into either is
+    ignored, so the script reporting "Configured" would be a lie that also hides
+    the one place the person could have fixed it.
+    """
+
+    def _configure(self, client: str, args: str, tmp_path: Path) -> str:
+        home = tmp_path / "home"
+        home.mkdir()
+        out = _run(
+            args,
+            f'HOME={home!s} configure_client {client} 2>&1 || true',
+            tmp_path,
+        )
+        return out
+
+    @pytest.mark.parametrize("client", ["claude-desktop", "windsurf"])
+    def test_remote_mode_tells_the_user_instead_of_writing(
+        self, client: str, tmp_path: Path
+    ) -> None:
+        out = self._configure(client, "--remote", tmp_path)
+        assert "cannot be configured from here" in out
+        assert "https://mcp.sense-lab.ai/mcp" in out
+        assert "Configured" not in out
+
+    @pytest.mark.parametrize("client", ["claude-desktop", "windsurf"])
+    def test_remote_mode_leaves_the_config_file_alone(
+        self, client: str, tmp_path: Path
+    ) -> None:
+        """An ignored entry is not the only cost — the file is shared."""
+        self._configure(client, "--remote", tmp_path)
+        assert not list((tmp_path / "home").rglob("*.json"))
+
+    @pytest.mark.parametrize("client", ["claude-desktop", "windsurf"])
+    def test_the_stdio_path_still_writes_the_file(
+        self, client: str, tmp_path: Path
+    ) -> None:
+        """The regression this could have caused, stated as a test."""
+        out = self._configure(client, "", tmp_path)
+        assert "Configured" in out
+        written = list((tmp_path / "home").rglob("*.json"))
+        assert len(written) == 1
+        assert "amfs-mcp-server" in written[0].read_text()
+
+    def test_cursor_is_configured_by_file_in_remote_mode(
+        self, tmp_path: Path
+    ) -> None:
+        """It understands the URL form, so it is not in the told-by-hand set."""
+        out = self._configure("cursor", "--remote", tmp_path)
+        assert "Configured Cursor" in out
+        written = list((tmp_path / "home").rglob("mcp.json"))
+        assert len(written) == 1
+        assert "https://mcp.sense-lab.ai/mcp" in written[0].read_text()
+
+
 class TestTheJoinTokenIsNotLeakedByTheScript:
     def test_it_does_not_appear_in_the_help_text(self) -> None:
         proc = subprocess.run(

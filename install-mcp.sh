@@ -478,6 +478,27 @@ detect_clients() {
 
 # ── Configure a single client ────────────────────────────────────────────────
 
+# Say where to paste the endpoint, for a client whose config file cannot hold it.
+#
+# `--remote` writes `{"type": "http", "url": …}`, which is what Cursor, Claude
+# Code, Codex and VS Code understand. Claude Desktop's config file takes stdio
+# servers only — a `url` entry there is ignored — and Windsurf names the same
+# thing `serverUrl`, so it is ignored too. Both reach remote servers through
+# their own UI instead.
+#
+# Writing the file anyway is worse than not touching it: the script says
+# "Configured", the client silently has no SenseLab, and the person has no reason
+# to look at the one place that would have worked. So neither is written to in
+# remote mode, and both are told where to go by hand. The stdio path is
+# unaffected and still writes both files as it always did.
+connector_instructions() {
+    local label="$1" where="$2"
+    warn "$label cannot be configured from here in remote mode."
+    echo "    Add it once, by hand: $where"
+    echo "    Endpoint: $(mcp_url)"
+    echo "    It signs in through a browser; there is no key to paste."
+}
+
 configure_client() {
     local client="$1"
 
@@ -488,6 +509,9 @@ configure_client() {
             if $UNINSTALL; then
                 remove_mcp_config "$path"
                 success "Removed AMFS from Claude Desktop config"
+            elif $REMOTE; then
+                connector_instructions "Claude Desktop" \
+                    "Settings → Connectors → Add custom connector"
             else
                 inject_mcp_config "$path"
                 success "Configured Claude Desktop ($path)"
@@ -587,6 +611,9 @@ configure_client() {
             if $UNINSTALL; then
                 remove_mcp_config "$path"
                 success "Removed AMFS from Windsurf config"
+            elif $REMOTE; then
+                connector_instructions "Windsurf" \
+                    "Settings → Cascade → MCP servers → Add server"
             else
                 inject_mcp_config "$path"
                 success "Configured Windsurf ($path)"
