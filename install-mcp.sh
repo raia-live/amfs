@@ -8,10 +8,18 @@ set -euo pipefail
 #   --client <name|all>   Skip auto-detect; configure a specific client (or "all")
 #   --api-key <key>       Use AMFS SaaS with this API key
 #   --api-url <url>       SaaS API URL (default: https://amfs-login.sense-lab.ai)
+#   --remote              Connect to the hosted MCP endpoint; sign in in a browser
+#   --join <link|token>   Room invite to accept once connected (implies --remote)
 #   --uninstall           Remove AMFS config from detected/specified clients
 #   -y, --yes             Skip confirmation prompts
 
 AMFS_DEFAULT_API_URL="https://amfs-login.sense-lab.ai"
+
+# The hosted MCP endpoint. A different host from the API URL above on purpose:
+# it is the identity this resource advertises in its OAuth discovery documents,
+# and a client that discovers one issuer and is then sent to another treats the
+# mismatch as an attack.
+AMFS_DEFAULT_MCP_URL="https://mcp.sense-lab.ai/mcp"
 
 # ── Colours & helpers ────────────────────────────────────────────────────────
 
@@ -33,6 +41,9 @@ fatal()   { error "$@"; exit 1; }
 CLIENT_FLAG=""
 API_KEY=""
 API_URL=""
+MCP_URL=""
+REMOTE=false
+JOIN_TOKEN=""
 UNINSTALL=false
 AUTO_YES=false
 
@@ -41,6 +52,9 @@ while [[ $# -gt 0 ]]; do
         --client)     CLIENT_FLAG="$2"; shift 2 ;;
         --api-key)    API_KEY="$2"; shift 2 ;;
         --api-url)    API_URL="$2"; shift 2 ;;
+        --mcp-url)    MCP_URL="$2"; REMOTE=true; shift 2 ;;
+        --remote)     REMOTE=true; shift ;;
+        --join)       JOIN_TOKEN="$2"; shift 2 ;;
         --uninstall)  UNINSTALL=true; shift ;;
         -y|--yes)     AUTO_YES=true; shift ;;
         -h|--help)
@@ -56,15 +70,49 @@ Options:
                         claude-code, codex, windsurf, vscode, or "all"
   --api-key <key>       Connect to AMFS SaaS with this API key
   --api-url <url>       SaaS API URL (default: https://amfs-login.sense-lab.ai)
+  --remote              Connect to the hosted MCP endpoint instead of running a
+                        local server. Your client signs in through a browser, so
+                        there is no API key to create or paste.
+  --join <link|token>   A room invite link to accept once connected. Implies
+                        --remote, because redeeming one needs a signed-in user.
+  --mcp-url <url>       Hosted MCP endpoint (default: https://mcp.sense-lab.ai/mcp)
   --uninstall           Remove AMFS MCP config from clients
   -y, --yes             Skip confirmation prompts
   -h, --help            Show this help
+
+Notes:
+  Without --api-key or --remote, this installs the open-source server backed by
+  local files in ~/.amfs/ — which is what it has always done with no flags.
 USAGE
             exit 0
             ;;
         *) fatal "Unknown option: $1 (use --help for usage)" ;;
     esac
 done
+
+# ── Resolve the connection mode ──────────────────────────────────────────────
+#
+# Three modes, and exactly one of them applies: the hosted endpoint, SaaS with a
+# pasted key, or local files. The default — no flags at all — is local files, and
+# nothing below changes that.
+
+if $REMOTE && [[ -n "$API_KEY" ]]; then
+    fatal "--remote and --api-key are different ways to authenticate; pass one.
+  --remote signs in through a browser and needs no key.
+  --api-key runs a local server against the SaaS API with the key you paste."
+fi
+
+# --join needs a signed-in user, since accepting an invite admits a person rather
+# than a process. A pasted key already identifies one — its creator — so a key
+# invocation is left alone; without one, the browser sign-in is how a user gets
+# attached to the connection, so joining implies --remote.
+if [[ -n "$JOIN_TOKEN" && -z "$API_KEY" ]]; then
+    REMOTE=true
+fi
+
+if [[ -n "$JOIN_TOKEN" ]] && $UNINSTALL; then
+    fatal "--join and --uninstall ask for opposite things."
+fi
 
 # ── OS detection ─────────────────────────────────────────────────────────────
 
@@ -84,6 +132,13 @@ fi
 # ── Step 1: Ensure uv is installed ───────────────────────────────────────────
 
 ensure_uv() {
+    # The hosted endpoint needs no local process, so it needs no Python
+    # toolchain. Installing uv anyway would download a toolchain and edit the
+    # user's PATH to run nothing — the opposite of what --remote is for.
+    if $REMOTE; then
+        return 0
+    fi
+
     if command -v uv &>/dev/null; then
         success "uv is already installed ($(uv --version))"
         return 0
@@ -118,6 +173,14 @@ ensure_uv() {
 # ── Step 2: Pre-install amfs-mcp-server ──────────────────────────────────────
 
 ensure_amfs_mcp() {
+    # Nothing to install for the hosted endpoint — the client talks to it over
+    # HTTP. This is the whole reason --remote exists: no uvx, no Python, and no
+    # key to copy, because the client signs in through a browser.
+    if $REMOTE; then
+        info "Using the hosted SenseLab endpoint — nothing to install"
+        return 0
+    fi
+
     # `--refresh` so the warm-up pulls the latest published build, matching the
     # `--refresh` the generated client config uses at launch.
     if [[ -n "$API_KEY" ]]; then
@@ -157,12 +220,31 @@ vscode_config_path() {
 
 UVX_PATH=""
 
+mcp_url() {
+    echo "${MCP_URL:-$AMFS_DEFAULT_MCP_URL}"
+}
+
 resolve_uvx_path() {
     if [[ -n "$UVX_PATH" ]]; then return; fi
     UVX_PATH="$(command -v uvx 2>/dev/null || echo "uvx")"
 }
 
 build_mcp_json() {
+    # The hosted endpoint is a URL, not a command, so this branch returns before
+    # uvx is even resolved. Placed ahead of the two below and gated on a variable
+    # that is false unless --remote or --join was passed, so neither the bare
+    # `curl | bash` nor the --api-key invocation reaches different code than it
+    # did before this branch existed.
+    if $REMOTE; then
+        cat <<REMOTEJSON
+{
+        "type": "http",
+        "url": "$(mcp_url)"
+    }
+REMOTEJSON
+        return 0
+    fi
+
     resolve_uvx_path
     local env_block="{}"
     local pkg="amfs-mcp-server"
@@ -435,16 +517,25 @@ configure_client() {
                     warn "Claude Code CLI (claude) not found on PATH — skipping"
                     return 1
                 fi
-                resolve_uvx_path
-                local pkg="amfs-mcp-server"
-                if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
-                # `--refresh` (a uvx flag, before the package) forces a fresh
-                # re-resolve each launch so users never get stuck on a stale
-                # cached build after we publish a fix.
-                local args=("mcp" "add" "senselab" "--" "$UVX_PATH" "--refresh" "$pkg")
-                if [[ -n "$API_KEY" ]]; then
-                    local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
-                    args=("mcp" "add" "senselab" "-e" "AMFS_HTTP_URL=$url" "-e" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "--refresh" "$pkg")
+                local args
+                if $REMOTE; then
+                    # Claude Code has native support for an HTTP transport, and
+                    # runs the OAuth flow itself on first use.
+                    args=("mcp" "add" "--transport" "http" "senselab" "$(mcp_url)")
+                    # Re-runs stay idempotent; adding a name that exists fails.
+                    claude mcp remove senselab 2>/dev/null || true
+                else
+                    resolve_uvx_path
+                    local pkg="amfs-mcp-server"
+                    if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
+                    # `--refresh` (a uvx flag, before the package) forces a fresh
+                    # re-resolve each launch so users never get stuck on a stale
+                    # cached build after we publish a fix.
+                    args=("mcp" "add" "senselab" "--" "$UVX_PATH" "--refresh" "$pkg")
+                    if [[ -n "$API_KEY" ]]; then
+                        local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
+                        args=("mcp" "add" "senselab" "-e" "AMFS_HTTP_URL=$url" "-e" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "--refresh" "$pkg")
+                    fi
                 fi
                 claude "${args[@]}"
                 success "Configured Claude Code"
@@ -465,17 +556,22 @@ configure_client() {
                     warn "Codex CLI (codex) not found on PATH — skipping"
                     return 1
                 fi
-                resolve_uvx_path
-                local pkg="amfs-mcp-server"
-                if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
-                # codex mcp add <name> [--env KEY=VAL]... -- <command> [args...]
-                # `--refresh` (uvx flag, before the package) forces a fresh
-                # re-resolve each launch so a stale cache can't pin users to an
-                # old build after we publish a fix.
-                local args=("mcp" "add" "senselab" "--" "$UVX_PATH" "--refresh" "$pkg")
-                if [[ -n "$API_KEY" ]]; then
-                    local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
-                    args=("mcp" "add" "senselab" "--env" "AMFS_HTTP_URL=$url" "--env" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "--refresh" "$pkg")
+                local args
+                if $REMOTE; then
+                    args=("mcp" "add" "senselab" "--url" "$(mcp_url)")
+                else
+                    resolve_uvx_path
+                    local pkg="amfs-mcp-server"
+                    if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
+                    # codex mcp add <name> [--env KEY=VAL]... -- <command> [args...]
+                    # `--refresh` (uvx flag, before the package) forces a fresh
+                    # re-resolve each launch so a stale cache can't pin users to an
+                    # old build after we publish a fix.
+                    args=("mcp" "add" "senselab" "--" "$UVX_PATH" "--refresh" "$pkg")
+                    if [[ -n "$API_KEY" ]]; then
+                        local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
+                        args=("mcp" "add" "senselab" "--env" "AMFS_HTTP_URL=$url" "--env" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "--refresh" "$pkg")
+                    fi
                 fi
                 # Replace any existing entry so re-runs stay idempotent.
                 codex mcp remove senselab 2>/dev/null || true
@@ -642,13 +738,40 @@ main() {
     success "Done! Restart your IDE/app to connect to AMFS."
     echo ""
 
-    if [[ -n "$API_KEY" ]]; then
+    if $REMOTE; then
+        info "Configured the hosted SenseLab endpoint ($(mcp_url))"
+        echo "  Your client will open a browser to sign in the first time it"
+        echo "  connects. There is no API key to create."
+        echo ""
+        # Named per client because the reload step differs and getting it wrong
+        # looks like the install failed: the config is on disk and the client is
+        # still running without it.
+        echo "  Claude Code:  run /mcp and approve the sign-in"
+        echo "  Cursor:       Settings → MCP, then sign in"
+        echo "  Codex:        restart codex"
+        echo "  Others:       restart the app"
+    elif [[ -n "$API_KEY" ]]; then
         info "Connected to AMFS SaaS (${API_URL:-$AMFS_DEFAULT_API_URL})"
     else
         info "Using local filesystem storage (~/.amfs/)"
         echo "  To connect to AMFS SaaS, re-run with --api-key <key>"
     fi
     echo ""
+
+    if [[ -n "$JOIN_TOKEN" ]]; then
+        # Not redeemed here, and this is not a shortcoming to fix later. Accepting
+        # an invite needs a signed-in user, and the sign-in has not happened yet
+        # — it happens inside the client, after this script has exited. Doing it
+        # here would mean minting a credential of our own first, which is the
+        # copy-and-paste step --remote exists to remove.
+        info "One step left: accept the room invitation."
+        echo "  Once your client has signed in, ask your agent:"
+        echo ""
+        echo "    Join my SenseLab room with amfs_room_redeem, invite ${JOIN_TOKEN}"
+        echo ""
+        echo "  Or open the invite link in a browser, which does the same thing."
+        echo ""
+    fi
 
     # Claude Desktop has no writable instructions file — surface the one manual
     # step so it recalls proactively like the file-based clients now do.
