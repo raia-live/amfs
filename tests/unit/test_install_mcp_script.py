@@ -301,8 +301,52 @@ class TestClientsThatCannotHoldAUrl:
         out = self._configure("claude-desktop", "--remote", tmp_path, home=home)
 
         assert "Removed the old local" not in out
-        assert "not readable as JSON" in out
+        assert "could not be read" in out
         assert "remove it by hand" in out
+
+    def test_a_check_that_cannot_run_at_all_warns_rather_than_going_quiet(
+        self, tmp_path: Path
+    ) -> None:
+        """No python3 on PATH, which is the shape of every unexpected failure.
+
+        The state used to arrive as an exit status, which had to carry both the
+        answer and whether asking worked. A missing interpreter exits 127, and as
+        a number that fell outside the three-way branch — so nothing was removed,
+        nothing was said, and the summary still reported the hosted endpoint.
+        """
+        home = tmp_path / "home"
+        path = self._existing_stdio_config("claude-desktop", home)
+
+        out = _run(
+            "--remote",
+            f"python3() {{ return 127; }}\n"
+            f"HOME={home!s} configure_client claude-desktop 2>&1 || true",
+            tmp_path,
+        )
+
+        assert "Removed the old local" not in out
+        assert "could not be read" in out
+        assert "senselab" in path.read_text()
+
+    def test_a_config_file_it_cannot_write_does_not_abort_the_install(
+        self, tmp_path: Path
+    ) -> None:
+        """`set -e` is on, so a bare removal call exiting non-zero took the whole
+        script with it — before printing the connector instructions, and before
+        the warning that the old entry is still in place."""
+        home = tmp_path / "home"
+        path = self._existing_stdio_config("claude-desktop", home)
+
+        out = _run(
+            "--remote",
+            f"remove_mcp_config() {{ return 1; }}\n"
+            f"HOME={home!s} configure_client claude-desktop 2>&1 || true",
+            tmp_path,
+        )
+
+        assert "Could not confirm" in out
+        assert "Add it once, by hand" in out
+        assert "senselab" in path.read_text()
 
     def test_a_removal_that_cannot_be_confirmed_is_not_called_a_removal(
         self, tmp_path: Path

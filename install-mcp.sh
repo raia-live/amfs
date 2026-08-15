@@ -330,37 +330,47 @@ with open(config_path, 'w') as f:
 " "$config_file" "$amfs_block"
 }
 
-# The three answers has_stdio_senselab gives, named so callers cannot mix up
-# "gone" with "we could not tell" — which is the whole reason it has three.
-readonly SENSELAB_PRESENT=0
-readonly SENSELAB_ABSENT=1
-readonly SENSELAB_UNREADABLE=2
-
-# Whether a config file currently holds a local stdio `senselab` entry.
+# Whether a config file holds a local stdio `senselab` entry: present, absent, or
+# unreadable.
 #
-# The third answer is the reason this parses instead of grepping. `grep -q
-# '"senselab"'` finds the string in a path, a comment, or another server's
-# argument list, and — the case that matters — it cannot tell "the entry is gone"
-# from "the file is unparseable so nothing was removed". remove_mcp_config exits 0
-# on a JSONDecodeError without writing anything, so a caller trusting grep can
-# report a removal that did not happen, which puts back exactly the stale local
-# server the removal exists to prevent.
-has_stdio_senselab() {
-    local config_file="$1"
-    [[ -f "$config_file" ]] || return 1
-    python3 -c "
+# Three answers rather than two, and a word on stdout rather than an exit status.
+#
+# Three, because `grep -q '"senselab"'` cannot tell "the entry is gone" from "the
+# file is unparseable so nothing was removed" — and remove_mcp_config exits 0
+# either way, so a caller trusting grep reports a removal that did not happen and
+# leaves the stale local server it was removing. Grep also matches the name in a
+# path or another server's argument list.
+#
+# A word, because an exit status has to carry both the answer and whether asking
+# worked, and those are different things. If python3 is not on PATH the status is
+# 127, which as a number falls outside a three-way branch and silently means
+# nothing happens. Here every failure of the check becomes "unreadable", which is
+# the answer that warns rather than the one that stays quiet.
+senselab_entry_state() {
+    local config_file="$1" state=""
+
+    if [[ ! -f "$config_file" ]]; then
+        state="absent"
+    else
+        state="$(python3 -c "
 import json, sys
 
 try:
     with open(sys.argv[1]) as f:
         config = json.load(f)
-except (json.JSONDecodeError, OSError):
-    sys.exit(2)
+except (json.JSONDecodeError, OSError, ValueError):
+    sys.exit(1)
 
 entry = (config.get('mcpServers') or {}).get('senselab')
 # A url entry is this script's own remote config, not a local server to clear.
-sys.exit(0 if isinstance(entry, dict) and entry.get('command') else 1)
-" "$config_file"
+print('present' if isinstance(entry, dict) and entry.get('command') else 'absent')
+" "$config_file" 2>/dev/null || true)"
+    fi
+
+    case "$state" in
+        present|absent) echo "$state" ;;
+        *) echo "unreadable" ;;
+    esac
 }
 
 remove_mcp_config() {
@@ -558,27 +568,31 @@ connector_instructions() {
     # way, so "we tried" is not evidence and the one case worth catching is
     # precisely the one where the old server is still there.
     if [[ -n "$config_file" ]]; then
-        local state=$SENSELAB_PRESENT
-        has_stdio_senselab "$config_file" || state=$?
+        local state
+        state="$(senselab_entry_state "$config_file")"
 
-        if [[ $state -eq $SENSELAB_PRESENT ]]; then
-            remove_mcp_config "$config_file"
+        if [[ "$state" == "present" ]]; then
+            # `|| true` because a failure here is not a reason to abandon the
+            # install. The file may be read-only, and the connector instructions
+            # below are still the right thing to print — under `set -e` a bare
+            # call would exit before saying anything at all, including the warning
+            # that the old entry is still there.
+            remove_mcp_config "$config_file" || true
 
-            # Asked again, because the answer is the only evidence. ABSENT is the
-            # one state that is a removal; the other two both mean the old server
-            # may still start, and they share a message because they share a
-            # recovery — open the file and look.
-            state=$SENSELAB_PRESENT
-            has_stdio_senselab "$config_file" || state=$?
-            if [[ $state -eq $SENSELAB_ABSENT ]]; then
+            # Asked again, because the answer is the only evidence a removal
+            # happened. "absent" is the one state that is one; the other two both
+            # mean the old server may still start, and they share a message
+            # because they share a recovery — open the file and look.
+            state="$(senselab_entry_state "$config_file")"
+            if [[ "$state" == "absent" ]]; then
                 success "Removed the old local $label entry ($config_file)"
             else
                 warn "Could not confirm the old local $label entry is gone."
                 echo "    Check $config_file for a \"senselab\" block and remove it —"
                 echo "    until then $label may keep starting the old local server."
             fi
-        elif [[ $state -eq $SENSELAB_UNREADABLE ]]; then
-            warn "$config_file is not readable as JSON, so it was left alone."
+        elif [[ "$state" == "unreadable" ]]; then
+            warn "$config_file could not be read, so it was left alone."
             echo "    If it has a \"senselab\" block, remove it by hand: otherwise"
             echo "    $label keeps starting the old local server."
         fi
