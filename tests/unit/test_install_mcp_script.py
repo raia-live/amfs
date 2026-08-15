@@ -304,6 +304,31 @@ class TestClientsThatCannotHoldAUrl:
         assert "not readable as JSON" in out
         assert "remove it by hand" in out
 
+    def test_a_removal_that_cannot_be_confirmed_is_not_called_a_removal(
+        self, tmp_path: Path
+    ) -> None:
+        """Only "the entry is absent" is evidence of a removal.
+
+        The check after removing was a plain if/else at first, so the two states
+        that are not a removal — still present, and unreadable — collapsed into
+        the success branch between them. Stubbing the removal to do nothing is the
+        cheapest way to hold that open: if any non-absent answer ever reads as
+        success again, this fails.
+        """
+        home = tmp_path / "home"
+        path = self._existing_stdio_config("claude-desktop", home)
+
+        out = _run(
+            "--remote",
+            f"remove_mcp_config() {{ :; }}\n"
+            f"HOME={home!s} configure_client claude-desktop 2>&1 || true",
+            tmp_path,
+        )
+
+        assert "Removed the old local" not in out
+        assert "Could not confirm" in out
+        assert "senselab" in path.read_text()
+
     def test_the_word_senselab_elsewhere_is_not_an_entry(
         self, tmp_path: Path
     ) -> None:

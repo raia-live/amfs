@@ -330,9 +330,13 @@ with open(config_path, 'w') as f:
 " "$config_file" "$amfs_block"
 }
 
+# The three answers has_stdio_senselab gives, named so callers cannot mix up
+# "gone" with "we could not tell" — which is the whole reason it has three.
+readonly SENSELAB_PRESENT=0
+readonly SENSELAB_ABSENT=1
+readonly SENSELAB_UNREADABLE=2
+
 # Whether a config file currently holds a local stdio `senselab` entry.
-#
-# 0 = yes, 1 = no, 2 = the file could not be read as JSON.
 #
 # The third answer is the reason this parses instead of grepping. `grep -q
 # '"senselab"'` finds the string in a path, a comment, or another server's
@@ -554,18 +558,26 @@ connector_instructions() {
     # way, so "we tried" is not evidence and the one case worth catching is
     # precisely the one where the old server is still there.
     if [[ -n "$config_file" ]]; then
-        local before=0
-        has_stdio_senselab "$config_file" || before=$?
-        if [[ $before -eq 0 ]]; then
+        local state=$SENSELAB_PRESENT
+        has_stdio_senselab "$config_file" || state=$?
+
+        if [[ $state -eq $SENSELAB_PRESENT ]]; then
             remove_mcp_config "$config_file"
-            if has_stdio_senselab "$config_file"; then
-                warn "Could not remove the old local $label entry."
-                echo "    Delete the \"senselab\" block from $config_file by hand —"
-                echo "    until then $label keeps starting the old local server."
-            else
+
+            # Asked again, because the answer is the only evidence. ABSENT is the
+            # one state that is a removal; the other two both mean the old server
+            # may still start, and they share a message because they share a
+            # recovery — open the file and look.
+            state=$SENSELAB_PRESENT
+            has_stdio_senselab "$config_file" || state=$?
+            if [[ $state -eq $SENSELAB_ABSENT ]]; then
                 success "Removed the old local $label entry ($config_file)"
+            else
+                warn "Could not confirm the old local $label entry is gone."
+                echo "    Check $config_file for a \"senselab\" block and remove it —"
+                echo "    until then $label may keep starting the old local server."
             fi
-        elif [[ $before -eq 2 ]]; then
+        elif [[ $state -eq $SENSELAB_UNREADABLE ]]; then
             warn "$config_file is not readable as JSON, so it was left alone."
             echo "    If it has a \"senselab\" block, remove it by hand: otherwise"
             echo "    $label keeps starting the old local server."
