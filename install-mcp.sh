@@ -507,12 +507,67 @@ configured() {
 }
 
 connector_instructions() {
-    local label="$1" where="$2"
+    local label="$1" where="$2" config_file="${3:-}"
     MANUAL_COUNT=$((MANUAL_COUNT + 1))
+
+    # Take the old stdio entry out on the way past.
+    #
+    # Not writing was only half of it. Someone switching an existing install to
+    # --remote has a `senselab` block already in this file, and leaving it there
+    # means the client keeps launching the local server: the script says to add a
+    # connector, they add one, and now there are two — or, if they do not, the
+    # migration silently did nothing and they are still on the old server. Both
+    # are worse than either half alone, because the summary says the hosted
+    # endpoint is what they are on.
+    if [[ -n "$config_file" && -f "$config_file" ]] \
+        && grep -q '"senselab"' "$config_file" 2>/dev/null; then
+        remove_mcp_config "$config_file"
+        success "Removed the old local $label entry ($config_file)"
+    fi
+
     warn "$label cannot be configured from here in remote mode."
     echo "    Add it once, by hand: $where"
     echo "    Endpoint: $(mcp_url)"
     echo "    It signs in through a browser; there is no key to paste."
+}
+
+# What is left to do about the invite, if one was passed.
+#
+# The invite is not redeemed here, and that is not a shortcoming to fix later:
+# accepting one needs a signed-in user, and the sign-in happens inside the client
+# after this script has exited. Doing it here would mean minting a credential of
+# our own first, which is the copy-and-paste step --remote exists to remove.
+#
+# What to say differs by mode, which is why this is a function rather than a block
+# in main — the two branches are the thing worth testing, and main cannot be
+# called without configuring real clients.
+join_next_steps() {
+    [[ -n "$JOIN_TOKEN" ]] || return 0
+
+    info "One step left: accept the room invitation."
+    if $REMOTE; then
+        echo "  Once your client has signed in, ask your agent:"
+    else
+        # The key path has no sign-in to wait for: the key already names its
+        # owner, and that owner is who the invite admits. Telling this person to
+        # wait for a browser they will never see reads as a stuck install.
+        echo "  Ask your agent:"
+    fi
+    echo ""
+    echo "    Join my SenseLab room with amfs_room_redeem, invite ${JOIN_TOKEN}"
+    echo ""
+    if $REMOTE; then
+        echo "  Or open the invite link in a browser, which does the same thing."
+    else
+        # Not the same thing on this path. A browser admits whoever is logged
+        # into it, which need not be the account the key belongs to — so
+        # following it can join the room as one account while the agent that is
+        # connected belongs to another, and nothing reports the mismatch.
+        echo "  Opening the link in a browser also works, but it admits"
+        echo "  whoever is signed in there — which may not be the account"
+        echo "  this API key belongs to. Asking the agent avoids the question."
+    fi
+    echo ""
 }
 
 configure_client() {
@@ -527,7 +582,7 @@ configure_client() {
                 success "Removed AMFS from Claude Desktop config"
             elif $REMOTE; then
                 connector_instructions "Claude Desktop" \
-                    "Settings → Connectors → Add custom connector"
+                    "Settings → Connectors → Add custom connector" "$path"
             else
                 inject_mcp_config "$path"
                 configured "Configured Claude Desktop ($path)"
@@ -629,7 +684,7 @@ configure_client() {
                 success "Removed AMFS from Windsurf config"
             elif $REMOTE; then
                 connector_instructions "Windsurf" \
-                    "Settings → Cascade → MCP servers → Add server"
+                    "Settings → Cascade → MCP servers → Add server" "$path"
             else
                 inject_mcp_config "$path"
                 configured "Configured Windsurf ($path)"
@@ -814,20 +869,7 @@ main() {
     fi
     echo ""
 
-    if [[ -n "$JOIN_TOKEN" ]]; then
-        # Not redeemed here, and this is not a shortcoming to fix later. Accepting
-        # an invite needs a signed-in user, and the sign-in has not happened yet
-        # — it happens inside the client, after this script has exited. Doing it
-        # here would mean minting a credential of our own first, which is the
-        # copy-and-paste step --remote exists to remove.
-        info "One step left: accept the room invitation."
-        echo "  Once your client has signed in, ask your agent:"
-        echo ""
-        echo "    Join my SenseLab room with amfs_room_redeem, invite ${JOIN_TOKEN}"
-        echo ""
-        echo "  Or open the invite link in a browser, which does the same thing."
-        echo ""
-    fi
+    join_next_steps
 
     # Claude Desktop has no writable instructions file — surface the one manual
     # step so it recalls proactively like the file-based clients now do.

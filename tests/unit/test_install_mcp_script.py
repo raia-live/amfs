@@ -186,15 +186,46 @@ class TestClientsThatCannotHoldAUrl:
     the one place the person could have fixed it.
     """
 
-    def _configure(self, client: str, args: str, tmp_path: Path) -> str:
-        home = tmp_path / "home"
-        home.mkdir()
-        out = _run(
+    #: Where each client's config lives under a fake HOME, on this platform.
+    #:
+    #: Only macOS and Linux differ, and only for Claude Desktop; the script picks
+    #: between them itself, so the test asks it rather than guessing.
+    def _config_path(self, client: str, home: Path, tmp_path: Path) -> Path:
+        fn = {
+            "claude-desktop": "claude_desktop_config_path",
+            "windsurf": "windsurf_config_path",
+            "cursor": "cursor_config_path",
+        }[client]
+        return Path(_run("", f"HOME={home!s} {fn}", tmp_path).strip())
+
+    def _existing_stdio_config(self, client: str, home: Path) -> Path:
+        """A config file as a previous stdio install would have left it."""
+        home.mkdir(exist_ok=True)
+        path = self._config_path(client, home, home.parent)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "mcpServers": {
+                "senselab": {
+                    "command": "/opt/homebrew/bin/uvx",
+                    "args": ["--refresh", "amfs-mcp-server-pro"],
+                    "env": {"AMFS_API_KEY": "amfs_old_key"},
+                },
+                "somebody-else": {"command": "node", "args": ["other.js"]},
+            }
+        }, indent=4))
+        return path
+
+    def _configure(
+        self, client: str, args: str, tmp_path: Path, home: Path | None = None
+    ) -> str:
+        if home is None:
+            home = tmp_path / "home"
+            home.mkdir(exist_ok=True)
+        return _run(
             args,
             f'HOME={home!s} configure_client {client} 2>&1 || true',
             tmp_path,
         )
-        return out
 
     @pytest.mark.parametrize("client", ["claude-desktop", "windsurf"])
     def test_remote_mode_tells_the_user_instead_of_writing(
@@ -206,12 +237,50 @@ class TestClientsThatCannotHoldAUrl:
         assert "Configured" not in out
 
     @pytest.mark.parametrize("client", ["claude-desktop", "windsurf"])
-    def test_remote_mode_leaves_the_config_file_alone(
+    def test_remote_mode_writes_no_new_config_file(
         self, client: str, tmp_path: Path
     ) -> None:
         """An ignored entry is not the only cost — the file is shared."""
         self._configure(client, "--remote", tmp_path)
         assert not list((tmp_path / "home").rglob("*.json"))
+
+    @pytest.mark.parametrize("client", ["claude-desktop", "windsurf"])
+    def test_it_takes_out_an_existing_local_entry(
+        self, client: str, tmp_path: Path
+    ) -> None:
+        """Someone switching an existing install over to the hosted endpoint.
+
+        Not writing was only half of it. Left in place, the old block keeps the
+        client launching the local server — so either they add the connector and
+        have two, or they do not and the migration silently did nothing, while
+        the summary says they are on the hosted endpoint.
+        """
+        home = tmp_path / "home"
+        path = self._existing_stdio_config(client, home)
+
+        out = self._configure(client, "--remote", tmp_path, home=home)
+
+        assert "Removed the old local" in out
+        assert "senselab" not in path.read_text()
+
+    @pytest.mark.parametrize("client", ["claude-desktop", "windsurf"])
+    def test_it_leaves_other_servers_in_that_file_alone(
+        self, client: str, tmp_path: Path
+    ) -> None:
+        """The file is shared with every other MCP server the person uses."""
+        home = tmp_path / "home"
+        path = self._existing_stdio_config(client, home)
+
+        self._configure(client, "--remote", tmp_path, home=home)
+
+        assert json.loads(path.read_text())["mcpServers"]["somebody-else"]
+
+    def test_there_is_nothing_to_say_when_there_was_no_old_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """A first-time install should not be told something was removed."""
+        out = self._configure("claude-desktop", "--remote", tmp_path)
+        assert "Removed the old local" not in out
 
     @pytest.mark.parametrize("client", ["claude-desktop", "windsurf"])
     def test_the_stdio_path_still_writes_the_file(
@@ -279,6 +348,58 @@ class TestTheClosingSummaryDoesNotOverclaim:
         out = self._run_main("--remote --client cursor", tmp_path)
         assert "Restart your IDE" in out
         assert "Configured the hosted SenseLab endpoint" in out
+
+
+class TestTheJoinCopyMatchesHowTheUserWillSignIn:
+    """`--join` says what to do next, and next is not the same in both modes.
+
+    In remote mode there is a browser sign-in to wait for. On the key path there
+    is not — the key already names its owner — so "once your client has signed
+    in" describes a step that never happens and reads as a stuck install. The
+    browser fallback is worse than merely wrong there: a browser admits whoever
+    is logged into it, which need not be the account the key belongs to, so
+    following it joins the room as one account while the connected agent belongs
+    to another.
+    """
+
+    def _steps(self, args: str, tmp_path: Path) -> str:
+        return _run(args, "join_next_steps", tmp_path)
+
+    def test_remote_mode_waits_for_the_sign_in(self, tmp_path: Path) -> None:
+        assert "Once your client has signed in" in self._steps(
+            "--join tok-abc", tmp_path
+        )
+
+    def test_the_key_path_does_not_wait_for_one(self, tmp_path: Path) -> None:
+        out = self._steps("--api-key amfs_k --join tok-abc", tmp_path)
+        assert "Once your client has signed in" not in out
+        assert "Ask your agent:" in out
+
+    def test_the_key_path_warns_that_a_browser_may_be_someone_else(
+        self, tmp_path: Path
+    ) -> None:
+        out = self._steps("--api-key amfs_k --join tok-abc", tmp_path)
+        assert "whoever is signed in there" in out
+
+    def test_only_remote_calls_the_browser_the_same_thing(
+        self, tmp_path: Path
+    ) -> None:
+        assert "does the same thing" in self._steps("--join tok", tmp_path)
+        assert "does the same thing" not in self._steps(
+            "--api-key amfs_k --join tok", tmp_path
+        )
+
+    @pytest.mark.parametrize(
+        "args", ["--join tok-abc", "--api-key amfs_k --join tok-abc"]
+    )
+    def test_both_modes_name_the_tool_and_the_token(
+        self, args: str, tmp_path: Path
+    ) -> None:
+        out = self._steps(args, tmp_path)
+        assert "amfs_room_redeem, invite tok-abc" in out
+
+    def test_it_says_nothing_at_all_without_an_invite(self, tmp_path: Path) -> None:
+        assert self._steps("--remote", tmp_path).strip() == ""
 
 
 class TestTheJoinTokenIsNotLeakedByTheScript:
