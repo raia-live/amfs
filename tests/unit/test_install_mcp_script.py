@@ -235,6 +235,52 @@ class TestClientsThatCannotHoldAUrl:
         assert "https://mcp.sense-lab.ai/mcp" in written[0].read_text()
 
 
+class TestTheClosingSummaryDoesNotOverclaim:
+    """A full run, end to end, for what the last lines say happened.
+
+    The summary used to be written from the flags rather than from the outcome:
+    `--remote` printed "Configured the hosted SenseLab endpoint" and "restart
+    your IDE/app" whether or not a single file had been written. A remote run
+    that found only Claude Desktop wrote nothing and still reported success,
+    which sends someone to look for a connection instead of at the one
+    instruction that would have worked.
+    """
+
+    def _run_main(self, args: str, tmp_path: Path) -> str:
+        home = tmp_path / "home"
+        home.mkdir()
+        proc = subprocess.run(
+            ["bash", str(SCRIPT), *args.split(), "--yes"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={"HOME": str(home), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+        )
+        return proc.stdout + proc.stderr
+
+    def test_a_client_it_cannot_write_to_is_not_called_configured(
+        self, tmp_path: Path
+    ) -> None:
+        out = self._run_main("--remote --client claude-desktop", tmp_path)
+        assert "Nothing was configured automatically" in out
+        assert "Restart your IDE" not in out
+
+    def test_it_still_names_the_endpoint_that_needs_pasting(
+        self, tmp_path: Path
+    ) -> None:
+        """The run is not useless — it is the instruction that is the product."""
+        out = self._run_main("--remote --client claude-desktop", tmp_path)
+        assert "https://mcp.sense-lab.ai/mcp" in out
+        assert "Add custom connector" in out
+
+    def test_a_client_it_did_write_to_is_told_to_restart(
+        self, tmp_path: Path
+    ) -> None:
+        out = self._run_main("--remote --client cursor", tmp_path)
+        assert "Restart your IDE" in out
+        assert "Configured the hosted SenseLab endpoint" in out
+
+
 class TestTheJoinTokenIsNotLeakedByTheScript:
     def test_it_does_not_appear_in_the_help_text(self) -> None:
         proc = subprocess.run(

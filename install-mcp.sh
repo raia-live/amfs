@@ -47,6 +47,15 @@ JOIN_TOKEN=""
 UNINSTALL=false
 AUTO_YES=false
 
+# What the closing summary is allowed to claim.
+#
+# In remote mode some clients are configured and some can only be told where to
+# paste the endpoint, so "Done, restart your app" is true for one run and a lie
+# for another — a run that found only Claude Desktop would report success while
+# nothing had been connected. These count which happened.
+CONFIGURED_COUNT=0
+MANUAL_COUNT=0
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --client)     CLIENT_FLAG="$2"; shift 2 ;;
@@ -491,8 +500,15 @@ detect_clients() {
 # to look at the one place that would have worked. So neither is written to in
 # remote mode, and both are told where to go by hand. The stdio path is
 # unaffected and still writes both files as it always did.
+# Report a client we actually wrote a config for, and count it as one.
+configured() {
+    CONFIGURED_COUNT=$((CONFIGURED_COUNT + 1))
+    success "$1"
+}
+
 connector_instructions() {
     local label="$1" where="$2"
+    MANUAL_COUNT=$((MANUAL_COUNT + 1))
     warn "$label cannot be configured from here in remote mode."
     echo "    Add it once, by hand: $where"
     echo "    Endpoint: $(mcp_url)"
@@ -514,7 +530,7 @@ configure_client() {
                     "Settings → Connectors → Add custom connector"
             else
                 inject_mcp_config "$path"
-                success "Configured Claude Desktop ($path)"
+                configured "Configured Claude Desktop ($path)"
             fi
             ;;
         cursor)
@@ -525,7 +541,7 @@ configure_client() {
                 success "Removed AMFS from Cursor config"
             else
                 inject_mcp_config "$path"
-                success "Configured Cursor ($path)"
+                configured "Configured Cursor ($path)"
             fi
             ;;
         claude-code)
@@ -562,7 +578,7 @@ configure_client() {
                     fi
                 fi
                 claude "${args[@]}"
-                success "Configured Claude Code"
+                configured "Configured Claude Code"
                 install_claude_code_skill
                 upsert_senselab_block "$HOME/.claude/CLAUDE.md"
                 success "Installed SenseLab recall-first memory guide (skill + ~/.claude/CLAUDE.md)"
@@ -600,7 +616,7 @@ configure_client() {
                 # Replace any existing entry so re-runs stay idempotent.
                 codex mcp remove senselab 2>/dev/null || true
                 codex "${args[@]}"
-                success "Configured Codex"
+                configured "Configured Codex"
                 upsert_senselab_block "$HOME/.codex/AGENTS.md"
                 success "Installed SenseLab recall-first memory guide (~/.codex/AGENTS.md)"
             fi
@@ -616,7 +632,7 @@ configure_client() {
                     "Settings → Cascade → MCP servers → Add server"
             else
                 inject_mcp_config "$path"
-                success "Configured Windsurf ($path)"
+                configured "Configured Windsurf ($path)"
             fi
             ;;
         vscode)
@@ -627,7 +643,7 @@ configure_client() {
                 success "Removed AMFS from VS Code config"
             else
                 inject_mcp_config "$path"
-                success "Configured VS Code ($path)"
+                configured "Configured VS Code ($path)"
             fi
             ;;
         *)
@@ -762,10 +778,20 @@ main() {
 
     echo ""
     echo "──────────────────"
-    success "Done! Restart your IDE/app to connect to AMFS."
+    # Only claim a restart will do it if something was written for a client to
+    # pick up. A remote run that found only Claude Desktop has written nothing,
+    # and telling that person to restart sends them to look for a connection
+    # that will not be there instead of at the instructions just printed.
+    if (( CONFIGURED_COUNT > 0 )); then
+        success "Done! Restart your IDE/app to connect to AMFS."
+    elif (( MANUAL_COUNT > 0 )); then
+        warn "Nothing was configured automatically — see the step above."
+    else
+        warn "No clients were configured."
+    fi
     echo ""
 
-    if $REMOTE; then
+    if $REMOTE && (( CONFIGURED_COUNT > 0 )); then
         info "Configured the hosted SenseLab endpoint ($(mcp_url))"
         echo "  Your client will open a browser to sign in the first time it"
         echo "  connects. There is no API key to create."
@@ -777,6 +803,9 @@ main() {
         echo "  Cursor:       Settings → MCP, then sign in"
         echo "  Codex:        restart codex"
         echo "  Others:       restart the app"
+    elif $REMOTE; then
+        info "The hosted SenseLab endpoint is $(mcp_url)"
+        echo "  Signing in happens in a browser; there is no API key to create."
     elif [[ -n "$API_KEY" ]]; then
         info "Connected to AMFS SaaS (${API_URL:-$AMFS_DEFAULT_API_URL})"
     else
