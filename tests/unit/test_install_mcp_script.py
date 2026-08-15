@@ -282,6 +282,49 @@ class TestClientsThatCannotHoldAUrl:
         out = self._configure("claude-desktop", "--remote", tmp_path)
         assert "Removed the old local" not in out
 
+    def test_a_file_it_cannot_parse_is_reported_not_claimed(
+        self, tmp_path: Path
+    ) -> None:
+        """The case a grep could not distinguish.
+
+        `remove_mcp_config` leaves an unparseable file untouched and exits 0
+        either way, so reporting from the attempt rather than the result claimed
+        a removal that did not happen — putting back the stale local server the
+        removal exists to prevent, with a success line over the top of it.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        path = self._config_path("claude-desktop", home, tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"mcpServers": {"senselab": {"command": "uvx"},,,')
+
+        out = self._configure("claude-desktop", "--remote", tmp_path, home=home)
+
+        assert "Removed the old local" not in out
+        assert "not readable as JSON" in out
+        assert "remove it by hand" in out
+
+    def test_the_word_senselab_elsewhere_is_not_an_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """A path or another server's arguments can carry the name."""
+        home = tmp_path / "home"
+        home.mkdir()
+        path = self._config_path("claude-desktop", home, tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "mcpServers": {
+                "other": {"command": "node", "args": ["/opt/senselab/x.js"]}
+            }
+        }))
+
+        out = self._configure("claude-desktop", "--remote", tmp_path, home=home)
+
+        assert "Removed the old local" not in out
+        assert "Could not remove" not in out
+        assert "not readable as JSON" not in out
+        assert json.loads(path.read_text())["mcpServers"]["other"]
+
     @pytest.mark.parametrize("client", ["claude-desktop", "windsurf"])
     def test_the_stdio_path_still_writes_the_file(
         self, client: str, tmp_path: Path

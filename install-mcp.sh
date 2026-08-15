@@ -330,6 +330,35 @@ with open(config_path, 'w') as f:
 " "$config_file" "$amfs_block"
 }
 
+# Whether a config file currently holds a local stdio `senselab` entry.
+#
+# 0 = yes, 1 = no, 2 = the file could not be read as JSON.
+#
+# The third answer is the reason this parses instead of grepping. `grep -q
+# '"senselab"'` finds the string in a path, a comment, or another server's
+# argument list, and — the case that matters — it cannot tell "the entry is gone"
+# from "the file is unparseable so nothing was removed". remove_mcp_config exits 0
+# on a JSONDecodeError without writing anything, so a caller trusting grep can
+# report a removal that did not happen, which puts back exactly the stale local
+# server the removal exists to prevent.
+has_stdio_senselab() {
+    local config_file="$1"
+    [[ -f "$config_file" ]] || return 1
+    python3 -c "
+import json, sys
+
+try:
+    with open(sys.argv[1]) as f:
+        config = json.load(f)
+except (json.JSONDecodeError, OSError):
+    sys.exit(2)
+
+entry = (config.get('mcpServers') or {}).get('senselab')
+# A url entry is this script's own remote config, not a local server to clear.
+sys.exit(0 if isinstance(entry, dict) and entry.get('command') else 1)
+" "$config_file"
+}
+
 remove_mcp_config() {
     local config_file="$1"
 
@@ -519,10 +548,28 @@ connector_instructions() {
     # migration silently did nothing and they are still on the old server. Both
     # are worse than either half alone, because the summary says the hosted
     # endpoint is what they are on.
-    if [[ -n "$config_file" && -f "$config_file" ]] \
-        && grep -q '"senselab"' "$config_file" 2>/dev/null; then
-        remove_mcp_config "$config_file"
-        success "Removed the old local $label entry ($config_file)"
+    #
+    # Reported from the state afterwards rather than from the attempt. A file this
+    # cannot parse is left untouched by remove_mcp_config, which exits 0 either
+    # way, so "we tried" is not evidence and the one case worth catching is
+    # precisely the one where the old server is still there.
+    if [[ -n "$config_file" ]]; then
+        local before=0
+        has_stdio_senselab "$config_file" || before=$?
+        if [[ $before -eq 0 ]]; then
+            remove_mcp_config "$config_file"
+            if has_stdio_senselab "$config_file"; then
+                warn "Could not remove the old local $label entry."
+                echo "    Delete the \"senselab\" block from $config_file by hand —"
+                echo "    until then $label keeps starting the old local server."
+            else
+                success "Removed the old local $label entry ($config_file)"
+            fi
+        elif [[ $before -eq 2 ]]; then
+            warn "$config_file is not readable as JSON, so it was left alone."
+            echo "    If it has a \"senselab\" block, remove it by hand: otherwise"
+            echo "    $label keeps starting the old local server."
+        fi
     fi
 
     warn "$label cannot be configured from here in remote mode."
