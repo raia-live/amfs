@@ -416,6 +416,295 @@ class TestClientsThatCannotHoldAUrl:
         assert "https://mcp.sense-lab.ai/mcp" in written[0].read_text()
 
 
+class TestTheKeyOnDiskSurvivesBeingReplaced:
+    """The `senselab` block is the only copy of the user's API key.
+
+    SenseLab stores keys hashed, so no part of the product can hand the same one
+    back — a key this script overwrites or deletes is gone, and every client
+    still pointing at it is unrepairable without minting a new one and visiting
+    them all.
+
+    That is not hypothetical. It happened here: an `--uninstall` and then a run
+    carrying a six-character placeholder left a real key unrecoverable. Nothing
+    warned, nothing kept a copy, and the file had been rewritten by the time
+    anyone looked. The three paths that reach it are all normal use — removing
+    an install, migrating one to `--remote`, and re-running the one-liner, which
+    without `--api-key` quietly downgrades a keyed install to the free server.
+
+    So the rule these hold: if a key is on disk and is about to stop being on
+    disk, a copy is made first and its location is said out loud. When nothing
+    is at risk, no copy appears — a backup on every idempotent re-run would
+    train people to ignore them.
+    """
+
+    #: A key long enough to be recognisably real rather than a placeholder.
+    REAL_KEY = "amfs_xZnxjg8Jhl1Sd0liWX2uga_g9qdqgo18xSKDBbMtJaU"
+
+    def _config_path(self, client: str, home: Path, tmp_path: Path) -> Path:
+        fn = {
+            "cursor": "cursor_config_path",
+            "claude-desktop": "claude_desktop_config_path",
+        }[client]
+        return Path(_run("", f"HOME={home!s} {fn}", tmp_path).strip())
+
+    def _keyed_config(
+        self, home: Path, tmp_path: Path, client: str = "cursor"
+    ) -> Path:
+        """A config as a working `--api-key` install would have left it."""
+        home.mkdir(exist_ok=True)
+        path = self._config_path(client, home, tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "mcpServers": {
+                "senselab": {
+                    "command": "/opt/homebrew/bin/uvx",
+                    "args": ["--refresh", "amfs-mcp-server-pro"],
+                    "env": {
+                        "AMFS_HTTP_URL": "https://amfs-login.sense-lab.ai",
+                        "AMFS_API_KEY": self.REAL_KEY,
+                    },
+                },
+                "somebody-else": {"command": "node", "args": ["other.js"]},
+            }
+        }, indent=4))
+        return path
+
+    def _configure(
+        self, client: str, args: str, tmp_path: Path, home: Path, extra: str = ""
+    ) -> str:
+        return _run(
+            args,
+            f"{extra}HOME={home!s} configure_client {client} 2>&1 || true",
+            tmp_path,
+        )
+
+    def _backups(self, path: Path) -> list[Path]:
+        return sorted(path.parent.glob(f"{path.name}.senselab-backup-*"))
+
+    def _the_one_backup(self, path: Path) -> Path:
+        found = self._backups(path)
+        assert len(found) == 1, f"expected one copy, found {found}"
+        return found[0]
+
+    def test_an_uninstall_keeps_the_key_it_takes_away(self, tmp_path: Path) -> None:
+        """Anyone uninstalling to reinstall cleanly is about to need this."""
+        home = tmp_path / "home"
+        path = self._keyed_config(home, tmp_path)
+
+        out = self._configure("cursor", "--uninstall", tmp_path, home)
+
+        assert self.REAL_KEY in self._the_one_backup(path).read_text()
+        assert "senselab" not in path.read_text()
+        assert "Kept a copy" in out
+
+    def test_a_keyless_rerun_keeps_the_key_it_downgrades(
+        self, tmp_path: Path
+    ) -> None:
+        """The incident, exactly: `curl | bash` over a working keyed install.
+
+        No flags means the free local server and no `env` block at all, so the
+        key is dropped by a run whose output otherwise reads like a success.
+        """
+        home = tmp_path / "home"
+        path = self._keyed_config(home, tmp_path)
+
+        self._configure("cursor", "", tmp_path, home)
+
+        assert self.REAL_KEY in self._the_one_backup(path).read_text()
+        assert self.REAL_KEY not in path.read_text()
+
+    def test_a_rerun_with_a_different_key_keeps_the_old_one(
+        self, tmp_path: Path
+    ) -> None:
+        """A placeholder pasted out of a doc, or a second account's key."""
+        home = tmp_path / "home"
+        path = self._keyed_config(home, tmp_path)
+
+        self._configure("cursor", "--api-key amfs_k", tmp_path, home)
+
+        assert self.REAL_KEY in self._the_one_backup(path).read_text()
+        assert "amfs_k" in json.loads(path.read_text())[
+            "mcpServers"]["senselab"]["env"]["AMFS_API_KEY"]
+
+    def test_the_remote_migration_keeps_the_key_it_clears(
+        self, tmp_path: Path
+    ) -> None:
+        """`--remote` deletes the stdio block as a migration, key and all.
+
+        The user asked to switch endpoints, not to give up a credential, and
+        going back afterwards is what needs it.
+        """
+        home = tmp_path / "home"
+        path = self._keyed_config(home, tmp_path, client="claude-desktop")
+
+        out = self._configure("claude-desktop", "--remote", tmp_path, home)
+
+        assert self.REAL_KEY in self._the_one_backup(path).read_text()
+        assert "Removed the old local" in out
+
+    def test_a_rerun_with_the_same_key_leaves_nothing_behind(
+        self, tmp_path: Path
+    ) -> None:
+        """Re-running the wizard's own line is how people repair a config.
+
+        Nothing stops existing, so a copy would be litter — and a directory of
+        backups nobody needed is how the one that matters gets ignored.
+        """
+        home = tmp_path / "home"
+        path = self._keyed_config(home, tmp_path)
+
+        out = self._configure(
+            "cursor", f"--api-key {self.REAL_KEY}", tmp_path, home
+        )
+
+        assert self._backups(path) == []
+        assert "Kept a copy" not in out
+
+    def test_a_first_install_leaves_nothing_behind(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        home.mkdir()
+
+        out = self._configure("cursor", f"--api-key {self.REAL_KEY}", tmp_path, home)
+
+        path = self._config_path("cursor", home, tmp_path)
+        assert self._backups(path) == []
+        assert "Kept a copy" not in out
+
+    def test_a_config_holding_no_key_is_not_copied(self, tmp_path: Path) -> None:
+        """The free local server has no `env`, so there is nothing to lose."""
+        home = tmp_path / "home"
+        home.mkdir()
+        path = self._config_path("cursor", home, tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "mcpServers": {"senselab": {"command": "uvx", "args": ["amfs-mcp-server"]}}
+        }))
+
+        out = self._configure("cursor", "--uninstall", tmp_path, home)
+
+        assert self._backups(path) == []
+        assert "Kept a copy" not in out
+
+    def test_the_copy_is_not_left_readable_by_everyone(
+        self, tmp_path: Path
+    ) -> None:
+        """It is a credential in a directory that may not be private."""
+        home = tmp_path / "home"
+        path = self._keyed_config(home, tmp_path)
+
+        self._configure("cursor", "--uninstall", tmp_path, home)
+
+        assert self._the_one_backup(path).stat().st_mode & 0o777 == 0o600
+
+    def test_it_says_where_the_copy_is_and_why_it_matters(
+        self, tmp_path: Path
+    ) -> None:
+        """A backup nobody is told about is not a rescue.
+
+        The path has to be in the output because the name carries a timestamp,
+        and the reason has to be there because "just make another one" is the
+        obvious assumption and it is wrong — the same key never comes back.
+        """
+        home = tmp_path / "home"
+        path = self._keyed_config(home, tmp_path)
+
+        out = self._configure("cursor", "--uninstall", tmp_path, home)
+
+        assert str(self._the_one_backup(path)) in out
+        assert "cannot reissue the same one" in out
+
+    def test_a_file_it_cannot_read_is_not_claimed_as_saved(
+        self, tmp_path: Path
+    ) -> None:
+        """An unparseable config is left alone by the removal, so nothing is
+        lost and nothing needs keeping — but claiming a copy that does not exist
+        would be worse than saying nothing."""
+        home = tmp_path / "home"
+        home.mkdir()
+        path = self._config_path("cursor", home, tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"mcpServers": {"senselab": {"env": {,,,')
+
+        out = self._configure("cursor", "--uninstall", tmp_path, home)
+
+        assert self._backups(path) == []
+        assert "Kept a copy" not in out
+
+    def test_a_copy_that_fails_says_so_instead_of_going_quiet(
+        self, tmp_path: Path
+    ) -> None:
+        """The write that follows will probably fail too, but not certainly —
+        and a silent failure here is the exact shape of the original loss."""
+        home = tmp_path / "home"
+        self._keyed_config(home, tmp_path)
+
+        out = self._configure(
+            "cursor", "--uninstall", tmp_path, home, extra="cp() { return 1; }\n"
+        )
+
+        assert "Could not copy" in out
+        assert "cannot" in out and "hand the same one back" in out
+
+    def test_the_uninstall_prompt_says_it_before_asking(
+        self, tmp_path: Path
+    ) -> None:
+        """Order is the whole point: after the answer, the key is already gone."""
+        home = tmp_path / "home"
+        home.mkdir()
+
+        out = _run(
+            "--uninstall",
+            "detect_clients() { DETECTED_CLIENTS=(cursor); }\n"
+            "configure_client() { :; }\n"
+            f"HOME={home!s} prompt_clients 2>&1 || true",
+            tmp_path,
+        )
+
+        assert "takes your API key with it" in out
+        assert out.index("takes your API key") < out.index("Remove AMFS from all")
+
+    def test_a_cli_managed_store_is_kept_when_it_holds_the_key(
+        self, tmp_path: Path
+    ) -> None:
+        """Claude Code is configured through its own CLI, not by writing files.
+
+        There is no block of ours to compare, so the marker is the test: finding
+        AMFS_API_KEY in the file that CLI keeps means a copy really does preserve
+        the key, and not finding it means saying nothing.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        store = home / ".claude.json"
+        store.write_text(json.dumps({
+            "mcpServers": {"senselab": {"env": {"AMFS_API_KEY": self.REAL_KEY}}}
+        }))
+
+        out = self._configure(
+            "claude-code", "--uninstall", tmp_path, home,
+            extra="command() { :; }\nclaude() { :; }\n",
+        )
+
+        assert self.REAL_KEY in self._the_one_backup(store).read_text()
+        assert "Kept a copy" in out
+
+    def test_a_cli_managed_store_without_the_key_is_left_alone(
+        self, tmp_path: Path
+    ) -> None:
+        """Where a given version of those tools keeps it is not ours to assume."""
+        home = tmp_path / "home"
+        home.mkdir()
+        store = home / ".claude.json"
+        store.write_text(json.dumps({"projects": {"/tmp/x": {"allowedTools": []}}}))
+
+        out = self._configure(
+            "claude-code", "--uninstall", tmp_path, home,
+            extra="command() { :; }\nclaude() { :; }\n",
+        )
+
+        assert self._backups(store) == []
+        assert "Kept a copy" not in out
+
+
 class TestTheClosingSummaryDoesNotOverclaim:
     """A full run, end to end, for what the last lines say happened.
 

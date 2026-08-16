@@ -284,12 +284,110 @@ ENVJSON
 MCPJSON
 }
 
+# ── Not throwing away the key that is already on disk ────────────────────────
+#
+# The `senselab` block holds AMFS_API_KEY, and the service keeps only a hash of
+# a key, never the key. So the copy in a client's config file is the only copy
+# there is: once this script rewrites or deletes that block, nobody — not the
+# dashboard, not support — can give the same key back, and every other client
+# still pointing at it stops working with no way to repair them.
+#
+# Three paths here do exactly that, and only one of them is asked for in those
+# words. `--uninstall` at least says "remove". `--remote` clears the old stdio
+# entry as a migration. And a plain re-run overwrites, which is the one that
+# actually bites: `curl | bash` with no key downgrades a working keyed install
+# to the free server and takes the key with it, and so does a re-run with a
+# placeholder pasted out of a doc.
+#
+# So copy the file first — but only when there is something to lose, meaning a
+# key on disk that differs from the one going in. A first install, a keyless
+# install over nothing, and an idempotent re-run with the same key all leave no
+# backup behind, because in none of them does a key stop existing.
+
+# The copy itself: where it goes, and saying so.
+#
+# 0600 because the file it came from holds a credential and the directory it
+# lands in may not be private. A failed copy is reported rather than fatal: it
+# almost certainly means the file is read-only, so the write about to follow
+# will fail too and abandoning the install here would only make the message
+# about the wrong thing.
+keep_a_copy_of_the_key() {
+    local file="$1" dest
+    dest="$file.senselab-backup-$(date -u +%Y%m%d%H%M%S)"
+
+    if cp "$file" "$dest" 2>/dev/null; then
+        chmod 600 "$dest" 2>/dev/null || true
+        info "Kept a copy of the API key already in that config: $dest"
+        echo "    SenseLab stores keys hashed and cannot reissue the same one, so"
+        echo "    this copy is the only one left. Delete it once you are sure the"
+        echo "    new connection works."
+    else
+        warn "Could not copy $file before changing it."
+        echo "    The API key in it is about to be replaced, and SenseLab cannot"
+        echo "    hand the same one back. Copy the file yourself if you need it."
+    fi
+}
+
+# Before this script rewrites or deletes a `senselab` block it owns.
+#
+# `incoming` is the key that is about to take its place, empty for a removal or
+# a keyless install — which is why the comparison is against a string and not a
+# flag: "no key going in" and "a different key going in" both lose what is
+# there, and both want a copy.
+backup_key_at_risk() {
+    local config_file="$1" incoming="${2:-}" existing=""
+
+    [[ -f "$config_file" ]] || return 0
+
+    existing="$(python3 -c '
+import json, sys
+
+try:
+    with open(sys.argv[1]) as f:
+        config = json.load(f)
+except (json.JSONDecodeError, OSError, ValueError):
+    sys.exit(0)
+
+entry = (config.get("mcpServers") or {}).get("senselab")
+if isinstance(entry, dict):
+    print((entry.get("env") or {}).get("AMFS_API_KEY") or "")
+' "$config_file" 2>/dev/null || true)"
+
+    if [[ -n "$existing" && "$existing" != "$incoming" ]]; then
+        keep_a_copy_of_the_key "$config_file"
+    fi
+}
+
+# Before asking a client's own CLI to drop the entry.
+#
+# Claude Code and Codex are configured through `claude mcp` and `codex mcp`
+# rather than by writing their files, so there is no block of ours to read and
+# compare. The marker is enough: if AMFS_API_KEY is in the file the CLI keeps,
+# a copy of that file genuinely preserves the key, and if it is not, this says
+# nothing rather than claiming a rescue it did not perform. That also covers
+# being wrong about where a given version of those tools stores it.
+backup_cli_store() {
+    local file="$1" incoming="${2:-}"
+
+    [[ -f "$file" ]] || return 0
+    grep -q "AMFS_API_KEY" "$file" 2>/dev/null || return 0
+    # -F because a key is not a pattern. Re-adding the key already in there
+    # changes nothing, so there is nothing to keep.
+    if [[ -n "$incoming" ]] && grep -qF -- "$incoming" "$file" 2>/dev/null; then
+        return 0
+    fi
+
+    keep_a_copy_of_the_key "$file"
+}
+
 # ── JSON merge (portable, no jq dependency) ──────────────────────────────────
 
 inject_mcp_config() {
     local config_file="$1"
     local amfs_block
     amfs_block="$(build_mcp_json)"
+
+    backup_key_at_risk "$config_file" "$API_KEY"
 
     local dir
     dir="$(dirname "$config_file")"
@@ -379,6 +477,8 @@ remove_mcp_config() {
     if [[ ! -f "$config_file" ]]; then
         return 0
     fi
+
+    backup_key_at_risk "$config_file" ""
 
     python3 -c "
 import json, sys
@@ -675,6 +775,7 @@ configure_client() {
         claude-code)
             if $UNINSTALL; then
                 if command -v claude &>/dev/null; then
+                    backup_cli_store "$HOME/.claude.json"
                     claude mcp remove senselab 2>/dev/null || true
                     success "Removed AMFS from Claude Code"
                 fi
@@ -691,6 +792,7 @@ configure_client() {
                     # runs the OAuth flow itself on first use.
                     args=("mcp" "add" "--transport" "http" "senselab" "$(mcp_url)")
                     # Re-runs stay idempotent; adding a name that exists fails.
+                    backup_cli_store "$HOME/.claude.json"
                     claude mcp remove senselab 2>/dev/null || true
                 else
                     resolve_uvx_path
@@ -715,6 +817,7 @@ configure_client() {
         codex)
             if $UNINSTALL; then
                 if command -v codex &>/dev/null; then
+                    backup_cli_store "$HOME/.codex/config.toml"
                     codex mcp remove senselab 2>/dev/null || true
                     success "Removed AMFS from Codex"
                 fi
@@ -741,7 +844,9 @@ configure_client() {
                         args=("mcp" "add" "senselab" "--env" "AMFS_HTTP_URL=$url" "--env" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "--refresh" "$pkg")
                     fi
                 fi
-                # Replace any existing entry so re-runs stay idempotent.
+                # Replace any existing entry so re-runs stay idempotent — which
+                # means a re-run with a different key, or none, drops the old one.
+                backup_cli_store "$HOME/.codex/config.toml" "$API_KEY"
                 codex mcp remove senselab 2>/dev/null || true
                 codex "${args[@]}"
                 configured "Configured Codex"
@@ -818,6 +923,16 @@ prompt_clients() {
 
     local action="Configure"
     if $UNINSTALL; then action="Remove AMFS from"; fi
+
+    # Said before the question, because after it the key is already gone. Anyone
+    # uninstalling to reinstall cleanly is about to find out that "cleanly" costs
+    # them a credential, and this is the last moment that is useful to know.
+    if $UNINSTALL; then
+        warn "This takes your API key with it."
+        echo "    SenseLab stores keys hashed, so the same one cannot be reissued."
+        echo "    A copy of any config holding it is kept next to the original."
+        echo ""
+    fi
 
     printf "${BOLD}$action all detected clients? [Y/n/list]:${NC} "
     read -r answer </dev/tty 2>/dev/null || answer="y"
