@@ -687,6 +687,72 @@ class TestTheKeyOnDiskSurvivesBeingReplaced:
         assert self.REAL_KEY in self._the_one_backup(store).read_text()
         assert "Kept a copy" in out
 
+    def _cli_store_decision(
+        self, stored: str, incoming: str, tmp_path: Path, quote: str = '"'
+    ) -> tuple[str, list[Path]]:
+        """Ask `backup_cli_store` directly, for one stored/incoming pair.
+
+        The two CLIs own these files, so the shape that matters is a line
+        carrying the name and the quoted value — JSON uses `:`, TOML uses `=`,
+        and either may quote with `'`. Calling the function rather than a whole
+        client path is what makes the quoting the only variable.
+        """
+        store = tmp_path / "cli-store"
+        store.write_text(
+            f"  AMFS_API_KEY = {quote}{stored}{quote}\n"
+            '  command = "uvx"\n  args = ["--refresh", "amfs-mcp-server-pro"]\n'
+        )
+        out = _run("", f'backup_cli_store {store!s} "{incoming}" 2>&1 || true', tmp_path)
+        return out, self._backups(store)
+
+    def test_a_shorter_key_is_not_mistaken_for_the_one_stored(
+        self, tmp_path: Path
+    ) -> None:
+        """The bug this function exists to prevent, reintroduced inside it.
+
+        Matching the incoming key as a bare substring meant a placeholder like
+        `amfs_k` counted as already present in any real key beginning with those
+        characters. The copy was skipped, `codex mcp remove` deleted the entry,
+        and the key was gone — which is the original incident exactly, and short
+        keys are the ones people paste by mistake.
+        """
+        stored = "amfs_kREALKEYcontinuesWellPastThePlaceholder"
+
+        out, backups = self._cli_store_decision(stored, "amfs_k", tmp_path)
+
+        assert len(backups) == 1, "a prefix must not count as the stored key"
+        assert stored in backups[0].read_text()
+        assert "Kept a copy" in out
+
+    def test_a_different_key_entirely_is_kept(self, tmp_path: Path) -> None:
+        out, backups = self._cli_store_decision(
+            self.REAL_KEY, "amfs_someOtherAccountsKey", tmp_path
+        )
+        assert len(backups) == 1
+        assert self.REAL_KEY in backups[0].read_text()
+        assert "Kept a copy" in out
+
+    @pytest.mark.parametrize("quote", ['"', "'"])
+    def test_re_adding_the_same_key_keeps_nothing(
+        self, quote: str, tmp_path: Path
+    ) -> None:
+        """Nothing stops existing, in either quoting style those CLIs use."""
+        out, backups = self._cli_store_decision(
+            self.REAL_KEY, self.REAL_KEY, tmp_path, quote=quote
+        )
+        assert backups == []
+        assert "Kept a copy" not in out
+
+    def test_a_longer_key_containing_the_stored_one_is_kept(
+        self, tmp_path: Path
+    ) -> None:
+        """The mirror image, in case the comparison is ever loosened again."""
+        stored = "amfs_short"
+
+        _, backups = self._cli_store_decision(stored, f"{stored}AndThenSome", tmp_path)
+
+        assert len(backups) == 1
+
     def test_a_cli_managed_store_without_the_key_is_left_alone(
         self, tmp_path: Path
     ) -> None:

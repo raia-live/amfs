@@ -371,9 +371,23 @@ backup_cli_store() {
 
     [[ -f "$file" ]] || return 0
     grep -q "AMFS_API_KEY" "$file" 2>/dev/null || return 0
-    # -F because a key is not a pattern. Re-adding the key already in there
-    # changes nothing, so there is nothing to keep.
-    if [[ -n "$incoming" ]] && grep -qF -- "$incoming" "$file" 2>/dev/null; then
+
+    # Re-adding the key already in there changes nothing, so there is nothing to
+    # keep — but only the whole stored value counts as "already in there".
+    #
+    # Matching the incoming key as a bare substring reintroduced the bug this
+    # function exists to prevent. A placeholder like `amfs_k` is a substring of
+    # every real key that happens to begin with those characters, so the copy
+    # was skipped and `codex mcp remove` then deleted the only one left. Short
+    # keys are exactly the ones people paste by mistake.
+    #
+    # Both formats these CLIs write quote the value — JSON for Claude Code,
+    # TOML for Codex — so requiring the quotes, on the same line as the name,
+    # compares the value end to end. A form neither branch recognises falls
+    # through to making a copy, which is the direction to be wrong in: a spare
+    # file costs nothing against a credential that cannot be reissued.
+    if [[ -n "$incoming" ]] && grep -F "AMFS_API_KEY" "$file" 2>/dev/null |
+        grep -qF -e "\"$incoming\"" -e "'$incoming'"; then
         return 0
     fi
 
