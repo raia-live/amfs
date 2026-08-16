@@ -8,10 +8,18 @@ set -euo pipefail
 #   --client <name|all>   Skip auto-detect; configure a specific client (or "all")
 #   --api-key <key>       Use AMFS SaaS with this API key
 #   --api-url <url>       SaaS API URL (default: https://amfs-login.sense-lab.ai)
+#   --remote              Connect to the hosted MCP endpoint; sign in in a browser
+#   --join <link|token>   Room invite to accept once connected (implies --remote)
 #   --uninstall           Remove AMFS config from detected/specified clients
 #   -y, --yes             Skip confirmation prompts
 
 AMFS_DEFAULT_API_URL="https://amfs-login.sense-lab.ai"
+
+# The hosted MCP endpoint. A different host from the API URL above on purpose:
+# it is the identity this resource advertises in its OAuth discovery documents,
+# and a client that discovers one issuer and is then sent to another treats the
+# mismatch as an attack.
+AMFS_DEFAULT_MCP_URL="https://mcp.sense-lab.ai/mcp"
 
 # ── Colours & helpers ────────────────────────────────────────────────────────
 
@@ -33,14 +41,29 @@ fatal()   { error "$@"; exit 1; }
 CLIENT_FLAG=""
 API_KEY=""
 API_URL=""
+MCP_URL=""
+REMOTE=false
+JOIN_TOKEN=""
 UNINSTALL=false
 AUTO_YES=false
+
+# What the closing summary is allowed to claim.
+#
+# In remote mode some clients are configured and some can only be told where to
+# paste the endpoint, so "Done, restart your app" is true for one run and a lie
+# for another — a run that found only Claude Desktop would report success while
+# nothing had been connected. These count which happened.
+CONFIGURED_COUNT=0
+MANUAL_COUNT=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --client)     CLIENT_FLAG="$2"; shift 2 ;;
         --api-key)    API_KEY="$2"; shift 2 ;;
         --api-url)    API_URL="$2"; shift 2 ;;
+        --mcp-url)    MCP_URL="$2"; REMOTE=true; shift 2 ;;
+        --remote)     REMOTE=true; shift ;;
+        --join)       JOIN_TOKEN="$2"; shift 2 ;;
         --uninstall)  UNINSTALL=true; shift ;;
         -y|--yes)     AUTO_YES=true; shift ;;
         -h|--help)
@@ -56,15 +79,49 @@ Options:
                         claude-code, codex, windsurf, vscode, or "all"
   --api-key <key>       Connect to AMFS SaaS with this API key
   --api-url <url>       SaaS API URL (default: https://amfs-login.sense-lab.ai)
+  --remote              Connect to the hosted MCP endpoint instead of running a
+                        local server. Your client signs in through a browser, so
+                        there is no API key to create or paste.
+  --join <link|token>   A room invite link to accept once connected. Implies
+                        --remote, because redeeming one needs a signed-in user.
+  --mcp-url <url>       Hosted MCP endpoint (default: https://mcp.sense-lab.ai/mcp)
   --uninstall           Remove AMFS MCP config from clients
   -y, --yes             Skip confirmation prompts
   -h, --help            Show this help
+
+Notes:
+  Without --api-key or --remote, this installs the open-source server backed by
+  local files in ~/.amfs/ — which is what it has always done with no flags.
 USAGE
             exit 0
             ;;
         *) fatal "Unknown option: $1 (use --help for usage)" ;;
     esac
 done
+
+# ── Resolve the connection mode ──────────────────────────────────────────────
+#
+# Three modes, and exactly one of them applies: the hosted endpoint, SaaS with a
+# pasted key, or local files. The default — no flags at all — is local files, and
+# nothing below changes that.
+
+if $REMOTE && [[ -n "$API_KEY" ]]; then
+    fatal "--remote and --api-key are different ways to authenticate; pass one.
+  --remote signs in through a browser and needs no key.
+  --api-key runs a local server against the SaaS API with the key you paste."
+fi
+
+# --join needs a signed-in user, since accepting an invite admits a person rather
+# than a process. A pasted key already identifies one — its creator — so a key
+# invocation is left alone; without one, the browser sign-in is how a user gets
+# attached to the connection, so joining implies --remote.
+if [[ -n "$JOIN_TOKEN" && -z "$API_KEY" ]]; then
+    REMOTE=true
+fi
+
+if [[ -n "$JOIN_TOKEN" ]] && $UNINSTALL; then
+    fatal "--join and --uninstall ask for opposite things."
+fi
 
 # ── OS detection ─────────────────────────────────────────────────────────────
 
@@ -84,6 +141,13 @@ fi
 # ── Step 1: Ensure uv is installed ───────────────────────────────────────────
 
 ensure_uv() {
+    # The hosted endpoint needs no local process, so it needs no Python
+    # toolchain. Installing uv anyway would download a toolchain and edit the
+    # user's PATH to run nothing — the opposite of what --remote is for.
+    if $REMOTE; then
+        return 0
+    fi
+
     if command -v uv &>/dev/null; then
         success "uv is already installed ($(uv --version))"
         return 0
@@ -118,6 +182,14 @@ ensure_uv() {
 # ── Step 2: Pre-install amfs-mcp-server ──────────────────────────────────────
 
 ensure_amfs_mcp() {
+    # Nothing to install for the hosted endpoint — the client talks to it over
+    # HTTP. This is the whole reason --remote exists: no uvx, no Python, and no
+    # key to copy, because the client signs in through a browser.
+    if $REMOTE; then
+        info "Using the hosted SenseLab endpoint — nothing to install"
+        return 0
+    fi
+
     # `--refresh` so the warm-up pulls the latest published build, matching the
     # `--refresh` the generated client config uses at launch.
     if [[ -n "$API_KEY" ]]; then
@@ -157,12 +229,31 @@ vscode_config_path() {
 
 UVX_PATH=""
 
+mcp_url() {
+    echo "${MCP_URL:-$AMFS_DEFAULT_MCP_URL}"
+}
+
 resolve_uvx_path() {
     if [[ -n "$UVX_PATH" ]]; then return; fi
     UVX_PATH="$(command -v uvx 2>/dev/null || echo "uvx")"
 }
 
 build_mcp_json() {
+    # The hosted endpoint is a URL, not a command, so this branch returns before
+    # uvx is even resolved. Placed ahead of the two below and gated on a variable
+    # that is false unless --remote or --join was passed, so neither the bare
+    # `curl | bash` nor the --api-key invocation reaches different code than it
+    # did before this branch existed.
+    if $REMOTE; then
+        cat <<REMOTEJSON
+{
+        "type": "http",
+        "url": "$(mcp_url)"
+    }
+REMOTEJSON
+        return 0
+    fi
+
     resolve_uvx_path
     local env_block="{}"
     local pkg="amfs-mcp-server"
@@ -237,6 +328,49 @@ with open(config_path, 'w') as f:
     json.dump(config, f, indent=4)
     f.write('\n')
 " "$config_file" "$amfs_block"
+}
+
+# Whether a config file holds a local stdio `senselab` entry: present, absent, or
+# unreadable.
+#
+# Three answers rather than two, and a word on stdout rather than an exit status.
+#
+# Three, because `grep -q '"senselab"'` cannot tell "the entry is gone" from "the
+# file is unparseable so nothing was removed" — and remove_mcp_config exits 0
+# either way, so a caller trusting grep reports a removal that did not happen and
+# leaves the stale local server it was removing. Grep also matches the name in a
+# path or another server's argument list.
+#
+# A word, because an exit status has to carry both the answer and whether asking
+# worked, and those are different things. If python3 is not on PATH the status is
+# 127, which as a number falls outside a three-way branch and silently means
+# nothing happens. Here every failure of the check becomes "unreadable", which is
+# the answer that warns rather than the one that stays quiet.
+senselab_entry_state() {
+    local config_file="$1" state=""
+
+    if [[ ! -f "$config_file" ]]; then
+        state="absent"
+    else
+        state="$(python3 -c "
+import json, sys
+
+try:
+    with open(sys.argv[1]) as f:
+        config = json.load(f)
+except (json.JSONDecodeError, OSError, ValueError):
+    sys.exit(1)
+
+entry = (config.get('mcpServers') or {}).get('senselab')
+# A url entry is this script's own remote config, not a local server to clear.
+print('present' if isinstance(entry, dict) and entry.get('command') else 'absent')
+" "$config_file" 2>/dev/null || true)"
+    fi
+
+    case "$state" in
+        present|absent) echo "$state" ;;
+        *) echo "unreadable" ;;
+    esac
 }
 
 remove_mcp_config() {
@@ -396,6 +530,119 @@ detect_clients() {
 
 # ── Configure a single client ────────────────────────────────────────────────
 
+# Say where to paste the endpoint, for a client whose config file cannot hold it.
+#
+# `--remote` writes `{"type": "http", "url": …}`, which is what Cursor, Claude
+# Code, Codex and VS Code understand. Claude Desktop's config file takes stdio
+# servers only — a `url` entry there is ignored — and Windsurf names the same
+# thing `serverUrl`, so it is ignored too. Both reach remote servers through
+# their own UI instead.
+#
+# Writing the file anyway is worse than not touching it: the script says
+# "Configured", the client silently has no SenseLab, and the person has no reason
+# to look at the one place that would have worked. So neither is written to in
+# remote mode, and both are told where to go by hand. The stdio path is
+# unaffected and still writes both files as it always did.
+# Report a client we actually wrote a config for, and count it as one.
+configured() {
+    CONFIGURED_COUNT=$((CONFIGURED_COUNT + 1))
+    success "$1"
+}
+
+connector_instructions() {
+    local label="$1" where="$2" config_file="${3:-}"
+    MANUAL_COUNT=$((MANUAL_COUNT + 1))
+
+    # Take the old stdio entry out on the way past.
+    #
+    # Not writing was only half of it. Someone switching an existing install to
+    # --remote has a `senselab` block already in this file, and leaving it there
+    # means the client keeps launching the local server: the script says to add a
+    # connector, they add one, and now there are two — or, if they do not, the
+    # migration silently did nothing and they are still on the old server. Both
+    # are worse than either half alone, because the summary says the hosted
+    # endpoint is what they are on.
+    #
+    # Reported from the state afterwards rather than from the attempt. A file this
+    # cannot parse is left untouched by remove_mcp_config, which exits 0 either
+    # way, so "we tried" is not evidence and the one case worth catching is
+    # precisely the one where the old server is still there.
+    if [[ -n "$config_file" ]]; then
+        local state
+        state="$(senselab_entry_state "$config_file")"
+
+        if [[ "$state" == "present" ]]; then
+            # `|| true` because a failure here is not a reason to abandon the
+            # install. The file may be read-only, and the connector instructions
+            # below are still the right thing to print — under `set -e` a bare
+            # call would exit before saying anything at all, including the warning
+            # that the old entry is still there.
+            remove_mcp_config "$config_file" || true
+
+            # Asked again, because the answer is the only evidence a removal
+            # happened. "absent" is the one state that is one; the other two both
+            # mean the old server may still start, and they share a message
+            # because they share a recovery — open the file and look.
+            state="$(senselab_entry_state "$config_file")"
+            if [[ "$state" == "absent" ]]; then
+                success "Removed the old local $label entry ($config_file)"
+            else
+                warn "Could not confirm the old local $label entry is gone."
+                echo "    Check $config_file for a \"senselab\" block and remove it —"
+                echo "    until then $label may keep starting the old local server."
+            fi
+        elif [[ "$state" == "unreadable" ]]; then
+            warn "$config_file could not be read, so it was left alone."
+            echo "    If it has a \"senselab\" block, remove it by hand: otherwise"
+            echo "    $label keeps starting the old local server."
+        fi
+    fi
+
+    warn "$label cannot be configured from here in remote mode."
+    echo "    Add it once, by hand: $where"
+    echo "    Endpoint: $(mcp_url)"
+    echo "    It signs in through a browser; there is no key to paste."
+}
+
+# What is left to do about the invite, if one was passed.
+#
+# The invite is not redeemed here, and that is not a shortcoming to fix later:
+# accepting one needs a signed-in user, and the sign-in happens inside the client
+# after this script has exited. Doing it here would mean minting a credential of
+# our own first, which is the copy-and-paste step --remote exists to remove.
+#
+# What to say differs by mode, which is why this is a function rather than a block
+# in main — the two branches are the thing worth testing, and main cannot be
+# called without configuring real clients.
+join_next_steps() {
+    [[ -n "$JOIN_TOKEN" ]] || return 0
+
+    info "One step left: accept the room invitation."
+    if $REMOTE; then
+        echo "  Once your client has signed in, ask your agent:"
+    else
+        # The key path has no sign-in to wait for: the key already names its
+        # owner, and that owner is who the invite admits. Telling this person to
+        # wait for a browser they will never see reads as a stuck install.
+        echo "  Ask your agent:"
+    fi
+    echo ""
+    echo "    Join my SenseLab room with amfs_room_redeem, invite ${JOIN_TOKEN}"
+    echo ""
+    if $REMOTE; then
+        echo "  Or open the invite link in a browser, which does the same thing."
+    else
+        # Not the same thing on this path. A browser admits whoever is logged
+        # into it, which need not be the account the key belongs to — so
+        # following it can join the room as one account while the agent that is
+        # connected belongs to another, and nothing reports the mismatch.
+        echo "  Opening the link in a browser also works, but it admits"
+        echo "  whoever is signed in there — which may not be the account"
+        echo "  this API key belongs to. Asking the agent avoids the question."
+    fi
+    echo ""
+}
+
 configure_client() {
     local client="$1"
 
@@ -406,9 +653,12 @@ configure_client() {
             if $UNINSTALL; then
                 remove_mcp_config "$path"
                 success "Removed AMFS from Claude Desktop config"
+            elif $REMOTE; then
+                connector_instructions "Claude Desktop" \
+                    "Settings → Connectors → Add custom connector" "$path"
             else
                 inject_mcp_config "$path"
-                success "Configured Claude Desktop ($path)"
+                configured "Configured Claude Desktop ($path)"
             fi
             ;;
         cursor)
@@ -419,7 +669,7 @@ configure_client() {
                 success "Removed AMFS from Cursor config"
             else
                 inject_mcp_config "$path"
-                success "Configured Cursor ($path)"
+                configured "Configured Cursor ($path)"
             fi
             ;;
         claude-code)
@@ -435,19 +685,28 @@ configure_client() {
                     warn "Claude Code CLI (claude) not found on PATH — skipping"
                     return 1
                 fi
-                resolve_uvx_path
-                local pkg="amfs-mcp-server"
-                if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
-                # `--refresh` (a uvx flag, before the package) forces a fresh
-                # re-resolve each launch so users never get stuck on a stale
-                # cached build after we publish a fix.
-                local args=("mcp" "add" "senselab" "--" "$UVX_PATH" "--refresh" "$pkg")
-                if [[ -n "$API_KEY" ]]; then
-                    local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
-                    args=("mcp" "add" "senselab" "-e" "AMFS_HTTP_URL=$url" "-e" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "--refresh" "$pkg")
+                local args
+                if $REMOTE; then
+                    # Claude Code has native support for an HTTP transport, and
+                    # runs the OAuth flow itself on first use.
+                    args=("mcp" "add" "--transport" "http" "senselab" "$(mcp_url)")
+                    # Re-runs stay idempotent; adding a name that exists fails.
+                    claude mcp remove senselab 2>/dev/null || true
+                else
+                    resolve_uvx_path
+                    local pkg="amfs-mcp-server"
+                    if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
+                    # `--refresh` (a uvx flag, before the package) forces a fresh
+                    # re-resolve each launch so users never get stuck on a stale
+                    # cached build after we publish a fix.
+                    args=("mcp" "add" "senselab" "--" "$UVX_PATH" "--refresh" "$pkg")
+                    if [[ -n "$API_KEY" ]]; then
+                        local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
+                        args=("mcp" "add" "senselab" "-e" "AMFS_HTTP_URL=$url" "-e" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "--refresh" "$pkg")
+                    fi
                 fi
                 claude "${args[@]}"
-                success "Configured Claude Code"
+                configured "Configured Claude Code"
                 install_claude_code_skill
                 upsert_senselab_block "$HOME/.claude/CLAUDE.md"
                 success "Installed SenseLab recall-first memory guide (skill + ~/.claude/CLAUDE.md)"
@@ -465,22 +724,27 @@ configure_client() {
                     warn "Codex CLI (codex) not found on PATH — skipping"
                     return 1
                 fi
-                resolve_uvx_path
-                local pkg="amfs-mcp-server"
-                if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
-                # codex mcp add <name> [--env KEY=VAL]... -- <command> [args...]
-                # `--refresh` (uvx flag, before the package) forces a fresh
-                # re-resolve each launch so a stale cache can't pin users to an
-                # old build after we publish a fix.
-                local args=("mcp" "add" "senselab" "--" "$UVX_PATH" "--refresh" "$pkg")
-                if [[ -n "$API_KEY" ]]; then
-                    local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
-                    args=("mcp" "add" "senselab" "--env" "AMFS_HTTP_URL=$url" "--env" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "--refresh" "$pkg")
+                local args
+                if $REMOTE; then
+                    args=("mcp" "add" "senselab" "--url" "$(mcp_url)")
+                else
+                    resolve_uvx_path
+                    local pkg="amfs-mcp-server"
+                    if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
+                    # codex mcp add <name> [--env KEY=VAL]... -- <command> [args...]
+                    # `--refresh` (uvx flag, before the package) forces a fresh
+                    # re-resolve each launch so a stale cache can't pin users to an
+                    # old build after we publish a fix.
+                    args=("mcp" "add" "senselab" "--" "$UVX_PATH" "--refresh" "$pkg")
+                    if [[ -n "$API_KEY" ]]; then
+                        local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
+                        args=("mcp" "add" "senselab" "--env" "AMFS_HTTP_URL=$url" "--env" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "--refresh" "$pkg")
+                    fi
                 fi
                 # Replace any existing entry so re-runs stay idempotent.
                 codex mcp remove senselab 2>/dev/null || true
                 codex "${args[@]}"
-                success "Configured Codex"
+                configured "Configured Codex"
                 upsert_senselab_block "$HOME/.codex/AGENTS.md"
                 success "Installed SenseLab recall-first memory guide (~/.codex/AGENTS.md)"
             fi
@@ -491,9 +755,12 @@ configure_client() {
             if $UNINSTALL; then
                 remove_mcp_config "$path"
                 success "Removed AMFS from Windsurf config"
+            elif $REMOTE; then
+                connector_instructions "Windsurf" \
+                    "Settings → Cascade → MCP servers → Add server" "$path"
             else
                 inject_mcp_config "$path"
-                success "Configured Windsurf ($path)"
+                configured "Configured Windsurf ($path)"
             fi
             ;;
         vscode)
@@ -504,7 +771,7 @@ configure_client() {
                 success "Removed AMFS from VS Code config"
             else
                 inject_mcp_config "$path"
-                success "Configured VS Code ($path)"
+                configured "Configured VS Code ($path)"
             fi
             ;;
         *)
@@ -639,16 +906,43 @@ main() {
 
     echo ""
     echo "──────────────────"
-    success "Done! Restart your IDE/app to connect to AMFS."
+    # Only claim a restart will do it if something was written for a client to
+    # pick up. A remote run that found only Claude Desktop has written nothing,
+    # and telling that person to restart sends them to look for a connection
+    # that will not be there instead of at the instructions just printed.
+    if (( CONFIGURED_COUNT > 0 )); then
+        success "Done! Restart your IDE/app to connect to AMFS."
+    elif (( MANUAL_COUNT > 0 )); then
+        warn "Nothing was configured automatically — see the step above."
+    else
+        warn "No clients were configured."
+    fi
     echo ""
 
-    if [[ -n "$API_KEY" ]]; then
+    if $REMOTE && (( CONFIGURED_COUNT > 0 )); then
+        info "Configured the hosted SenseLab endpoint ($(mcp_url))"
+        echo "  Your client will open a browser to sign in the first time it"
+        echo "  connects. There is no API key to create."
+        echo ""
+        # Named per client because the reload step differs and getting it wrong
+        # looks like the install failed: the config is on disk and the client is
+        # still running without it.
+        echo "  Claude Code:  run /mcp and approve the sign-in"
+        echo "  Cursor:       Settings → MCP, then sign in"
+        echo "  Codex:        restart codex"
+        echo "  Others:       restart the app"
+    elif $REMOTE; then
+        info "The hosted SenseLab endpoint is $(mcp_url)"
+        echo "  Signing in happens in a browser; there is no API key to create."
+    elif [[ -n "$API_KEY" ]]; then
         info "Connected to AMFS SaaS (${API_URL:-$AMFS_DEFAULT_API_URL})"
     else
         info "Using local filesystem storage (~/.amfs/)"
         echo "  To connect to AMFS SaaS, re-run with --api-key <key>"
     fi
     echo ""
+
+    join_next_steps
 
     # Claude Desktop has no writable instructions file — surface the one manual
     # step so it recalls proactively like the file-based clients now do.
