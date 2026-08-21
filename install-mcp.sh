@@ -30,6 +30,13 @@ warn()    { printf "${YELLOW}==> ${NC}%s\n" "$*"; }
 error()   { printf "${RED}==> ${NC}%s\n" "$*" >&2; }
 fatal()   { error "$@"; exit 1; }
 
+# Hosted install? True when a key or an explicit API URL was given, or --saas
+# was passed. Hosted installs use the pro server and bake AMFS_HTTP_URL; the API
+# key is written into the config ONLY when supplied here — so `--saas`/`--api-url`
+# alone bakes a hosted-ready config whose key is injected at runtime, keeping any
+# secret out of an image or checkpoint.
+is_saas() { [[ "$SAAS_MODE" == true || -n "$API_KEY" ]]; }
+
 # ── Parse arguments ──────────────────────────────────────────────────────────
 
 CLIENT_FLAG=""
@@ -38,12 +45,14 @@ API_URL=""
 ENTITY_PATH=""
 UNINSTALL=false
 AUTO_YES=false
+SAAS_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --client)      CLIENT_FLAG="$2"; shift 2 ;;
-        --api-key)     API_KEY="$2"; shift 2 ;;
-        --api-url)     API_URL="$2"; shift 2 ;;
+        --api-key)     API_KEY="$2"; SAAS_MODE=true; shift 2 ;;
+        --api-url)     API_URL="$2"; SAAS_MODE=true; shift 2 ;;
+        --saas)        SAAS_MODE=true; shift ;;
         --entity-path) ENTITY_PATH="$2"; shift 2 ;;
         --uninstall)   UNINSTALL=true; shift ;;
         -y|--yes)      AUTO_YES=true; shift ;;
@@ -59,7 +68,12 @@ Options:
   --client <name|all>   Configure a specific client: claude-desktop, cursor,
                         claude-code, codex, gemini, windsurf, vscode, or "all"
   --api-key <key>       Connect to AMFS SaaS with this API key
-  --api-url <url>       SaaS API URL (default: https://amfs-login.sense-lab.ai)
+  --api-url <url>       SaaS API URL (default: https://amfs-login.sense-lab.ai).
+                        Implies --saas.
+  --saas                Configure hosted mode (the pro server + AMFS_HTTP_URL)
+                        WITHOUT baking a key. Inject AMFS_API_KEY at runtime —
+                        ideal for a base image/checkpoint shared across tenants,
+                        so no secret lands in the image.
   --entity-path <path>  Bind this environment to a home entity_path (e.g.
                         acme/checkout). Sets AMFS_ENTITY_PATH so agents
                         auto-brief that entity on boot — ideal for disposable
@@ -128,7 +142,7 @@ ensure_uv() {
 ensure_amfs_mcp() {
     # `--refresh` so the warm-up pulls the latest published build, matching the
     # `--refresh` the generated client config uses at launch.
-    if [[ -n "$API_KEY" ]]; then
+    if is_saas; then
         info "Installing amfs-mcp-server-pro (SaaS)..."
         uvx --refresh --from amfs-mcp-server-pro amfs-mcp-server-pro --help &>/dev/null || true
         success "amfs-mcp-server-pro is ready"
@@ -179,11 +193,16 @@ build_mcp_json() {
     local pkg="amfs-mcp-server"
     local -a env_pairs=()
 
-    if [[ -n "$API_KEY" ]]; then
+    if is_saas; then
         pkg="amfs-mcp-server-pro"
         local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
         env_pairs+=("\"AMFS_HTTP_URL\": \"$url\"")
-        env_pairs+=("\"AMFS_API_KEY\": \"$API_KEY\"")
+        # Only write the key when one was actually supplied. --saas/--api-url
+        # alone bakes a hosted-ready config with no secret; the key is injected
+        # at runtime (ambient env), keeping it out of any image/checkpoint.
+        if [[ -n "$API_KEY" ]]; then
+            env_pairs+=("\"AMFS_API_KEY\": \"$API_KEY\"")
+        fi
     fi
     # A bound entity_path applies in both local and SaaS mode, so agents in a
     # disposable environment auto-brief the right memory on boot.
@@ -470,15 +489,16 @@ configure_client() {
                 fi
                 resolve_uvx_path
                 local pkg="amfs-mcp-server"
-                if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
+                if is_saas; then pkg="amfs-mcp-server-pro"; fi
                 # `--refresh` (a uvx flag, before the package) forces a fresh
                 # re-resolve each launch so users never get stuck on a stale
                 # cached build after we publish a fix. Build a single args array
                 # (avoids empty-array expansion errors under bash 3.2 + set -u).
                 local args=("mcp" "add" "senselab")
-                if [[ -n "$API_KEY" ]]; then
+                if is_saas; then
                     local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
-                    args+=("-e" "AMFS_HTTP_URL=$url" "-e" "AMFS_API_KEY=$API_KEY")
+                    args+=("-e" "AMFS_HTTP_URL=$url")
+                    if [[ -n "$API_KEY" ]]; then args+=("-e" "AMFS_API_KEY=$API_KEY"); fi
                 fi
                 if [[ -n "$ENTITY_PATH" ]]; then
                     args+=("-e" "AMFS_ENTITY_PATH=$ENTITY_PATH")
@@ -507,15 +527,16 @@ configure_client() {
                 fi
                 resolve_uvx_path
                 local pkg="amfs-mcp-server"
-                if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
+                if is_saas; then pkg="amfs-mcp-server-pro"; fi
                 # codex mcp add <name> [--env KEY=VAL]... -- <command> [args...]
                 # `--refresh` (uvx flag, before the package) forces a fresh
                 # re-resolve each launch so a stale cache can't pin users to an
                 # old build after we publish a fix.
                 local args=("mcp" "add" "senselab")
-                if [[ -n "$API_KEY" ]]; then
+                if is_saas; then
                     local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
-                    args+=("--env" "AMFS_HTTP_URL=$url" "--env" "AMFS_API_KEY=$API_KEY")
+                    args+=("--env" "AMFS_HTTP_URL=$url")
+                    if [[ -n "$API_KEY" ]]; then args+=("--env" "AMFS_API_KEY=$API_KEY"); fi
                 fi
                 if [[ -n "$ENTITY_PATH" ]]; then
                     args+=("--env" "AMFS_ENTITY_PATH=$ENTITY_PATH")
@@ -705,9 +726,12 @@ main() {
 
     if [[ -n "$API_KEY" ]]; then
         info "Connected to AMFS SaaS (${API_URL:-$AMFS_DEFAULT_API_URL})"
+    elif is_saas; then
+        info "Configured hosted mode (${API_URL:-$AMFS_DEFAULT_API_URL}) — no key baked."
+        echo "  Inject AMFS_API_KEY in the environment at runtime to connect."
     else
         info "Using local filesystem storage (~/.amfs/)"
-        echo "  To connect to AMFS SaaS, re-run with --api-key <key>"
+        echo "  To connect to AMFS SaaS, re-run with --api-key <key> (or --saas)"
     fi
     echo ""
 

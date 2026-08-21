@@ -354,7 +354,12 @@ export class HttpAdapter implements AmfsAdapter {
     const rows = Array.isArray(data) ? data : (data.entries ?? []);
     return rows.map((row) => {
       const r = row as Record<string, unknown>;
-      const score = typeof r._score === "number" ? r._score : 0;
+      // The server tags each row with a sidecar `_score`, but `fetch` has
+      // already run convertKeys (snake→camel), which rewrites a leading
+      // underscore key into a capitalized one — so `_score` arrives as `Score`.
+      // Read that first, falling back to the raw forms for older servers.
+      const rawScore = r.Score ?? r._score ?? r.score;
+      const score = typeof rawScore === "number" ? rawScore : 0;
       return { entry: r as unknown as MemoryEntry, score };
     });
   }

@@ -681,9 +681,12 @@ def amfs_set_identity(
         auto_paths = list(existing.auto_context_paths) if existing else []
         # Bind this environment's home entity so it's persisted on the profile
         # and surfaced back to the agent (real auto-context, not just metadata).
+        # It goes to the *front*: next_step and the hydration hint brief
+        # auto_paths[0], and the environment's binding must win over any path
+        # already saved on the profile — that's the point of AMFS_ENTITY_PATH.
         bound = _default_entity_path()
-        if bound and bound not in auto_paths:
-            auto_paths.append(bound)
+        if bound:
+            auto_paths = [bound] + [p for p in auto_paths if p != bound]
         profile = AgentProfile(
             description=description or (existing.description if existing else ""),
             default_branch=existing.default_branch if existing else "main",
