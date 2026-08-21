@@ -171,23 +171,69 @@ _GETTING_STARTED = {
     "call amfs_retrieve BEFORE answering — never say you have no memory of it without checking.",
 }
 
+
+def _default_entity_path() -> str | None:
+    """The home entity_path for this environment, from ``AMFS_ENTITY_PATH``.
+
+    Set by hosts that spin up disposable, single-purpose environments (e.g. a
+    Fly.io Sprite or a CI job) so a fresh process auto-hydrates the right
+    memory without the agent having to guess a path. When set, it becomes the
+    default for ``amfs_briefing`` and is advertised to the agent through the
+    server instructions and the ``amfs_set_identity`` response.
+    """
+    ep = os.environ.get("AMFS_ENTITY_PATH")
+    return ep.strip() if ep and ep.strip() else None
+
+
+def _build_instructions() -> str:
+    """Return the server instructions, appending the bound entity when set."""
+    base = _INSTRUCTIONS
+    ep = _default_entity_path()
+    if ep:
+        base += (
+            f"\n\n## This environment is bound to `{ep}`\n\n"
+            f"`AMFS_ENTITY_PATH` is set, so this machine/session has a home "
+            f"entity: **{ep}**. Right after `amfs_set_identity`, call "
+            f"`amfs_briefing(entity_path=\"{ep}\")` to load everything prior "
+            f"sessions here learned, and default your reads/writes to this "
+            f"path unless the task clearly concerns another entity. Calling "
+            f"`amfs_briefing()` with no argument also defaults to `{ep}` here.\n"
+        )
+    return base
+
+
+def _getting_started() -> dict[str, str]:
+    """The getting-started block, with the bound entity path baked in when set."""
+    gs = dict(_GETTING_STARTED)
+    ep = _default_entity_path()
+    if ep:
+        gs["get_briefed"] = (
+            f'This environment is bound to entity_path="{ep}". Call '
+            f'amfs_briefing(entity_path="{ep}") now to load what prior '
+            f"sessions here learned before doing any work."
+        )
+        gs["bound_entity_path"] = ep
+    return gs
+
+
 _toolset = os.environ.get("AMFS_TOOLSET", "all").lower()
 
 
 def _create_server(toolset: str) -> FastMCP:
     """Build FastMCP with tag filtering, compatible with v2 and v3+."""
+    instructions = _build_instructions()
     if toolset != "all":
         try:
-            server = FastMCP(name="amfs", instructions=_INSTRUCTIONS, include_tags={"core"})
+            server = FastMCP(name="amfs", instructions=instructions, include_tags={"core"})
         except TypeError:
-            server = FastMCP(name="amfs", instructions=_INSTRUCTIONS)
+            server = FastMCP(name="amfs", instructions=instructions)
             server.enable(tags={"core"}, only=True)
         logger.info(
             "AMFS toolset: core (essential tools incl. amfs_retrieve). "
             "Set AMFS_TOOLSET=all to expose all 36 tools."
         )
     else:
-        server = FastMCP(name="amfs", instructions=_INSTRUCTIONS)
+        server = FastMCP(name="amfs", instructions=instructions)
         logger.info("AMFS toolset: all (36 tools)")
     return server
 
@@ -584,7 +630,7 @@ def amfs_set_identity(
             "session_id": mem.session_id,
             "status": "already_active",
             "sticky": True,
-            "getting_started": _GETTING_STARTED,
+            "getting_started": _getting_started(),
             "session_metadata": _session_metadata.model_dump(mode="json"),
         }, default=str)
 
@@ -632,16 +678,23 @@ def amfs_set_identity(
 
         current_agent = mem._adapter.get_agent(name, namespace=mem.namespace)
         existing = current_agent.profile if current_agent else None
+        auto_paths = list(existing.auto_context_paths) if existing else []
+        # Bind this environment's home entity so it's persisted on the profile
+        # and surfaced back to the agent (real auto-context, not just metadata).
+        bound = _default_entity_path()
+        if bound and bound not in auto_paths:
+            auto_paths.append(bound)
         profile = AgentProfile(
             description=description or (existing.description if existing else ""),
             default_branch=existing.default_branch if existing else "main",
-            auto_context_paths=existing.auto_context_paths if existing else [],
+            auto_context_paths=auto_paths,
             tags=existing.tags if existing else [],
             session_metadata=_session_metadata,
         )
         mem._adapter.update_agent_profile(name, profile, namespace=mem.namespace)
     except Exception:
         logger.debug("Could not update agent profile for %s", name, exc_info=True)
+        auto_paths = [p for p in [_default_entity_path()] if p]
 
     result: dict[str, Any] = {
         "previous_identity": old_identity,
@@ -649,9 +702,17 @@ def amfs_set_identity(
         "session_id": mem.session_id,
         "sticky": True,
         "hint": "Identity saved — it will be auto-restored in future sessions.",
-        "getting_started": _GETTING_STARTED,
+        "getting_started": _getting_started(),
         "session_metadata": _session_metadata.model_dump(mode="json"),
     }
+    # Surface the entity paths this agent should load now (auto-context
+    # hydration): a bound AMFS_ENTITY_PATH plus any paths saved on the profile.
+    if auto_paths:
+        result["auto_context_paths"] = auto_paths
+        result["next_step"] = (
+            f'Call amfs_briefing(entity_path="{auto_paths[0]}") now to load '
+            f"prior context before working."
+        )
     if description:
         result["description"] = description
     return json.dumps(result, default=str)
@@ -673,6 +734,9 @@ def amfs_whoami() -> str:
         "platform": detect_platform(),
         "identity_file": str(_identity_file()),
     }
+    bound = _default_entity_path()
+    if bound:
+        result["bound_entity_path"] = bound
     if _session_metadata:
         result["session_metadata"] = _session_metadata.model_dump(mode="json")
     return json.dumps(result)
@@ -1536,6 +1600,11 @@ def amfs_briefing(
 
     Example: amfs_briefing(entity_path="checkout-service")
     """
+    # When the host bound this environment to an entity (AMFS_ENTITY_PATH),
+    # default to it so a fresh, disposable process hydrates the right memory
+    # without the agent having to know the path.
+    if entity_path is None:
+        entity_path = _default_entity_path()
     mem = _get_memory()
     digests = mem.briefing(
         entity_path=entity_path,

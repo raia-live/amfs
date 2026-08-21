@@ -54,7 +54,10 @@ curl -sSL ... | bash -s -- --client all -y
 curl -sSL ... | bash -s -- --uninstall
 ```
 
-Supported `--client` values: `claude-desktop`, `cursor`, `claude-code`, `windsurf`, `vscode`, `all`.
+Supported `--client` values: `claude-desktop`, `cursor`, `claude-code`, `codex`, `gemini`, `windsurf`, `vscode`, `all`.
+
+{: .note }
+Use `--entity-path <path>` (e.g. `--entity-path sprites/acme/checkout`) to bind an environment to a home entity. It sets `AMFS_ENTITY_PATH`, so connected agents default `amfs_briefing` to that path and auto-hydrate the right memory on boot — ideal for disposable sandboxes and CI jobs. See the [Fly.io Sprites guide](/amfs/guides/sprites/).
 
 {: .note }
 Prefer the quick installer above. The manual sections below are for advanced setups or unsupported clients.

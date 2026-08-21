@@ -1,6 +1,6 @@
 {
   "name": "@senselab-ai/amfs",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "AMFS TypeScript SDK — Agent Memory File System",
   "type": "module",
   "main": "dist/index.js",

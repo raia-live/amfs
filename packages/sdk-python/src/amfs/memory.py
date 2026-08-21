@@ -1400,6 +1400,44 @@ class AgentMemory:
             "external_contexts": self._read_tracker.external_contexts,
         }
 
+    def list_traces(
+        self,
+        *,
+        entity_path: str | None = None,
+        agent_id: str | None = None,
+        outcome_type: str | None = None,
+        limit: int = 100,
+    ) -> list[DecisionTrace]:
+        """Browse persisted decision traces from past sessions.
+
+        Each trace is the full causal chain a committed outcome snapshotted:
+        the reads, external contexts, recorded actions, and the outcome itself.
+        Use this to learn from past decisions before making a similar one.
+
+        Args:
+            entity_path: Only traces touching this entity.
+            agent_id: Only traces committed by this agent.
+            outcome_type: Filter by outcome (e.g. "success", "failure").
+            limit: Maximum traces to return (default 100).
+
+        Returns an empty list on adapters without trace persistence (e.g. the
+        default filesystem adapter) — traces live in Postgres or the hosted API.
+        """
+        return self._adapter.list_traces(
+            entity_path=entity_path,
+            agent_id=agent_id,
+            outcome_type=outcome_type,
+            limit=limit,
+        )
+
+    def get_trace(self, trace_id: str) -> DecisionTrace | None:
+        """Retrieve a full decision trace by ID, or None if not found.
+
+        Args:
+            trace_id: The trace ID (from ``list_traces`` or ``commit_outcome``).
+        """
+        return self._adapter.get_trace(trace_id)
+
     # ------------------------------------------------------------------
     # Agent brain — scoped recall & cross-agent reads
     # ------------------------------------------------------------------
