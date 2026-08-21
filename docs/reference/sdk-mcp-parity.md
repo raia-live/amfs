@@ -34,6 +34,8 @@ AMFS exposes memory three ways: the **MCP server** (for agents), the **Python SD
 | History | `amfs_history` | `history` | `history`, `historyAsync` |
 | Stats | `amfs_stats` | `stats` | `stats`, `statsAsync` |
 | Graph neighbors | `amfs_graph_neighbors` | `graph_neighbors` (adapter) | `graphNeighborsAsync` |
+| Bulk export | `amfs_export` | — (use `list`) | — |
+| Server-side aggregate | `amfs_aggregate` | — (HTTP `POST /api/v1/aggregate`) | — |
 
 ## Tracing & outcomes
 
@@ -66,6 +68,8 @@ These MCP tools are **not** mirrored 1:1 in the SDKs, by design. They are either
 | `amfs_export_training_data` | Pro (HTTP-proxied) | Calls `GET /api/v1/pro/export`. Exposed on the TS `HttpAdapter` as `exportTrainingDataAsync`; Python calls the endpoint directly. |
 | `amfs_room_*`, `amfs_negotiate_*` | Pro (rooms backend) | Multi-agent rooms/negotiation require the Pro rooms service. The TS SDK has `room*`/`negotiate*` methods; `amfs_negotiate_cancel` has **no OSS backend endpoint**, so it's not added as an SDK method (it would be a broken stub). |
 | `amfs_verify`, `amfs_commit_batch`, `amfs_merge_base` | SDK-covered | Present in the Python SDK (`verify`, `transaction`, `common_ancestor`) and TS SDK (`verify`, `transaction`, `commonAncestor`). |
+| `amfs_export` | MCP-only | Spools full untruncated values to a **local file** on the MCP client's machine — a file-system convenience that only makes sense in-process. SDK callers already have `list`/`read` returning full values with no truncation, so there is nothing to mirror. |
+| `amfs_aggregate` | MCP-backed by OSS endpoint | Reduces server-side via `POST /api/v1/aggregate` (visibility-filtered before the reduce). SDK callers can hit the same endpoint through the `HttpAdapter`; a dedicated `aggregate` method is not yet exposed. |
 
 {: .warning }
 **Consolidation contract caveat.** Two consolidation tools disagree with the API they proxy: `amfs_consolidate(dry_run=True)` is not honoured as a preview by the handler (it performs a real run), and `amfs_consolidation_candidates` requires an `entity_path` the tool doesn't always send. Until the server contract is fixed, prefer `amfs_consolidation_candidates(entity_path=...)` for previews and avoid relying on `dry_run`. SDK wrappers forward these params but inherit the same server behavior.

@@ -54,6 +54,7 @@ from amfs_core.quality import HeuristicQualityEvaluator
 from amfs_http.auth import verify_api_key
 from amfs_http.models import (
     AddTeamMemberRequest,
+    AggregateRequest,
     ContextRequest,
     CreateAPIKeyRequest,
     CreateSnapshotRequest,
@@ -1163,6 +1164,55 @@ async def list_entity_summaries(
         summaries = mem._adapter.entity_summaries()
 
     return json.loads(json.dumps({"entities": summaries}, default=str))
+
+
+@app.post("/api/v1/aggregate")
+async def aggregate_entries_endpoint(
+    request: Request,
+    req: AggregateRequest,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Compute one aggregate server-side over the records under an entity path.
+
+    Returns only the computed result, not the raw records — so an agent can get
+    a sum/mean/group-by across thousands of records without pulling any of them
+    into context. The visibility filter is applied BEFORE reducing (same order
+    as /api/v1/entities), so a caller can never aggregate over entries they
+    can't read.
+    """
+    from amfs_core.aggregates import AGGREGATE_OPS, aggregate_entries
+
+    if req.op not in AGGREGATE_OPS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown op {req.op!r}; expected one of {list(AGGREGATE_OPS)}",
+        )
+    if req.op != "count" and not req.field:
+        raise HTTPException(
+            status_code=400, detail=f"op {req.op!r} requires a 'field'"
+        )
+
+    mem = _get_memory()
+    entries = mem.list(req.entity_path, branch=req.branch)
+
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter():
+        entries = vis.filter_entries(entries)
+
+    try:
+        result = aggregate_entries(
+            entries,
+            op=req.op,
+            field=req.field,
+            group_by=req.group_by,
+            row_path=req.row_path,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    result["entity_path"] = req.entity_path
+    result["entries_scanned"] = len(entries)
+    return json.loads(json.dumps(result, default=str))
 
 
 # ──────────────────────────────────────────────────────────────────────

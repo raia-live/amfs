@@ -18,6 +18,46 @@ if TYPE_CHECKING:
     from amfs_postgres.adapter import PostgresAdapter
 
 
+def _structured_profile(entries: list) -> tuple[dict | None, dict | None]:
+    """Compute a schema profile + materialized aggregates for tabular entities.
+
+    This is what makes heavy (e.g. room) usage fast: an agent reading the digest
+    learns the shape of the data and gets common numeric rollups precomputed,
+    without listing every record. Returns (None, None) when the entries are not
+    record-shaped (plain-text memories), so ordinary entities are unaffected.
+    Never raises — profiling must not break digest compilation.
+    """
+    try:
+        from amfs_core.aggregates import aggregate_entries, room_schema_profile
+
+        base = room_schema_profile(entries)
+        candidates = base.get("row_path_candidates") or []
+        row_path = candidates[0]["field"] if candidates else None
+        profile = room_schema_profile(entries, row_path=row_path) if row_path else base
+
+        field_names = [f["field"] for f in profile["fields"] if f["field"] != "_value"]
+        if not field_names or profile["total_rows"] == 0:
+            return None, None
+
+        materialized: dict = {"total_rows": profile["total_rows"]}
+        if row_path:
+            materialized["row_path"] = row_path
+        numeric_fields = [
+            f["field"] for f in profile["fields"]
+            if "numeric_range" in f and f["field"] != "_value"
+        ]
+        field_stats: dict = {}
+        for fld in numeric_fields[:10]:
+            res = aggregate_entries(entries, op="stats", field=fld, row_path=row_path)
+            field_stats[fld] = {k: res.get(k) for k in ("n", "sum", "mean", "min", "max")}
+        if field_stats:
+            materialized["numeric_fields"] = field_stats
+        return profile, materialized
+    except Exception:  # noqa: BLE001 - profiling is best-effort
+        logger.debug("schema profiling failed for entity digest", exc_info=True)
+        return None, None
+
+
 def _confidence_label(c: float) -> str:
     if c >= 0.95:
         return "very high"
@@ -96,20 +136,30 @@ class RuleBasedStrategy:
             avg_conf, outcome_linked, risk_keys, ext_event_count,
         )
 
+        summary: dict[str, Any] = {
+            "narrative": narrative,
+            "total_keys": len(entries),
+            "top_keys": top_keys,
+            "agents": sorted(agents),
+            "external_sources": sorted(external_sources),
+            "avg_confidence": avg_conf,
+            "last_write": last_write.isoformat(),
+            "outcome_linked": outcome_linked,
+            "external_events": ext_event_count,
+        }
+
+        # Room/tabular entities: carry an always-fresh schema profile and
+        # precomputed numeric rollups so an agent can orient and get common
+        # aggregates in this one briefing call instead of reading every record.
+        schema_profile, materialized = _structured_profile(entries)
+        if schema_profile is not None:
+            summary["schema_profile"] = schema_profile
+            summary["materialized_aggregates"] = materialized
+
         return Digest(
             digest_type=DigestType.ENTITY,
             scope=entity_path,
-            summary={
-                "narrative": narrative,
-                "total_keys": len(entries),
-                "top_keys": top_keys,
-                "agents": sorted(agents),
-                "external_sources": sorted(external_sources),
-                "avg_confidence": avg_conf,
-                "last_write": last_write.isoformat(),
-                "outcome_linked": outcome_linked,
-                "external_events": ext_event_count,
-            },
+            summary=summary,
             entry_count=len(entries),
             source_agents=sorted(agents | {f"webhook/{s}" for s in external_sources} | {f"external/{s}" for s in external_sources}),
             compiled_at=datetime.now(timezone.utc),

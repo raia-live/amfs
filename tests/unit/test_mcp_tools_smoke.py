@@ -101,6 +101,18 @@ class TestReadSurfaceSmoke:
     def test_stats(self, srv):
         _ok("amfs_stats", srv.amfs_stats())
 
+    def test_export(self, srv):
+        # Bulk export writes full values to a file and returns a manifest.
+        payload = _ok("amfs_export", srv.amfs_export("smoke/db"))
+        assert payload["entry_count"] >= 1
+        assert "path" in payload
+
+    def test_aggregate_local_fallback(self, srv):
+        # No AMFS_HTTP_URL in this test env, so amfs_aggregate must compute
+        # locally over the same aggregates module rather than erroring.
+        payload = _ok("amfs_aggregate", srv.amfs_aggregate("smoke/db", op="count"))
+        assert "count" in payload
+
     def test_retrieve(self, srv):
         # THE regression: retrieve forwards include_artifacts down the stack.
         _ok("amfs_retrieve", srv.amfs_retrieve(query="retry policy"))

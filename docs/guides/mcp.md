@@ -84,6 +84,8 @@ After setup, your AI agents have tools across five categories:
 | `amfs_search` | Search entries with filters and progressive retrieval (`depth`: 1=Hot, 2=+Warm, 3=all) |
 | `amfs_retrieve` | Natural language retrieval with semantic + recency + confidence scoring |
 | `amfs_list` | List entries for an entity |
+| `amfs_export` | Bulk-fetch full (untruncated) entry values for an entity to a local file, with an inline fallback for small sets — the fast path for reading a whole room/entity without per-entry calls or context truncation |
+| `amfs_aggregate` | Compute a number over an entity's records server-side (`count`/`sum`/`mean`/`min`/`max`/`stats`, optional `group_by` and `row_path`) without pulling records into context |
 | `amfs_stats` | Get a memory overview (entry counts, outcome counts) |
 | `amfs_history` | Retrieve version history of an entry with optional time range |
 | `amfs_graph_neighbors` | Explore the knowledge graph around an entity |
@@ -408,6 +410,26 @@ For non-IDE environments (CI bots, deploy scripts), set `AMFS_AGENT_ID`:
 8. **Outcome committed** — `amfs_commit_outcome` snapshots the full decision trace (all reads, writes, and contexts) and back-propagates confidence.
 9. **Traces persist** — `amfs_list_traces` and `amfs_get_trace` let future agents learn from past decisions.
 10. **Knowledge compounds** — The next agent starts with compiled context, cross-agent reads, and full decision history.
+
+### Working with data-heavy entities and rooms
+
+When an entity or room holds a lot of structured data (hundreds of batch
+entries, thousands of records), do **not** list-and-read every entry — that
+truncates values, floods context, and does not survive compaction. Instead:
+
+1. **Orient** — read the entity digest via `amfs_briefing`. For a room-scoped
+   entity it now carries a `schema_profile` (which fields exist, their types and
+   ranges, `row_path` candidates) and `materialized_aggregates`, so you know the
+   shape before reading anything.
+2. **Compute** — call `amfs_aggregate` for the numbers you actually need
+   (counts, sums, means, group-by). The reduction happens server-side; records
+   never enter your context.
+3. **Only if you need the raw rows** — call `amfs_export` to spool the full,
+   untruncated values to a local file and process them there.
+
+This turns what used to be dozens of truncated per-entry reads into two or three
+calls. Inside a SenseLab room, the room-wide equivalents `amfs_room_aggregate`
+and `amfs_room_schema` span every topic in the room in a single call.
 
 ### Example Scenario
 
