@@ -3,6 +3,7 @@
  */
 
 import type { AmfsAdapter, WatchHandle } from "./adapter.js";
+import type { DecisionTrace, DecisionTraceSummary, HttpAdapter } from "./adapters/http.js";
 import { InMemoryAdapter } from "./adapters/filesystem.js";
 import { defaultConfig } from "./config.js";
 import { CausalTagger, CoWEngine } from "./engine.js";
@@ -518,6 +519,167 @@ export class AgentMemory {
   /** Reset the session read log. */
   clearReadLog(): void {
     this.readTracker.clear();
+  }
+
+  // ------------------------------------------------------------------
+  // Async remote API (HTTP adapter)
+  //
+  // The synchronous methods above operate on an in-process adapter. When the
+  // memory is backed by a remote AMFS server — the common case for an
+  // orchestrator or a disposable sandbox pointing at hosted SenseLab — every
+  // operation is a network round-trip, so these `*Async` variants delegate to
+  // the HttpAdapter and return promises. They also feed the local read/commit
+  // trackers, so decision traces stay complete over HTTP.
+  // ------------------------------------------------------------------
+
+  private requireHttp(method: string): HttpAdapter {
+    const a = this.adapter as unknown as Record<string, unknown>;
+    if (typeof a[method] !== "function") {
+      throw new Error(
+        `${method}() requires a remote HTTP adapter — construct AgentMemory ` +
+        `with an HttpAdapter (AMFS_HTTP_URL + AMFS_API_KEY). The local ` +
+        `in-memory adapter supports only the synchronous API.`
+      );
+    }
+    return this.adapter as unknown as HttpAdapter;
+  }
+
+  /** Read a single entry from the remote server. Records it for causal tracing. */
+  async readAsync(entityPath: string, key: string): Promise<MemoryEntry | null> {
+    const entry = await this.requireHttp("readAsync").readAsync(entityPath, key);
+    if (entry) this.readTracker.record(entry);
+    return entry;
+  }
+
+  /** Write an entry to the remote server. */
+  async writeAsync(
+    entityPath: string,
+    key: string,
+    value: unknown,
+    options?: {
+      confidence?: number;
+      memoryType?: string;
+      shared?: boolean;
+      patternRefs?: string[];
+      branch?: string;
+    }
+  ): Promise<MemoryEntry> {
+    return this.requireHttp("writeAsync").writeAsync({
+      entityPath,
+      key,
+      value,
+      agentId: this.agentId,
+      ...options,
+    });
+  }
+
+  /** List entries under an entity path from the remote server. */
+  async listAsync(
+    entityPath?: string,
+    options?: { includeSuperseded?: boolean }
+  ): Promise<MemoryEntry[]> {
+    return this.requireHttp("listAsync").listAsync(entityPath, options);
+  }
+
+  /** Filtered/keyword search on the remote server. */
+  async searchAsync(options?: SearchOptions): Promise<MemoryEntry[]> {
+    return this.requireHttp("searchAsync").searchAsync({
+      query: options?.query,
+      entityPath: options?.entityPath,
+      minConfidence: options?.minConfidence,
+      maxConfidence: options?.maxConfidence,
+      agentId: options?.agentId,
+      since: options?.since,
+      patternRef: options?.patternRef,
+      sortBy: options?.sortBy,
+      limit: options?.limit,
+    });
+  }
+
+  /** Semantic retrieval by meaning (server-side embedding + blend). */
+  async retrieveAsync(
+    query: string,
+    options?: {
+      entityPath?: string;
+      minConfidence?: number;
+      limit?: number;
+      includeArtifacts?: boolean;
+    }
+  ): Promise<Array<{ entry: MemoryEntry; score: number }>> {
+    return this.requireHttp("retrieveAsync").retrieveAsync(query, options);
+  }
+
+  /** Compiled Cortex briefing for an entity — the start-of-session context load. */
+  async briefingAsync(options?: { entityPath?: string; limit?: number }): Promise<unknown> {
+    return this.requireHttp("briefingAsync").briefingAsync(options);
+  }
+
+  /** Commit an outcome remotely, snapshotting the session's causal chain. */
+  async commitOutcomeAsync(
+    outcomeRef: string,
+    outcomeType: OutcomeType,
+    options?: { entityPath?: string; causalEntryKeys?: string[]; causalConfidence?: number }
+  ): Promise<unknown> {
+    const keys = options?.causalEntryKeys ?? this.readTracker.causalKeys;
+    return this.requireHttp("commitOutcomeAsync").commitOutcomeAsync({
+      outcomeRef,
+      outcomeType: String(outcomeType),
+      entityPath: options?.entityPath,
+      causalEntryKeys: keys,
+      causalConfidence: options?.causalConfidence,
+      agentId: this.agentId,
+    });
+  }
+
+  /** Version history of a key from the remote server. */
+  async historyAsync(
+    entityPath: string,
+    key: string,
+    options?: { since?: string; until?: string }
+  ): Promise<MemoryEntry[]> {
+    return this.requireHttp("historyAsync").historyAsync(entityPath, key, options);
+  }
+
+  /** Recent timeline events for this agent (writes, outcomes, cross-agent reads). */
+  async timelineAsync(options?: {
+    eventType?: string;
+    since?: string;
+    limit?: number;
+    branch?: string;
+  }): Promise<unknown[]> {
+    return this.requireHttp("timelineAsync").timelineAsync(this.agentId, options);
+  }
+
+  /** Related entities in the knowledge graph (Pro). */
+  async graphNeighborsAsync(options: {
+    entity: string;
+    relation?: string;
+    direction?: string;
+    minConfidence?: number;
+    depth?: number;
+    limit?: number;
+  }): Promise<unknown[]> {
+    return this.requireHttp("graphNeighborsAsync").graphNeighborsAsync(options);
+  }
+
+  /** Browse persisted decision traces from past sessions. */
+  async listTracesAsync(options?: {
+    entityPath?: string;
+    agentId?: string;
+    outcomeType?: string;
+    limit?: number;
+  }): Promise<DecisionTraceSummary[]> {
+    return this.requireHttp("listTracesAsync").listTracesAsync(options);
+  }
+
+  /** Retrieve a full decision trace by ID, or null if not found. */
+  async getTraceAsync(traceId: string): Promise<DecisionTrace | null> {
+    return this.requireHttp("getTraceAsync").getTraceAsync(traceId);
+  }
+
+  /** Aggregate memory statistics from the remote server. */
+  async statsAsync(): Promise<Record<string, unknown>> {
+    return this.requireHttp("statsAsync").statsAsync();
   }
 
   // ── Room operations (Pro — requires HTTP adapter with rooms backend) ──

@@ -8,6 +8,8 @@ set -euo pipefail
 #   --client <name|all>   Skip auto-detect; configure a specific client (or "all")
 #   --api-key <key>       Use AMFS SaaS with this API key
 #   --api-url <url>       SaaS API URL (default: https://amfs-login.sense-lab.ai)
+#   --entity-path <path>  Bind this environment to a home entity_path (e.g.
+#                         acme/checkout) so agents auto-brief it on boot
 #   --uninstall           Remove AMFS config from detected/specified clients
 #   -y, --yes             Skip confirmation prompts
 
@@ -28,21 +30,32 @@ warn()    { printf "${YELLOW}==> ${NC}%s\n" "$*"; }
 error()   { printf "${RED}==> ${NC}%s\n" "$*" >&2; }
 fatal()   { error "$@"; exit 1; }
 
+# Hosted install? True when a key or an explicit API URL was given, or --saas
+# was passed. Hosted installs use the pro server and bake AMFS_HTTP_URL; the API
+# key is written into the config ONLY when supplied here — so `--saas`/`--api-url`
+# alone bakes a hosted-ready config whose key is injected at runtime, keeping any
+# secret out of an image or checkpoint.
+is_saas() { [[ "$SAAS_MODE" == true || -n "$API_KEY" ]]; }
+
 # ── Parse arguments ──────────────────────────────────────────────────────────
 
 CLIENT_FLAG=""
 API_KEY=""
 API_URL=""
+ENTITY_PATH=""
 UNINSTALL=false
 AUTO_YES=false
+SAAS_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --client)     CLIENT_FLAG="$2"; shift 2 ;;
-        --api-key)    API_KEY="$2"; shift 2 ;;
-        --api-url)    API_URL="$2"; shift 2 ;;
-        --uninstall)  UNINSTALL=true; shift ;;
-        -y|--yes)     AUTO_YES=true; shift ;;
+        --client)      CLIENT_FLAG="$2"; shift 2 ;;
+        --api-key)     API_KEY="$2"; SAAS_MODE=true; shift 2 ;;
+        --api-url)     API_URL="$2"; SAAS_MODE=true; shift 2 ;;
+        --saas)        SAAS_MODE=true; shift ;;
+        --entity-path) ENTITY_PATH="$2"; shift 2 ;;
+        --uninstall)   UNINSTALL=true; shift ;;
+        -y|--yes)      AUTO_YES=true; shift ;;
         -h|--help)
             cat <<'USAGE'
 AMFS MCP Installer
@@ -53,9 +66,18 @@ Usage:
 
 Options:
   --client <name|all>   Configure a specific client: claude-desktop, cursor,
-                        claude-code, codex, windsurf, vscode, or "all"
+                        claude-code, codex, gemini, windsurf, vscode, or "all"
   --api-key <key>       Connect to AMFS SaaS with this API key
-  --api-url <url>       SaaS API URL (default: https://amfs-login.sense-lab.ai)
+  --api-url <url>       SaaS API URL (default: https://amfs-login.sense-lab.ai).
+                        Implies --saas.
+  --saas                Configure hosted mode (the pro server + AMFS_HTTP_URL)
+                        WITHOUT baking a key. Inject AMFS_API_KEY at runtime —
+                        ideal for a base image/checkpoint shared across tenants,
+                        so no secret lands in the image.
+  --entity-path <path>  Bind this environment to a home entity_path (e.g.
+                        acme/checkout). Sets AMFS_ENTITY_PATH so agents
+                        auto-brief that entity on boot — ideal for disposable
+                        sandboxes and CI jobs.
   --uninstall           Remove AMFS MCP config from clients
   -y, --yes             Skip confirmation prompts
   -h, --help            Show this help
@@ -120,7 +142,7 @@ ensure_uv() {
 ensure_amfs_mcp() {
     # `--refresh` so the warm-up pulls the latest published build, matching the
     # `--refresh` the generated client config uses at launch.
-    if [[ -n "$API_KEY" ]]; then
+    if is_saas; then
         info "Installing amfs-mcp-server-pro (SaaS)..."
         uvx --refresh --from amfs-mcp-server-pro amfs-mcp-server-pro --help &>/dev/null || true
         success "amfs-mcp-server-pro is ready"
@@ -153,6 +175,39 @@ vscode_config_path() {
     echo "$HOME/.vscode/mcp.json"
 }
 
+gemini_settings_path() {
+    echo "$HOME/.gemini/settings.json"
+}
+
+# Whitelist env var NAMES on the Codex senselab server so runtime-injected values
+# reach it. Codex does NOT pass the ambient environment to stdio MCP subprocesses;
+# only names listed in `env_vars` are forwarded from Codex's launch env (`--env`
+# / the `env` table sets literal values only). So a keyless --saas bake, whose
+# AMFS_API_KEY is injected at runtime, would 401 without this — the server never
+# sees the key. `codex mcp add` can't set env_vars, so we patch config.toml.
+codex_whitelist_env_vars() {
+    [[ $# -eq 0 ]] && return 0
+    local cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
+    [[ -f "$cfg" ]] || { warn "Codex config not found at $cfg — skipping env_vars whitelist"; return 0; }
+
+    # Build a TOML array literal, e.g. ["AMFS_API_KEY", "AMFS_ENTITY_PATH"].
+    local list="" name
+    for name in "$@"; do
+        [[ -n "$list" ]] && list+=", "
+        list+="\"$name\""
+    done
+
+    # Insert `env_vars = [...]` immediately after the [mcp_servers.senselab] header
+    # (so it sits on the main table, before any [mcp_servers.senselab.env] subtable),
+    # dropping any prior env_vars line in that block so re-runs stay idempotent.
+    awk -v line="env_vars = [$list]" '
+        /^\[mcp_servers\.senselab\][[:space:]]*$/ { print; print line; in_block=1; next }
+        in_block && /^[[:space:]]*env_vars[[:space:]]*=/ { next }
+        /^\[/ { in_block=0 }
+        { print }
+    ' "$cfg" > "$cfg.tmp" && mv "$cfg.tmp" "$cfg"
+}
+
 # ── Build MCP config JSON ───────────────────────────────────────────────────
 
 UVX_PATH=""
@@ -164,19 +219,35 @@ resolve_uvx_path() {
 
 build_mcp_json() {
     resolve_uvx_path
-    local env_block="{}"
     local pkg="amfs-mcp-server"
+    local -a env_pairs=()
 
-    if [[ -n "$API_KEY" ]]; then
+    if is_saas; then
         pkg="amfs-mcp-server-pro"
         local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
-        env_block=$(cat <<ENVJSON
-{
-            "AMFS_HTTP_URL": "$url",
-            "AMFS_API_KEY": "$API_KEY"
-        }
-ENVJSON
-)
+        env_pairs+=("\"AMFS_HTTP_URL\": \"$url\"")
+        # Only write the key when one was actually supplied. --saas/--api-url
+        # alone bakes a hosted-ready config with no secret; the key is injected
+        # at runtime (ambient env), keeping it out of any image/checkpoint.
+        if [[ -n "$API_KEY" ]]; then
+            env_pairs+=("\"AMFS_API_KEY\": \"$API_KEY\"")
+        fi
+    fi
+    # A bound entity_path applies in both local and SaaS mode, so agents in a
+    # disposable environment auto-brief the right memory on boot.
+    if [[ -n "$ENTITY_PATH" ]]; then
+        env_pairs+=("\"AMFS_ENTITY_PATH\": \"$ENTITY_PATH\"")
+    fi
+
+    local env_block="{}"
+    if [[ ${#env_pairs[@]} -gt 0 ]]; then
+        local inner=""
+        local p
+        for p in "${env_pairs[@]}"; do
+            if [[ -n "$inner" ]]; then inner+=$',\n'; fi
+            inner+="            $p"
+        done
+        env_block=$'{\n'"$inner"$'\n        }'
     fi
 
     # `--refresh` forces uvx to re-resolve from PyPI on each launch instead of
@@ -291,6 +362,12 @@ tools and sessions. Use it proactively:
 - **Remember things:** when the user shares a durable fact, preference, or decision, or says "remember…", call `amfs_write(entity_path, key, value)`.
 - `amfs_read`/`amfs_recall` need an EXACT key — a miss there means "try `amfs_retrieve`", NOT "nothing is stored".
 MD
+    # When this environment is bound to a home entity, spell out the concrete
+    # path so a fresh agent hydrates the right memory without guessing.
+    if [[ -n "$ENTITY_PATH" ]]; then
+        printf '\n- **This environment is bound to `%s`.** Right after `amfs_set_identity`, call `amfs_briefing(entity_path="%s")` to load what prior sessions here learned, and default your reads/writes to `%s` unless the task clearly concerns another entity.\n' \
+            "$ENTITY_PATH" "$ENTITY_PATH" "$ENTITY_PATH"
+    fi
 }
 
 upsert_senselab_block() {
@@ -383,6 +460,10 @@ detect_clients() {
         DETECTED_CLIENTS+=("codex")
     fi
 
+    if command -v gemini &>/dev/null || [[ -d "$HOME/.gemini" ]]; then
+        DETECTED_CLIENTS+=("gemini")
+    fi
+
     local windsurf_dir
     windsurf_dir="$(dirname "$(windsurf_config_path)")"
     if [[ -d "$windsurf_dir" ]]; then
@@ -437,15 +518,23 @@ configure_client() {
                 fi
                 resolve_uvx_path
                 local pkg="amfs-mcp-server"
-                if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
+                if is_saas; then pkg="amfs-mcp-server-pro"; fi
                 # `--refresh` (a uvx flag, before the package) forces a fresh
                 # re-resolve each launch so users never get stuck on a stale
-                # cached build after we publish a fix.
-                local args=("mcp" "add" "senselab" "--" "$UVX_PATH" "--refresh" "$pkg")
-                if [[ -n "$API_KEY" ]]; then
+                # cached build after we publish a fix. Build a single args array
+                # (avoids empty-array expansion errors under bash 3.2 + set -u).
+                local args=("mcp" "add" "senselab")
+                if is_saas; then
                     local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
-                    args=("mcp" "add" "senselab" "-e" "AMFS_HTTP_URL=$url" "-e" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "--refresh" "$pkg")
+                    args+=("-e" "AMFS_HTTP_URL=$url")
+                    if [[ -n "$API_KEY" ]]; then args+=("-e" "AMFS_API_KEY=$API_KEY"); fi
                 fi
+                if [[ -n "$ENTITY_PATH" ]]; then
+                    args+=("-e" "AMFS_ENTITY_PATH=$ENTITY_PATH")
+                fi
+                args+=("--" "$UVX_PATH" "--refresh" "$pkg")
+                # Replace any existing entry so re-runs stay idempotent.
+                claude mcp remove senselab 2>/dev/null || true
                 claude "${args[@]}"
                 success "Configured Claude Code"
                 install_claude_code_skill
@@ -467,22 +556,54 @@ configure_client() {
                 fi
                 resolve_uvx_path
                 local pkg="amfs-mcp-server"
-                if [[ -n "$API_KEY" ]]; then pkg="amfs-mcp-server-pro"; fi
+                if is_saas; then pkg="amfs-mcp-server-pro"; fi
                 # codex mcp add <name> [--env KEY=VAL]... -- <command> [args...]
                 # `--refresh` (uvx flag, before the package) forces a fresh
                 # re-resolve each launch so a stale cache can't pin users to an
                 # old build after we publish a fix.
-                local args=("mcp" "add" "senselab" "--" "$UVX_PATH" "--refresh" "$pkg")
-                if [[ -n "$API_KEY" ]]; then
+                local args=("mcp" "add" "senselab")
+                if is_saas; then
                     local url="${API_URL:-$AMFS_DEFAULT_API_URL}"
-                    args=("mcp" "add" "senselab" "--env" "AMFS_HTTP_URL=$url" "--env" "AMFS_API_KEY=$API_KEY" "--" "$UVX_PATH" "--refresh" "$pkg")
+                    args+=("--env" "AMFS_HTTP_URL=$url")
+                    if [[ -n "$API_KEY" ]]; then args+=("--env" "AMFS_API_KEY=$API_KEY"); fi
                 fi
+                if [[ -n "$ENTITY_PATH" ]]; then
+                    args+=("--env" "AMFS_ENTITY_PATH=$ENTITY_PATH")
+                fi
+                args+=("--" "$UVX_PATH" "--refresh" "$pkg")
                 # Replace any existing entry so re-runs stay idempotent.
                 codex mcp remove senselab 2>/dev/null || true
                 codex "${args[@]}"
+                # Forward names that arrive at runtime rather than being baked as
+                # literals above — Codex drops ambient env for stdio servers, so
+                # without this the injected AMFS_API_KEY (keyless --saas) and an
+                # unbaked AMFS_ENTITY_PATH never reach the server.
+                local fwd_names=()
+                if is_saas && [[ -z "$API_KEY" ]]; then fwd_names+=("AMFS_API_KEY"); fi
+                if [[ -z "$ENTITY_PATH" ]]; then fwd_names+=("AMFS_ENTITY_PATH"); fi
+                if [[ ${#fwd_names[@]} -gt 0 ]]; then
+                    codex_whitelist_env_vars "${fwd_names[@]}"
+                fi
                 success "Configured Codex"
                 upsert_senselab_block "$HOME/.codex/AGENTS.md"
                 success "Installed SenseLab recall-first memory guide (~/.codex/AGENTS.md)"
+            fi
+            ;;
+        gemini)
+            # Gemini CLI reads MCP servers from ~/.gemini/settings.json under the
+            # same "mcpServers" key as the other JSON clients, so the shared
+            # merge helper applies. Its recall-first guide goes in ~/.gemini/GEMINI.md.
+            local path
+            path="$(gemini_settings_path)"
+            if $UNINSTALL; then
+                remove_mcp_config "$path"
+                remove_senselab_block "$HOME/.gemini/GEMINI.md"
+                success "Removed AMFS from Gemini CLI"
+            else
+                inject_mcp_config "$path"
+                success "Configured Gemini CLI ($path)"
+                upsert_senselab_block "$HOME/.gemini/GEMINI.md"
+                success "Installed SenseLab recall-first memory guide (~/.gemini/GEMINI.md)"
             fi
             ;;
         windsurf)
@@ -644,9 +765,12 @@ main() {
 
     if [[ -n "$API_KEY" ]]; then
         info "Connected to AMFS SaaS (${API_URL:-$AMFS_DEFAULT_API_URL})"
+    elif is_saas; then
+        info "Configured hosted mode (${API_URL:-$AMFS_DEFAULT_API_URL}) — no key baked."
+        echo "  Inject AMFS_API_KEY in the environment at runtime to connect."
     else
         info "Using local filesystem storage (~/.amfs/)"
-        echo "  To connect to AMFS SaaS, re-run with --api-key <key>"
+        echo "  To connect to AMFS SaaS, re-run with --api-key <key> (or --saas)"
     fi
     echo ""
 
