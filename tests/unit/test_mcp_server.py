@@ -314,6 +314,92 @@ class TestMCPTools:
         result = json.loads(amfs_commit_outcome("task-46", "success"))
         assert result["tool_calls"] == 0
 
+    def test_a_trace_missing_both_halves_is_reported_untrainable(self) -> None:
+        """The gap has to be named at the moment it can still be closed.
+
+        An outcome sealed without the request or the action commits happily and
+        reads as a success, so an account can accumulate hundreds of them and
+        discover only at readiness that none can be trained on — by which time
+        every session that could have supplied the missing half is over.
+        """
+        from amfs_mcp.server import amfs_commit_outcome, amfs_write
+
+        amfs_write("svc", "key", "value")
+
+        result = json.loads(amfs_commit_outcome("task-47", "success"))
+        assert result["training"]["trainable"] is False
+        assert result["training"]["missing"] == ["task_input", "tool_calls"]
+
+    def test_the_note_does_not_ask_for_actions_that_were_never_taken(self) -> None:
+        """A session that only read and wrote memory has no action to record.
+
+        Prompting for one regardless would ask the agent to invent it, and a
+        fabricated action is worse than the missing example: it trains the
+        model on a decision nobody made.
+        """
+        from amfs_mcp.server import amfs_commit_outcome, amfs_write
+
+        amfs_write("svc", "key", "value")
+
+        result = json.loads(amfs_commit_outcome("task-48", "success"))
+        assert "invented" in result["training"]["note"]
+
+    def test_only_the_absent_half_is_named(self) -> None:
+        from amfs_mcp.server import (
+            amfs_commit_outcome,
+            amfs_record_action,
+            amfs_write,
+        )
+
+        amfs_write("svc", "key", "value")
+        amfs_record_action("deploy", {"target": "production"}, result="live")
+
+        result = json.loads(amfs_commit_outcome("task-49", "success"))
+        assert result["training"]["missing"] == ["task_input"]
+
+    def test_a_complete_pair_is_reported_trainable_without_a_note(self) -> None:
+        from amfs_mcp.server import (
+            amfs_commit_outcome,
+            amfs_record_action,
+            amfs_write,
+        )
+
+        amfs_write("svc", "key", "value")
+        amfs_record_action("deploy", {"target": "production"}, result="live")
+
+        result = json.loads(
+            amfs_commit_outcome("task-50", "success", task_input="ship the release")
+        )
+        assert result["training"] == {"trainable": True}
+
+    def test_a_task_input_the_trace_never_kept_is_reported_absent(self) -> None:
+        """Reported off the trace rather than off the argument.
+
+        The SDK may not accept task_input, and the safety gate can redact it,
+        so an agent that passed one can still have committed a trace without
+        it. Echoing the argument back would confirm a capture that did not
+        happen, which is the one answer worse than saying nothing.
+        """
+        import amfs_mcp.server as srv
+        from amfs_mcp.server import amfs_commit_outcome, amfs_write
+
+        amfs_write("svc", "key", "value")
+
+        original = srv._get_memory().commit_outcome
+
+        def drop_task_input(ref, otype, **kwargs):
+            kwargs.pop("task_input", None)
+            return original(ref, otype, **kwargs)
+
+        with patch.object(
+            srv._get_memory(), "commit_outcome", side_effect=drop_task_input
+        ):
+            result = json.loads(
+                amfs_commit_outcome("task-51", "success", task_input="ship it")
+            )
+
+        assert "task_input" in result["training"]["missing"]
+
     def test_the_explanation_is_absent_once_something_was_read(self) -> None:
         from amfs_mcp.server import amfs_commit_outcome, amfs_read, amfs_write
 

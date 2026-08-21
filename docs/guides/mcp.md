@@ -34,7 +34,25 @@ This will:
 
 ### Connecting to AMFS SaaS
 
-Pass your API key to connect to hosted AMFS:
+The shortest route needs no API key. `--remote` points your clients at the hosted
+MCP endpoint, and they sign you in through a browser the first time they connect:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.sh | bash -s -- --remote
+```
+
+Nothing is installed locally in this mode — no `uv`, no Python — because the
+client talks to the endpoint over HTTP.
+
+If you were sent a room invite link, `--join` takes it and tells you the one
+remaining step once your client has signed in:
+
+```bash
+curl -sSL ... | bash -s -- --join https://amfs.sense-lab.ai/join/<token>
+```
+
+To run a local server against the SaaS API instead, pass an API key. This is the
+right choice if you want the process on your own machine:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.sh | bash -s -- --api-key <your-key>
