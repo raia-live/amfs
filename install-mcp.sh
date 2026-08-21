@@ -179,6 +179,35 @@ gemini_settings_path() {
     echo "$HOME/.gemini/settings.json"
 }
 
+# Whitelist env var NAMES on the Codex senselab server so runtime-injected values
+# reach it. Codex does NOT pass the ambient environment to stdio MCP subprocesses;
+# only names listed in `env_vars` are forwarded from Codex's launch env (`--env`
+# / the `env` table sets literal values only). So a keyless --saas bake, whose
+# AMFS_API_KEY is injected at runtime, would 401 without this — the server never
+# sees the key. `codex mcp add` can't set env_vars, so we patch config.toml.
+codex_whitelist_env_vars() {
+    [[ $# -eq 0 ]] && return 0
+    local cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
+    [[ -f "$cfg" ]] || { warn "Codex config not found at $cfg — skipping env_vars whitelist"; return 0; }
+
+    # Build a TOML array literal, e.g. ["AMFS_API_KEY", "AMFS_ENTITY_PATH"].
+    local list="" name
+    for name in "$@"; do
+        [[ -n "$list" ]] && list+=", "
+        list+="\"$name\""
+    done
+
+    # Insert `env_vars = [...]` immediately after the [mcp_servers.senselab] header
+    # (so it sits on the main table, before any [mcp_servers.senselab.env] subtable),
+    # dropping any prior env_vars line in that block so re-runs stay idempotent.
+    awk -v line="env_vars = [$list]" '
+        /^\[mcp_servers\.senselab\][[:space:]]*$/ { print; print line; in_block=1; next }
+        in_block && /^[[:space:]]*env_vars[[:space:]]*=/ { next }
+        /^\[/ { in_block=0 }
+        { print }
+    ' "$cfg" > "$cfg.tmp" && mv "$cfg.tmp" "$cfg"
+}
+
 # ── Build MCP config JSON ───────────────────────────────────────────────────
 
 UVX_PATH=""
@@ -545,6 +574,16 @@ configure_client() {
                 # Replace any existing entry so re-runs stay idempotent.
                 codex mcp remove senselab 2>/dev/null || true
                 codex "${args[@]}"
+                # Forward names that arrive at runtime rather than being baked as
+                # literals above — Codex drops ambient env for stdio servers, so
+                # without this the injected AMFS_API_KEY (keyless --saas) and an
+                # unbaked AMFS_ENTITY_PATH never reach the server.
+                local fwd_names=()
+                if is_saas && [[ -z "$API_KEY" ]]; then fwd_names+=("AMFS_API_KEY"); fi
+                if [[ -z "$ENTITY_PATH" ]]; then fwd_names+=("AMFS_ENTITY_PATH"); fi
+                if [[ ${#fwd_names[@]} -gt 0 ]]; then
+                    codex_whitelist_env_vars "${fwd_names[@]}"
+                fi
                 success "Configured Codex"
                 upsert_senselab_block "$HOME/.codex/AGENTS.md"
                 success "Installed SenseLab recall-first memory guide (~/.codex/AGENTS.md)"
