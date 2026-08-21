@@ -17,7 +17,7 @@ AMFS supports the following environment variables. They override values set in `
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `AMFS_AGENT_ID` | Override auto-detected agent identity | Auto-detected from environment |
-| `AMFS_ENTITY_PATH` | Home entity path for this environment. When set, the MCP server defaults `amfs_briefing` to it, advertises it in the server instructions and the `amfs_set_identity` response, and adds it to the agent's `auto_context_paths`. Lets a fresh, disposable environment (e.g. a Fly.io Sprite or CI job) auto-hydrate the right memory without the agent guessing a path. | — |
+| `AMFS_ENTITY_PATH` | Home entity path for this environment. When set, the MCP server defaults `amfs_briefing` to it, advertises it in the server instructions and the `amfs_set_identity` response, and adds it to the agent's `auto_context_paths`. Lets a fresh, disposable environment (e.g. an ephemeral sandbox or CI job) auto-hydrate the right memory without the agent guessing a path. | — |
 | `AMFS_NAMESPACE` | Memory namespace for isolation | `default` |
 | `AMFS_DATA_DIR` | Custom filesystem data directory path | `.amfs` |
 | `AMFS_POSTGRES_DSN` | Postgres connection string; switches adapter to Postgres | — |

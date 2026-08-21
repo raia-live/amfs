@@ -19,7 +19,6 @@ dev = [
     "amfs-langgraph",
     "amfs-autogen",
     "amfs-strands",
-    "amfs-sprites",
 ]
 
 [tool.uv.workspace]
@@ -41,7 +40,6 @@ members = [
     "packages/integrations/langgraph",
     "packages/integrations/autogen",
     "packages/integrations/strands",
-    "packages/integrations/sprites",
 ]
 
 [tool.pytest.ini_options]
@@ -73,7 +71,6 @@ amfs-langchain = { workspace = true }
 amfs-langgraph = { workspace = true }
 amfs-autogen = { workspace = true }
 amfs-strands = { workspace = true }
-amfs-sprites = { workspace = true }
 
 [tool.mypy]
 python_version = "3.11"

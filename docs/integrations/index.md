@@ -37,27 +37,6 @@ See the [SaaS Connection Guide](/amfs/guides/saas/) for detailed setup instructi
 
 ---
 
-## Fly.io Sprites
-
-Give disposable [Fly.io Sprites](https://fly.io/sprites) microVMs persistent memory, so a freshly spun-up Sprite hydrates everything prior sessions learned:
-
-```bash
-pip install "amfs-sprites[http]"
-```
-
-```python
-from amfs_sprites import provision_memory, derive_entity_path
-
-session = provision_memory(entity_path=derive_entity_path("acme", "checkout"))
-system_prompt = session.hydrate_prompt()   # inject into your agent on boot
-# ... run the agent ...
-session.commit_outcome("checkout-work", "success")
-```
-
-Or, for MCP agents preinstalled on Sprites (Cursor, Claude Code, Codex, Gemini), bake the config into the base image and inject `AMFS_API_KEY` + `AMFS_ENTITY_PATH` at runtime. See the [full guide](/amfs/guides/sprites/).
-
----
-
 ## Strands Agents
 
 Add persistent memory to Strands agents as a plugin:

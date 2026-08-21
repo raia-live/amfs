@@ -48,7 +48,7 @@ AMFS exposes memory three ways: the **MCP server** (for agents), the **Python SD
 | Get trace | `amfs_get_trace` | `get_trace` | `getTraceAsync` |
 
 {: .note }
-The TypeScript SDK's `*Async` methods route through the `HttpAdapter` to a remote AMFS server. The synchronous methods operate on the in-process adapter. Construct `AgentMemory` with an `HttpAdapter` to use the async surface — the intended path for a Node orchestrator or a Sprite pointing at hosted SenseLab.
+The TypeScript SDK's `*Async` methods route through the `HttpAdapter` to a remote AMFS server. The synchronous methods operate on the in-process adapter. Construct `AgentMemory` with an `HttpAdapter` to use the async surface — the intended path for a Node orchestrator or a disposable sandbox pointing at hosted SenseLab.
 
 ## Identity
 

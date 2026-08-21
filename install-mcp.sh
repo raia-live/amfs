@@ -9,7 +9,7 @@ set -euo pipefail
 #   --api-key <key>       Use AMFS SaaS with this API key
 #   --api-url <url>       SaaS API URL (default: https://amfs-login.sense-lab.ai)
 #   --entity-path <path>  Bind this environment to a home entity_path (e.g.
-#                         sprites/acme/checkout) so agents auto-brief it on boot
+#                         acme/checkout) so agents auto-brief it on boot
 #   --uninstall           Remove AMFS config from detected/specified clients
 #   -y, --yes             Skip confirmation prompts
 
@@ -61,9 +61,9 @@ Options:
   --api-key <key>       Connect to AMFS SaaS with this API key
   --api-url <url>       SaaS API URL (default: https://amfs-login.sense-lab.ai)
   --entity-path <path>  Bind this environment to a home entity_path (e.g.
-                        sprites/acme/checkout). Sets AMFS_ENTITY_PATH so agents
+                        acme/checkout). Sets AMFS_ENTITY_PATH so agents
                         auto-brief that entity on boot — ideal for disposable
-                        sandboxes (Fly.io Sprites) and CI jobs.
+                        sandboxes and CI jobs.
   --uninstall           Remove AMFS MCP config from clients
   -y, --yes             Skip confirmation prompts
   -h, --help            Show this help

@@ -175,8 +175,8 @@ _GETTING_STARTED = {
 def _default_entity_path() -> str | None:
     """The home entity_path for this environment, from ``AMFS_ENTITY_PATH``.
 
-    Set by hosts that spin up disposable, single-purpose environments (e.g. a
-    Fly.io Sprite or a CI job) so a fresh process auto-hydrates the right
+    Set by hosts that spin up disposable, single-purpose environments (e.g. an
+    ephemeral sandbox or a CI job) so a fresh process auto-hydrates the right
     memory without the agent having to guess a path. When set, it becomes the
     default for ``amfs_briefing`` and is advertised to the agent through the
     server instructions and the ``amfs_set_identity`` response.
