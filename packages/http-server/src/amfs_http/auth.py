@@ -9,11 +9,18 @@ import threading
 import time
 
 from fastapi import HTTPException, Security, status
-from fastapi.security import APIKeyHeader
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 
 logger = logging.getLogger(__name__)
 
 API_KEY_HEADER = APIKeyHeader(name="X-AMFS-API-Key", auto_error=False)
+
+# Also accept the key as `Authorization: Bearer <amfs_key>`. Credential-brokering
+# gateways (e.g. Fly.io Sprites connectors) store the key once and inject it as a
+# bearer token, so they can't set our custom X-AMFS-API-Key header. auto_error is
+# off so a missing/other-scheme Authorization header falls through to the API-key
+# header rather than 403-ing before verify_api_key runs.
+BEARER_SCHEME = HTTPBearer(auto_error=False)
 
 _AUTH_CACHE_TTL = 120.0
 _auth_cache: dict[str, float] = {}
@@ -79,7 +86,15 @@ def generate_api_key() -> str:
     return f"amfs_{secrets.token_urlsafe(32)}"
 
 
-async def verify_api_key(api_key: str | None = Security(API_KEY_HEADER)) -> str | None:
+async def verify_api_key(
+    api_key: str | None = Security(API_KEY_HEADER),
+    bearer: HTTPAuthorizationCredentials | None = Security(BEARER_SCHEME),
+) -> str | None:
+    # X-AMFS-API-Key is canonical; fall back to the bearer token so gateways that
+    # can only inject `Authorization: Bearer <key>` authenticate the same way.
+    if not api_key and bearer is not None:
+        api_key = bearer.credentials
+
     env_keys = get_api_keys()
     if not env_keys:
         if not os.environ.get("AMFS_POSTGRES_DSN"):
