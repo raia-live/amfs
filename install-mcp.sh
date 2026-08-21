@@ -908,8 +908,10 @@ configure_client() {
                     fi
                     args+=("--" "$UVX_PATH" "--refresh" "$pkg")
                 fi
-                # Replace any existing entry so re-runs stay idempotent.
-                backup_cli_store "$HOME/.claude.json"
+                # Replace any existing entry so re-runs stay idempotent. Pass the
+                # incoming key so a same-key re-run skips the backup (as Codex
+                # does) instead of spawning a fresh .senselab-backup-* each time.
+                backup_cli_store "$HOME/.claude.json" "$API_KEY"
                 claude mcp remove senselab 2>/dev/null || true
                 claude "${args[@]}"
                 configured "Configured Claude Code"
@@ -988,7 +990,7 @@ configure_client() {
                 success "Removed AMFS from Gemini CLI"
             else
                 inject_mcp_config "$path"
-                success "Configured Gemini CLI ($path)"
+                configured "Configured Gemini CLI ($path)"
                 upsert_senselab_block "$HOME/.gemini/GEMINI.md"
                 success "Installed SenseLab recall-first memory guide (~/.gemini/GEMINI.md)"
             fi
