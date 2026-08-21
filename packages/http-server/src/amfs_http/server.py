@@ -636,6 +636,16 @@ def _health_payload() -> dict[str, str]:
     return payload
 
 
+@app.get("/")
+async def root() -> dict[str, str]:
+    # A reachable, unauthenticated 200 at the origin root. Generic API gateways
+    # and connector validators (e.g. Fly.io Sprites' custom_api "test request")
+    # probe base_url/ to confirm the service is live before saving a connector;
+    # without this they get a 404 and refuse the connector. Returns the same
+    # health payload as /health.
+    return _health_payload()
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return _health_payload()
