@@ -288,6 +288,45 @@ class TestSchemaProfileVisibility:
         assert len(result) == 1
         assert "schema_profile" in result[0].summary
 
+    def test_kept_when_external_sources_sit_alongside_a_visible_agent(self):
+        # The digest expands every external writer into webhook/{s} and
+        # external/{s}; those synthetic ids can never pass the visibility check,
+        # so counting them dropped the rollups on any entity that ingested a
+        # single external event — even though the caller can read those entries
+        # via amfs_search / amfs_aggregate. They must not gate the rollups.
+        vis = _mock_vis({"my-agent"})
+        d = self._with_aggregates(
+            _digest(source_agents=["my-agent", "webhook/stripe", "external/stripe"]),
+        )
+        result = _filter_briefing_digests(vis, [d])
+        assert len(result) == 1
+        assert "schema_profile" in result[0].summary
+        assert "materialized_aggregates" in result[0].summary
+
+    def test_still_redacted_when_a_real_co_author_is_hidden_despite_external(self):
+        # External sources are ignored by the gate, but a hidden *real* agent
+        # still redacts: the rollups genuinely summarise its private entries.
+        vis = _mock_vis({"my-agent"})
+        d = self._with_aggregates(
+            _digest(source_agents=["my-agent", "foreign-agent", "webhook/stripe"]),
+        )
+        result = _filter_briefing_digests(vis, [d])
+        assert len(result) == 1
+        assert "schema_profile" not in result[0].summary
+        assert "materialized_aggregates" not in result[0].summary
+
+    def test_redacted_when_only_external_sources_and_no_room(self):
+        # With no real agent to anchor visibility and no room grant, stay
+        # conservative and redact — unchanged from before.
+        vis = _mock_vis({"my-agent"})
+        d = self._with_aggregates(
+            _digest(scope="foreign/entity", source_agents=["webhook/stripe", "external/stripe"]),
+        )
+        result = _filter_briefing_digests(vis, [d])
+        # The digest itself is dropped (no visible source), which also removes
+        # the rollups — assert on whichever survives.
+        assert result == [] or "schema_profile" not in result[0].summary
+
 
 class TestAdminBypass:
 

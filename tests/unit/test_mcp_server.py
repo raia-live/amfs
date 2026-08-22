@@ -507,6 +507,41 @@ class TestIdentityGuard:
         result = json.loads(amfs_set_identity("agent-a"))
         assert result["status"] == "already_active"
 
+    def test_already_active_still_surfaces_the_home_entity_binding(
+        self, monkeypatch
+    ) -> None:
+        """The already-active path (a repeated set, or a restored sticky
+        identity) must still bind AMFS_ENTITY_PATH and hand back the auto-context
+        paths and next-step hint — a disposable environment relies on it for
+        hydration, and it used to return early and skip both."""
+        from amfs_mcp.server import amfs_set_identity
+
+        monkeypatch.setenv("AMFS_ENTITY_PATH", "acme/checkout")
+        amfs_set_identity("agent-a")
+        result = json.loads(amfs_set_identity("agent-a"))
+
+        assert result["status"] == "already_active"
+        assert result["auto_context_paths"][0] == "acme/checkout"
+        assert 'amfs_briefing(entity_path="acme/checkout")' in result["next_step"]
+
+    def test_a_restored_sticky_identity_gets_the_binding_on_first_call(
+        self, monkeypatch
+    ) -> None:
+        """The exact reported case: sticky restore leaves _active_identity == name
+        before the agent's explicit amfs_set_identity, so the very first call
+        takes the already-active path — and must still bind the home entity."""
+        import amfs_mcp.server as srv
+        from amfs_mcp.server import amfs_set_identity
+
+        monkeypatch.setenv("AMFS_ENTITY_PATH", "acme/checkout")
+        srv._active_identity = "agent-a"  # as if restored from ~/.amfs/.identity
+
+        result = json.loads(amfs_set_identity("agent-a"))
+
+        assert result["status"] == "already_active"
+        assert result["auto_context_paths"][0] == "acme/checkout"
+        assert 'amfs_briefing(entity_path="acme/checkout")' in result["next_step"]
+
     def test_set_identity_rejects_during_cooldown(self) -> None:
         import amfs_mcp.server as srv
         from amfs_mcp.server import amfs_set_identity

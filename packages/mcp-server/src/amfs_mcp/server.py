@@ -551,6 +551,49 @@ def _serialize_entries(entries: Iterable[Any]) -> list[dict[str, Any]]:
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _bind_home_entity_paths(
+    mem: Any, name: str, description: str | None, *, persist: bool
+) -> list[str]:
+    """Persist the AMFS_ENTITY_PATH binding on the agent's profile and return the
+    ``auto_context_paths`` it should hydrate now (the bound home entity first).
+
+    Shared by the new-identity and already-active paths so a disposable
+    environment still gets its binding applied — and the ``next_step`` hint back —
+    when sticky identity was already restored (or the same name is re-set), the
+    case that previously returned early and skipped both.
+
+    ``persist`` is True for a fresh identity, which always rewrites the profile to
+    record the description and session metadata. On the already-active path the
+    profile is rewritten only when there is actually a bound path to apply, so a
+    plain idempotent re-affirmation with no AMFS_ENTITY_PATH costs no write.
+    """
+    try:
+        from amfs_core.models import AgentProfile
+
+        current_agent = mem._adapter.get_agent(name, namespace=mem.namespace)
+        existing = current_agent.profile if current_agent else None
+        auto_paths = list(existing.auto_context_paths) if existing else []
+        # It goes to the *front*: next_step and the hydration hint brief
+        # auto_paths[0], and the environment's binding must win over any path
+        # already saved on the profile — that's the point of AMFS_ENTITY_PATH.
+        bound = _default_entity_path()
+        if bound:
+            auto_paths = [bound] + [p for p in auto_paths if p != bound]
+        if persist or bound:
+            profile = AgentProfile(
+                description=description or (existing.description if existing else ""),
+                default_branch=existing.default_branch if existing else "main",
+                auto_context_paths=auto_paths,
+                tags=existing.tags if existing else [],
+                session_metadata=_session_metadata,
+            )
+            mem._adapter.update_agent_profile(name, profile, namespace=mem.namespace)
+        return auto_paths
+    except Exception:
+        logger.debug("Could not update agent profile for %s", name, exc_info=True)
+        return [p for p in [_default_entity_path()] if p]
+
+
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "idempotentHint": True})
 def amfs_set_identity(
     name: str,
@@ -620,19 +663,33 @@ def amfs_set_identity(
 
     _enrich_metadata_from_context(ctx)
 
-    # Idempotent: same name is always a no-op (but still update metadata)
+    # Idempotent on the identity itself, but not a no-op: sticky restoration (or
+    # any earlier _get_memory call) leaves _active_identity == name, so this is
+    # the common path in a disposable environment. It must still apply the
+    # AMFS_ENTITY_PATH binding and hand back the auto-context paths / next_step,
+    # or the environment that relies on that binding for hydration never gets it.
     if _active_identity == name:
         _last_activity = now
         mem = _get_memory()
         mem.session_metadata = _session_metadata
-        return json.dumps({
+        auto_paths = _bind_home_entity_paths(mem, name, description, persist=False)
+        result: dict[str, Any] = {
             "identity": name,
             "session_id": mem.session_id,
             "status": "already_active",
             "sticky": True,
             "getting_started": _getting_started(),
             "session_metadata": _session_metadata.model_dump(mode="json"),
-        }, default=str)
+        }
+        if auto_paths:
+            result["auto_context_paths"] = auto_paths
+            result["next_step"] = (
+                f'Call amfs_briefing(entity_path="{auto_paths[0]}") now to load '
+                f"prior context before working."
+            )
+        if description:
+            result["description"] = description
+        return json.dumps(result, default=str)
 
     # Guard: reject if a *different* identity was recently active
     if _active_identity is not None:
@@ -671,33 +728,11 @@ def amfs_set_identity(
     )
 
     # Register / update the agent profile with the description and session
-    # metadata so it shows up on the dashboard.  Fire-and-forget best-effort
-    # — identity setting always succeeds even if profile update fails.
-    try:
-        from amfs_core.models import AgentProfile
-
-        current_agent = mem._adapter.get_agent(name, namespace=mem.namespace)
-        existing = current_agent.profile if current_agent else None
-        auto_paths = list(existing.auto_context_paths) if existing else []
-        # Bind this environment's home entity so it's persisted on the profile
-        # and surfaced back to the agent (real auto-context, not just metadata).
-        # It goes to the *front*: next_step and the hydration hint brief
-        # auto_paths[0], and the environment's binding must win over any path
-        # already saved on the profile — that's the point of AMFS_ENTITY_PATH.
-        bound = _default_entity_path()
-        if bound:
-            auto_paths = [bound] + [p for p in auto_paths if p != bound]
-        profile = AgentProfile(
-            description=description or (existing.description if existing else ""),
-            default_branch=existing.default_branch if existing else "main",
-            auto_context_paths=auto_paths,
-            tags=existing.tags if existing else [],
-            session_metadata=_session_metadata,
-        )
-        mem._adapter.update_agent_profile(name, profile, namespace=mem.namespace)
-    except Exception:
-        logger.debug("Could not update agent profile for %s", name, exc_info=True)
-        auto_paths = [p for p in [_default_entity_path()] if p]
+    # metadata (and the AMFS_ENTITY_PATH binding) so it shows up on the dashboard
+    # and the environment's home entity is surfaced back as real auto-context.
+    # Best-effort — identity setting always succeeds even if the profile update
+    # fails. Shared with the already-active path above.
+    auto_paths = _bind_home_entity_paths(mem, name, description, persist=True)
 
     result: dict[str, Any] = {
         "previous_identity": old_identity,

@@ -5528,9 +5528,21 @@ def _filter_briefing_digests(vis: Any, digests: list) -> list:
         # entry on the topic; otherwise every source agent must be visible.
         if "schema_profile" in digest.summary or "materialized_aggregates" in digest.summary:
             room_ok = scope in room_map
-            all_agents_visible = bool(source_agents) and all(
+            # webhook/{source} and external/{source} are ingestion sources, not
+            # agents whose memory the caller might be barred from — the digest
+            # expands every external writer into both. They can never satisfy
+            # _is_agent_visible_for_entity, so counting them meant any entity that
+            # ingested a single external event failed the all()-visible check and
+            # lost its rollups, even though the caller can already read those
+            # entries via amfs_search / amfs_aggregate. Gate on the real agents
+            # only; the synthetic sources neither grant nor deny visibility.
+            real_agents = [
+                a for a in source_agents
+                if not a.startswith(("webhook/", "external/"))
+            ]
+            all_agents_visible = bool(real_agents) and all(
                 _is_agent_visible_for_entity(a, scope, user_agents, room_map)
-                for a in source_agents
+                for a in real_agents
             )
             if not (room_ok or all_agents_visible):
                 digest.summary.pop("schema_profile", None)
