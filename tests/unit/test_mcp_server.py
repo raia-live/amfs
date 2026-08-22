@@ -542,6 +542,53 @@ class TestIdentityGuard:
         assert result["auto_context_paths"][0] == "acme/checkout"
         assert 'amfs_briefing(entity_path="acme/checkout")' in result["next_step"]
 
+    def test_already_active_never_rewrites_the_profile(self, monkeypatch) -> None:
+        """Regression: over HTTP get_agent is a None stub, so rewriting the profile
+        on the already-active path (a bound AMFS_ENTITY_PATH used to force it) would
+        wipe the description/tags saved at creation. It must only recompute paths
+        for the response, never write. Reproduces the None-existing case: a sticky
+        restore before any profile was persisted in this process."""
+        import amfs_mcp.server as srv
+        from amfs_mcp.server import amfs_set_identity
+
+        monkeypatch.setenv("AMFS_ENTITY_PATH", "acme/checkout")
+        writes: list = []
+        orig = srv._adapter.update_agent_profile
+
+        def _spy(*args, **kwargs):
+            writes.append((args, kwargs))
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(srv._adapter, "update_agent_profile", _spy)
+        srv._active_identity = "agent-a"  # restored sticky, nothing persisted yet
+
+        result = json.loads(amfs_set_identity("agent-a"))
+
+        assert result["status"] == "already_active"
+        assert result["auto_context_paths"][0] == "acme/checkout"
+        assert writes == []  # profile was NOT rewritten — nothing to wipe
+
+    def test_new_identity_still_persists_the_profile(self, monkeypatch) -> None:
+        """The new-identity path must keep persisting the profile (description +
+        bound path) — the fix only stops the already-active path from writing."""
+        import amfs_mcp.server as srv
+        from amfs_mcp.server import amfs_set_identity
+
+        monkeypatch.setenv("AMFS_ENTITY_PATH", "acme/checkout")
+        writes: list = []
+        orig = srv._adapter.update_agent_profile
+
+        def _spy(*args, **kwargs):
+            writes.append((args, kwargs))
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(srv._adapter, "update_agent_profile", _spy)
+
+        result = json.loads(amfs_set_identity("agent-a", "doing stuff"))
+
+        assert result["new_identity"] == "agent-a"
+        assert len(writes) == 1  # profile persisted on a fresh identity
+
     def test_set_identity_rejects_during_cooldown(self) -> None:
         import amfs_mcp.server as srv
         from amfs_mcp.server import amfs_set_identity

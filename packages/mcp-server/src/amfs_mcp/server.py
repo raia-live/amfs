@@ -554,22 +554,29 @@ def _serialize_entries(entries: Iterable[Any]) -> list[dict[str, Any]]:
 def _bind_home_entity_paths(
     mem: Any, name: str, description: str | None, *, persist: bool
 ) -> list[str]:
-    """Persist the AMFS_ENTITY_PATH binding on the agent's profile and return the
-    ``auto_context_paths`` it should hydrate now (the bound home entity first).
+    """Return the ``auto_context_paths`` the agent should hydrate now — the bound
+    ``AMFS_ENTITY_PATH`` first, then any saved on the profile — and, on a fresh
+    identity only, persist that profile.
 
-    Shared by the new-identity and already-active paths so a disposable
-    environment still gets its binding applied — and the ``next_step`` hint back —
-    when sticky identity was already restored (or the same name is re-set), the
-    case that previously returned early and skipped both.
+    ``persist`` must be True *only* on the new-identity path. There the profile is
+    (re)written to record the description, session metadata and the bound path —
+    the pre-existing behaviour.
 
-    ``persist`` is True for a fresh identity, which always rewrites the profile to
-    record the description and session metadata. On the already-active path the
-    profile is rewritten only when there is actually a bound path to apply, so a
-    plain idempotent re-affirmation with no AMFS_ENTITY_PATH costs no write.
+    The already-active path (a repeated set with the same name, or a restored
+    sticky identity) passes ``persist=False`` and MUST NOT write: over HTTP the
+    client cannot read the live profile (``get_agent`` is a None stub on
+    ``HttpAdapter``), so rewriting it from an empty baseline would wipe the
+    description and tags saved when the identity was first created — the very
+    SaaS / disposable-sandbox path this binding targets. The profile was already
+    persisted at creation time, so recomputing the paths for the response hint is
+    all that path needs.
     """
     try:
         from amfs_core.models import AgentProfile
 
+        # Read-only best effort: a real profile on local adapters, None over HTTP
+        # (the ABC stub — no network). Used to merge saved paths and, when
+        # persisting, to preserve description/tags rather than clobber them.
         current_agent = mem._adapter.get_agent(name, namespace=mem.namespace)
         existing = current_agent.profile if current_agent else None
         auto_paths = list(existing.auto_context_paths) if existing else []
@@ -579,7 +586,7 @@ def _bind_home_entity_paths(
         bound = _default_entity_path()
         if bound:
             auto_paths = [bound] + [p for p in auto_paths if p != bound]
-        if persist or bound:
+        if persist:
             profile = AgentProfile(
                 description=description or (existing.description if existing else ""),
                 default_branch=existing.default_branch if existing else "main",
@@ -665,9 +672,11 @@ def amfs_set_identity(
 
     # Idempotent on the identity itself, but not a no-op: sticky restoration (or
     # any earlier _get_memory call) leaves _active_identity == name, so this is
-    # the common path in a disposable environment. It must still apply the
-    # AMFS_ENTITY_PATH binding and hand back the auto-context paths / next_step,
-    # or the environment that relies on that binding for hydration never gets it.
+    # the common path in a disposable environment. It must still hand back the
+    # auto-context paths / next_step so the environment that relies on the
+    # AMFS_ENTITY_PATH binding for hydration gets them — but persist=False: the
+    # profile was already written when the identity was first created, and
+    # rewriting it here would wipe it over HTTP (see _bind_home_entity_paths).
     if _active_identity == name:
         _last_activity = now
         mem = _get_memory()
