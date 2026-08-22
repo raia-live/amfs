@@ -242,6 +242,53 @@ class TestWhoToAskVisibility:
         assert _filter_briefing_digests(vis, [d]) == []
 
 
+class TestSchemaProfileVisibility:
+    """schema_profile / materialized_aggregates are computed over EVERY entry in
+    the entity, so their sums, ranges and enums can disclose data authored by
+    agents the caller cannot see. They must be redacted unless the caller can
+    reach everything they summarise.
+    """
+
+    @staticmethod
+    def _with_aggregates(d: Digest) -> Digest:
+        d.summary["schema_profile"] = {"total_rows": 42, "fields": [{"field": "price"}]}
+        d.summary["materialized_aggregates"] = {"numeric_fields": {"price": {"sum": 1000}}}
+        return d
+
+    def test_kept_when_every_source_agent_is_visible(self):
+        vis = _mock_vis({"my-agent"})
+        d = self._with_aggregates(_digest(source_agents=["my-agent"]))
+        result = _filter_briefing_digests(vis, [d])
+        assert "schema_profile" in result[0].summary
+        assert "materialized_aggregates" in result[0].summary
+
+    def test_redacted_when_any_source_agent_is_hidden(self):
+        # The digest still survives (my-agent is visible), but the rollups are
+        # built partly from foreign-agent's entries, so they must be stripped.
+        vis = _mock_vis({"my-agent"})
+        d = self._with_aggregates(
+            _digest(source_agents=["my-agent", "foreign-agent"]),
+        )
+        result = _filter_briefing_digests(vis, [d])
+        assert len(result) == 1
+        assert "schema_profile" not in result[0].summary
+        assert "materialized_aggregates" not in result[0].summary
+
+    def test_kept_for_a_room_member_even_with_hidden_co_authors(self):
+        # Room membership grants access to every entry on the topic, so the
+        # room-wide rollups disclose nothing the caller cannot already read.
+        vis = _mock_vis(
+            {"my-agent"},
+            room_map={"myapp/auth": {"my-agent", "teammate"}},
+        )
+        d = self._with_aggregates(
+            _digest(scope="myapp/auth", source_agents=["teammate"]),
+        )
+        result = _filter_briefing_digests(vis, [d])
+        assert len(result) == 1
+        assert "schema_profile" in result[0].summary
+
+
 class TestAdminBypass:
 
     def test_admin_should_filter_false(self):

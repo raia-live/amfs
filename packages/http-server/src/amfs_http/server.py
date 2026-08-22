@@ -5518,6 +5518,24 @@ def _filter_briefing_digests(vis: Any, digests: list) -> list:
             else:
                 digest.summary.pop("who_to_ask")
 
+        # schema_profile / materialized_aggregates are computed over EVERY entry
+        # in the entity, so their sums, ranges and enum values can disclose data
+        # authored by agents this caller cannot see — the same data amfs_read /
+        # amfs_search / amfs_aggregate would refuse them. The digest is compiled
+        # once and served to callers of differing visibility, so it cannot be
+        # re-scoped per caller here; keep the rollups only when the caller can
+        # actually reach everything they summarise. A room member reaches every
+        # entry on the topic; otherwise every source agent must be visible.
+        if "schema_profile" in digest.summary or "materialized_aggregates" in digest.summary:
+            room_ok = scope in room_map
+            all_agents_visible = bool(source_agents) and all(
+                _is_agent_visible_for_entity(a, scope, user_agents, room_map)
+                for a in source_agents
+            )
+            if not (room_ok or all_agents_visible):
+                digest.summary.pop("schema_profile", None)
+                digest.summary.pop("materialized_aggregates", None)
+
         if source_agents:
             has_visible = any(
                 _is_agent_visible_for_entity(a, scope, user_agents, room_map)

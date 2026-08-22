@@ -1211,7 +1211,14 @@ def amfs_export(
             "prefer amfs_aggregate so records never enter your context."
         ),
     }
-    if len(content) <= inline_char_budget:
+    # Gate the inline copy on the size it will ACTUALLY occupy in this manifest,
+    # not on len(content): a CSV file is compact, but manifest["inline"] embeds
+    # the raw records which re-serialize as JSON — far larger for csv/json — so
+    # comparing the file size would let a small CSV smuggle a huge inline blob
+    # past the context budget.
+    inline_serialized = json.dumps(records, default=str)
+    manifest["inline_chars"] = len(inline_serialized)
+    if len(inline_serialized) <= inline_char_budget:
         manifest["inline"] = records
     return json.dumps(manifest, default=str)
 

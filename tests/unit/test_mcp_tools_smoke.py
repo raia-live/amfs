@@ -107,6 +107,30 @@ class TestReadSurfaceSmoke:
         assert payload["entry_count"] >= 1
         assert "path" in payload
 
+    def test_export_inline_gate_keys_on_inline_payload_size(self, srv):
+        # The inline copy embeds the raw records, which re-serialize as JSON and
+        # can dwarf a compact CSV file. The gate must compare the budget to that
+        # inline size (reported as inline_chars), not the file's — otherwise a
+        # small CSV would smuggle a huge inline blob past the context budget.
+        srv.amfs_write(
+            "smoke/rows", "batch",
+            json.dumps({"rows": [{"v": "x" * 200} for _ in range(20)]}),
+        )
+        below = _ok(
+            "amfs_export",
+            srv.amfs_export("smoke/rows", format="csv", row_path="rows",
+                            inline_char_budget=10),
+        )
+        assert below["inline_chars"] > 10
+        assert "inline" not in below
+
+        at_or_above = _ok(
+            "amfs_export",
+            srv.amfs_export("smoke/rows", format="csv", row_path="rows",
+                            inline_char_budget=below["inline_chars"]),
+        )
+        assert "inline" in at_or_above
+
     def test_aggregate_local_fallback(self, srv):
         # No AMFS_HTTP_URL in this test env, so amfs_aggregate must compute
         # locally over the same aggregates module rather than erroring.

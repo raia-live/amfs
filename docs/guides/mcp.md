@@ -420,7 +420,10 @@ truncates values, floods context, and does not survive compaction. Instead:
 1. **Orient** — read the entity digest via `amfs_briefing`. For a room-scoped
    entity it now carries a `schema_profile` (which fields exist, their types and
    ranges, `row_path` candidates) and `materialized_aggregates`, so you know the
-   shape before reading anything.
+   shape before reading anything. The digest is compiled from a bounded,
+   top-confidence slice of entries; for a large entity these rollups are a
+   sample (flagged with `sampled: true` and a `note`), so treat `amfs_aggregate`
+   — which runs over the full set — as authoritative for exact numbers.
 2. **Compute** — call `amfs_aggregate` for the numbers you actually need
    (counts, sums, means, group-by). The reduction happens server-side; records
    never enter your context.

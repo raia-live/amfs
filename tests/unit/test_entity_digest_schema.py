@@ -63,3 +63,33 @@ def test_compile_entity_plain_text_has_no_schema_profile():
     digest = RuleBasedStrategy().compile_entity("ops/notes", _Adapter(entries), "default")
     assert digest is not None
     assert "schema_profile" not in digest.summary
+
+
+def test_small_entity_profile_is_not_flagged_sampled():
+    entries = [_e({"listings": [{"price": 100, "city": "A"}]}, "b1")]
+    digest = RuleBasedStrategy().compile_entity("@room/listings", _Adapter(entries), "default")
+    assert "sampled" not in digest.summary["schema_profile"]
+    assert "sampled" not in digest.summary["materialized_aggregates"]
+
+
+def test_large_entity_profile_is_flagged_as_a_sample(monkeypatch):
+    """When the entity has as many keys as the digest cap, the rollups are a
+    top-confidence sample and must say so — otherwise they read as the totals
+    and disagree with a full amfs_aggregate."""
+    import amfs_cortex.strategies as strategies
+
+    monkeypatch.setattr(strategies, "_ENTITY_DIGEST_LIMIT", 3)
+    entries = [
+        _e({"price": 100}, "k1"),
+        _e({"price": 200}, "k2"),
+        _e({"price": 300}, "k3"),
+    ]
+    digest = strategies.RuleBasedStrategy().compile_entity(
+        "@room/listings", _Adapter(entries), "default",
+    )
+    prof = digest.summary["schema_profile"]
+    agg = digest.summary["materialized_aggregates"]
+    assert prof["sampled"] is True
+    assert prof["sample_size"] == 3
+    assert "amfs_aggregate" in prof["note"]
+    assert agg["sampled"] is True

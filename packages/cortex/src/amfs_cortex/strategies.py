@@ -14,6 +14,13 @@ from amfs_core.models import Digest, DigestType
 
 logger = logging.getLogger(__name__)
 
+#: How many entries a single entity digest compiles from. The search is ordered
+#: by confidence, so a digest for an entity with more keys than this is built
+#: from the top slice — which the schema profile / materialized aggregates must
+#: disclose, since presenting a partial rollup as the entity's totals would
+#: disagree with a full amfs_aggregate.
+_ENTITY_DIGEST_LIMIT = 1000
+
 if TYPE_CHECKING:
     from amfs_postgres.adapter import PostgresAdapter
 
@@ -88,7 +95,7 @@ class RuleBasedStrategy:
 
         entries = adapter.search(SearchQuery(
             entity_path=entity_path,
-            limit=1000,
+            limit=_ENTITY_DIGEST_LIMIT,
             sort_by="confidence",
             # Digest narrative/top_keys summarise knowledge, not stored code files.
             include_artifacts=False,
@@ -153,6 +160,22 @@ class RuleBasedStrategy:
         # aggregates in this one briefing call instead of reading every record.
         schema_profile, materialized = _structured_profile(entries)
         if schema_profile is not None:
+            # The digest is built from at most _ENTITY_DIGEST_LIMIT entries. When
+            # the entity has more, these rollups are a top-confidence sample, not
+            # the entity's totals — say so, and point at amfs_aggregate (which
+            # runs over the full set) for exact numbers.
+            if len(entries) >= _ENTITY_DIGEST_LIMIT:
+                note = (
+                    f"Computed from the {_ENTITY_DIGEST_LIMIT} highest-confidence "
+                    "entries; this entity has at least that many, so treat these "
+                    "as a sample and use amfs_aggregate for exact totals."
+                )
+                schema_profile["sampled"] = True
+                schema_profile["sample_size"] = len(entries)
+                schema_profile["note"] = note
+                if materialized is not None:
+                    materialized["sampled"] = True
+                    materialized["note"] = note
             summary["schema_profile"] = schema_profile
             summary["materialized_aggregates"] = materialized
 
