@@ -46,6 +46,14 @@ def _check_db_key(api_key: str) -> bool:
     set amfs.current_account_id, so direct table queries would return nothing
     when FORCE ROW LEVEL SECURITY is enabled.
     """
+    # SHA-256 (not bcrypt/argon2) is intentional and correct here: API keys are
+    # 256-bit random tokens (generate_api_key -> secrets.token_urlsafe(32)), not
+    # human passwords, so there is nothing to brute-force and a slow password
+    # hash buys no security. A fast *deterministic* digest is also required — the
+    # lookup below (amfs_authenticate_api_key) is an indexed equality match on
+    # key_hash, which salted password hashers cannot support. This mirrors how
+    # GitHub/Stripe/AWS hash API tokens. CodeQL py/weak-sensitive-data-hashing
+    # flags this as password hashing; it is a false positive for random tokens.
     key_hash = hashlib.sha256(api_key.encode()).hexdigest()
     now = time.monotonic()
 
