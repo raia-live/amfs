@@ -91,6 +91,33 @@ List entries for an entity.
 |:----------|:-----|:---------|:------------|
 | `entity_path` | `str` | No | Scope to entity (omit for all) |
 
+### amfs_export
+
+Bulk-fetch full (untruncated) entry values for an entity. Spools to a local file
+when the payload is large, with an inline fallback for small sets. Use this
+instead of listing-and-reading every entry in a data-heavy entity or room.
+
+| Parameter | Type | Required | Description |
+|:----------|:-----|:---------|:------------|
+| `entity_path` | `str` | Yes | Entity to export |
+| `format` | `str` | No | `"jsonl"` (default) or `"json"` |
+| `row_path` | `str` | No | Dotted field holding a list to flatten into rows (e.g. `"listings"`) |
+| `inline_char_budget` | `int` | No | Return inline instead of writing a file when the payload fits this budget |
+
+### amfs_aggregate
+
+Compute a number over an entity's records **server-side**, without pulling
+records into context. Non-numeric values are ignored for numeric ops (never
+coerced to zero); `n` reports how many rows actually contributed.
+
+| Parameter | Type | Required | Description |
+|:----------|:-----|:---------|:------------|
+| `entity_path` | `str` | Yes | Entity to aggregate over |
+| `op` | `str` | No | `"count"` (default), `"sum"`, `"mean"`, `"min"`, `"max"`, `"stats"` |
+| `field` | `str` | No | Dotted field for numeric ops (e.g. `"price"`) — required unless `op="count"` |
+| `group_by` | `str` | No | Dotted field to group results by |
+| `row_path` | `str` | No | Dotted field holding a list to flatten into rows first |
+
 ### amfs_history
 
 Retrieve version history of an entry.

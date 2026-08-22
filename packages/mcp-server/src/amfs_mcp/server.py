@@ -1096,6 +1096,187 @@ def amfs_list(entity_path: str | None = None) -> str:
     }, default=str)
 
 
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
+def amfs_export(
+    entity_path: str,
+    format: str = "jsonl",
+    row_path: str | None = None,
+    inline_char_budget: int = 20000,
+) -> str:
+    """Bulk-fetch every entry under an entity path with FULL values, to a file.
+
+    Use this instead of many amfs_read calls when you need all the data under a
+    path (e.g. an entire room). Unlike amfs_list/amfs_search/amfs_retrieve, this
+    does NOT truncate values — but to keep your context clean it writes the full
+    data to a local file and returns a manifest (path, count, keys), not the
+    values. Read the file with your filesystem tool, or hand its path to a
+    subagent. Because it is on disk, the data survives conversation compaction:
+    re-crunching is a file read, not a re-fetch.
+
+    Args:
+        entity_path: Path to export (required). For a room, pass its shared
+            path, e.g. "@my-room/listings". An entity path is required —
+            unscoped exports would drop shared/room data.
+        format: "jsonl" (default), "json", or "csv". csv/jsonl combine well
+            with row_path for tabular datasets.
+        row_path: Optional dotted field holding a list of records to flatten
+            into one row each (e.g. "listings" turns 26 batch entries into one
+            row per listing). Omit to export whole entries.
+        inline_char_budget: If the whole payload is at or under this many
+            characters it is ALSO returned inline (for clients without a
+            filesystem tool). Larger payloads return the path only.
+
+    Example: amfs_export("@deals-room/listings", format="csv", row_path="listings")
+    """
+    import csv
+    import io
+    import uuid
+
+    from amfs_core.aggregates import coerce_value, iter_rows
+
+    fmt = format.lower()
+    if fmt not in ("jsonl", "json", "csv"):
+        return json.dumps({"error": f"unknown format {format!r}; use jsonl, json, or csv"})
+
+    mem = _get_memory()
+    entries = mem.list(entity_path)
+    if not entries:
+        return json.dumps({
+            "status": "empty",
+            "count": 0,
+            "entity_path": entity_path,
+            "message": "No entries found for that entity path.",
+        })
+
+    keys = [getattr(e, "key", None) for e in entries]
+    if row_path:
+        records: list[Any] = iter_rows(entries, row_path)
+    else:
+        records = [
+            {**_serialize_entry(e), "value": coerce_value(getattr(e, "value", None))}
+            for e in entries
+        ]
+
+    if fmt == "json":
+        content = json.dumps(records, default=str, indent=2)
+    elif fmt == "jsonl":
+        content = "\n".join(json.dumps(r, default=str) for r in records)
+    else:  # csv
+        dict_rows = [r for r in records if isinstance(r, dict)]
+        columns: list[str] = []
+        for r in dict_rows:
+            for k in r.keys():
+                if k not in columns:
+                    columns.append(k)
+        buf = io.StringIO()
+        if columns:
+            writer = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+            writer.writeheader()
+            for r in dict_rows:
+                writer.writerow({
+                    k: (v if isinstance(v, (str, int, float, bool)) or v is None
+                        else json.dumps(v, default=str))
+                    for k, v in r.items()
+                })
+        else:
+            writer = csv.writer(buf)
+            writer.writerow(["value"])
+            for r in records:
+                writer.writerow([json.dumps(r, default=str)])
+        content = buf.getvalue()
+
+    export_dir = os.path.join(os.path.expanduser("~"), ".amfs", "exports")
+    os.makedirs(export_dir, exist_ok=True)
+    ext = {"jsonl": "jsonl", "json": "json", "csv": "csv"}[fmt]
+    safe = "".join(c if c.isalnum() else "-" for c in entity_path).strip("-") or "export"
+    path = os.path.join(export_dir, f"{safe}-{uuid.uuid4().hex[:8]}.{ext}")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+    except OSError as exc:
+        return json.dumps({"error": f"could not write export file: {exc}"})
+
+    manifest: dict[str, Any] = {
+        "path": path,
+        "format": fmt,
+        "entity_path": entity_path,
+        "row_path": row_path,
+        "entry_count": len(entries),
+        "record_count": len(records),
+        "total_chars": len(content),
+        "keys": keys,
+        "next": (
+            "Full data written to 'path'. Read it with your filesystem tool or "
+            "hand the path to a subagent — it survives compaction. For numbers, "
+            "prefer amfs_aggregate so records never enter your context."
+        ),
+    }
+    # Gate the inline copy on the size it will ACTUALLY occupy in this manifest,
+    # not on len(content): a CSV file is compact, but manifest["inline"] embeds
+    # the raw records which re-serialize as JSON — far larger for csv/json — so
+    # comparing the file size would let a small CSV smuggle a huge inline blob
+    # past the context budget.
+    inline_serialized = json.dumps(records, default=str)
+    manifest["inline_chars"] = len(inline_serialized)
+    if len(inline_serialized) <= inline_char_budget:
+        manifest["inline"] = records
+    return json.dumps(manifest, default=str)
+
+
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
+def amfs_aggregate(
+    entity_path: str,
+    op: str = "count",
+    field: str | None = None,
+    group_by: str | None = None,
+    row_path: str | None = None,
+) -> str:
+    """Compute an aggregate over records under an entity path — server-side.
+
+    Use this to answer quantitative questions ("average price", "total yield by
+    city", "how many listings") WITHOUT pulling any records into your context.
+    Only the computed result comes back. Far cheaper than exporting and doing
+    the math token-by-token.
+
+    Args:
+        entity_path: Path to aggregate over (required). For a room use its
+            shared path, e.g. "@my-room/listings".
+        op: "count" (default), "sum", "mean", "min", "max", or "stats"
+            (all numeric stats at once). Numeric ops require `field`.
+        field: Dotted field to aggregate, e.g. "price" or "meta.yield".
+        group_by: Optional dotted field to group results by (e.g. "city").
+        row_path: Optional dotted field holding a list of records to flatten
+            into rows first (e.g. "listings" for batch entries).
+
+    Example: amfs_aggregate("@deals-room/listings", op="mean", field="price", group_by="city", row_path="listings")
+    """
+    body = {
+        "entity_path": entity_path,
+        "op": op,
+        "field": field,
+        "group_by": group_by,
+        "row_path": row_path,
+    }
+    if os.environ.get("AMFS_HTTP_URL"):
+        return _http_api_call("POST", "/api/v1/aggregate", body=body)
+
+    # Local fallback (filesystem / local-Postgres installs): compute over the
+    # same shared aggregates module so results match the server path.
+    from amfs_core.aggregates import aggregate_entries
+
+    mem = _get_memory()
+    entries = mem.list(entity_path)
+    try:
+        result = aggregate_entries(
+            entries, op=op, field=field, group_by=group_by, row_path=row_path
+        )
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    result["entity_path"] = entity_path
+    result["entries_scanned"] = len(entries)
+    return json.dumps(result, default=str)
+
+
 @mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
 def amfs_graph_neighbors(
     entity: str,

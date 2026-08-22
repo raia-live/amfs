@@ -60,6 +60,23 @@ class SearchRequest(BaseModel):
     include_artifacts: bool = True
 
 
+class AggregateRequest(BaseModel):
+    """Server-side aggregation over the records stored under one entity path.
+
+    entity_path is required: an unscoped query strips shared @room/ paths, so
+    an unscoped aggregate would silently return empty for every room. The
+    reducer runs after visibility filtering so a caller can never aggregate over
+    entries they cannot read.
+    """
+
+    entity_path: str
+    op: str = "count"
+    field: str | None = None
+    group_by: str | None = None
+    row_path: str | None = None
+    branch: str = "main"
+
+
 class RetrieveRequest(BaseModel):
     """Semantic (meaning-based) retrieval request.
 
