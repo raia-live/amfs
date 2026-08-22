@@ -1335,6 +1335,39 @@ def amfs_stats() -> str:
     return json.dumps(stats.model_dump(mode="json"), default=str)
 
 
+def _training_note(missing: list[str]) -> str:
+    """Explain which half of the training pair the sealed trace is missing.
+
+    Worded to be actionable without inviting invention. A request exists for
+    every session, so a missing ``task_input`` is always a gap worth closing;
+    an action does not, and a session that only read and wrote memory has none
+    to record. Prompting for actions unconditionally would ask agents to make
+    them up, which costs more than the missing example.
+    """
+    if missing == ["task_input"]:
+        return (
+            "The actions on this trace are recorded but the request that "
+            "prompted them is not, so it says what was done without saying "
+            "what was asked. Pass task_input on this call, in the words the "
+            "request arrived in."
+        )
+    if missing == ["tool_calls"]:
+        return (
+            "The request on this trace is recorded but no action is, so there "
+            "is no decision in it to learn from. Call amfs_record_action as "
+            "each consequential action is taken, before committing. A session "
+            "that only read and wrote memory rightly has none, and an invented "
+            "action is worse than the gap."
+        )
+    return (
+        "This trace carries neither the request that started the work nor any "
+        "recorded action, so it is not a training example. Pass task_input on "
+        "this call, and call amfs_record_action as each consequential action "
+        "is taken. A session that only read and wrote memory rightly records "
+        "no action, and an invented one is worse than the gap."
+    )
+
+
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "destructiveHint": False})
 def amfs_commit_outcome(
     outcome_ref: str,
@@ -1415,6 +1448,25 @@ def amfs_commit_outcome(
         # exactly like one that landed all ten, and the absence surfaces much
         # later as an export with nothing in it.
         result["tool_calls"] = len(getattr(trace, "tool_calls", None) or [])
+        # Supervised training pairs the request with the action taken in
+        # response, and the exporter skips a trace missing either half. Said
+        # here because this call is the last moment anyone can tell: an account
+        # finds out otherwise when readiness reports hundreds of outcomes and
+        # nothing to train on, months after the sessions that produced them.
+        # Read off the trace rather than off the arguments, so a task_input the
+        # SDK never stored or the gate redacted is reported as absent.
+        missing = [
+            half
+            for half, present in (
+                ("task_input", bool(getattr(trace, "task_input", None))),
+                ("tool_calls", bool(result["tool_calls"])),
+            )
+            if not present
+        ]
+        result["training"] = {"trainable": not missing}
+        if missing:
+            result["training"]["missing"] = missing
+            result["training"]["note"] = _training_note(missing)
         result["session_duration_ms"] = trace.session_duration_ms
         diff = getattr(trace, "state_diff", None)
         if diff is not None:

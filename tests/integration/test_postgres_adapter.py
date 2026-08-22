@@ -139,3 +139,61 @@ def test_recorded_actions_survive_a_round_trip(adapter) -> None:
     listed = [t for t in adapter.list_traces(agent_id="action-agent")]
     assert listed, "the trace should be listable"
     assert [t.tool_name for t in listed[0].tool_calls] == ["deploy_rollback"]
+
+
+def test_a_trace_carrying_session_metadata_is_saved(adapter) -> None:
+    """The model, not a dict, is what actually reaches ``save_trace``.
+
+    ``DecisionTrace.session_metadata`` is typed, so ``POST /api/v1/traces``
+    validating a request body hands the adapter a ``SessionMetadata`` — which
+    ``json.dumps`` refused to encode, failing the save with a 500 and dropping
+    the trace. Every other test here left the field unset, so the whole hosted
+    write path was uncovered while the column looked exercised.
+
+    Constructed as a model on purpose: passing a dict would be validated into
+    one by ``DecisionTrace`` anyway, and asserting on the round trip is what
+    proves the value survived rather than being written as an empty object.
+    """
+    from amfs_core.models import DecisionTrace, SessionMetadata
+
+    saved = adapter.save_trace(
+        DecisionTrace(
+            agent_id="metadata-agent",
+            session_id="metadata-session",
+            outcome_ref="round-trip-4",
+            outcome_type="success",
+            session_metadata=SessionMetadata(
+                model="claude-4-opus",
+                client_name="cursor",
+                platform="cursor",
+                tools_available=["Shell", "Read"],
+            ),
+        )
+    )
+
+    fetched = adapter.get_trace(saved.id)
+    assert fetched is not None
+    assert fetched.session_metadata is not None
+    assert fetched.session_metadata.model == "claude-4-opus"
+    assert fetched.session_metadata.client_name == "cursor"
+    assert fetched.session_metadata.tools_available == ["Shell", "Read"]
+
+
+def test_a_trace_without_session_metadata_still_saves(adapter) -> None:
+    """The empty case the fix must not regress: no metadata is not an error."""
+    from amfs_core.models import DecisionTrace
+
+    saved = adapter.save_trace(
+        DecisionTrace(
+            agent_id="metadata-agent",
+            session_id="metadata-session",
+            outcome_ref="round-trip-5",
+            outcome_type="success",
+        )
+    )
+
+    fetched = adapter.get_trace(saved.id)
+    assert fetched is not None
+    assert fetched.session_metadata is None or (
+        fetched.session_metadata.model is None
+    )
