@@ -9,8 +9,10 @@
 # each one triggers a deploy on merge (see .github/workflows/trigger-deploy.yml).
 #
 # The `groups` blocks below collapse each ecosystem/directory into ONE pull
-# request — security and version updates alike — so the same advisories arrive
-# as a handful of reviewable, single-deploy PRs instead of dozens.
+# request. Grouping applies per update *type*, so every ecosystem gets two
+# groups: one `applies-to: security-updates` (the backlog that motivated this)
+# and one `applies-to: version-updates`. Without the security-updates group,
+# advisories would keep arriving one PR per dependency.
 #
 # Weekly cadence + open-pull-requests-limit keep the volume predictable.
 version: 2
@@ -22,23 +24,32 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     groups:
-      python:
+      python-security:
+        applies-to: security-updates
+        patterns: ["*"]
+      python-version:
+        applies-to: version-updates
         patterns: ["*"]
 
-  # npm — every package.json in the repo. `directories` fans out to each
-  # manifest; the group then collapses that manifest's updates into one PR.
+  # npm — every committed package.json in the repo. `directories` fans out to
+  # each manifest; the groups then collapse that manifest's updates into one PR
+  # per update type. (/desktop is intentionally absent: it has no committed
+  # package.json.)
   - package-ecosystem: "npm"
     directories:
       - "/"
       - "/demo"
-      - "/desktop"
       - "/packages/browser-extension"
       - "/packages/sdk-typescript"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
     groups:
-      npm:
+      npm-security:
+        applies-to: security-updates
+        patterns: ["*"]
+      npm-version:
+        applies-to: version-updates
         patterns: ["*"]
 
   # GitHub Actions used by the workflows.
@@ -48,5 +59,9 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     groups:
-      actions:
+      actions-security:
+        applies-to: security-updates
+        patterns: ["*"]
+      actions-version:
+        applies-to: version-updates
         patterns: ["*"]
