@@ -6,7 +6,10 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
     "amfs-core",
-    "watchdog>=4.0,<5",
+    # Keep this compatible with strands-agents>=1.0, which requires watchdog>=6:
+    # a <5 cap makes the workspace (amfs-strands[strands] + this) unresolvable and
+    # breaks Dependabot. Only the stable PollingObserver / events API is used here.
+    "watchdog>=4.0,<7",
 ]
 
 [build-system]
