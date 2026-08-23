@@ -1,0 +1,30 @@
+{
+  "_comment": "Edit this file to publish incidents. `impact` is one of: degraded, partial_outage, major_outage, maintenance. `status` is investigating | identified | monitoring | resolved. Updates are newest-first. `date` is the incident day (YYYY-MM-DD, UTC). Active (non-resolved) incidents appear in the banner at the top.",
+  "incidents": [
+    {
+      "id": "example-2026-08-21",
+      "title": "Elevated latency on Hosted MCP",
+      "impact": "degraded",
+      "status": "resolved",
+      "date": "2026-08-21",
+      "summary": "Some MCP requests saw elevated latency for ~20 minutes.",
+      "updates": [
+        {
+          "label": "Resolved",
+          "at": "2026-08-21T09:12:00Z",
+          "body": "Latency has returned to normal levels. The root cause was a slow cold start after a deploy; we have raised the minimum instance count to prevent recurrence."
+        },
+        {
+          "label": "Monitoring",
+          "at": "2026-08-21T08:58:00Z",
+          "body": "A fix has been applied and we are monitoring recovery."
+        },
+        {
+          "label": "Investigating",
+          "at": "2026-08-21T08:50:00Z",
+          "body": "We are investigating reports of elevated latency on the Hosted MCP endpoint."
+        }
+      ]
+    }
+  ]
+}

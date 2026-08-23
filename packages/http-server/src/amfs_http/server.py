@@ -657,6 +657,152 @@ async def health_v1() -> dict[str, str]:
     return _health_payload()
 
 
+# ── Deep component health (for the public status page) ─────────────────
+# Unauthenticated, on purpose: the status page has no API key and needs to
+# read this. It reveals only up/down + latency per internal dependency —
+# never hostnames, versions, or data — the same disclosure class as /health.
+# amfs-api is the one service that sits inside the project/VPC and can reach
+# pro-api, the Cortex pipeline outputs, and the doc worker, so it is the
+# authoritative aggregator of their health. Every check is fail-open.
+
+_DOC_WORKER_HEALTH_URL = os.environ.get("AMFS_DOC_WORKER_URL", "").rstrip("/")
+
+
+async def _check_database() -> dict[str, Any]:
+    """Prove DB connectivity with a trivial query. This is the Memory Engine."""
+    import time as _time
+
+    start = _time.perf_counter()
+    try:
+        if _async_adapter is not None:
+            async with _async_adapter._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT 1")
+                    await cur.fetchone()
+            latency = (_time.perf_counter() - start) * 1000.0
+            return {"status": "operational", "latency_ms": round(latency, 1)}
+
+        # No async pool (e.g. HTTP-adapter mode): fall back to a sync ping.
+        def _sync_ping() -> None:
+            mem = _get_memory()
+            adapter = mem._adapter
+            pool = getattr(adapter, "_pool", None)
+            if pool is None:
+                raise RuntimeError("no DB pool")
+            with pool.connection() as conn:  # type: ignore[union-attr]
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+
+        await asyncio.get_event_loop().run_in_executor(_bg_executor, _sync_ping)
+        latency = (_time.perf_counter() - start) * 1000.0
+        return {"status": "operational", "latency_ms": round(latency, 1)}
+    except Exception as exc:  # noqa: BLE001 - health must never raise
+        return {"status": "major_outage", "error": type(exc).__name__}
+
+
+async def _check_url(url: str) -> dict[str, Any]:
+    """GET a health URL and map the response to a status level."""
+    import time as _time
+
+    if not url:
+        return {"status": "no_data"}
+    start = _time.perf_counter()
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            resp = await client.get(url)
+        latency = (_time.perf_counter() - start) * 1000.0
+        if resp.status_code < 400:
+            level = "degraded" if latency > 2500 else "operational"
+            return {"status": level, "latency_ms": round(latency, 1)}
+        if resp.status_code >= 500:
+            return {"status": "major_outage", "http_code": resp.status_code}
+        return {"status": "degraded", "http_code": resp.status_code}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "major_outage", "error": type(exc).__name__}
+
+
+async def _check_retrieval() -> dict[str, Any]:
+    """Health of the pro-api retrieval service (internal svc-to-svc)."""
+    from amfs_http.pro_proxy import PRO_URL
+
+    if not PRO_URL:
+        return {"status": "no_data"}
+    return await _check_url(f"{PRO_URL}/health")
+
+
+async def _check_cortex() -> dict[str, Any]:
+    """Health of the Memory Cortex / ML pipelines.
+
+    Judged by the freshness of its output (compiled digests) read from the DB,
+    since the worker itself has no inbound port. Reachable table => the pipeline
+    subsystem is up; a recent digest => actively producing.
+    """
+    def _probe() -> dict[str, Any]:
+        try:
+            from amfs_postgres.adapter import PostgresAdapter
+
+            mem = _get_memory()
+            adapter = mem._adapter
+            if not isinstance(adapter, PostgresAdapter):
+                return {"status": "no_data"}
+            digests = adapter.list_digests()
+            return {"status": "operational", "digest_count": len(digests)}
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "major_outage", "error": type(exc).__name__}
+
+    return await asyncio.get_event_loop().run_in_executor(_bg_executor, _probe)
+
+
+async def _check_managed_models() -> dict[str, Any]:
+    """Health of Managed Models serving.
+
+    Serving is in-process in amfs-api under /api/v1/models (+ the OpenAI-
+    compatible /api/v1/chat/completions and Anthropic-compatible /api/v1/messages).
+    A full inference probe needs an API key and a trained model, so instead we
+    report whether the serving router is mounted in this running image — the
+    failure this feature actually shipped with was an image built WITHOUT the
+    package, where every /api/v1/models route silently 404s. Mounted => the
+    serving path is available on a healthy Memory API; absent => not_deployed.
+    """
+    try:
+        serving_paths = ("/api/v1/models", "/api/v1/chat/completions", "/api/v1/messages")
+        mounted = any(
+            getattr(r, "path", "").startswith("/api/v1/models")
+            or getattr(r, "path", "") in serving_paths
+            for r in app.routes
+        )
+        return {"status": "operational"} if mounted else {"status": "no_data"}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "major_outage", "error": type(exc).__name__}
+
+
+@app.get("/api/v1/health/components")
+async def health_components() -> JSONResponse:
+    """Real per-dependency health for the status page, checked from inside the VPC."""
+    database, retrieval, cortex, doc_worker, managed_models = await asyncio.gather(
+        _check_database(),
+        _check_retrieval(),
+        _check_cortex(),
+        _check_url(f"{_DOC_WORKER_HEALTH_URL}/health" if _DOC_WORKER_HEALTH_URL else ""),
+        _check_managed_models(),
+    )
+    payload = {
+        "status": "ok",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "components": {
+            "database": database,
+            "retrieval": retrieval,
+            "cortex": cortex,
+            "doc_worker": doc_worker,
+            "managed_models": managed_models,
+        },
+    }
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/v1/auth/whoami")
 async def whoami(
     request: Request,

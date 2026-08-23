@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SenseLab Status</title>
+    <meta name="description" content="Current status and uptime of SenseLab production services." />
+    <link rel="icon" type="image/png" href="/assets/senselab-icon.png" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="site-header">
+        <div class="brand">
+          <img class="brand-logo" src="/assets/senselab-icon.png" alt="SenseLab" />
+          <span class="brand-sub">Status</span>
+        </div>
+        <div class="header-actions">
+          <a class="header-link" href="https://sense-lab.ai" target="_blank" rel="noopener">Website</a>
+          <a class="header-link" href="https://docs.sense-lab.ai" target="_blank" rel="noopener">Docs</a>
+          <button id="theme-toggle" class="theme-toggle" title="Toggle theme" aria-label="Toggle theme">
+            <span class="theme-icon">◐</span>
+          </button>
+        </div>
+      </header>
+
+      <main>
+        <!-- Overall banner -->
+        <section id="overall" class="overall overall--loading" aria-live="polite">
+          <div class="overall-icon" id="overall-icon"></div>
+          <div class="overall-text">
+            <h1 id="overall-title">Checking system status…</h1>
+            <p id="overall-sub" class="overall-sub"></p>
+          </div>
+        </section>
+
+        <!-- Active incidents -->
+        <section id="active-incidents" class="active-incidents" hidden></section>
+
+        <!-- Components -->
+        <section class="components-card">
+          <div class="components-head">
+            <h2>Uptime over the past 90 days</h2>
+            <div class="refresh-meta">
+              <span class="live-dot" id="live-dot"></span>
+              <span id="last-checked">—</span>
+            </div>
+          </div>
+          <div id="groups" class="groups">
+            <div class="skeleton-list">
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Legend -->
+        <section class="legend" id="legend"></section>
+
+        <!-- Past incidents -->
+        <section class="incidents-card">
+          <h2>Past Incidents</h2>
+          <div id="incidents" class="incidents"></div>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <p>
+          Live status of SenseLab production services. Auto-refreshes every
+          <span id="poll-interval">60</span>s.
+        </p>
+        <p class="footer-links">
+          <a href="/api/status">JSON API</a>
+          <span aria-hidden="true">·</span>
+          <a href="https://sense-lab.ai" target="_blank" rel="noopener">sense-lab.ai</a>
+        </p>
+      </footer>
+    </div>
+
+    <!-- Tooltip element reused for uptime bars -->
+    <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

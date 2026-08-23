@@ -1,0 +1,78 @@
+# Build, deploy, and domain-map the SenseLab status page to Cloud Run.
+#
+# Invoked by the amfs-internal deploy pipeline (repository-dispatch on push to
+# main), or manually:
+#
+#   gcloud builds submit --config status/cloudbuild.yaml status/ \
+#     --substitutions=_ENV=prod
+#
+# The status page has no secrets and no database — it only makes outbound health
+# probes — so nothing sensitive is wired here.
+
+substitutions:
+  _REGION: us-central1
+  _SERVICE: status-page
+  _DOMAIN: status.sense-lab.ai
+  _REPO: amfs-docker
+  _ENV: prod
+  # Deep-health aggregator on amfs-api; overridable per environment.
+  _AGGREGATE_URL: https://amfs-login.sense-lab.ai/api/v1/health/components
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA
+
+steps:
+  # 1. Build the image.
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+      - .
+
+  # 2. Push both tags.
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}
+
+  # 3. Deploy the Cloud Run service. min-instances=1 keeps the background probe
+  #    loop warm so uptime history stays continuous.
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --min-instances=1
+      - --max-instances=2
+      - --cpu=1
+      - --memory=256Mi
+      - --port=8080
+      - --set-env-vars=STATUS_POLL_INTERVAL=60,STATUS_AGGREGATE_URL=${_AGGREGATE_URL}
+
+  # 4. Map status.sense-lab.ai to the service (idempotent — ignore if it exists).
+  #    The one-time DNS record this prints must be added at the registrar.
+  - id: domain-map
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud beta run domain-mappings describe --domain=${_DOMAIN} --region=${_REGION} >/dev/null 2>&1 \
+          && echo "Domain mapping ${_DOMAIN} already exists — skipping." \
+          || gcloud beta run domain-mappings create \
+               --service=${_SERVICE} --domain=${_DOMAIN} --region=${_REGION}
+
+options:
+  logging: CLOUD_LOGGING_ONLY
