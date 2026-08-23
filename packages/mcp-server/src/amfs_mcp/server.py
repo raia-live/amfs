@@ -171,23 +171,69 @@ _GETTING_STARTED = {
     "call amfs_retrieve BEFORE answering — never say you have no memory of it without checking.",
 }
 
+
+def _default_entity_path() -> str | None:
+    """The home entity_path for this environment, from ``AMFS_ENTITY_PATH``.
+
+    Set by hosts that spin up disposable, single-purpose environments (e.g. an
+    ephemeral sandbox or a CI job) so a fresh process auto-hydrates the right
+    memory without the agent having to guess a path. When set, it becomes the
+    default for ``amfs_briefing`` and is advertised to the agent through the
+    server instructions and the ``amfs_set_identity`` response.
+    """
+    ep = os.environ.get("AMFS_ENTITY_PATH")
+    return ep.strip() if ep and ep.strip() else None
+
+
+def _build_instructions() -> str:
+    """Return the server instructions, appending the bound entity when set."""
+    base = _INSTRUCTIONS
+    ep = _default_entity_path()
+    if ep:
+        base += (
+            f"\n\n## This environment is bound to `{ep}`\n\n"
+            f"`AMFS_ENTITY_PATH` is set, so this machine/session has a home "
+            f"entity: **{ep}**. Right after `amfs_set_identity`, call "
+            f"`amfs_briefing(entity_path=\"{ep}\")` to load everything prior "
+            f"sessions here learned, and default your reads/writes to this "
+            f"path unless the task clearly concerns another entity. Calling "
+            f"`amfs_briefing()` with no argument also defaults to `{ep}` here.\n"
+        )
+    return base
+
+
+def _getting_started() -> dict[str, str]:
+    """The getting-started block, with the bound entity path baked in when set."""
+    gs = dict(_GETTING_STARTED)
+    ep = _default_entity_path()
+    if ep:
+        gs["get_briefed"] = (
+            f'This environment is bound to entity_path="{ep}". Call '
+            f'amfs_briefing(entity_path="{ep}") now to load what prior '
+            f"sessions here learned before doing any work."
+        )
+        gs["bound_entity_path"] = ep
+    return gs
+
+
 _toolset = os.environ.get("AMFS_TOOLSET", "all").lower()
 
 
 def _create_server(toolset: str) -> FastMCP:
     """Build FastMCP with tag filtering, compatible with v2 and v3+."""
+    instructions = _build_instructions()
     if toolset != "all":
         try:
-            server = FastMCP(name="amfs", instructions=_INSTRUCTIONS, include_tags={"core"})
+            server = FastMCP(name="amfs", instructions=instructions, include_tags={"core"})
         except TypeError:
-            server = FastMCP(name="amfs", instructions=_INSTRUCTIONS)
+            server = FastMCP(name="amfs", instructions=instructions)
             server.enable(tags={"core"}, only=True)
         logger.info(
             "AMFS toolset: core (essential tools incl. amfs_retrieve). "
             "Set AMFS_TOOLSET=all to expose all 36 tools."
         )
     else:
-        server = FastMCP(name="amfs", instructions=_INSTRUCTIONS)
+        server = FastMCP(name="amfs", instructions=instructions)
         logger.info("AMFS toolset: all (36 tools)")
     return server
 
@@ -505,6 +551,56 @@ def _serialize_entries(entries: Iterable[Any]) -> list[dict[str, Any]]:
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _bind_home_entity_paths(
+    mem: Any, name: str, description: str | None, *, persist: bool
+) -> list[str]:
+    """Return the ``auto_context_paths`` the agent should hydrate now — the bound
+    ``AMFS_ENTITY_PATH`` first, then any saved on the profile — and, on a fresh
+    identity only, persist that profile.
+
+    ``persist`` must be True *only* on the new-identity path. There the profile is
+    (re)written to record the description, session metadata and the bound path —
+    the pre-existing behaviour.
+
+    The already-active path (a repeated set with the same name, or a restored
+    sticky identity) passes ``persist=False`` and MUST NOT write: over HTTP the
+    client cannot read the live profile (``get_agent`` is a None stub on
+    ``HttpAdapter``), so rewriting it from an empty baseline would wipe the
+    description and tags saved when the identity was first created — the very
+    SaaS / disposable-sandbox path this binding targets. The profile was already
+    persisted at creation time, so recomputing the paths for the response hint is
+    all that path needs.
+    """
+    try:
+        from amfs_core.models import AgentProfile
+
+        # Read-only best effort: a real profile on local adapters, None over HTTP
+        # (the ABC stub — no network). Used to merge saved paths and, when
+        # persisting, to preserve description/tags rather than clobber them.
+        current_agent = mem._adapter.get_agent(name, namespace=mem.namespace)
+        existing = current_agent.profile if current_agent else None
+        auto_paths = list(existing.auto_context_paths) if existing else []
+        # It goes to the *front*: next_step and the hydration hint brief
+        # auto_paths[0], and the environment's binding must win over any path
+        # already saved on the profile — that's the point of AMFS_ENTITY_PATH.
+        bound = _default_entity_path()
+        if bound:
+            auto_paths = [bound] + [p for p in auto_paths if p != bound]
+        if persist:
+            profile = AgentProfile(
+                description=description or (existing.description if existing else ""),
+                default_branch=existing.default_branch if existing else "main",
+                auto_context_paths=auto_paths,
+                tags=existing.tags if existing else [],
+                session_metadata=_session_metadata,
+            )
+            mem._adapter.update_agent_profile(name, profile, namespace=mem.namespace)
+        return auto_paths
+    except Exception:
+        logger.debug("Could not update agent profile for %s", name, exc_info=True)
+        return [p for p in [_default_entity_path()] if p]
+
+
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "idempotentHint": True})
 def amfs_set_identity(
     name: str,
@@ -574,19 +670,35 @@ def amfs_set_identity(
 
     _enrich_metadata_from_context(ctx)
 
-    # Idempotent: same name is always a no-op (but still update metadata)
+    # Idempotent on the identity itself, but not a no-op: sticky restoration (or
+    # any earlier _get_memory call) leaves _active_identity == name, so this is
+    # the common path in a disposable environment. It must still hand back the
+    # auto-context paths / next_step so the environment that relies on the
+    # AMFS_ENTITY_PATH binding for hydration gets them — but persist=False: the
+    # profile was already written when the identity was first created, and
+    # rewriting it here would wipe it over HTTP (see _bind_home_entity_paths).
     if _active_identity == name:
         _last_activity = now
         mem = _get_memory()
         mem.session_metadata = _session_metadata
-        return json.dumps({
+        auto_paths = _bind_home_entity_paths(mem, name, description, persist=False)
+        result: dict[str, Any] = {
             "identity": name,
             "session_id": mem.session_id,
             "status": "already_active",
             "sticky": True,
-            "getting_started": _GETTING_STARTED,
+            "getting_started": _getting_started(),
             "session_metadata": _session_metadata.model_dump(mode="json"),
-        }, default=str)
+        }
+        if auto_paths:
+            result["auto_context_paths"] = auto_paths
+            result["next_step"] = (
+                f'Call amfs_briefing(entity_path="{auto_paths[0]}") now to load '
+                f"prior context before working."
+            )
+        if description:
+            result["description"] = description
+        return json.dumps(result, default=str)
 
     # Guard: reject if a *different* identity was recently active
     if _active_identity is not None:
@@ -625,23 +737,11 @@ def amfs_set_identity(
     )
 
     # Register / update the agent profile with the description and session
-    # metadata so it shows up on the dashboard.  Fire-and-forget best-effort
-    # — identity setting always succeeds even if profile update fails.
-    try:
-        from amfs_core.models import AgentProfile
-
-        current_agent = mem._adapter.get_agent(name, namespace=mem.namespace)
-        existing = current_agent.profile if current_agent else None
-        profile = AgentProfile(
-            description=description or (existing.description if existing else ""),
-            default_branch=existing.default_branch if existing else "main",
-            auto_context_paths=existing.auto_context_paths if existing else [],
-            tags=existing.tags if existing else [],
-            session_metadata=_session_metadata,
-        )
-        mem._adapter.update_agent_profile(name, profile, namespace=mem.namespace)
-    except Exception:
-        logger.debug("Could not update agent profile for %s", name, exc_info=True)
+    # metadata (and the AMFS_ENTITY_PATH binding) so it shows up on the dashboard
+    # and the environment's home entity is surfaced back as real auto-context.
+    # Best-effort — identity setting always succeeds even if the profile update
+    # fails. Shared with the already-active path above.
+    auto_paths = _bind_home_entity_paths(mem, name, description, persist=True)
 
     result: dict[str, Any] = {
         "previous_identity": old_identity,
@@ -649,9 +749,17 @@ def amfs_set_identity(
         "session_id": mem.session_id,
         "sticky": True,
         "hint": "Identity saved — it will be auto-restored in future sessions.",
-        "getting_started": _GETTING_STARTED,
+        "getting_started": _getting_started(),
         "session_metadata": _session_metadata.model_dump(mode="json"),
     }
+    # Surface the entity paths this agent should load now (auto-context
+    # hydration): a bound AMFS_ENTITY_PATH plus any paths saved on the profile.
+    if auto_paths:
+        result["auto_context_paths"] = auto_paths
+        result["next_step"] = (
+            f'Call amfs_briefing(entity_path="{auto_paths[0]}") now to load '
+            f"prior context before working."
+        )
     if description:
         result["description"] = description
     return json.dumps(result, default=str)
@@ -673,6 +781,9 @@ def amfs_whoami() -> str:
         "platform": detect_platform(),
         "identity_file": str(_identity_file()),
     }
+    bound = _default_entity_path()
+    if bound:
+        result["bound_entity_path"] = bound
     if _session_metadata:
         result["session_metadata"] = _session_metadata.model_dump(mode="json")
     return json.dumps(result)
@@ -1027,6 +1138,187 @@ def amfs_list(entity_path: str | None = None) -> str:
         "count": len(entries),
         "entries": _serialize_entries(entries),
     }, default=str)
+
+
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
+def amfs_export(
+    entity_path: str,
+    format: str = "jsonl",
+    row_path: str | None = None,
+    inline_char_budget: int = 20000,
+) -> str:
+    """Bulk-fetch every entry under an entity path with FULL values, to a file.
+
+    Use this instead of many amfs_read calls when you need all the data under a
+    path (e.g. an entire room). Unlike amfs_list/amfs_search/amfs_retrieve, this
+    does NOT truncate values — but to keep your context clean it writes the full
+    data to a local file and returns a manifest (path, count, keys), not the
+    values. Read the file with your filesystem tool, or hand its path to a
+    subagent. Because it is on disk, the data survives conversation compaction:
+    re-crunching is a file read, not a re-fetch.
+
+    Args:
+        entity_path: Path to export (required). For a room, pass its shared
+            path, e.g. "@my-room/listings". An entity path is required —
+            unscoped exports would drop shared/room data.
+        format: "jsonl" (default), "json", or "csv". csv/jsonl combine well
+            with row_path for tabular datasets.
+        row_path: Optional dotted field holding a list of records to flatten
+            into one row each (e.g. "listings" turns 26 batch entries into one
+            row per listing). Omit to export whole entries.
+        inline_char_budget: If the whole payload is at or under this many
+            characters it is ALSO returned inline (for clients without a
+            filesystem tool). Larger payloads return the path only.
+
+    Example: amfs_export("@deals-room/listings", format="csv", row_path="listings")
+    """
+    import csv
+    import io
+    import uuid
+
+    from amfs_core.aggregates import coerce_value, iter_rows
+
+    fmt = format.lower()
+    if fmt not in ("jsonl", "json", "csv"):
+        return json.dumps({"error": f"unknown format {format!r}; use jsonl, json, or csv"})
+
+    mem = _get_memory()
+    entries = mem.list(entity_path)
+    if not entries:
+        return json.dumps({
+            "status": "empty",
+            "count": 0,
+            "entity_path": entity_path,
+            "message": "No entries found for that entity path.",
+        })
+
+    keys = [getattr(e, "key", None) for e in entries]
+    if row_path:
+        records: list[Any] = iter_rows(entries, row_path)
+    else:
+        records = [
+            {**_serialize_entry(e), "value": coerce_value(getattr(e, "value", None))}
+            for e in entries
+        ]
+
+    if fmt == "json":
+        content = json.dumps(records, default=str, indent=2)
+    elif fmt == "jsonl":
+        content = "\n".join(json.dumps(r, default=str) for r in records)
+    else:  # csv
+        dict_rows = [r for r in records if isinstance(r, dict)]
+        columns: list[str] = []
+        for r in dict_rows:
+            for k in r.keys():
+                if k not in columns:
+                    columns.append(k)
+        buf = io.StringIO()
+        if columns:
+            writer = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+            writer.writeheader()
+            for r in dict_rows:
+                writer.writerow({
+                    k: (v if isinstance(v, (str, int, float, bool)) or v is None
+                        else json.dumps(v, default=str))
+                    for k, v in r.items()
+                })
+        else:
+            writer = csv.writer(buf)
+            writer.writerow(["value"])
+            for r in records:
+                writer.writerow([json.dumps(r, default=str)])
+        content = buf.getvalue()
+
+    export_dir = os.path.join(os.path.expanduser("~"), ".amfs", "exports")
+    os.makedirs(export_dir, exist_ok=True)
+    ext = {"jsonl": "jsonl", "json": "json", "csv": "csv"}[fmt]
+    safe = "".join(c if c.isalnum() else "-" for c in entity_path).strip("-") or "export"
+    path = os.path.join(export_dir, f"{safe}-{uuid.uuid4().hex[:8]}.{ext}")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+    except OSError as exc:
+        return json.dumps({"error": f"could not write export file: {exc}"})
+
+    manifest: dict[str, Any] = {
+        "path": path,
+        "format": fmt,
+        "entity_path": entity_path,
+        "row_path": row_path,
+        "entry_count": len(entries),
+        "record_count": len(records),
+        "total_chars": len(content),
+        "keys": keys,
+        "next": (
+            "Full data written to 'path'. Read it with your filesystem tool or "
+            "hand the path to a subagent — it survives compaction. For numbers, "
+            "prefer amfs_aggregate so records never enter your context."
+        ),
+    }
+    # Gate the inline copy on the size it will ACTUALLY occupy in this manifest,
+    # not on len(content): a CSV file is compact, but manifest["inline"] embeds
+    # the raw records which re-serialize as JSON — far larger for csv/json — so
+    # comparing the file size would let a small CSV smuggle a huge inline blob
+    # past the context budget.
+    inline_serialized = json.dumps(records, default=str)
+    manifest["inline_chars"] = len(inline_serialized)
+    if len(inline_serialized) <= inline_char_budget:
+        manifest["inline"] = records
+    return json.dumps(manifest, default=str)
+
+
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
+def amfs_aggregate(
+    entity_path: str,
+    op: str = "count",
+    field: str | None = None,
+    group_by: str | None = None,
+    row_path: str | None = None,
+) -> str:
+    """Compute an aggregate over records under an entity path — server-side.
+
+    Use this to answer quantitative questions ("average price", "total yield by
+    city", "how many listings") WITHOUT pulling any records into your context.
+    Only the computed result comes back. Far cheaper than exporting and doing
+    the math token-by-token.
+
+    Args:
+        entity_path: Path to aggregate over (required). For a room use its
+            shared path, e.g. "@my-room/listings".
+        op: "count" (default), "sum", "mean", "min", "max", or "stats"
+            (all numeric stats at once). Numeric ops require `field`.
+        field: Dotted field to aggregate, e.g. "price" or "meta.yield".
+        group_by: Optional dotted field to group results by (e.g. "city").
+        row_path: Optional dotted field holding a list of records to flatten
+            into rows first (e.g. "listings" for batch entries).
+
+    Example: amfs_aggregate("@deals-room/listings", op="mean", field="price", group_by="city", row_path="listings")
+    """
+    body = {
+        "entity_path": entity_path,
+        "op": op,
+        "field": field,
+        "group_by": group_by,
+        "row_path": row_path,
+    }
+    if os.environ.get("AMFS_HTTP_URL"):
+        return _http_api_call("POST", "/api/v1/aggregate", body=body)
+
+    # Local fallback (filesystem / local-Postgres installs): compute over the
+    # same shared aggregates module so results match the server path.
+    from amfs_core.aggregates import aggregate_entries
+
+    mem = _get_memory()
+    entries = mem.list(entity_path)
+    try:
+        result = aggregate_entries(
+            entries, op=op, field=field, group_by=group_by, row_path=row_path
+        )
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    result["entity_path"] = entity_path
+    result["entries_scanned"] = len(entries)
+    return json.dumps(result, default=str)
 
 
 @mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
@@ -1588,6 +1880,11 @@ def amfs_briefing(
 
     Example: amfs_briefing(entity_path="checkout-service")
     """
+    # When the host bound this environment to an entity (AMFS_ENTITY_PATH),
+    # default to it so a fresh, disposable process hydrates the right memory
+    # without the agent having to know the path.
+    if entity_path is None:
+        entity_path = _default_entity_path()
     mem = _get_memory()
     digests = mem.briefing(
         entity_path=entity_path,

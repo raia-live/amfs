@@ -322,6 +322,119 @@ export class HttpAdapter implements AmfsAdapter {
       return null;
     }
   }
+
+  /** Server-side semantic retrieval (embedding + similarity + blend happen on the server). */
+  async retrieveAsync(
+    query: string,
+    options?: {
+      entityPath?: string;
+      minConfidence?: number;
+      limit?: number;
+      semanticWeight?: number;
+      recencyWeight?: number;
+      confidenceWeight?: number;
+      includeArtifacts?: boolean;
+      branch?: string;
+    }
+  ): Promise<Array<{ entry: MemoryEntry; score: number }>> {
+    const data = await this.fetch<{ entries?: unknown[] } | unknown[]>("/api/v1/retrieve", {
+      method: "POST",
+      body: JSON.stringify({
+        query,
+        min_confidence: options?.minConfidence ?? 0.0,
+        limit: options?.limit ?? 10,
+        semantic_weight: options?.semanticWeight ?? 0.5,
+        recency_weight: options?.recencyWeight ?? 0.3,
+        confidence_weight: options?.confidenceWeight ?? 0.2,
+        include_artifacts: options?.includeArtifacts ?? true,
+        branch: options?.branch ?? "main",
+        ...(options?.entityPath ? { entity_path: options.entityPath } : {}),
+      }),
+    });
+    const rows = Array.isArray(data) ? data : (data.entries ?? []);
+    return rows.map((row) => {
+      const r = row as Record<string, unknown>;
+      // The server tags each row with a sidecar `_score`, but `fetch` has
+      // already run convertKeys (snake→camel), which rewrites a leading
+      // underscore key into a capitalized one — so `_score` arrives as `Score`.
+      // Read that first, falling back to the raw forms for older servers.
+      const rawScore = r.Score ?? r._score ?? r.score;
+      const score = typeof rawScore === "number" ? rawScore : 0;
+      return { entry: r as unknown as MemoryEntry, score };
+    });
+  }
+
+  /** Full version history of a key, ordered by version. */
+  async historyAsync(
+    entityPath: string,
+    key: string,
+    options?: { since?: string; until?: string }
+  ): Promise<MemoryEntry[]> {
+    const params = new URLSearchParams();
+    if (options?.since) params.set("since", options.since);
+    if (options?.until) params.set("until", options.until);
+    const qs = params.toString();
+    const data = await this.fetch<{ versions?: MemoryEntry[] } | MemoryEntry[]>(
+      `/api/v1/history/${encodeURIComponent(entityPath)}/${encodeURIComponent(key)}${qs ? `?${qs}` : ""}`
+    );
+    if (Array.isArray(data)) return data;
+    return data.versions ?? [];
+  }
+
+  /** Recent timeline events for an agent (writes, outcomes, cross-agent reads). */
+  async timelineAsync(
+    agentId: string,
+    options?: { eventType?: string; since?: string; limit?: number; branch?: string }
+  ): Promise<unknown[]> {
+    const params = new URLSearchParams();
+    if (options?.eventType) params.set("event_type", options.eventType);
+    if (options?.since) params.set("since", options.since);
+    if (options?.branch) params.set("branch", options.branch);
+    params.set("limit", String(options?.limit ?? 100));
+    const data = await this.fetch<{ events?: unknown[] } | unknown[]>(
+      `/api/v1/agents/${encodeURIComponent(agentId)}/timeline?${params.toString()}`
+    );
+    if (Array.isArray(data)) return data;
+    return data.events ?? [];
+  }
+
+  /** Related entities in the knowledge graph (Pro). */
+  async graphNeighborsAsync(options: {
+    entity: string;
+    relation?: string;
+    direction?: string;
+    minConfidence?: number;
+    depth?: number;
+    limit?: number;
+  }): Promise<unknown[]> {
+    const params = new URLSearchParams();
+    params.set("entity", options.entity);
+    if (options.relation) params.set("relation", options.relation);
+    if (options.direction) params.set("direction", options.direction);
+    if (options.minConfidence != null) params.set("min_confidence", String(options.minConfidence));
+    if (options.depth != null) params.set("depth", String(options.depth));
+    if (options.limit != null) params.set("limit", String(options.limit));
+    const data = await this.fetch<{ edges?: unknown[] } | unknown[]>(
+      `/api/v1/pro/graph/neighbors?${params.toString()}`
+    );
+    if (Array.isArray(data)) return data;
+    return data.edges ?? [];
+  }
+
+  /** Export outcome-validated knowledge as a fine-tuning dataset (Pro). */
+  async exportTrainingDataAsync(options?: {
+    entityPath?: string;
+    minConfidence?: number;
+    format?: "sft" | "dpo" | "reward_model";
+    limit?: number;
+  }): Promise<unknown> {
+    const params = new URLSearchParams();
+    params.set("format", options?.format ?? "sft");
+    params.set("min_confidence", String(options?.minConfidence ?? 0.7));
+    params.set("limit", String(options?.limit ?? 100));
+    if (options?.entityPath) params.set("entity_path", options.entityPath);
+    return this.fetch(`/api/v1/pro/export?${params.toString()}`);
+  }
 }
 
 export interface DecisionTraceSummary {
