@@ -9,8 +9,8 @@
     "@senselab-ai/amfs": "file:../packages/sdk-typescript"
   },
   "devDependencies": {
-    "@types/node": "^25.6.0",
-    "tsx": "^4.19",
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23",
     "typescript": "^5.4"
   }
 }
