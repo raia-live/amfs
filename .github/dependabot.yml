@@ -1,0 +1,67 @@
+# Dependabot configuration.
+#
+# Why this file exists
+# --------------------
+# Even without it, Dependabot ran SECURITY updates from the repo's security
+# settings — but ungrouped: one PR per vulnerable dependency, in every ecosystem
+# it found. With a backlog of advisories across the Python (uv) lock and several
+# npm package.json files, that produced a flood of single-dependency PRs, and
+# each one triggers a deploy on merge (see .github/workflows/trigger-deploy.yml).
+#
+# The `groups` blocks below collapse each ecosystem/directory into ONE pull
+# request. Grouping applies per update *type*, so every ecosystem gets two
+# groups: one `applies-to: security-updates` (the backlog that motivated this)
+# and one `applies-to: version-updates`. Without the security-updates group,
+# advisories would keep arriving one PR per dependency.
+#
+# Weekly cadence + open-pull-requests-limit keep the volume predictable.
+version: 2
+updates:
+  # Python (uv workspace) at the repo root.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      python-security:
+        applies-to: security-updates
+        patterns: ["*"]
+      python-version:
+        applies-to: version-updates
+        patterns: ["*"]
+
+  # npm — every committed package.json in the repo. `directories` fans out to
+  # each manifest; the groups then collapse that manifest's updates into one PR
+  # per update type. (/desktop is intentionally absent: it has no committed
+  # package.json.)
+  - package-ecosystem: "npm"
+    directories:
+      - "/"
+      - "/demo"
+      - "/packages/browser-extension"
+      - "/packages/sdk-typescript"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      npm-security:
+        applies-to: security-updates
+        patterns: ["*"]
+      npm-version:
+        applies-to: version-updates
+        patterns: ["*"]
+
+  # GitHub Actions used by the workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      actions-security:
+        applies-to: security-updates
+        patterns: ["*"]
+      actions-version:
+        applies-to: version-updates
+        patterns: ["*"]
