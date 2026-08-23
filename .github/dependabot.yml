@@ -1,0 +1,52 @@
+# Dependabot configuration.
+#
+# Why this file exists
+# --------------------
+# Even without it, Dependabot ran SECURITY updates from the repo's security
+# settings — but ungrouped: one PR per vulnerable dependency, in every ecosystem
+# it found. With a backlog of advisories across the Python (uv) lock and several
+# npm package.json files, that produced a flood of single-dependency PRs, and
+# each one triggers a deploy on merge (see .github/workflows/trigger-deploy.yml).
+#
+# The `groups` blocks below collapse each ecosystem/directory into ONE pull
+# request — security and version updates alike — so the same advisories arrive
+# as a handful of reviewable, single-deploy PRs instead of dozens.
+#
+# Weekly cadence + open-pull-requests-limit keep the volume predictable.
+version: 2
+updates:
+  # Python (uv workspace) at the repo root.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      python:
+        patterns: ["*"]
+
+  # npm — every package.json in the repo. `directories` fans out to each
+  # manifest; the group then collapses that manifest's updates into one PR.
+  - package-ecosystem: "npm"
+    directories:
+      - "/"
+      - "/demo"
+      - "/desktop"
+      - "/packages/browser-extension"
+      - "/packages/sdk-typescript"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      npm:
+        patterns: ["*"]
+
+  # GitHub Actions used by the workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
