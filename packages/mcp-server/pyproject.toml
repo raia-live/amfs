@@ -10,7 +10,7 @@ dependencies = [
     # TypeError on the one call agents are told to make at the end of every task.
     # An unbounded dependency is how the equivalent skew reached Pro users.
     # 0.5.7 adds AgentMemory.record_action, which amfs_record_action calls.
-    "amfs>=0.5.8",
+    "amfs>=0.5.9",
     # Direct floor at the import site. amfs_export and amfs_aggregate do
     # `from amfs_core.aggregates import coerce_value, iter_rows, aggregate_entries`.
     # Those were added in amfs-core 0.3.15 — but 0.3.14 was already published
@@ -26,7 +26,7 @@ dependencies = [
     # trace with an empty list, and the dataset built from those traces has
     # nothing to learn from. Nothing raises: the commit succeeds, and the only
     # symptom is a model that never becomes ready.
-    "amfs-adapter-http>=0.1.10",
+    "amfs-adapter-http>=0.1.11",
     "fastmcp>=2.0",
 ]
 
