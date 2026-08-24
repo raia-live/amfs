@@ -8,7 +8,7 @@ dependencies = [
     # 0.3.14 adds ToolCall, ReadTracker.record_action and
     # capture.scan_captured_arguments. record_action and commit_outcome below use
     # all three unconditionally, so an older core raises rather than degrading.
-    "amfs-core>=0.3.14",
+    "amfs-core>=0.3.15",
     "amfs-adapter-filesystem",
     "pyyaml>=6.0,<7",
 ]
