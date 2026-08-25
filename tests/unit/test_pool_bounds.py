@@ -13,6 +13,8 @@ import pytest
 from amfs_postgres.adapter import (
     _DEFAULT_POOL_MAX,
     _DEFAULT_POOL_MIN,
+    connection_options,
+    hnsw_iterative_scan_option,
     pool_bounds,
     statement_timeout_options,
 )
@@ -76,3 +78,57 @@ class TestTheStatementCeiling:
     def test_it_becomes_a_libpq_option(self, monkeypatch):
         monkeypatch.setenv("AMFS_POSTGRES_STATEMENT_TIMEOUT", "300s")
         assert statement_timeout_options() == "-c statement_timeout=300s"
+
+    def test_a_process_can_override_the_environment(self, monkeypatch):
+        """A bulk load, an index build and an embedding backfill are single
+        statements that outlast any request. Inheriting a request-shaped ceiling
+        from a shared environment variable aborts them partway through."""
+        monkeypatch.setenv("AMFS_POSTGRES_STATEMENT_TIMEOUT", "30s")
+        assert statement_timeout_options("15min") == "-c statement_timeout=15min"
+
+    def test_a_process_can_opt_out_entirely(self, monkeypatch):
+        from amfs_postgres.adapter import NO_STATEMENT_TIMEOUT
+
+        monkeypatch.setenv("AMFS_POSTGRES_STATEMENT_TIMEOUT", "30s")
+        assert (
+            statement_timeout_options(NO_STATEMENT_TIMEOUT)
+            == "-c statement_timeout=0"
+        )
+
+
+class TestIterativeHNSWScans:
+    """Without this, an HNSW index post-filters: it finds globally-near vectors
+    and then drops the ones failing the WHERE clause, so a search scoped to one
+    tenant or one dataset can come back short while the rows it wanted sit
+    unvisited. Missing results, not mis-ranked ones."""
+
+    def test_it_is_off_unless_asked_for(self, monkeypatch):
+        monkeypatch.delenv("AMFS_POSTGRES_HNSW_ITERATIVE_SCAN", raising=False)
+        assert hnsw_iterative_scan_option() is None
+
+    def test_it_becomes_a_libpq_option(self, monkeypatch):
+        monkeypatch.setenv("AMFS_POSTGRES_HNSW_ITERATIVE_SCAN", "relaxed_order")
+        assert hnsw_iterative_scan_option() == "-c hnsw.iterative_scan=relaxed_order"
+
+    def test_an_unknown_mode_is_refused(self, monkeypatch):
+        """Applied through libpq options, an unrecognised setting makes every
+        connection fail to open. Better to say why here than to have the pool
+        refuse to start with a libpq error."""
+        monkeypatch.setenv("AMFS_POSTGRES_HNSW_ITERATIVE_SCAN", "yes-please")
+        with pytest.raises(ValueError, match="must be one of"):
+            hnsw_iterative_scan_option()
+
+
+class TestComposingConnectionOptions:
+    def test_nothing_configured_means_no_options_at_all(self, monkeypatch):
+        monkeypatch.delenv("AMFS_POSTGRES_STATEMENT_TIMEOUT", raising=False)
+        monkeypatch.delenv("AMFS_POSTGRES_HNSW_ITERATIVE_SCAN", raising=False)
+        # None rather than "", so callers can leave `options` off the connection.
+        assert connection_options() is None
+
+    def test_both_fragments_compose(self, monkeypatch):
+        monkeypatch.setenv("AMFS_POSTGRES_STATEMENT_TIMEOUT", "30s")
+        monkeypatch.setenv("AMFS_POSTGRES_HNSW_ITERATIVE_SCAN", "strict_order")
+        assert connection_options() == (
+            "-c statement_timeout=30s -c hnsw.iterative_scan=strict_order"
+        )

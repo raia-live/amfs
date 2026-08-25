@@ -38,7 +38,7 @@ from amfs_postgres.adapter import (
     _EXCLUDE_SHARED_PATHS,
     PostgresAdapter,
     pool_bounds,
-    statement_timeout_options,
+    connection_options,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,41 +62,17 @@ class _AsyncTenantRLSConnection:
         self._inner_ctx = inner_ctx
 
     async def __aenter__(self) -> Any:
-        from amfs_postgres.tenant_context import (
-            get_request_tenant_account_id,
-            get_request_tenant_team_id,
-            get_request_is_account_admin,
-            get_request_user_id,
-        )
+        from amfs_postgres.tenant_context import get_request_tenant_account_id
+        from amfs_postgres.tenant_gucs import aset_tenant_gucs
 
         conn = await self._inner_ctx.__aenter__()
-        tid = get_request_tenant_account_id()
-        team_id = get_request_tenant_team_id()
-        is_admin = get_request_is_account_admin()
-        user_id = get_request_user_id()
-
-        guc_account = tid if tid else ""
-        guc_team = team_id if team_id else ""
-        guc_admin = "true" if is_admin else "false"
-        guc_user = user_id if user_id else ""
-
-        if not tid:
-            logger.warning(
-                "async pool checkout: tenant account_id is EMPTY "
-                "(tid=%r, team=%r, admin=%r) — RLS reads will return no rows",
-                tid, team_id, is_admin,
-            )
-
         async with conn.cursor() as cur:
-            # Set unconditionally, for the same reason as the other three: a
-            # pooled connection would otherwise keep the previous borrower's
-            # user, and this is the GUC that grants access across accounts.
-            await cur.execute(
-                "SELECT set_config('amfs.current_account_id', %s, false),"
-                "       set_config('amfs.current_team_id', %s, false),"
-                "       set_config('amfs.is_account_admin', %s, false),"
-                "       set_config('amfs.current_user_id', %s, false)",
-                (guc_account, guc_team, guc_admin, guc_user),
+            await aset_tenant_gucs(cur, local=False)
+
+        if not get_request_tenant_account_id():
+            logger.warning(
+                "async pool checkout with no tenant account_id — RLS-protected "
+                "reads will return no rows"
             )
         return conn
 
@@ -143,6 +119,7 @@ class AsyncPostgresAdapter:
         *,
         min_pool_size: int | None = None,
         max_pool_size: int | None = None,
+        statement_timeout: str | None = None,
     ) -> None:
         self._dsn = dsn
         self._namespace = namespace
@@ -155,7 +132,7 @@ class AsyncPostgresAdapter:
         # on — and until this line existed, AMFS_POSTGRES_STATEMENT_TIMEOUT
         # reached only the sync adapter, leaving the request path it was
         # introduced to protect without one.
-        options = statement_timeout_options()
+        options = connection_options(statement_timeout)
         if options:
             connect_kwargs["options"] = options
         min_size, max_size = pool_bounds(min_pool_size, max_pool_size)

@@ -25,7 +25,15 @@ services:
       retries: 3
 
   postgres:
-    image: pgvector/pgvector:pg16
+    # Pinned, not `pg16`. The floating tag moves, and the extension version
+    # decides whether HNSW searches can be trusted: `hnsw.iterative_scan`
+    # arrived in pgvector 0.8.0, and without it an HNSW index post-filters,
+    # walking the global proximity graph and then discarding rows that fail the
+    # WHERE clause. A query scoped to a small slice of a large table then gets
+    # results that are missing rather than merely mis-ranked, which is the kind
+    # of wrong answer nobody notices. Local, CI and Cloud SQL agreeing on one
+    # version is the only way that stays true.
+    image: pgvector/pgvector:0.8.1-pg16
     environment:
       POSTGRES_USER: amfs
       POSTGRES_PASSWORD: amfs

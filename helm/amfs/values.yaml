@@ -45,7 +45,9 @@ postgres:
   external: false
   dsn: ""
   # Built-in Postgres (set external=false)
-  image: pgvector/pgvector:pg16
+  # Pinned rather than the floating `pg16` tag: HNSW recall depends on
+  # `hnsw.iterative_scan`, which needs pgvector >= 0.8.0. See docker-compose.yml.
+  image: pgvector/pgvector:0.8.1-pg16
   password: amfs
   storage: 10Gi
 
