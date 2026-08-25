@@ -8,10 +8,6 @@ resolution-markers = [
     "python_full_version < '3.12'",
 ]
 
-[options]
-exclude-newer = "2026-08-23T04:18:34.009715Z"
-exclude-newer-span = "P2D"
-
 [manifest]
 members = [
     "amfs",
