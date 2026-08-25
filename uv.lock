@@ -8,6 +8,10 @@ resolution-markers = [
     "python_full_version < '3.12'",
 ]
 
+[options]
+exclude-newer = "2026-08-23T04:18:34.009715Z"
+exclude-newer-span = "P2D"
+
 [manifest]
 members = [
     "amfs",
@@ -184,7 +188,7 @@ wheels = [
 
 [[package]]
 name = "amfs"
-version = "0.5.8"
+version = "0.5.10"
 source = { editable = "packages/sdk-python" }
 dependencies = [
     { name = "amfs-adapter-filesystem" },
@@ -216,7 +220,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-http"
-version = "0.1.10"
+version = "0.1.12"
 source = { editable = "packages/adapters/http" }
 dependencies = [
     { name = "amfs-core" },
@@ -231,7 +235,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-postgres"
-version = "0.2.2"
+version = "0.2.4"
 source = { editable = "packages/adapters/postgres" }
 dependencies = [
     { name = "amfs-core" },
@@ -330,7 +334,7 @@ provides-extras = ["cli"]
 
 [[package]]
 name = "amfs-core"
-version = "0.3.14"
+version = "0.3.16"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "pydantic" },
@@ -395,7 +399,7 @@ provides-extras = ["crewai"]
 
 [[package]]
 name = "amfs-http-server"
-version = "0.3.15"
+version = "0.3.17"
 source = { editable = "packages/http-server" }
 dependencies = [
     { name = "amfs" },
@@ -465,11 +469,12 @@ provides-extras = ["langgraph"]
 
 [[package]]
 name = "amfs-mcp-server"
-version = "0.7.15"
+version = "0.7.17"
 source = { editable = "packages/mcp-server" }
 dependencies = [
     { name = "amfs" },
     { name = "amfs-adapter-http" },
+    { name = "amfs-core" },
     { name = "fastmcp" },
 ]
 
@@ -477,6 +482,7 @@ dependencies = [
 requires-dist = [
     { name = "amfs", editable = "packages/sdk-python" },
     { name = "amfs-adapter-http", editable = "packages/adapters/http" },
+    { name = "amfs-core", editable = "packages/core" },
     { name = "fastmcp", specifier = ">=2.0" },
 ]
 

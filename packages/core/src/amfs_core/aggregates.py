@@ -209,6 +209,18 @@ def coerce_value(value: object) -> object:
     return value
 
 
+# row_path values that mean "the entry value itself" — used when a batch is a
+# bare array rather than ``{"listings": [...]}``.
+_IDENTITY_ROW_PATHS = frozenset({".", "$"})
+
+
+def _normalize_row_path(row_path: str | None) -> str | None:
+    if row_path is None:
+        return None
+    stripped = row_path.strip()
+    return stripped or None
+
+
 def _get_path(row: object, path: str) -> object:
     """Dotted-path getter over dict rows; returns None if any segment misses."""
     cur = row
@@ -220,6 +232,28 @@ def _get_path(row: object, path: str) -> object:
     return cur
 
 
+def _rows_from_value(val: object, row_path: str | None) -> list:
+    """Fan ``val`` out into records, honouring ``row_path``.
+
+    A top-level list is always flattened: there is no dict key to descend into,
+    so a guessed ``row_path`` like ``"properties"`` must not drop the records.
+    """
+    path = _normalize_row_path(row_path)
+    if path in _IDENTITY_ROW_PATHS or path is None:
+        if isinstance(val, list):
+            return list(val)
+        return [val]
+    if isinstance(val, list):
+        return list(val)
+    if isinstance(val, dict):
+        target = _get_path(val, path)
+        if isinstance(target, list):
+            return list(target)
+        if target is not None:
+            return [target]
+    return []
+
+
 def iter_rows(entries: "list[MemoryEntry]", row_path: str | None = None) -> list:
     """Flatten entries into the records to aggregate over.
 
@@ -227,20 +261,14 @@ def iter_rows(entries: "list[MemoryEntry]", row_path: str | None = None) -> list
     list, each element is a row). With ``row_path`` the value at that dotted
     path is expected to be a list — one row per element — which is how a batch
     entry like ``{"listings": [...]}`` fans out into per-listing rows.
+
+    ``row_path="."`` (or ``"$"``) flattens the value itself. If the value is
+    already a list, any ``row_path`` flattens it — wrappers are optional.
     """
     rows: list = []
     for entry in entries:
         val = coerce_value(getattr(entry, "value", entry))
-        if row_path:
-            target = _get_path(val, row_path) if isinstance(val, dict) else None
-            if isinstance(target, list):
-                rows.extend(target)
-            elif target is not None:
-                rows.append(target)
-        elif isinstance(val, list):
-            rows.extend(val)
-        else:
-            rows.append(val)
+        rows.extend(_rows_from_value(val, row_path))
     return rows
 
 
@@ -356,10 +384,16 @@ def _row_path_candidates(entries: "list[MemoryEntry]") -> list[dict]:
 
     These are the ``row_path`` values an agent should aggregate over (e.g. a
     batch entry ``{"listings": [ {...}, ... ]}`` yields candidate ``listings``).
+    A bare top-level array yields candidate ``"."``.
     """
     seen: dict[str, dict] = {}
     for entry in entries:
         val = coerce_value(getattr(entry, "value", entry))
+        if isinstance(val, list) and val and any(isinstance(el, dict) for el in val):
+            info = seen.setdefault(".", {"field": ".", "entries": 0, "total_rows": 0})
+            info["entries"] += 1
+            info["total_rows"] += len(val)
+            continue
         if not isinstance(val, dict):
             continue
         for k, v in val.items():

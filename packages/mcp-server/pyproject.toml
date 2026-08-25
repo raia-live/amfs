@@ -1,6 +1,6 @@
 [project]
 name = "amfs-mcp-server"
-version = "0.7.16"
+version = "0.7.17"
 description = "AMFS MCP Server — expose Agent Memory as MCP tools for Cursor and Claude Code"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ dependencies = [
     # TypeError on the one call agents are told to make at the end of every task.
     # An unbounded dependency is how the equivalent skew reached Pro users.
     # 0.5.7 adds AgentMemory.record_action, which amfs_record_action calls.
-    "amfs>=0.5.9",
+    "amfs>=0.5.10",
     # Direct floor at the import site. amfs_export and amfs_aggregate do
     # `from amfs_core.aggregates import coerce_value, iter_rows, aggregate_entries`.
     # Those were added in amfs-core 0.3.15 — but 0.3.14 was already published
@@ -18,7 +18,13 @@ dependencies = [
     # transitive floor via amfs (>=0.3.14) resolves a core that lacks the symbols
     # and the tool ImportErrors the instant it is called. Floor core directly so
     # a resolver can never pair this server with the broken 0.3.14 wheel.
-    "amfs-core>=0.3.15",
+    # 0.3.16 is the same hazard one degree quieter: iter_rows there flattens a
+    # bare top-level array and accepts row_path=".". Against 0.3.15 that call
+    # raises nothing — it looks in a dict, finds no key, and returns zero rows,
+    # so amfs_export writes an empty file and the agent concludes the data has
+    # no such shape. A silent empty result is worse than an ImportError, so this
+    # floor is the only thing separating the two.
+    "amfs-core>=0.3.16",
     # 0.1.10 for the same reason, one layer down: this adapter builds the
     # /outcomes body field by field, and anything earlier does not copy
     # tool_calls into it. The floor was 0.1.2, which a cached 0.1.9 satisfies —
@@ -26,7 +32,7 @@ dependencies = [
     # trace with an empty list, and the dataset built from those traces has
     # nothing to learn from. Nothing raises: the commit succeeds, and the only
     # symptom is a model that never becomes ready.
-    "amfs-adapter-http>=0.1.11",
+    "amfs-adapter-http>=0.1.12",
     "fastmcp>=2.0",
 ]
 
