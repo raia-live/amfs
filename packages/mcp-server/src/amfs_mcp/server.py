@@ -1165,7 +1165,8 @@ def amfs_export(
             with row_path for tabular datasets.
         row_path: Optional dotted field holding a list of records to flatten
             into one row each (e.g. "listings" turns 26 batch entries into one
-            row per listing). Omit to export whole entries.
+            row per listing). Use "." when the entry value IS the list (a
+            bare array, no wrapper key). Omit to export whole entries.
         inline_char_budget: If the whole payload is at or under this many
             characters it is ALSO returned inline (for clients without a
             filesystem tool). Larger payloads return the path only.
@@ -1193,7 +1194,8 @@ def amfs_export(
         })
 
     keys = [getattr(e, "key", None) for e in entries]
-    if row_path:
+    flatten = bool((row_path or "").strip())
+    if flatten:
         records: list[Any] = iter_rows(entries, row_path)
     else:
         records = [
@@ -1255,6 +1257,16 @@ def amfs_export(
             "prefer amfs_aggregate so records never enter your context."
         ),
     }
+    if not flatten:
+        bare = sum(
+            1 for e in entries
+            if isinstance(coerce_value(getattr(e, "value", None)), list)
+        )
+        if bare:
+            manifest["hint"] = (
+                f"{bare} of {len(entries)} entries store a top-level array. "
+                "Re-run with row_path='.' to flatten into one row per record."
+            )
     # Gate the inline copy on the size it will ACTUALLY occupy in this manifest,
     # not on len(content): a CSV file is compact, but manifest["inline"] embeds
     # the raw records which re-serialize as JSON — far larger for csv/json — so
@@ -1290,7 +1302,8 @@ def amfs_aggregate(
         field: Dotted field to aggregate, e.g. "price" or "meta.yield".
         group_by: Optional dotted field to group results by (e.g. "city").
         row_path: Optional dotted field holding a list of records to flatten
-            into rows first (e.g. "listings" for batch entries).
+            into rows first (e.g. "listings" for batch entries). Use "." when
+            the entry value is itself the list.
 
     Example: amfs_aggregate("@deals-room/listings", op="mean", field="price", group_by="city", row_path="listings")
     """

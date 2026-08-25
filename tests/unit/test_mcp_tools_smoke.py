@@ -131,6 +131,27 @@ class TestReadSurfaceSmoke:
         )
         assert "inline" in at_or_above
 
+    def test_export_flattens_bare_array_with_dot_row_path(self, srv):
+        srv.amfs_write(
+            "smoke/bare", "chunk",
+            json.dumps([{"addr": "1 Main"}, {"addr": "2 Main"}]),
+        )
+        payload = _ok(
+            "amfs_export",
+            srv.amfs_export("smoke/bare", format="csv", row_path="."),
+        )
+        assert payload["entry_count"] == 1
+        assert payload["record_count"] == 2
+        csv_text = Path(payload["path"]).read_text()
+        assert "1 Main" in csv_text
+        assert "2 Main" in csv_text
+
+    def test_export_hints_when_values_are_bare_arrays(self, srv):
+        srv.amfs_write("smoke/bare2", "chunk", json.dumps([{"addr": "1 Main"}]))
+        payload = _ok("amfs_export", srv.amfs_export("smoke/bare2", format="csv"))
+        assert payload["record_count"] == 1
+        assert "row_path='.'" in payload["hint"]
+
     def test_aggregate_local_fallback(self, srv):
         # No AMFS_HTTP_URL in this test env, so amfs_aggregate must compute
         # locally over the same aggregates module rather than erroring.

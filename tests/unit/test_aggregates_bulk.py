@@ -61,6 +61,22 @@ def test_iter_rows_flattens_list_valued_field():
     assert rows == [{"p": 1}, {"p": 2}, {"p": 3}]
 
 
+def test_iter_rows_flattens_bare_array_without_row_path():
+    rows = iter_rows([_entry([{"p": 1}, {"p": 2}]), _entry([{"p": 3}])])
+    assert rows == [{"p": 1}, {"p": 2}, {"p": 3}]
+
+
+def test_iter_rows_dot_flattens_bare_array():
+    rows = iter_rows([_entry([{"p": 1}, {"p": 2}])], row_path=".")
+    assert rows == [{"p": 1}, {"p": 2}]
+
+
+def test_iter_rows_guessed_wrapper_still_flattens_bare_array():
+    # Agents guess "properties" / "listings" even when the value IS the list.
+    rows = iter_rows([_entry([{"p": 1}, {"p": 2}])], row_path="properties")
+    assert rows == [{"p": 1}, {"p": 2}]
+
+
 # ── aggregation ──────────────────────────────────────────────────────────
 
 
@@ -148,6 +164,14 @@ def test_schema_profile_detects_row_path_candidates():
     cands = {c["field"]: c for c in prof["row_path_candidates"]}
     assert "listings" in cands
     assert cands["listings"]["total_rows"] == 2
+
+
+def test_schema_profile_candidate_for_bare_array():
+    entries = [_entry([{"p": 1}, {"p": 2}], key="b1"), _entry([{"p": 3}], key="b2")]
+    prof = room_schema_profile(entries)
+    cands = {c["field"]: c for c in prof["row_path_candidates"]}
+    assert cands["."]["total_rows"] == 3
+    assert cands["."]["entries"] == 2
 
 
 def test_schema_profile_counts_records_per_key():

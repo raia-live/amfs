@@ -101,7 +101,7 @@ instead of listing-and-reading every entry in a data-heavy entity or room.
 |:----------|:-----|:---------|:------------|
 | `entity_path` | `str` | Yes | Entity to export |
 | `format` | `str` | No | `"jsonl"` (default) or `"json"` |
-| `row_path` | `str` | No | Dotted field holding a list to flatten into rows (e.g. `"listings"`) |
+| `row_path` | `str` | No | Dotted field holding a list to flatten into rows (e.g. `"listings"`). Use `"."` when the entry value is itself the list. |
 | `inline_char_budget` | `int` | No | Return inline instead of writing a file when the payload fits this budget |
 
 ### amfs_aggregate
@@ -116,7 +116,7 @@ coerced to zero); `n` reports how many rows actually contributed.
 | `op` | `str` | No | `"count"` (default), `"sum"`, `"mean"`, `"min"`, `"max"`, `"stats"` |
 | `field` | `str` | No | Dotted field for numeric ops (e.g. `"price"`) — required unless `op="count"` |
 | `group_by` | `str` | No | Dotted field to group results by |
-| `row_path` | `str` | No | Dotted field holding a list to flatten into rows first |
+| `row_path` | `str` | No | Dotted field holding a list to flatten into rows first. Use `"."` when the value is itself the list. |
 
 ### amfs_history
 
