@@ -154,8 +154,13 @@ def pool_bounds(
     return min(low, high), high
 
 
-def statement_timeout_options() -> str | None:
-    """The libpq ``options`` string carrying the statement ceiling, if set.
+#: Passed as ``statement_timeout`` to mean "no ceiling for this process",
+#: distinct from passing nothing, which means "whatever the environment says".
+NO_STATEMENT_TIMEOUT = "0"
+
+
+def statement_timeout_options(override: str | None = None) -> str | None:
+    """The libpq ``options`` string carrying the statement ceiling, if any.
 
     A ceiling on how long any one statement may run. Off unless asked for,
     because the right ceiling depends on the deployment: a request-serving
@@ -167,9 +172,76 @@ def statement_timeout_options() -> str | None:
     request that asked for it holds its locks with nobody left to want the
     answer, which is how a single slow query became a production outage on
     2026-08-12; see _apply_schema.
+
+    ``override`` exists because this is applied through libpq ``options``, which
+    makes it a property of the *connection* and therefore of the whole pool.
+    That is the right shape for a service but the wrong shape for a process that
+    does both kinds of work: a bulk load, a per-partition index build and an
+    embedding backfill are all single statements that legitimately outlast any
+    request, and inheriting a request-shaped ceiling from a shared environment
+    variable aborts them partway. A process that knows what it is passes its own
+    value, or :data:`NO_STATEMENT_TIMEOUT` to opt out, rather than depending on
+    how the environment happens to be configured around it.
     """
-    timeout = os.environ.get("AMFS_POSTGRES_STATEMENT_TIMEOUT", "").strip()
+    timeout = (
+        override
+        if override is not None
+        else os.environ.get("AMFS_POSTGRES_STATEMENT_TIMEOUT", "")
+    ).strip()
     return f"-c statement_timeout={timeout}" if timeout else None
+
+
+#: pgvector's accepted values. ``off`` is its default.
+_HNSW_ITERATIVE_SCAN_MODES = frozenset({"off", "strict_order", "relaxed_order"})
+
+
+def hnsw_iterative_scan_option() -> str | None:
+    """The libpq ``options`` fragment enabling iterative HNSW scans, if asked.
+
+    Without this, an HNSW index *post-filters*: it walks the global proximity
+    graph for the nearest vectors and only then discards the ones failing the
+    query's ``WHERE`` clause. A search restricted to a small slice of a large
+    table -- one tenant, one room, one dataset -- can therefore come back short
+    or empty while the rows it wanted sit unvisited. That failure is quiet, and
+    a quiet wrong answer is worse than a slow one.
+
+    ``hnsw.iterative_scan`` makes the scan keep going until it has enough rows
+    that actually satisfy the filter. It needs pgvector >= 0.8.0.
+
+    Off unless asked for, and deliberately not on by default: this is applied
+    through libpq ``options``, so on a server whose pgvector predates 0.8.0 the
+    setting is unrecognised and *every connection fails to open*. An installer
+    who has not pinned their extension version should not have the adapter stop
+    working because of a flag they never set. Deployments that control their
+    database version -- which is the same set that can pin the image -- opt in.
+    """
+    mode = os.environ.get("AMFS_POSTGRES_HNSW_ITERATIVE_SCAN", "").strip().lower()
+    if not mode:
+        return None
+    if mode not in _HNSW_ITERATIVE_SCAN_MODES:
+        raise ValueError(
+            "AMFS_POSTGRES_HNSW_ITERATIVE_SCAN must be one of "
+            f"{sorted(_HNSW_ITERATIVE_SCAN_MODES)}, got {mode!r}"
+        )
+    return f"-c hnsw.iterative_scan={mode}"
+
+
+def connection_options(statement_timeout: str | None = None) -> str | None:
+    """Everything this process wants set on each connection, as one string.
+
+    libpq takes repeated ``-c`` flags separated by spaces, so the fragments
+    compose. None when nothing is configured, so callers can leave ``options``
+    off the connection entirely rather than passing an empty string.
+    """
+    fragments = [
+        fragment
+        for fragment in (
+            statement_timeout_options(statement_timeout),
+            hnsw_iterative_scan_option(),
+        )
+        if fragment
+    ]
+    return " ".join(fragments) if fragments else None
 
 
 def _tables_created_by(sql: str) -> frozenset[str]:
@@ -223,61 +295,59 @@ class _SingleConnectionPool:
 
 
 class _TenantRLSConnection:
-    """Applies ``amfs.current_account_id`` when a request-scoped tenant is set.
+    """Applies the four tenant settings on every checkout.
 
-    Always sets the GUC on every checkout:
-    - When a tenant is present: sets the real account UUID (RLS filters to that tenant).
-    - When no tenant is present: sets empty string which, via NULLIF in RLS
-      policies, evaluates to NULL — matching zero rows. This prevents stale
-      tenant context from a previous pooled-connection user leaking across
-      requests.
+    All four are set every time, whether or not a request tenant is present:
+    with a tenant, to the real values; without one, to empty, which ``NULLIF``
+    in the policies turns into NULL so nothing matches. Setting them
+    unconditionally is the point — skipping the write when there is no tenant
+    would leave the previous borrower of this pooled connection in place, and
+    ``amfs.current_user_id`` is the setting that grants reach across accounts.
+
+    Session-scoped, which is correct for ``psycopg_pool`` and not correct behind
+    a transaction-mode pooler. See :mod:`amfs_postgres.tenant_gucs` for why, and
+    :func:`~amfs_postgres.tenant_gucs.tenant_transaction` for the form that is.
     """
 
-    _log_counter = 0
+    _tenantless_checkouts = 0
 
     def __init__(self, inner_ctx: Any) -> None:
         self._inner_ctx = inner_ctx
 
     def __enter__(self) -> Any:
-        from amfs_postgres.tenant_context import (
-            get_request_tenant_account_id,
-            get_request_tenant_team_id,
-            get_request_is_account_admin,
-            get_request_user_id,
-        )
+        from amfs_postgres.tenant_gucs import set_tenant_gucs
 
         conn = self._inner_ctx.__enter__()
-        tid = get_request_tenant_account_id()
-        team_id = get_request_tenant_team_id()
-        is_admin = get_request_is_account_admin()
-        user_id = get_request_user_id()
-
-        _TenantRLSConnection._log_counter += 1
-        if _TenantRLSConnection._log_counter <= 20 or not tid:
-            import logging as _logging
-            _logging.getLogger("amfs_postgres.adapter").warning(
-                "[RLS-CONN] account_id=%s team_id=%s is_admin=%s",
-                tid, team_id, is_admin,
-            )
-
         with conn.cursor() as cur:
-            # current_user_id is set unconditionally, like the others: on a
-            # pooled connection, leaving it alone would leave the previous
-            # borrower's user in place, and this is the one GUC that grants
-            # access across accounts rather than restricting within one.
-            cur.execute(
-                "SELECT set_config('amfs.current_account_id', %s, false),"
-                "       set_config('amfs.current_team_id', %s, false),"
-                "       set_config('amfs.is_account_admin', %s, false),"
-                "       set_config('amfs.current_user_id', %s, false)",
-                (
-                    tid if tid else "",
-                    team_id if team_id else "",
-                    "true" if is_admin else "false",
-                    user_id if user_id else "",
-                ),
-            )
+            set_tenant_gucs(cur, local=False)
+        self._warn_if_tenantless()
         return conn
+
+    @staticmethod
+    def _warn_if_tenantless() -> None:
+        """Report tenant-less checkouts, but on a curve rather than every time.
+
+        A checkout with no tenant is worth knowing about, because in a request
+        path it means reads are about to return nothing. It is also completely
+        normal in a worker or a CLI, which have no request to carry one — and
+        those are exactly the processes that check out connections in a tight
+        loop, where one warning per checkout buries the log it was meant to
+        inform. Powers of two keep the first few and then get out of the way.
+        """
+        from amfs_postgres.tenant_context import get_request_tenant_account_id
+
+        if get_request_tenant_account_id():
+            return
+        _TenantRLSConnection._tenantless_checkouts += 1
+        count = _TenantRLSConnection._tenantless_checkouts
+        if count & (count - 1):  # not a power of two
+            return
+        logger.warning(
+            "Postgres checkout with no tenant account_id (%d so far) — "
+            "RLS-protected reads will return no rows. Expected in workers and "
+            "CLIs; a bug in a request path.",
+            count,
+        )
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
         return self._inner_ctx.__exit__(exc_type, exc, tb)
@@ -325,6 +395,7 @@ class PostgresAdapter(AdapterABC):
         max_pool_size: int | None = None,
         embedder: EmbedderABC | None = None,
         embedding_dim: int = 384,
+        statement_timeout: str | None = None,
     ) -> None:
         self._dsn = dsn
         self._namespace = namespace
@@ -341,16 +412,24 @@ class PostgresAdapter(AdapterABC):
             "row_factory": dict_row,
             "autocommit": True,
         }
-        options = statement_timeout_options()
+        options = connection_options(statement_timeout)
         if options:
             connect_kwargs["options"] = options
         pool_kwargs: dict[str, Any] = {"kwargs": connect_kwargs}
         if _ConnectionPool is not None:
+            from amfs_postgres.tenant_gucs import reset_tenant_gucs
+
             min_size, max_size = pool_bounds(min_pool_size, max_pool_size)
             self._pool = _ConnectionPool(
                 dsn,
                 min_size=min_size,
                 max_size=max_size,
+                # Blank the tenant settings as the connection goes back. Every
+                # checkout already overwrites all four, so this is not what
+                # prevents a leak in normal use; it prevents one from outliving
+                # a checkout that raised partway through, and it means an
+                # idle pooled connection is never sitting on a real tenant.
+                reset=reset_tenant_gucs,
                 **pool_kwargs,
             )
         else:
@@ -1333,12 +1412,54 @@ class PostgresAdapter(AdapterABC):
                 )
         self._detect_optional_columns()
 
-    def backfill_embeddings(self, *, batch_size: int = 200) -> int:
+    def backfill_embeddings(
+        self, *, batch_size: int = 200, max_rows: int | None = None
+    ) -> int:
         """Compute and store embeddings for existing rows that lack one.
 
         Returns the number of rows updated. Requires a configured embedder and
-        the embedding column. Intended as a one-off migration step after
-        enabling write-time embeddings on an existing store.
+        the embedding column. Intended as a migration step after enabling
+        write-time embeddings on an existing store, and as the repair path for
+        rows an import wrote while no embedder was configured.
+
+        Walks a keyset cursor over ``id`` to completion, in the same shape as
+        :meth:`backfill_is_artifact`. Both properties matter, and neither was
+        true before:
+
+        * **It finishes.** The previous version read one batch and returned, so
+          a caller asking to backfill a store with more than ``batch_size``
+          missing embeddings silently got ``batch_size`` of them and no
+          indication there was more.
+        * **A row that cannot be embedded cannot starve the ones behind it.**
+          The previous version ordered by ``written_at`` and skipped failures
+          with ``continue``, leaving them ``NULL``. Every later call therefore
+          re-read the same permanently-failing rows at the head of the batch --
+          a value the embedder chokes on is enough to stall the backfill
+          forever, and the symptom is a store that never finishes backfilling
+          rather than an error. Advancing by ``id`` regardless of outcome is
+          what fixes it, since progress no longer depends on success.
+
+        ``max_rows`` bounds the work for a caller that wants to make progress
+        without running to completion, such as a worker doing this between other
+        jobs. It counts rows *examined*, not rows successfully embedded, and the
+        difference is the whole value of it: counting successes would mean a run
+        of rows the embedder cannot handle does not count against the budget, so
+        a caller asking for 1000 rows of work would keep fetching batches until
+        it found 1000 that worked -- walking every remaining row in the store if
+        none of them do. A bound that a bad row can lift is not a bound, and the
+        caller that needs one is precisely the one on a time slice.
+
+        The return value is still the number of rows *updated*, which is the
+        useful figure for a migration and the one the integration test asserts
+        on. When the two differ, the warning below says by how much.
+
+        One cost this does not pay off: each call starts its cursor from the
+        beginning, so rows that permanently fail are re-examined by every
+        subsequent call. That is bounded by the number of such rows rather than
+        growing, and it does not block progress -- a call still reaches new rows
+        after paying it -- so it is left as a known overhead instead of being
+        fixed with a resume cursor that no caller yet wants. If failures ever
+        grow to the point of eating a time slice, that is the fix.
 
         TODO(integration-test): covered by tests/integration/test_postgres_embeddings.py
         (needs AMFS_TEST_PG_DSN + pgvector); unvalidated in unit CI.
@@ -1346,27 +1467,55 @@ class PostgresAdapter(AdapterABC):
         if self._embedder is None or not self._has_embedding_col:
             return 0
         updated = 0
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id, value FROM amfs_memory_entries "
-                    "WHERE namespace = %s AND embedding IS NULL "
-                    "ORDER BY written_at LIMIT %s",
-                    (self._namespace, batch_size),
-                )
-                rows = cur.fetchall()
-                for r in rows:
-                    try:
-                        value = json.loads(r["value"]) if isinstance(r["value"], str) else r["value"]
-                        vec = self._embedder.embed_value(value)
-                    except Exception:  # noqa: BLE001
-                        logger.warning("backfill embedding failed for row %s", r["id"], exc_info=True)
-                        continue
+        failed = 0
+        examined = 0
+        last_id = "00000000-0000-0000-0000-000000000000"
+        while True:
+            if max_rows is not None and examined >= max_rows:
+                break
+            limit = batch_size
+            if max_rows is not None:
+                limit = min(limit, max_rows - examined)
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
                     cur.execute(
-                        "UPDATE amfs_memory_entries SET embedding = %s WHERE id = %s",
-                        (f"[{','.join(str(v) for v in vec)}]", r["id"]),
+                        "SELECT id, value FROM amfs_memory_entries "
+                        "WHERE namespace = %s AND embedding IS NULL AND id > %s "
+                        "ORDER BY id LIMIT %s",
+                        (self._namespace, last_id, limit),
                     )
-                    updated += 1
+                    rows = cur.fetchall()
+                    if not rows:
+                        break
+                    for r in rows:
+                        last_id = r["id"]
+                        examined += 1
+                        try:
+                            value = (
+                                json.loads(r["value"])
+                                if isinstance(r["value"], str)
+                                else r["value"]
+                            )
+                            vec = self._embedder.embed_value(value)
+                        except Exception:  # noqa: BLE001
+                            failed += 1
+                            logger.warning(
+                                "backfill embedding failed for row %s", r["id"],
+                                exc_info=True,
+                            )
+                            continue
+                        cur.execute(
+                            "UPDATE amfs_memory_entries SET embedding = %s "
+                            "WHERE id = %s",
+                            (f"[{','.join(str(v) for v in vec)}]", r["id"]),
+                        )
+                        updated += 1
+        if failed:
+            logger.warning(
+                "backfill_embeddings: examined %d rows, updated %d, %d could not "
+                "be embedded and remain without one",
+                examined, updated, failed,
+            )
         return updated
 
     def backfill_is_artifact(self, *, batch_size: int = 200, reembed: bool = True) -> int:
