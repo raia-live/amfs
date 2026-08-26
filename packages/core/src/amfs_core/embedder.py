@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Any
 
 
@@ -29,6 +30,23 @@ class EmbedderABC(ABC):
         if isinstance(value, str):
             return self.embed(value)
         return self.embed(json.dumps(value, default=str))
+
+    def embed_batch(self, texts: Sequence[str]) -> list[list[float]]:
+        """Embed many texts at once, in the order given.
+
+        The default loops, so every existing embedder keeps working without
+        change and a caller can always reach for this. Implementations backed by
+        a model that accepts a list should override it, because for those the
+        difference is not a micro-optimisation: embedding one string at a time
+        pays the per-call overhead of the inference runtime on every row, so a
+        25,000-row import costs 25,000 separate inferences where it could cost a
+        few hundred batched ones. That is the dominant CPU cost of a bulk import,
+        which is what this method exists for.
+
+        Overrides must return one vector per input, in input order, and must not
+        drop or reorder — callers zip the result back against their rows.
+        """
+        return [self.embed(text) for text in texts]
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
