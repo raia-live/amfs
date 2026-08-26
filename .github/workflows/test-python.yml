@@ -15,7 +15,21 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # pgvector's image, and a pinned version of it rather than the floating
+        # `pg16` tag — the same one docker-compose.yml and the Helm values use,
+        # for the reason spelled out there: `hnsw.iterative_scan` arrived in
+        # pgvector 0.8.0, and without it an HNSW index post-filters, walking the
+        # global proximity graph and then discarding rows that fail the WHERE
+        # clause. A query scoped to a small slice of a large table then returns
+        # results that are missing rather than merely mis-ranked. Local, CI and
+        # Cloud SQL agreeing on one version is the only thing that keeps that
+        # true, and CI was the one that did not.
+        #
+        # Plain `postgres:16` was not a smaller version of this. It ships no
+        # pgvector at all, and the adapter opens by running `CREATE EXTENSION IF
+        # NOT EXISTS vector` — so the vector paths could never have been
+        # exercised here, whatever the job reported.
+        image: pgvector/pgvector:0.8.1-pg16
         env:
           POSTGRES_DB: amfs_test
           POSTGRES_PASSWORD: test
