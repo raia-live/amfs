@@ -40,6 +40,26 @@ class TestTheStatementCeiling:
         assert kwargs["row_factory"] is not None
 
 
+class TestTheTenantResetOnReturn:
+    """The sync pool blanks the four tenant settings when a connection goes
+    back. This pool serves the request path, where tenants change fastest, so
+    going without it was the gap that mattered more of the two."""
+
+    def test_the_pool_is_given_a_reset_callback(self):
+        from amfs_postgres.tenant_gucs import areset_tenant_gucs
+
+        assert _pool(AsyncPostgresAdapter(dsn=DSN))._reset is areset_tenant_gucs
+
+    def test_the_callback_is_awaitable(self):
+        # psycopg_pool awaits the async pool's reset, so handing it the sync
+        # helper would raise on every connection return rather than at startup.
+        import inspect
+
+        from amfs_postgres.tenant_gucs import areset_tenant_gucs
+
+        assert inspect.iscoroutinefunction(areset_tenant_gucs)
+
+
 class TestThePoolSize:
     def test_it_follows_the_environment(self, monkeypatch):
         monkeypatch.setenv("AMFS_POSTGRES_POOL_MAX", "6")

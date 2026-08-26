@@ -1441,7 +1441,25 @@ class PostgresAdapter(AdapterABC):
 
         ``max_rows`` bounds the work for a caller that wants to make progress
         without running to completion, such as a worker doing this between other
-        jobs.
+        jobs. It counts rows *examined*, not rows successfully embedded, and the
+        difference is the whole value of it: counting successes would mean a run
+        of rows the embedder cannot handle does not count against the budget, so
+        a caller asking for 1000 rows of work would keep fetching batches until
+        it found 1000 that worked -- walking every remaining row in the store if
+        none of them do. A bound that a bad row can lift is not a bound, and the
+        caller that needs one is precisely the one on a time slice.
+
+        The return value is still the number of rows *updated*, which is the
+        useful figure for a migration and the one the integration test asserts
+        on. When the two differ, the warning below says by how much.
+
+        One cost this does not pay off: each call starts its cursor from the
+        beginning, so rows that permanently fail are re-examined by every
+        subsequent call. That is bounded by the number of such rows rather than
+        growing, and it does not block progress -- a call still reaches new rows
+        after paying it -- so it is left as a known overhead instead of being
+        fixed with a resume cursor that no caller yet wants. If failures ever
+        grow to the point of eating a time slice, that is the fix.
 
         TODO(integration-test): covered by tests/integration/test_postgres_embeddings.py
         (needs AMFS_TEST_PG_DSN + pgvector); unvalidated in unit CI.
@@ -1450,13 +1468,14 @@ class PostgresAdapter(AdapterABC):
             return 0
         updated = 0
         failed = 0
+        examined = 0
         last_id = "00000000-0000-0000-0000-000000000000"
         while True:
-            if max_rows is not None and updated >= max_rows:
+            if max_rows is not None and examined >= max_rows:
                 break
             limit = batch_size
             if max_rows is not None:
-                limit = min(limit, max_rows - updated)
+                limit = min(limit, max_rows - examined)
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -1470,6 +1489,7 @@ class PostgresAdapter(AdapterABC):
                         break
                     for r in rows:
                         last_id = r["id"]
+                        examined += 1
                         try:
                             value = (
                                 json.loads(r["value"])
@@ -1492,9 +1512,9 @@ class PostgresAdapter(AdapterABC):
                         updated += 1
         if failed:
             logger.warning(
-                "backfill_embeddings: %d rows updated, %d could not be embedded "
-                "and remain without one",
-                updated, failed,
+                "backfill_embeddings: examined %d rows, updated %d, %d could not "
+                "be embedded and remain without one",
+                examined, updated, failed,
             )
         return updated
 

@@ -195,6 +195,40 @@ class TestBoundingTheWork:
 
         assert _adapter(db).backfill_embeddings(batch_size=10, max_rows=99) == 5
 
+    def test_the_bound_counts_rows_examined_not_rows_embedded(self):
+        """A bound a bad row can lift is not a bound.
+
+        Counting successes meant failures were free: the loop kept fetching
+        batches until it found `max_rows` that worked, so a caller asking for 10
+        rows of work against 10 unembeddable rows walked the entire store
+        looking for successes that were never coming. The caller that asks for a
+        bound is the one on a time slice, which is exactly the one that cannot
+        afford that.
+        """
+        db = _FakeDB(_ids(25))
+        doomed = set(_ids(25)[:10])
+
+        updated = _adapter(db, failing=doomed).backfill_embeddings(
+            batch_size=10, max_rows=10
+        )
+
+        assert updated == 0, "none of the first ten can be embedded"
+        # One batch of ten, and then it stops. Not 25 rows read in pursuit of
+        # ten successes.
+        assert db.selects == [(_ZERO_UUID, 10)]
+        assert db.embedded == set()
+
+    def test_a_partly_failing_slice_still_stops_at_the_bound(self):
+        db = _FakeDB(_ids(40))
+        doomed = {"row-000", "row-003", "row-007"}
+
+        updated = _adapter(db, failing=doomed).backfill_embeddings(
+            batch_size=5, max_rows=10
+        )
+
+        assert updated == 7, "ten examined, three of them unembeddable"
+        assert sum(limit for _start, limit in db.selects) == 10
+
 
 class TestWhenItCannotRunAtAll:
     @pytest.mark.parametrize(

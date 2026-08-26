@@ -134,6 +134,20 @@ def reset_tenant_gucs(conn: Any) -> None:
         cur.execute(CLEAR_TENANT_GUCS, CLEARED_TENANT_GUC_VALUES)
 
 
+async def areset_tenant_gucs(conn: Any) -> None:
+    """Async twin of :func:`reset_tenant_gucs`, for ``AsyncConnectionPool``.
+
+    Needed separately because ``psycopg_pool`` awaits the async pool's ``reset``
+    callback, so the sync function cannot be handed to both. Worth more here
+    than on the sync side, not less: this pool serves the HTTP request path,
+    which is the most multi-tenant thing in the system and the place where an
+    idle connection left holding ``amfs.current_user_id`` would be holding the
+    one setting that grants reach across accounts.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(CLEAR_TENANT_GUCS, CLEARED_TENANT_GUC_VALUES)
+
+
 def _assert_in_transaction(conn: Any) -> None:
     """Refuse to proceed unless a transaction is genuinely open.
 

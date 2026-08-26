@@ -15,6 +15,7 @@ checks it has a real transaction rather than trusting that it does.
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -29,6 +30,26 @@ def _cursor(recorder: list) -> MagicMock:
     cur.__enter__ = MagicMock(return_value=cur)
     cur.__exit__ = MagicMock(return_value=None)
     return cur
+
+
+class _AsyncCursor:
+    """An async cursor, written out rather than mocked.
+
+    MagicMock can be bent into supporting `async with` and an awaitable
+    execute, but the bending is longer than the class and reads worse.
+    """
+
+    def __init__(self, recorder: list) -> None:
+        self._recorder = recorder
+
+    async def __aenter__(self) -> _AsyncCursor:
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        return None
+
+    async def execute(self, sql: str, params: tuple | None = None) -> None:
+        self._recorder.append((sql, params))
 
 
 def _connection(recorder: list, *, status: str = "INTRANS") -> MagicMock:
@@ -195,3 +216,18 @@ class TestReturningAConnectionToThePool:
         assert sql == tenant_gucs.SET_TENANT_GUCS_SESSION
         assert params == ("", "", "false", "")
         assert len(params) == len(tenant_gucs.TENANT_GUC_NAMES)
+
+    async def test_the_async_reset_blanks_the_same_four(self):
+        """Both pools need this and only one callback can be awaited, so the
+        async twin exists. The request path is served by the async pool, which
+        makes it the one where a connection left holding a real
+        amfs.current_user_id matters most."""
+        recorder: list = []
+        conn = MagicMock()
+        conn.cursor = MagicMock(return_value=_AsyncCursor(recorder))
+
+        await tenant_gucs.areset_tenant_gucs(conn)
+
+        sql, params = recorder[0]
+        assert sql == tenant_gucs.SET_TENANT_GUCS_SESSION
+        assert params == ("", "", "false", "")

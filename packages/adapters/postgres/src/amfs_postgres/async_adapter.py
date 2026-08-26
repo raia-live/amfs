@@ -40,6 +40,7 @@ from amfs_postgres.adapter import (
     pool_bounds,
     connection_options,
 )
+from amfs_postgres.tenant_gucs import areset_tenant_gucs
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,12 @@ class AsyncPostgresAdapter:
                 min_size=min_size,
                 max_size=max_size,
                 kwargs=connect_kwargs,
+                # The same blanking the sync pool does on return, and this is
+                # the pool that needs it more: these are the hot-path REST
+                # endpoints, so this is where tenants change fastest and where
+                # an idle connection left holding amfs.current_user_id would be
+                # holding the setting that reaches across accounts.
+                reset=areset_tenant_gucs,
                 open=False,
             )
         )
