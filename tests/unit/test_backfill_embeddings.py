@@ -49,7 +49,7 @@ class _FakeCursor:
                 if vector is None and row_id > last_id
             )
             self._rows = [
-                {"id": row_id, "value": json.dumps({"row": row_id})}
+                {"id": row_id, "value": self._db.stored_value(row_id)}
                 for row_id in pending[:limit]
             ]
         elif sql.startswith("UPDATE amfs_memory_entries SET embedding"):
@@ -63,11 +63,28 @@ class _FakeCursor:
 
 
 class _FakeDB:
-    def __init__(self, row_ids: list[str]) -> None:
+    def __init__(
+        self, row_ids: list[str], *, values: dict[str, Any] | None = None
+    ) -> None:
         self.embeddings: dict[str, str | None] = {r: None for r in row_ids}
         self.selects: list[tuple[str, int]] = []
+        self.scopes: list[bool] = []
+        #: Overrides for what a row's ``value`` column holds. The default is a
+        #: JSON object, which is the common case; a bare string is the case that
+        #: used to be misread as an unembeddable row.
+        self.values: dict[str, Any] = values or {}
 
-    def connection(self) -> Any:
+    def stored_value(self, row_id: str) -> Any:
+        if row_id in self.values:
+            return self.values[row_id]
+        return json.dumps({"row": row_id})
+
+    def connection(self, *, transactional: bool = True) -> Any:
+        # The backfill checks out with transactional=False, because it calls the
+        # embedder between statements and would otherwise hold a transaction
+        # open across a batch of network round trips. Recorded rather than
+        # ignored so that the scope stays part of what these tests describe.
+        self.scopes.append(transactional)
         cursor = _FakeCursor(self)
         pool_ctx = MagicMock()
         pool_ctx.__enter__ = MagicMock(return_value=_conn_with(cursor))
@@ -242,3 +259,88 @@ class TestWhenItCannotRunAtAll:
 
         assert adapter.backfill_embeddings() == 0
         assert db.selects == [], "must not query at all"
+
+
+class TestValuesThatAreNotJson:
+    """A value can be a bare string, and a bare string is not JSON.
+
+    The decode and the embed used to share one ``try``, so ``json.loads`` on a
+    plain string raised JSONDecodeError and the row was counted as one the
+    embedder could not handle. It kept its NULL embedding, stayed invisible to
+    semantic search, and was re-read and re-failed by every later backfill —
+    reported only as a warning, so the store looked backfilled.
+    """
+
+    def test_a_plain_string_value_is_embedded_not_skipped(self):
+        db = _FakeDB(_ids(3), values={"row-001": "analytics runs on clickhouse"})
+
+        updated = _adapter(db).backfill_embeddings()
+
+        assert updated == 3, "the bare-string row must be embedded like the rest"
+        assert db.missing == set()
+
+    def test_it_is_the_raw_string_that_reaches_the_embedder(self):
+        """Not a JSON-quoted version of it, and not a repr."""
+        db = _FakeDB(["row-000"], values={"row-000": "analytics on clickhouse"})
+        adapter = _adapter(db)
+
+        adapter.backfill_embeddings()
+
+        adapter._embedder.embed_value.assert_called_once_with(
+            "analytics on clickhouse"
+        )
+
+    def test_a_json_value_is_still_decoded(self):
+        """The fallback must not stop real JSON being parsed into an object."""
+        db = _FakeDB(["row-000"], values={"row-000": json.dumps({"row": "row-000"})})
+        adapter = _adapter(db)
+
+        adapter.backfill_embeddings()
+
+        adapter._embedder.embed_value.assert_called_once_with({"row": "row-000"})
+
+    def test_a_genuine_embedder_failure_is_still_skipped(self):
+        """The fallback widens what counts as decodable, not what counts as
+        embeddable — a row the embedder rejects must still be left alone."""
+        db = _FakeDB(_ids(3), values={"row-001": "unembeddable"})
+
+        updated = _adapter(db, failing={"unembeddable"}).backfill_embeddings()
+
+        assert updated == 2
+        assert db.missing == {"row-001"}
+
+
+class TestItDoesNotHoldATransactionAcrossTheEmbedder:
+    """Why this checks out non-transactionally, and why that is not an oversight.
+
+    Ordinary checkouts wrap the block in a transaction so the tenant settings
+    can be scoped to it, which is what makes the adapter safe behind a
+    transaction-mode pooler. This loop cannot take that: it calls the embedder
+    once per row inside the block, so the transaction would stay open across a
+    whole batch of network round trips — holding a transaction id, blocking
+    vacuum, and stretching to however long the embedding service takes.
+
+    Per-statement commit is also load-bearing for the behaviour the tests above
+    describe: one row's failure leaves the rest of the batch committed.
+    """
+
+    def test_every_batch_checks_out_without_a_transaction(self):
+        db = _FakeDB(_ids(25))
+
+        _adapter(db).backfill_embeddings(batch_size=10)
+
+        assert db.scopes, "expected at least one checkout"
+        assert all(scope is False for scope in db.scopes), (
+            f"a transactional checkout would hold a transaction open across "
+            f"the embedder calls: {db.scopes}"
+        )
+
+    def test_the_batches_are_separate_checkouts(self):
+        """Each batch its own checkout, so the connection is handed back — and
+        the tenant settings blanked — between them rather than held for the
+        whole run."""
+        db = _FakeDB(_ids(25))
+
+        _adapter(db).backfill_embeddings(batch_size=10)
+
+        assert len(db.scopes) == len(db.selects) > 1

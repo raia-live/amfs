@@ -20,6 +20,7 @@ and nothing will notice.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -71,9 +72,35 @@ class TestTheGuardIsDefinedOnce:
         )
 
     def test_the_async_adapter_shares_the_definition(self) -> None:
-        """Two copies of a security rule is one copy that gets forgotten."""
-        assert f"from amfs_postgres.adapter import {GUARD}" in ASYNC.read_text()
-        assert f'{GUARD} = ' not in ASYNC.read_text()
+        """Two copies of a security rule is one copy that gets forgotten.
+
+        Parsed rather than string-matched, because the substring version of this
+        test was a false negative for as long as the import stayed on one line
+        and then silently for as long as it did not: wrapping it in parentheses
+        -- which any formatter will do once a fourth name is added -- made the
+        assertion unsatisfiable while the code was still correct. A security
+        guard whose test fails for cosmetic reasons gets its test relaxed.
+        """
+        imported = {
+            alias.name
+            for node in ast.walk(ast.parse(ASYNC.read_text()))
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "amfs_postgres.adapter"
+            for alias in node.names
+        }
+        assert GUARD in imported, (
+            f"{GUARD} is not imported from amfs_postgres.adapter; the async "
+            f"adapter has either lost the guard or grown its own copy"
+        )
+
+        assigned = {
+            target.id
+            for node in ast.walk(ast.parse(ASYNC.read_text()))
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        assert GUARD not in assigned, "a second definition of the guard"
 
 
 class TestUnscopedReadsExcludeSharedNamespaces:
