@@ -62,11 +62,21 @@ Two kinds of work cannot run inside a caller-imposed transaction:
   embed-failed fallback issues more SQL after a caught error -- which inside a
   transaction is ``InFailedSqlTransaction`` instead of a fallback.
 
-Those use :func:`blank_tenant_gucs` instead: still one write of all four on
-every checkout, so nothing is inherited from the previous borrower, but to empty
-rather than to a tenant. Empty fails closed under RLS, and clearing is the one
-session-scoped write that cannot leak because there is nothing in it to leak.
-Both are ops- and startup-time paths that touch no tenant rows.
+Those check out with :func:`blank_tenant_gucs` instead: still one write of all
+four on every checkout, so nothing is inherited from the previous borrower, but
+to empty rather than to a tenant. Empty fails closed under RLS, and clearing is
+the one session-scoped write that cannot leak because there is nothing in it to
+leak.
+
+What that gives them is the absence of an enclosing transaction, and for DDL it
+is the whole story -- it touches no tenant rows, so blank settings are all it
+ever needs. The backfills are the other way round: they ``SELECT`` and
+``UPDATE`` ``amfs_memory_entries``, which is exactly the table the policies
+guard. Blank settings there are not a safe default but a silent no-op -- RLS
+matches no rows, so the loops examine nothing, update nothing, and report
+success. So they open a short transaction per statement and set a real tenant
+inside it, transaction-local like the data path, with the embedder calls falling
+between those transactions rather than inside one.
 """
 
 from __future__ import annotations

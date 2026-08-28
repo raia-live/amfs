@@ -10,6 +10,7 @@ import os
 import re
 import threading
 import uuid
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -483,24 +484,61 @@ class PostgresAdapter(AdapterABC):
         self._watchers: dict[str, list[Callable[[MemoryEntry], None]]] = {}
 
     def _maintenance_connection(self) -> Any:
-        """A checkout with no transaction and no tenant, for DDL and backfills.
+        """A checkout with no transaction, for DDL and the backfills.
 
         Everything that touches tenant rows goes through the ordinary
-        ``self._pool.connection()``, which wraps the block in a transaction and
-        scopes the four settings to it. This is the documented exception, and it
-        is deliberately awkward to reach: the two callers that need it cannot be
-        wrapped in a transaction at all -- DDL because one transaction around
-        ``schema.sql`` would hold ACCESS EXCLUSIVE on every object for the whole
-        run, the backfills because they call an embedder between statements and
-        fall back to more SQL after a caught error.
+        ``self._pool.connection()``, which wraps the whole block in one
+        transaction and scopes the four settings to it. This is the documented
+        exception, and it is deliberately awkward to reach: the callers that
+        need it cannot live inside a single caller-imposed transaction at all --
+        DDL because one transaction around ``schema.sql`` would hold ACCESS
+        EXCLUSIVE on every object for the whole run, the backfills because they
+        call an embedder between statements and fall back to more SQL after a
+        caught error.
 
-        Both blank the four settings instead of setting them, so the connection
-        never inherits the previous borrower's tenant and never carries one of
-        its own. Under FORCE ROW LEVEL SECURITY that reads zero rows rather than
-        all of them, so a maintenance path that grew a tenant query by accident
-        fails closed and visibly.
+        The checkout blanks the four settings rather than setting them, so the
+        connection never inherits the previous borrower's tenant. For DDL that
+        is the whole story, and it fails closed: under FORCE ROW LEVEL SECURITY
+        empty reads zero rows rather than all of them, so DDL that grew a tenant
+        query by accident would return nothing rather than everything.
+
+        The backfills do touch tenant rows, so they cannot run on the blanked
+        settings this leaves behind -- they open a short transaction per
+        statement with :meth:`_tenant_statement` and set a real tenant inside
+        it. What they get from here is only the absence of an enclosing
+        transaction.
         """
         return self._pool.connection(transactional=False)
+
+    @contextlib.contextmanager
+    def _tenant_statement(self, conn: Any) -> Iterator[Any]:
+        """A short transaction on an existing checkout, carrying a real tenant.
+
+        For the backfills, which run on :meth:`_maintenance_connection` but --
+        unlike DDL -- read and update ``amfs_memory_entries``. That table has
+        FORCE ROW LEVEL SECURITY, so on the blanked settings a maintenance
+        checkout leaves behind, their ``SELECT`` matches no rows and the loops
+        examine and update nothing at all, silently. They need a tenant.
+
+        The tenant is still transaction-local, because a session-scoped one is
+        the leak :mod:`amfs_postgres.tenant_gucs` exists to remove. So it is set
+        per statement here rather than once per checkout, which costs a round
+        trip per transaction and buys back both of the properties the backfills
+        depend on: no embedder call happens inside a transaction, and each
+        statement commits on its own, so one row's failure leaves the rest of
+        the batch committed and a fallback issued after a caught error runs in a
+        new transaction rather than a failed one.
+        """
+        from amfs_postgres.tenant_gucs import (
+            require_open_transaction,
+            set_tenant_gucs,
+        )
+
+        with conn.transaction():
+            require_open_transaction(conn)
+            with conn.cursor() as cur:
+                set_tenant_gucs(cur, local=True)
+                yield cur
 
     def _migrations_source(self) -> str | None:
         """The text of _apply_migrations, or None if it cannot be read.
@@ -1547,11 +1585,14 @@ class PostgresAdapter(AdapterABC):
                 limit = min(limit, max_rows - examined)
             # Maintenance checkout: this block calls the embedder once per row,
             # so an ordinary one would hold a transaction open across a whole
-            # batch of network round trips. Per-statement commit is also what
+            # batch of network round trips. The tenant comes from the short
+            # per-statement transactions below rather than from the checkout,
+            # which blanks it -- these rows are tenant rows, and RLS matches
+            # none of them on a blank tenant. Per-statement commit is also what
             # lets one row's embedding failure leave the rest of the batch
             # committed, which is the documented behaviour above.
             with self._maintenance_connection() as conn:
-                with conn.cursor() as cur:
+                with self._tenant_statement(conn) as cur:
                     cur.execute(
                         "SELECT id, value FROM amfs_memory_entries "
                         "WHERE namespace = %s AND embedding IS NULL AND id > %s "
@@ -1559,41 +1600,45 @@ class PostgresAdapter(AdapterABC):
                         (self._namespace, last_id, limit),
                     )
                     rows = cur.fetchall()
-                    if not rows:
-                        break
-                    for r in rows:
-                        last_id = r["id"]
-                        examined += 1
-                        # Decoding is separate from embedding on purpose. Both
-                        # used to share one try, so a value that is a bare
-                        # string -- not JSON, and perfectly embeddable -- raised
-                        # JSONDecodeError and was counted as a row that could
-                        # not be embedded. It then kept its NULL embedding and
-                        # was re-read and re-failed by every later backfill.
-                        # backfill_is_artifact already falls back this way.
-                        raw = r["value"]
-                        if isinstance(raw, str):
-                            try:
-                                value = json.loads(raw)
-                            except (json.JSONDecodeError, ValueError):
-                                value = raw
-                        else:
-                            value = raw
+                if not rows:
+                    break
+                for r in rows:
+                    last_id = r["id"]
+                    examined += 1
+                    # Decoding is separate from embedding on purpose. Both
+                    # used to share one try, so a value that is a bare
+                    # string -- not JSON, and perfectly embeddable -- raised
+                    # JSONDecodeError and was counted as a row that could
+                    # not be embedded. It then kept its NULL embedding and
+                    # was re-read and re-failed by every later backfill.
+                    # backfill_is_artifact already falls back this way.
+                    raw = r["value"]
+                    if isinstance(raw, str):
                         try:
-                            vec = self._embedder.embed_value(value)
-                        except Exception:  # noqa: BLE001
-                            failed += 1
-                            logger.warning(
-                                "backfill embedding failed for row %s", r["id"],
-                                exc_info=True,
-                            )
-                            continue
+                            value = json.loads(raw)
+                        except (json.JSONDecodeError, ValueError):
+                            value = raw
+                    else:
+                        value = raw
+                    # Outside any transaction on purpose: this is the network
+                    # round trip the maintenance checkout exists to keep out
+                    # of one.
+                    try:
+                        vec = self._embedder.embed_value(value)
+                    except Exception:  # noqa: BLE001
+                        failed += 1
+                        logger.warning(
+                            "backfill embedding failed for row %s", r["id"],
+                            exc_info=True,
+                        )
+                        continue
+                    with self._tenant_statement(conn) as cur:
                         cur.execute(
                             "UPDATE amfs_memory_entries SET embedding = %s "
                             "WHERE id = %s",
                             (f"[{','.join(str(v) for v in vec)}]", r["id"]),
                         )
-                        updated += 1
+                    updated += 1
         if failed:
             logger.warning(
                 "backfill_embeddings: examined %d rows, updated %d, %d could not "
@@ -1627,10 +1672,13 @@ class PostgresAdapter(AdapterABC):
             # Maintenance checkout, for two reasons. It embeds per row, so an
             # ordinary transactional one would stay open across a batch of
             # network calls; and the re-embed fallback below issues an UPDATE
-            # from inside an ``except``, which after a failed statement in a
-            # transaction is InFailedSqlTransaction rather than a fallback.
+            # from inside an ``except``, which after a failed statement in the
+            # same transaction is InFailedSqlTransaction rather than a fallback.
+            # The tenant comes from the short per-statement transactions rather
+            # than the checkout, which blanks it: these are tenant rows, and RLS
+            # matches none of them on a blank tenant.
             with self._maintenance_connection() as conn:
-                with conn.cursor() as cur:
+                with self._tenant_statement(conn) as cur:
                     cur.execute(
                         "SELECT id, key, value, is_artifact FROM amfs_memory_entries "
                         "WHERE namespace = %s AND id > %s "
@@ -1638,47 +1686,50 @@ class PostgresAdapter(AdapterABC):
                         (self._namespace, last_id, batch_size),
                     )
                     rows = cur.fetchall()
-                    if not rows:
-                        break
-                    for r in rows:
-                        last_id = r["id"]
-                        stored = bool(r["is_artifact"])
+                if not rows:
+                    break
+                for r in rows:
+                    last_id = r["id"]
+                    stored = bool(r["is_artifact"])
+                    try:
+                        value = (
+                            json.loads(r["value"])
+                            if isinstance(r["value"], str)
+                            else r["value"]
+                        )
+                    except (json.JSONDecodeError, ValueError):
+                        value = r["value"]
+                    is_art = classify_artifact(r["key"], value)
+                    if is_art == stored:
+                        continue
+                    if is_art and can_embed:
                         try:
-                            value = (
-                                json.loads(r["value"])
-                                if isinstance(r["value"], str)
-                                else r["value"]
-                            )
-                        except (json.JSONDecodeError, ValueError):
-                            value = r["value"]
-                        is_art = classify_artifact(r["key"], value)
-                        if is_art == stored:
-                            continue
-                        if is_art and can_embed:
-                            try:
-                                _, text = embedding_input(r["key"], value)
-                                vec = self._embedder.embed(text)
+                            _, text = embedding_input(r["key"], value)
+                            vec = self._embedder.embed(text)
+                            with self._tenant_statement(conn) as cur:
                                 cur.execute(
                                     "UPDATE amfs_memory_entries "
                                     "SET is_artifact = %s, embedding = %s WHERE id = %s",
                                     (is_art, f"[{','.join(str(v) for v in vec)}]", r["id"]),
                                 )
-                            except Exception:  # noqa: BLE001
-                                logger.warning(
-                                    "backfill re-embed failed for row %s", r["id"],
-                                    exc_info=True,
-                                )
+                        except Exception:  # noqa: BLE001
+                            logger.warning(
+                                "backfill re-embed failed for row %s", r["id"],
+                                exc_info=True,
+                            )
+                            with self._tenant_statement(conn) as cur:
                                 cur.execute(
                                     "UPDATE amfs_memory_entries "
                                     "SET is_artifact = %s WHERE id = %s",
                                     (is_art, r["id"]),
                                 )
-                        else:
+                    else:
+                        with self._tenant_statement(conn) as cur:
                             cur.execute(
                                 "UPDATE amfs_memory_entries SET is_artifact = %s WHERE id = %s",
                                 (is_art, r["id"]),
                             )
-                        updated += 1
+                    updated += 1
         return updated
 
     # ------------------------------------------------------------------
