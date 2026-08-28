@@ -9,6 +9,7 @@ The sync PostgresAdapter, SDK, MCP, and Cortex are completely unaffected.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import uuid
@@ -54,21 +55,47 @@ class _AsyncTenantRLSConnection:
     """Async equivalent of _TenantRLSConnection.
 
     Replicates the exact same RLS behaviour:
-    1. Always set GUC on every checkout (even when tid is empty).
+    1. Always set all four GUCs on every checkout (even when the tenant is
+       empty), so a connection never inherits the previous borrower's.
     2. Empty string for no tenant (NULLIF handles it in RLS policies).
     3. Reads from the same contextvars used by the sync version.
+    4. Sets them *inside* an explicit transaction, so Postgres discards them at
+       commit and a transaction-mode pooler cannot hand them to another tenant.
+
+    Point 4 matters more here than on the sync side, because this pool serves
+    the HTTP request path: it is the most multi-tenant thing in the system, and
+    ``amfs.current_user_id`` is the setting that grants reach across accounts.
+
+    No ``transactional=False`` twin of the sync maintenance path, because this
+    adapter has no DDL and no backfills — the two things that need it.
     """
 
     def __init__(self, inner_ctx: Any) -> None:
         self._inner_ctx = inner_ctx
+        self._stack: contextlib.AsyncExitStack | None = None
 
     async def __aenter__(self) -> Any:
         from amfs_postgres.tenant_context import get_request_tenant_account_id
-        from amfs_postgres.tenant_gucs import aset_tenant_gucs
+        from amfs_postgres.tenant_gucs import (
+            aset_tenant_gucs,
+            require_open_transaction,
+        )
 
-        conn = await self._inner_ctx.__aenter__()
-        async with conn.cursor() as cur:
-            await aset_tenant_gucs(cur, local=False)
+        # AsyncExitStack for the same reason the sync side uses ExitStack: a
+        # failure while establishing the tenant has to unwind the transaction
+        # and hand the connection back, in that order, and getting that right
+        # by hand twice is how one of them ends up leaking a checkout.
+        stack = contextlib.AsyncExitStack()
+        try:
+            conn = await stack.enter_async_context(self._inner_ctx)
+            await stack.enter_async_context(conn.transaction())
+            require_open_transaction(conn)
+            async with conn.cursor() as cur:
+                await aset_tenant_gucs(cur, local=True)
+        except BaseException:
+            await stack.aclose()
+            raise
+        self._stack = stack
 
         if not get_request_tenant_account_id():
             logger.warning(
@@ -78,11 +105,13 @@ class _AsyncTenantRLSConnection:
         return conn
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
-        return await self._inner_ctx.__aexit__(exc_type, exc, tb)
+        if self._stack is None:
+            return None
+        return await self._stack.__aexit__(exc_type, exc, tb)
 
 
 class _AsyncTenantRLSPoolWrapper:
-    """Wraps an AsyncConnectionPool so each checkout applies RLS session vars."""
+    """Wraps an AsyncConnectionPool so each checkout scopes RLS vars to a txn."""
 
     def __init__(self, inner: AsyncConnectionPool) -> None:
         self._inner = inner

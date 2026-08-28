@@ -22,26 +22,61 @@ bug rather than a formatting one.
 Session-scoped versus transaction-local
 ---------------------------------------
 ``set_config(name, value, is_local)`` takes a flag: false lasts for the session,
-true until the end of the current transaction. Both adapters use false today,
-set once per pool checkout, and with ``psycopg_pool`` that is sound — a checkout
-owns its backend for the whole block, and every checkout overwrites all four
-before running anything.
+true until the end of the current transaction. With ``psycopg_pool`` alone,
+false set once per checkout is sound — a checkout owns its backend for the whole
+block, and every checkout overwrites all four before running anything.
 
 It stops being sound the moment a transaction-mode pooler sits in front, because
 then one client connection maps to a different backend per transaction: the
 values set at checkout land on whichever backend served that statement, and the
 next query can be answered by a backend still carrying another tenant's session.
-Pooler-safe means setting them *inside* the transaction that reads, which is
-what :func:`tenant_transaction` is for.
+That is a cross-tenant read, and it was reproduced against a real PgBouncer
+before this was changed. Pooler-safe means setting them *inside* the transaction
+that reads.
 
-The trap, which is why this is not a one-line change: with ``autocommit=True``
+So the data path no longer sets them session-scoped at all: a checkout opens an
+explicit transaction and sets all four inside it, and Postgres discards them at
+commit. No tenant value is written session-scoped anywhere, which is what makes
+the leak structurally impossible rather than merely unlikely.
+
+The trap, which is why this was not a one-line change: with ``autocommit=True``
 -- what both adapters open their pools with -- ``set_config(..., true)`` applies
 to the implicit single-statement transaction it runs in and is gone before the
 next statement. The GUCs read empty, ``NULLIF`` turns that into NULL, and RLS
-matches nothing. It does not raise; it silently returns no rows. The same trap
-is already documented for ``SET LOCAL`` in ``_apply_schema``. So the local form
-is only ever used inside an explicit transaction, and
-:func:`tenant_transaction` asserts it has one rather than trusting the caller.
+matches nothing. It does not raise; it silently returns no rows. An empty page
+that looks like an empty account is the worst failure available here, so the
+local form is only ever used inside an explicit transaction and
+:func:`require_open_transaction` asserts there is one rather than trusting it.
+
+The maintenance exception
+-------------------------
+Two kinds of work cannot run inside a caller-imposed transaction:
+
+* **DDL.** ``_apply_schema`` deliberately does not wrap ``schema.sql`` in one --
+  a single transaction would hold ACCESS EXCLUSIVE on every object it touches
+  for the whole run, which is the lock convoy that took production down on
+  2026-08-12, only worse. It also sets ``lock_timeout`` session-scoped and
+  relies on statement-at-a-time commit to keep partial progress on retry.
+* **The backfills.** They call an embedder between statements, so a transaction
+  would stay open across a batch of network round trips, and their
+  embed-failed fallback issues more SQL after a caught error -- which inside a
+  transaction is ``InFailedSqlTransaction`` instead of a fallback.
+
+Those check out with :func:`blank_tenant_gucs` instead: still one write of all
+four on every checkout, so nothing is inherited from the previous borrower, but
+to empty rather than to a tenant. Empty fails closed under RLS, and clearing is
+the one session-scoped write that cannot leak because there is nothing in it to
+leak.
+
+What that gives them is the absence of an enclosing transaction, and for DDL it
+is the whole story -- it touches no tenant rows, so blank settings are all it
+ever needs. The backfills are the other way round: they ``SELECT`` and
+``UPDATE`` ``amfs_memory_entries``, which is exactly the table the policies
+guard. Blank settings there are not a safe default but a silent no-op -- RLS
+matches no rows, so the loops examine nothing, update nothing, and report
+success. So they open a short transaction per statement and set a real tenant
+inside it, transaction-local like the data path, with the embedder calls falling
+between those transactions rather than inside one.
 """
 
 from __future__ import annotations
@@ -109,29 +144,61 @@ CLEAR_TENANT_GUCS = SET_TENANT_GUCS_SESSION
 CLEARED_TENANT_GUC_VALUES: tuple[str, str, str, str] = ("", "", "false", "")
 
 
-def set_tenant_gucs(cur: Any, *, local: bool = False) -> None:
-    """Apply the current request's tenant to an open cursor."""
+def set_tenant_gucs(cur: Any, *, local: bool) -> None:
+    """Apply the current request's tenant to an open cursor.
+
+    ``local`` has no default on purpose. It used to default to False, and a
+    default here is the whole bug in one keyword: the unsafe scope was what you
+    got for not thinking about it, and the difference between the two is a
+    cross-tenant read rather than a style preference. Every caller now says
+    which it means, and ``local=False`` with a real tenant in it no longer
+    appears anywhere -- the session-scoped statement survives only to blank the
+    four, via :func:`blank_tenant_gucs`.
+    """
     sql = SET_TENANT_GUCS_LOCAL if local else SET_TENANT_GUCS_SESSION
     cur.execute(sql, tenant_guc_values())
 
 
-async def aset_tenant_gucs(cur: Any, *, local: bool = False) -> None:
-    """Async twin of :func:`set_tenant_gucs`."""
+async def aset_tenant_gucs(cur: Any, *, local: bool) -> None:
+    """Async twin of :func:`set_tenant_gucs`. ``local`` is required there too."""
     sql = SET_TENANT_GUCS_LOCAL if local else SET_TENANT_GUCS_SESSION
     await cur.execute(sql, tenant_guc_values())
+
+
+def blank_tenant_gucs(cur: Any) -> None:
+    """Set all four to empty on an open cursor, for the maintenance path.
+
+    The counterpart to :func:`set_tenant_gucs` for checkouts that cannot be
+    wrapped in a transaction (see "The maintenance exception" above). It is
+    session-scoped, like the old data path was, and that is safe here for a
+    reason that does not generalise: there is no tenant in it. Nothing that
+    could be leaked is written, and the previous borrower's tenant is still
+    overwritten, so the connection cannot inherit reach it should not have.
+
+    Under FORCE ROW LEVEL SECURITY -- which ``amfs_memory_entries`` has -- empty
+    matches no rows even for the table owner, so a maintenance path that
+    unexpectedly touched tenant data would read nothing rather than read
+    everything. Failing closed is the point.
+    """
+    cur.execute(CLEAR_TENANT_GUCS, CLEARED_TENANT_GUC_VALUES)
+
+
+async def ablank_tenant_gucs(cur: Any) -> None:
+    """Async twin of :func:`blank_tenant_gucs`."""
+    await cur.execute(CLEAR_TENANT_GUCS, CLEARED_TENANT_GUC_VALUES)
 
 
 def reset_tenant_gucs(conn: Any) -> None:
     """Blank all four. Suitable as a ``psycopg_pool`` ``reset`` callback.
 
-    Defence in depth for the session-scoped path. Every checkout already
-    overwrites all four before running anything, so this is not what stops a
-    leak today; it stops one from surviving a checkout that failed partway, or a
-    caller that reached the pool without going through the wrapper. Cheap enough
-    to be worth not having to reason about.
+    Defence in depth. The data path now scopes its tenant to a transaction, so
+    Postgres has already discarded it by the time a connection comes back and
+    there is normally nothing here to clear. This is what covers the paths that
+    do not go through that: a maintenance checkout, or a caller that reached the
+    pool directly. Cheap enough to be worth not having to reason about.
     """
     with conn.cursor() as cur:
-        cur.execute(CLEAR_TENANT_GUCS, CLEARED_TENANT_GUC_VALUES)
+        blank_tenant_gucs(cur)
 
 
 async def areset_tenant_gucs(conn: Any) -> None:
@@ -145,10 +212,10 @@ async def areset_tenant_gucs(conn: Any) -> None:
     one setting that grants reach across accounts.
     """
     async with conn.cursor() as cur:
-        await cur.execute(CLEAR_TENANT_GUCS, CLEARED_TENANT_GUC_VALUES)
+        await ablank_tenant_gucs(cur)
 
 
-def _assert_in_transaction(conn: Any) -> None:
+def require_open_transaction(conn: Any) -> None:
     """Refuse to proceed unless a transaction is genuinely open.
 
     This is the guard against the silent-empty-result failure described in the
@@ -156,6 +223,10 @@ def _assert_in_transaction(conn: Any) -> None:
     is discarded immediately and every following query reads an empty tenant, so
     the caller gets no rows and no error. Better to raise here, loudly, than to
     return an empty page that looks like an empty account.
+
+    Public because both adapters' checkout wrappers call it, not just
+    :func:`tenant_transaction`: the assertion is only worth having if it sits on
+    every path that sets the local form.
     """
     status = getattr(getattr(conn, "info", None), "transaction_status", None)
     if status is None:
@@ -163,7 +234,7 @@ def _assert_in_transaction(conn: Any) -> None:
     name = getattr(status, "name", str(status))
     if name not in ("INTRANS", "INERROR", "ACTIVE"):
         raise RuntimeError(
-            "tenant_transaction: no open transaction "
+            "tenant GUCs: no open transaction "
             f"(transaction_status={name}). Transaction-local tenant settings "
             "would be discarded before the next statement and every read would "
             "silently return zero rows."
@@ -179,15 +250,19 @@ def tenant_transaction(pool: Any) -> Iterator[Any]:
     them at commit. Nothing is left on the backend for the next borrower, which
     is what makes it safe to put a transaction-mode pooler in front.
 
-    Unwraps ``_TenantRLSPoolWrapper`` if handed one. The wrapper sets the same
-    four settings session-scoped at checkout, and here that is not merely
-    redundant: through a transaction pooler those writes land on an arbitrary
-    backend and stay there, which is the leak this function exists to avoid.
+    This is what ``_TenantRLSPoolWrapper`` now does on every checkout, so going
+    through the adapter's pool already gets you this. The function stays for
+    callers holding a bare pool, and for being the readable statement of the
+    invariant that the wrapper implements.
+
+    Unwraps the wrapper if handed one, purely to avoid doing the work twice: a
+    nested ``transaction()`` is a savepoint and a second write of the same four
+    values is a wasted round trip. Correct either way, which is the point.
     """
     inner = getattr(pool, "_inner", pool)
     with inner.connection() as conn:
         with conn.transaction():
-            _assert_in_transaction(conn)
+            require_open_transaction(conn)
             with conn.cursor() as cur:
                 set_tenant_gucs(cur, local=True)
             yield conn
