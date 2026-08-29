@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-from collections.abc import Sequence
 from typing import Any
 
 from amfs_core.embedder import EmbedderABC
@@ -87,13 +86,15 @@ def _create_fastembed_embedder(model_name: str = DEFAULT_EMBED_MODEL) -> Embedde
         def embed(self, text: str) -> list[float]:
             return [float(x) for x in next(iter(self._model.embed([text])))]
 
-        def embed_batch(self, texts: Sequence[str]) -> list[list[float]]:
-            # `embed` already wraps its one string in a list because that is the
-            # only signature fastembed has; handing it the whole batch instead is
-            # the entire optimisation, and it batches internally from there.
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            # One ONNX session run over the whole list instead of one per
+            # text, which is where the order-of-magnitude on bulk imports
+            # comes from. `embed` returns a generator, so the list() is what
+            # actually runs the model.
+            if not texts:
+                return []
             return [
-                [float(x) for x in vector]
-                for vector in self._model.embed(list(texts))
+                [float(x) for x in vector] for vector in self._model.embed(list(texts))
             ]
 
     logger.info("Default embedder: fastembed %s", model_name)
@@ -113,7 +114,7 @@ def _create_onnx_embedder() -> EmbedderABC:
         def embed(self, text: str) -> list[float]:
             return self._model.encode(text, normalize_embeddings=True).tolist()
 
-        def embed_batch(self, texts: Sequence[str]) -> list[list[float]]:
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
             if not texts:
                 return []
             return self._model.encode(
