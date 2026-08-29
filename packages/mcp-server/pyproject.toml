@@ -24,7 +24,11 @@ dependencies = [
     # so amfs_export writes an empty file and the agent concludes the data has
     # no such shape. A silent empty result is worse than an ImportError, so this
     # floor is the only thing separating the two.
-    "amfs-core>=0.3.16",
+    # 0.3.17 is the exception to the pattern above: it adds
+    # EmbedderABC.embed_batch, which this server never calls. The floor rises
+    # because a floor below the version in this tree is what
+    # test_dependency_floors forbids, not because anything here would break.
+    "amfs-core>=0.3.17",
     # 0.1.10 for the same reason, one layer down: this adapter builds the
     # /outcomes body field by field, and anything earlier does not copy
     # tool_calls into it. The floor was 0.1.2, which a cached 0.1.9 satisfies —

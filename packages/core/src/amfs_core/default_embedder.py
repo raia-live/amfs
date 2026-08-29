@@ -86,6 +86,17 @@ def _create_fastembed_embedder(model_name: str = DEFAULT_EMBED_MODEL) -> Embedde
         def embed(self, text: str) -> list[float]:
             return [float(x) for x in next(iter(self._model.embed([text])))]
 
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            # One ONNX session run over the whole list instead of one per
+            # text, which is where the order-of-magnitude on bulk imports
+            # comes from. `embed` returns a generator, so the list() is what
+            # actually runs the model.
+            if not texts:
+                return []
+            return [
+                [float(x) for x in vector] for vector in self._model.embed(list(texts))
+            ]
+
     logger.info("Default embedder: fastembed %s", model_name)
     return FastEmbedEmbedder()
 
@@ -102,6 +113,13 @@ def _create_onnx_embedder() -> EmbedderABC:
 
         def embed(self, text: str) -> list[float]:
             return self._model.encode(text, normalize_embeddings=True).tolist()
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            if not texts:
+                return []
+            return self._model.encode(
+                list(texts), normalize_embeddings=True
+            ).tolist()
 
         def embed_value(self, value: Any) -> list[float]:
             import json
