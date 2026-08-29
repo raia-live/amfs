@@ -80,7 +80,12 @@ def _stub_sentence_transformers(monkeypatch: pytest.MonkeyPatch) -> type:
             self.batches: list[list[str]] = []
             FakeSentenceTransformer.instances.append(self)
 
-        def encode(self, text: object, normalize_embeddings: bool = False) -> _Array:
+        def encode(
+            self,
+            text: object,
+            normalize_embeddings: bool = False,
+            batch_size: int | None = None,
+        ) -> _Array:
             if isinstance(text, str):
                 self.batches.append([text])
                 return _Array([float(len(text)), 0.25])
@@ -216,3 +221,125 @@ class TestTheOverridesActuallyBatch:
         assert embedder.embed_batch([]) == []
 
         assert fake.instances[-1].batches == []
+
+
+class TestABatchIsBoundedByWhatAttentionCosts:
+    """Why a batch is split at all, and the invariant that makes it safe.
+
+    A transformer pads every row of a batch to the longest one and allocates
+    attention scores shaped `[rows, heads, tokens, tokens]`. So the cost is
+    quadratic in the longest row, and the batch size that is fine for short
+    text is fatal for long text. Handing fastembed its default of 256 rows of
+    movie review allocated over 3GB and the kernel killed the importer ten
+    seconds in, on every retry, having written nothing.
+
+    Splitting is only safe if it is invisible: same vectors, same order, one per
+    input. `assert_honours_the_contract` covers that for a small batch; these
+    cover it where a split actually happens.
+    """
+
+    def test_a_long_batch_is_split_rather_than_sent_whole(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        fake = _stub_fastembed(monkeypatch)
+        embedder = default_embedder._create_fastembed_embedder("stub/model")
+
+        # Long enough to reach the token clamp, so the budget allows tens of
+        # rows per call and 400 of them cannot be one batch.
+        long_text = "x" * (default_embedder._MAX_TOKENS * 10)
+        embedder.embed_batch([long_text] * 400)
+
+        batches = fake.instances[-1].batches
+        assert len(batches) > 1, "400 long rows must not be one model call"
+        assert sum(len(b) for b in batches) == 400, "every row embedded once"
+
+    def test_no_batch_exceeds_the_budget(self, monkeypatch: pytest.MonkeyPatch):
+        """The invariant, asserted over a deliberately mixed workload.
+
+        Mixed rather than uniform because the split is greedy over the running
+        maximum: one long row arriving late must close the run it would have
+        blown, not be absorbed into it.
+        """
+        fake = _stub_fastembed(monkeypatch)
+        embedder = default_embedder._create_fastembed_embedder("stub/model")
+
+        texts = [
+            "short",
+            "x" * 6000,
+            *["tiny"] * 300,
+            "y" * 40_000,
+            "medium " * 50,
+        ]
+        embedder.embed_batch(texts)
+
+        for batch in fake.instances[-1].batches:
+            widest = max(default_embedder._tokens(t) for t in batch)
+            assert len(batch) * widest * widest <= default_embedder._ATTENTION_BUDGET
+            assert len(batch) <= default_embedder._MAX_BATCH_ROWS
+
+    def test_short_text_still_batches_in_bulk(self, monkeypatch: pytest.MonkeyPatch):
+        """The budget must not have quietly become a per-row loop.
+
+        This is the regression that would make the fix worse than the bug: a
+        conservative fixed batch size would be safe and would also throw away
+        the order of magnitude `embed_batch` exists for. Short rows must still
+        go hundreds at a time.
+        """
+        fake = _stub_fastembed(monkeypatch)
+        embedder = default_embedder._create_fastembed_embedder("stub/model")
+
+        embedder.embed_batch(["a short row"] * 1000)
+
+        batches = fake.instances[-1].batches
+        assert max(len(b) for b in batches) == default_embedder._MAX_BATCH_ROWS
+        assert len(batches) == 4, "1000 short rows in 256-row calls"
+
+    def test_splitting_preserves_order_and_content(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Positional matching is how callers attach vectors to rows.
+
+        The fake encodes each text's length, so a reordered split shows up as
+        vectors in the wrong order rather than as an error -- which is exactly
+        how it would fail in production: embeddings attached to the wrong
+        content, silently.
+        """
+        _stub_fastembed(monkeypatch)
+        embedder = default_embedder._create_fastembed_embedder("stub/model")
+
+        texts = ["z" * (i * 200) for i in range(1, 60)]
+        vectors = embedder.embed_batch(texts)
+
+        assert len(vectors) == len(texts)
+        assert [v[0] for v in vectors] == [float(len(t)) for t in texts]
+
+    def test_one_enormous_row_is_still_embedded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A single row over the budget has nowhere smaller to go.
+
+        Without the token clamp the estimate for a megabyte of text would drive
+        the batch to zero rows and the split would either loop forever or drop
+        the row. It must come back as one batch of one.
+        """
+        fake = _stub_fastembed(monkeypatch)
+        embedder = default_embedder._create_fastembed_embedder("stub/model")
+
+        vectors = embedder.embed_batch(["q" * 1_000_000])
+
+        assert len(vectors) == 1
+        assert fake.instances[-1].batches == [["q" * 1_000_000]]
+
+    def test_sentence_transformers_is_bounded_too(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The same ceiling on the other backend, which had the same hole."""
+        fake = _stub_sentence_transformers(monkeypatch)
+        embedder = default_embedder._create_onnx_embedder()
+
+        long_text = "x" * (default_embedder._MAX_TOKENS * 10)
+        embedder.embed_batch([long_text] * 400)
+
+        batches = fake.instances[-1].batches
+        assert len(batches) > 1
+        assert sum(len(b) for b in batches) == 400
