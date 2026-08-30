@@ -8,7 +8,7 @@ dependencies = [
     # The trace endpoints call amfs_core.capture and read/write task_input, and
     # 0.3.14 / 0.5.7 add the action half: scan_captured_arguments and ToolCall.
     "amfs>=0.5.10",
-    "amfs-core>=0.3.17",
+    "amfs-core>=0.3.18",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "sse-starlette>=2.0",

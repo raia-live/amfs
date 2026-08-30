@@ -7,7 +7,7 @@ license = "Apache-2.0"
 dependencies = [
     # 0.3.14 adds the capture fields this adapter now sends on the outcome record,
     # including the tool_calls that carry the action half of a training example.
-    "amfs-core>=0.3.17",
+    "amfs-core>=0.3.18",
     "httpx>=0.27,<1",
 ]
 
