@@ -200,6 +200,21 @@ When `depth=1`, the query uses the hot index; `depth=2` uses the warm index.
 
 The adapter uses `psycopg_pool.ConnectionPool` for efficient connection management. The pool size is configurable and defaults to sensible limits for most deployments.
 
+#### Running behind PgBouncer or another transaction pooler
+
+Supported, including in `pool_mode = transaction`. This is worth stating explicitly because it is the configuration where multi-tenant isolation is easiest to get wrong.
+
+Row-level security decides what a request can see by reading four Postgres settings — `amfs.current_account_id`, `amfs.current_team_id`, `amfs.is_account_admin`, and `amfs.current_user_id`. The adapter sets all four **inside the transaction** that reads, so Postgres discards them at commit and nothing is left on the server connection for whoever borrows it next.
+
+The alternative — setting them session-scoped, once per checkout — is safe with `psycopg_pool` on its own, because a checkout owns its backend for the whole block. It is **not** safe behind a transaction pooler, where one client connection maps to a different backend per transaction: the values land on whichever backend served the statement that set them, and the next query can be answered by a backend still carrying another tenant's. That is a cross-account read. AMFS does not do this, and `tests/integration/pgbouncer/` runs a real PgBouncer to prove both halves — that the old pattern leaks, and that the current one does not.
+
+Two consequences worth knowing about as an operator:
+
+- **Every checkout is a transaction.** Reads included. If you are watching for long-running transactions, expect one per request rather than none.
+- **Schema bootstrap and the backfills are exempt.** They run with the four settings blanked and no wrapping transaction: DDL because one transaction around the whole schema would hold `ACCESS EXCLUSIVE` on everything it touches until the last statement finished, and the backfills because they call an embedder between statements. Neither reads tenant data, and blanked settings match no rows under RLS, so they fail closed if that ever changes.
+
+No configuration is required to get this. There is no session-scoped mode to turn off.
+
 ---
 
 ## When to Use

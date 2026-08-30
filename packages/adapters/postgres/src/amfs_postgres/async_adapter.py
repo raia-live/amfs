@@ -9,6 +9,7 @@ The sync PostgresAdapter, SDK, MCP, and Cortex are completely unaffected.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import uuid
@@ -38,8 +39,9 @@ from amfs_postgres.adapter import (
     _EXCLUDE_SHARED_PATHS,
     PostgresAdapter,
     pool_bounds,
-    statement_timeout_options,
+    connection_options,
 )
+from amfs_postgres.tenant_gucs import areset_tenant_gucs
 
 logger = logging.getLogger(__name__)
 
@@ -53,59 +55,63 @@ class _AsyncTenantRLSConnection:
     """Async equivalent of _TenantRLSConnection.
 
     Replicates the exact same RLS behaviour:
-    1. Always set GUC on every checkout (even when tid is empty).
+    1. Always set all four GUCs on every checkout (even when the tenant is
+       empty), so a connection never inherits the previous borrower's.
     2. Empty string for no tenant (NULLIF handles it in RLS policies).
     3. Reads from the same contextvars used by the sync version.
+    4. Sets them *inside* an explicit transaction, so Postgres discards them at
+       commit and a transaction-mode pooler cannot hand them to another tenant.
+
+    Point 4 matters more here than on the sync side, because this pool serves
+    the HTTP request path: it is the most multi-tenant thing in the system, and
+    ``amfs.current_user_id`` is the setting that grants reach across accounts.
+
+    No ``transactional=False`` twin of the sync maintenance path, because this
+    adapter has no DDL and no backfills — the two things that need it.
     """
 
     def __init__(self, inner_ctx: Any) -> None:
         self._inner_ctx = inner_ctx
+        self._stack: contextlib.AsyncExitStack | None = None
 
     async def __aenter__(self) -> Any:
-        from amfs_postgres.tenant_context import (
-            get_request_tenant_account_id,
-            get_request_tenant_team_id,
-            get_request_is_account_admin,
-            get_request_user_id,
+        from amfs_postgres.tenant_context import get_request_tenant_account_id
+        from amfs_postgres.tenant_gucs import (
+            aset_tenant_gucs,
+            require_open_transaction,
         )
 
-        conn = await self._inner_ctx.__aenter__()
-        tid = get_request_tenant_account_id()
-        team_id = get_request_tenant_team_id()
-        is_admin = get_request_is_account_admin()
-        user_id = get_request_user_id()
+        # AsyncExitStack for the same reason the sync side uses ExitStack: a
+        # failure while establishing the tenant has to unwind the transaction
+        # and hand the connection back, in that order, and getting that right
+        # by hand twice is how one of them ends up leaking a checkout.
+        stack = contextlib.AsyncExitStack()
+        try:
+            conn = await stack.enter_async_context(self._inner_ctx)
+            await stack.enter_async_context(conn.transaction())
+            require_open_transaction(conn)
+            async with conn.cursor() as cur:
+                await aset_tenant_gucs(cur, local=True)
+        except BaseException:
+            await stack.aclose()
+            raise
+        self._stack = stack
 
-        guc_account = tid if tid else ""
-        guc_team = team_id if team_id else ""
-        guc_admin = "true" if is_admin else "false"
-        guc_user = user_id if user_id else ""
-
-        if not tid:
+        if not get_request_tenant_account_id():
             logger.warning(
-                "async pool checkout: tenant account_id is EMPTY "
-                "(tid=%r, team=%r, admin=%r) — RLS reads will return no rows",
-                tid, team_id, is_admin,
-            )
-
-        async with conn.cursor() as cur:
-            # Set unconditionally, for the same reason as the other three: a
-            # pooled connection would otherwise keep the previous borrower's
-            # user, and this is the GUC that grants access across accounts.
-            await cur.execute(
-                "SELECT set_config('amfs.current_account_id', %s, false),"
-                "       set_config('amfs.current_team_id', %s, false),"
-                "       set_config('amfs.is_account_admin', %s, false),"
-                "       set_config('amfs.current_user_id', %s, false)",
-                (guc_account, guc_team, guc_admin, guc_user),
+                "async pool checkout with no tenant account_id — RLS-protected "
+                "reads will return no rows"
             )
         return conn
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
-        return await self._inner_ctx.__aexit__(exc_type, exc, tb)
+        if self._stack is None:
+            return None
+        return await self._stack.__aexit__(exc_type, exc, tb)
 
 
 class _AsyncTenantRLSPoolWrapper:
-    """Wraps an AsyncConnectionPool so each checkout applies RLS session vars."""
+    """Wraps an AsyncConnectionPool so each checkout scopes RLS vars to a txn."""
 
     def __init__(self, inner: AsyncConnectionPool) -> None:
         self._inner = inner
@@ -143,6 +149,7 @@ class AsyncPostgresAdapter:
         *,
         min_pool_size: int | None = None,
         max_pool_size: int | None = None,
+        statement_timeout: str | None = None,
     ) -> None:
         self._dsn = dsn
         self._namespace = namespace
@@ -155,7 +162,7 @@ class AsyncPostgresAdapter:
         # on — and until this line existed, AMFS_POSTGRES_STATEMENT_TIMEOUT
         # reached only the sync adapter, leaving the request path it was
         # introduced to protect without one.
-        options = statement_timeout_options()
+        options = connection_options(statement_timeout)
         if options:
             connect_kwargs["options"] = options
         min_size, max_size = pool_bounds(min_pool_size, max_pool_size)
@@ -165,6 +172,12 @@ class AsyncPostgresAdapter:
                 min_size=min_size,
                 max_size=max_size,
                 kwargs=connect_kwargs,
+                # The same blanking the sync pool does on return, and this is
+                # the pool that needs it more: these are the hot-path REST
+                # endpoints, so this is where tenants change fastest and where
+                # an idle connection left holding amfs.current_user_id would be
+                # holding the setting that reaches across accounts.
+                reset=areset_tenant_gucs,
                 open=False,
             )
         )
