@@ -19,6 +19,46 @@ logger = logging.getLogger(__name__)
 
 _HASH_DIM = 384
 
+#: How much attention a single model call may allocate, in units of
+#: ``rows x tokens^2``.
+#:
+#: A transformer's peak memory on a batch is dominated by the attention scores,
+#: which are shaped ``[rows, heads, tokens, tokens]`` -- quadratic in the length
+#: of the longest row in the batch, because every row is padded to it. For a
+#: 12-head fp32 model this budget is about ``12e6 * 12 * 4`` bytes, or 570MB of
+#: scores, leaving room for the weights and the runtime's arena inside a 4GB
+#: container.
+#:
+#: Why a budget rather than a row count: a fixed batch size has to be chosen for
+#: the worst case, and then short rows -- overwhelmingly the common case -- get
+#: embedded in batches far smaller than they could be, losing most of the speed
+#: this method exists for. Holding ``rows x tokens^2`` roughly constant instead
+#: gives hundreds of rows per call on short text and tens on long text, at
+#: roughly constant memory.
+#:
+#: This was not hypothetical. Importing `stanfordnlp/imdb` -- 25k movie reviews,
+#: long enough to pad near the model's limit -- at fastembed's default of 256
+#: rows per batch allocated over 3GB of scores and was killed by the kernel ten
+#: seconds in, on every retry, having written nothing.
+_ATTENTION_BUDGET = 12_000_000
+
+#: Never send more rows than this in one call, however short they are. Past a
+#: few hundred the attention tensors stop being what dominates and the
+#: tokenizer's own output starts to, which this budget does not model. Also
+#: fastembed's own default, so it is a well-trodden ceiling.
+_MAX_BATCH_ROWS = 256
+
+#: Tokens the longest row of a batch is assumed to occupy, at most. Sequences
+#: are truncated to the model's limit, so no row can cost more than this however
+#: long its text -- without the clamp, one enormous string would drive the
+#: estimate down to a single row per call and crawl.
+_MAX_TOKENS = 512
+
+#: Bytes of text per token, deliberately low so the estimate runs high.
+#: Over-estimating costs a little throughput; under-estimating costs the
+#: container.
+_BYTES_PER_TOKEN = 3
+
 
 class HashEmbedder(EmbedderABC):
     """Deterministic hash-based embedder as a zero-dependency fallback.
@@ -75,6 +115,40 @@ def create_default_embedder() -> EmbedderABC:
         return HashEmbedder()
 
 
+def _tokens(text: str) -> int:
+    """Roughly how many tokens `text` will occupy, never above the model's cap."""
+    return min(_MAX_TOKENS, max(1, len(text) // _BYTES_PER_TOKEN + 2))
+
+
+def _within_budget(texts: list[str]) -> list[list[str]]:
+    """`texts` split into consecutive runs each cheap enough for one model call.
+
+    Greedy and order-preserving, which both matter. Order, because `embed_batch`
+    promises one vector per text in input order and the caller matches them to
+    rows positionally -- sorting by length would embed the right texts and
+    attach them to the wrong content, the one failure worse than no embedding.
+    Greedy, because a run only has to be small enough, not optimal: the cost is
+    driven by the longest member, so packing short rows together and letting a
+    long one start a new run is most of what any smarter split would achieve.
+    """
+    runs: list[list[str]] = []
+    run: list[str] = []
+    widest = 0
+    for text in texts:
+        length = _tokens(text)
+        widest_with = max(widest, length)
+        too_big = (len(run) + 1) * widest_with * widest_with > _ATTENTION_BUDGET
+        if run and (too_big or len(run) >= _MAX_BATCH_ROWS):
+            runs.append(run)
+            run, widest = [text], length
+        else:
+            run.append(text)
+            widest = widest_with
+    if run:
+        runs.append(run)
+    return runs
+
+
 def _create_fastembed_embedder(model_name: str = DEFAULT_EMBED_MODEL) -> EmbedderABC:
     from fastembed import TextEmbedding  # type: ignore[import-untyped]
 
@@ -87,15 +161,22 @@ def _create_fastembed_embedder(model_name: str = DEFAULT_EMBED_MODEL) -> Embedde
             return [float(x) for x in next(iter(self._model.embed([text])))]
 
         def embed_batch(self, texts: list[str]) -> list[list[float]]:
-            # One ONNX session run over the whole list instead of one per
-            # text, which is where the order-of-magnitude on bulk imports
-            # comes from. `embed` returns a generator, so the list() is what
-            # actually runs the model.
+            # Batched, because one session run over many texts instead of one
+            # per text is where the order-of-magnitude on bulk imports comes
+            # from -- but bounded, because the batch fastembed would choose by
+            # default (256 rows, whatever their length) allocates gigabytes of
+            # attention on long text and gets the process killed. See
+            # `_ATTENTION_BUDGET`. `embed` is a generator, so iterating it is
+            # what actually runs the model.
             if not texts:
                 return []
-            return [
-                [float(x) for x in vector] for vector in self._model.embed(list(texts))
-            ]
+            vectors: list[list[float]] = []
+            for run in _within_budget(list(texts)):
+                vectors.extend(
+                    [float(x) for x in vector]
+                    for vector in self._model.embed(run, batch_size=len(run))
+                )
+            return vectors
 
     logger.info("Default embedder: fastembed %s", model_name)
     return FastEmbedEmbedder()
@@ -115,11 +196,21 @@ def _create_onnx_embedder() -> EmbedderABC:
             return self._model.encode(text, normalize_embeddings=True).tolist()
 
         def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            # Bounded for the same reason as the fastembed path above:
+            # `encode` batches internally at 32 by default, but it accepts the
+            # whole list first and the attention cost still scales with the
+            # longest row, so a batch of long text is what gets the process
+            # killed. See `_ATTENTION_BUDGET`.
             if not texts:
                 return []
-            return self._model.encode(
-                list(texts), normalize_embeddings=True
-            ).tolist()
+            vectors: list[list[float]] = []
+            for run in _within_budget(list(texts)):
+                vectors.extend(
+                    self._model.encode(
+                        run, batch_size=len(run), normalize_embeddings=True
+                    ).tolist()
+                )
+            return vectors
 
         def embed_value(self, value: Any) -> list[float]:
             import json
