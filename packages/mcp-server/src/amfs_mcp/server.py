@@ -219,9 +219,8 @@ def _getting_started() -> dict[str, str]:
 _toolset = os.environ.get("AMFS_TOOLSET", "all").lower()
 
 # Reported as serverInfo.name and shown to users by MCP clients, so it carries
-# the product name rather than the package name. Matches what the hosted
-# endpoint at mcp.sense-lab.ai already answers.
-_SERVER_NAME = "SenseLab Memory"
+# the product name rather than the package name.
+_SERVER_NAME = "SenseLab"
 
 
 def _create_server(toolset: str) -> FastMCP:
