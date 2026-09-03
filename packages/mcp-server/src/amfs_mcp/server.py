@@ -218,23 +218,30 @@ def _getting_started() -> dict[str, str]:
 
 _toolset = os.environ.get("AMFS_TOOLSET", "all").lower()
 
+# Reported as serverInfo.name and shown to users by MCP clients, so it carries
+# the product name rather than the package name. Matches what the hosted
+# endpoint at mcp.sense-lab.ai already answers.
+_SERVER_NAME = "SenseLab Memory"
+
 
 def _create_server(toolset: str) -> FastMCP:
     """Build FastMCP with tag filtering, compatible with v2 and v3+."""
     instructions = _build_instructions()
     if toolset != "all":
         try:
-            server = FastMCP(name="amfs", instructions=instructions, include_tags={"core"})
+            server = FastMCP(
+                name=_SERVER_NAME, instructions=instructions, include_tags={"core"}
+            )
         except TypeError:
-            server = FastMCP(name="amfs", instructions=instructions)
+            server = FastMCP(name=_SERVER_NAME, instructions=instructions)
             server.enable(tags={"core"}, only=True)
         logger.info(
-            "AMFS toolset: core (essential tools incl. amfs_retrieve). "
-            "Set AMFS_TOOLSET=all to expose all 36 tools."
+            "SenseLab toolset: core (essential tools incl. amfs_retrieve). "
+            "Set AMFS_TOOLSET=all to expose every tool."
         )
     else:
-        server = FastMCP(name="amfs", instructions=instructions)
-        logger.info("AMFS toolset: all (36 tools)")
+        server = FastMCP(name=_SERVER_NAME, instructions=instructions)
+        logger.info("SenseLab toolset: all")
     return server
 
 
