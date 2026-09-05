@@ -3,7 +3,13 @@
  */
 
 import type { AmfsAdapter, WatchHandle } from "./adapter.js";
-import type { DecisionTrace, DecisionTraceSummary, HttpAdapter } from "./adapters/http.js";
+import type {
+  DecisionTrace,
+  DecisionTracePage,
+  DecisionTraceSummary,
+  HttpAdapter,
+  ListTracesOptions,
+} from "./adapters/http.js";
 import { InMemoryAdapter } from "./adapters/filesystem.js";
 import { defaultConfig } from "./config.js";
 import { CausalTagger, CoWEngine } from "./engine.js";
@@ -662,14 +668,23 @@ export class AgentMemory {
     return this.requireHttp("graphNeighborsAsync").graphNeighborsAsync(options);
   }
 
-  /** Browse persisted decision traces from past sessions. */
-  async listTracesAsync(options?: {
-    entityPath?: string;
-    agentId?: string;
-    outcomeType?: string;
-    limit?: number;
-  }): Promise<DecisionTraceSummary[]> {
+  /**
+   * Browse persisted decision traces from past sessions, newest first.
+   *
+   * Returns one page as a flat array. Pass `cursor` (from
+   * {@link listTracesPageAsync}) to continue, or `since` / `until` to bound by
+   * creation time.
+   */
+  async listTracesAsync(options?: ListTracesOptions): Promise<DecisionTraceSummary[]> {
     return this.requireHttp("listTracesAsync").listTracesAsync(options);
+  }
+
+  /**
+   * One page of decision traces with paging metadata:
+   * `{ traces, nextCursor, hasMore }`. Follow `nextCursor` while `hasMore`.
+   */
+  async listTracesPageAsync(options?: ListTracesOptions): Promise<DecisionTracePage> {
+    return this.requireHttp("listTracesPageAsync").listTracesPageAsync(options);
   }
 
   /** Retrieve a full decision trace by ID, or null if not found. */

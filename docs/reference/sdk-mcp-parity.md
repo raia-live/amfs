@@ -46,7 +46,7 @@ AMFS exposes memory three ways: the **MCP server** (for agents), the **Python SD
 | Record action | `amfs_record_action` | `record_action` | `recordAction` (tracker) |
 | Explain session | `amfs_explain` | `explain` | `explain` |
 | Timeline | `amfs_timeline` | `timeline` | `timelineAsync` |
-| List traces | `amfs_list_traces` | `list_traces` | `listTracesAsync` |
+| List traces | `amfs_list_traces` | `list_traces` (cursor / since / until) | `listTracesAsync`, `listTracesPageAsync` (`{traces, nextCursor, hasMore}`) |
 | Get trace | `amfs_get_trace` | `get_trace` | `getTraceAsync` |
 
 ### Spans & trace navigation (Pro)
@@ -67,6 +67,40 @@ These ship in the **Pro MCP server** (`amfs-mcp-server-pro`) only. The recording
 {: .note }
 The TypeScript SDK's `*Async` methods route through the `HttpAdapter` to a remote AMFS server. The synchronous methods operate on the in-process adapter. Construct `AgentMemory` with an `HttpAdapter` to use the async surface — the intended path for a Node orchestrator or a disposable sandbox pointing at hosted SenseLab.
 
+{: .note }
+**Paging traces in TypeScript.** `listTracesAsync` accepts `{ cursor, since, until, limit, offset, entityPath, agentId, outcomeType }` and still returns a flat array. `listTracesPageAsync` takes the same options and returns `{ traces, nextCursor, hasMore }`, matching the OSS server's `GET /api/v1/traces` page shape — follow `nextCursor` while `hasMore` is true. `DecisionTrace` now carries `taskInput`, `responseText`, `toolCalls[]` (with the caller's `arguments` keys left as-is) and `sessionMetadata`, mapped from the server's snake_case fields; the mappers are exported as `toDecisionTrace` / `toDecisionTracePage`.
+
+### Agent evaluation (Pro, hosted only)
+
+Judges, verdicts, behaviors, incidents, the fix loop and the investigator are **Pro, hosted-only** surfaces served by `/api/v1/eval` on SenseLab Cloud. They ship in three developer-facing forms, none of which live in the OSS SDKs:
+
+- **Pro MCP tools** (`amfs-mcp-server-pro`, `tags={"extended"}`): proxy to the hosted API when `AMFS_HTTP_URL` is set and refuse with `{"error": "...requires the hosted API (AMFS_HTTP_URL)...", "mode": "local"}` otherwise. They are excluded from the builder profile.
+- **`amfs_pro` Python client** (private dist `amfs-sdk-pro`): `ProClient(base_url=None, api_key=None)` reads `AMFS_HTTP_URL` / `AMFS_API_KEY`, sends `X-AMFS-API-Key`, and exposes `client.eval` and `client.traces`; `AsyncProClient` mirrors it on `httpx.AsyncClient`. List calls return `Page[...]` (`items`, `next_cursor`, `has_more`) and have `iter*` helpers that follow cursors.
+- **`amfs-pro` CLI** (installed with `amfs-sdk-pro`): every command takes `--json` for CI; `eval backfill` and `cases run` exit non-zero with `--fail-on-fail`.
+
+| Capability | MCP tool (Pro) | `amfs_pro` client | `amfs-pro` CLI |
+|:--|:--|:--|:--|
+| Grade one trace now | `amfs_judge_trace` | `eval.judge` | `eval judge <trace_id> <judge_id>` |
+| Define a judge (optionally dry-run first) | `amfs_judge_define` | `eval.judges.create` / `.update` / `.dry_run` / `.history` / `.diff` | `eval judges create --id --name --prompt [--dry-run]`, `eval judges dry-run <agent> <judge>` |
+| List judges | `amfs_judges` | `eval.judges.list` / `.get` / `.delete` / `.detection_rate` | `eval judges list <agent>` |
+| Install the starter pack | `amfs_seed_starter_judges` | `eval.judges.seed_starter_pack` | `eval judges seed <agent>` |
+| Browse verdicts | `amfs_verdicts` | `eval.verdicts.list` / `.iter` / `.get` / `.for_trace` | — (use `--json` on `eval judge` / `backfill`) |
+| Agent summary | `amfs_eval_summary` | `eval.summary` | `eval summary <agent> [--window]` |
+| Backfill past traces (spends budget) | `amfs_backfill` | `eval.backfill` / `eval.backfill_status` | `eval backfill <agent> <judge> [--since --until --limit --sampling-rate --wait --fail-on-fail]` |
+| Judge budget | — | `eval.budget.get` / `.set` | — |
+| Behaviors | `amfs_behaviors`, `amfs_behavior_define`, `amfs_behavior_from_trace` | `eval.behaviors.list` / `.create` / `.from_trace` / `.get` / `.update` / `.delete` / `.traces` | `behaviors list <agent>`, `behaviors from-trace <trace_id>` |
+| Blast radius of a behavior | `amfs_blast_radius` | `eval.behaviors.blast_radius` | — |
+| Incidents | `amfs_incident` (list / get / `action=acknowledge\|resolve\|mute`) | `eval.incidents.list` / `.get` / `.acknowledge` / `.resolve` / `.mute` | `incidents list [--agent --status]`, `incidents ack <id>`, `incidents mute <id> [--until]` |
+| Segment by dimension | `amfs_segment`, `amfs_dimensions` | `eval.segment`, `eval.dimensions` | — |
+| Attribute a failure to memory entries | `amfs_attribute_failure` | `eval.attribution` | — |
+| Fix loop | `amfs_propose_fix` (propose, then returns the handoff), `amfs_fixes`, `amfs_approve_fix_memory` | `eval.fixes.propose` / `.handoff` / `.list` / `.get` / `.approve_memory` / `.dismiss` / `.prevention` / `.prevention_for` | `fixes list <agent>`, `fixes propose <agent> --verdict\|--behavior`, `fixes handoff <fix_id>` (prints `instructions` markdown for piping into a coding agent) |
+| Regression cases | — | `eval.cases.sets` / `.create_set` / `.get_set` / `.cases` / `.run` (inline or queued) / `.get_run` / `.runs` / `.compare` | `cases run <set_id> --label [--since --compare-to --fail-on-fail]` |
+| Investigate a question across runs | `amfs_investigate` (non-streaming) | `eval.investigate`, `eval.investigate_stream` (SSE events) | `investigate <agent> "<question>" [--trace --max-steps --no-stream]` (streams steps) |
+| Alerts | `amfs_alerts` | `eval.alerts.list` / `.ack` / `.mute` / `.rules` | — |
+| Sealed traces | `amfs_trace_search`, `amfs_trace_spans`, `amfs_span_payload`, `amfs_trace_compare` | `traces.search` / `.iter_search` / `.get` / `.spans` / `.span` / `.compare` / `.otlp_export` | `traces search [--query --agent --since --until --has-error --outcome --limit --cursor]` |
+
+Where the Python SDK column above says "—", the same routes are reachable by any HTTP client with the `X-AMFS-API-Key` header; the `amfs_pro` client is the supported wrapper.
+
 ## Identity
 
 Agent identity in the SDKs is set via the `AgentMemory` constructor (`agent_id`). **Sticky identity** (`amfs_set_identity` / `amfs_whoami` / `amfs_reset_identity`) is an MCP-server concept: it persists the last identity to `~/.amfs/.identity-<client>` so a fresh MCP process auto-restores it. The SDKs don't own that on-disk state, so they intentionally don't expose set/whoami/reset — pass `agent_id` explicitly instead.
@@ -83,6 +117,7 @@ These MCP tools are **not** mirrored 1:1 in the SDKs, by design. They are either
 | `amfs_export_training_data` | Pro (HTTP-proxied) | Calls `GET /api/v1/pro/export`. Exposed on the TS `HttpAdapter` as `exportTrainingDataAsync`; Python calls the endpoint directly. |
 | `amfs_record_span`, `amfs_start_span`, `amfs_end_span`, `amfs_set_trace_attributes`, `amfs_record_llm_call` | Pro (works locally and over HTTP) | Spans live on the Pro `ImmutableDecisionTrace`; the OSS `DecisionTrace` carries them only as `session_metadata` extras that the seal path lifts out. The Python side is the `amfs_traces.spans.SpanRecorder` in the private repo, not an `AgentMemory` method; the TS SDK has no span recorder yet. |
 | `amfs_trace_search`, `amfs_trace_spans`, `amfs_span_payload`, `amfs_trace_compare` | Pro (HTTP-proxied, local fallback) | Backed by the Pro traces API (`/api/v1/pro/traces/search`, `/{id}/spans`, `/{id}/spans/{span_id}`, `/compare`). The local fallback has no semantic search or paging and can only see traces the adapter persists plus the last one committed in-process. No SDK methods yet; call the endpoints through the `HttpAdapter`. |
+| `amfs_judge_trace`, `amfs_judge_define`, `amfs_judges`, `amfs_seed_starter_judges`, `amfs_verdicts`, `amfs_eval_summary`, `amfs_backfill`, `amfs_behaviors`, `amfs_behavior_define`, `amfs_behavior_from_trace`, `amfs_blast_radius`, `amfs_incident`, `amfs_segment`, `amfs_dimensions`, `amfs_attribute_failure`, `amfs_propose_fix`, `amfs_fixes`, `amfs_approve_fix_memory`, `amfs_investigate`, `amfs_alerts` | Pro (HTTP-proxied, **no local mode**) | Agent evaluation runs on the hosted `/api/v1/eval` service (LLM judges, budgets, behavior mining). Without `AMFS_HTTP_URL` the tools answer `{"mode": "local"}` and do nothing. The OSS SDKs have no methods for these; use the private `amfs_pro` client or the `amfs-pro` CLI (see *Agent evaluation* above). |
 | `amfs_room_*`, `amfs_negotiate_*` | Pro (rooms backend) | Multi-agent rooms/negotiation require the Pro rooms service. The TS SDK has `room*`/`negotiate*` methods; `amfs_negotiate_cancel` has **no OSS backend endpoint**, so it's not added as an SDK method (it would be a broken stub). |
 | `amfs_verify`, `amfs_commit_batch`, `amfs_merge_base` | SDK-covered | Present in the Python SDK (`verify`, `transaction`, `common_ancestor`) and TS SDK (`verify`, `transaction`, `commonAncestor`). |
 | `amfs_export` | MCP-only | Spools full untruncated values to a **local file** on the MCP client's machine — a file-system convenience that only makes sense in-process. SDK callers already have `list`/`read` returning full values with no truncation, so there is nothing to mirror. |

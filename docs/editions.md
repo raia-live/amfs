@@ -569,6 +569,10 @@ Extends the OSS MCP server with additional tools:
 | `amfs_graph_path` | Find shortest trust-weighted path between two entities in the knowledge graph |
 | `amfs_graph_query` | Flexible graph edge search by relation, entity type, or confidence range |
 
+### Agent evaluation surfaces (Pro, hosted only)
+
+Pro adds an evaluation layer on top of sealed traces: LLM **judges** (versioned rubrics with sampling, budgets and dry runs), **verdicts** with evidence, **behaviors** mined from or authored against traces, **incidents** when a behavior breaks from baseline, blast-radius and dimension **segmentation**, **attribution** of failures to the memory entries that caused them, a **fix loop** that hands a coding agent a reproduction-and-tests payload, and an **investigator** that answers questions across runs. All of it runs on the hosted `/api/v1/eval` service and is reached three ways — the Pro MCP server's `amfs_judge_*` / `amfs_verdicts` / `amfs_behavior*` / `amfs_incident` / `amfs_propose_fix` / `amfs_investigate` tools (which refuse with `"mode": "local"` without `AMFS_HTTP_URL`), the private `amfs_pro` Python client (`ProClient` / `AsyncProClient`, dist `amfs-sdk-pro`), and the `amfs-pro` CLI (`eval`, `behaviors`, `incidents`, `fixes`, `cases`, `traces`, `investigate`; `--json` everywhere, `--fail-on-fail` for CI). None of these are in the OSS SDKs; the column map lives in [SDK ↔ MCP Parity]({{ site.baseurl }}/reference/sdk-mcp-parity/#agent-evaluation-pro-hosted-only).
+
 ---
 
 ## Architecture
