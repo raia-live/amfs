@@ -440,10 +440,37 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_propagate_outcome ON amfs_outcomes;
-CREATE TRIGGER trg_propagate_outcome
-    AFTER INSERT ON amfs_outcomes
-    FOR EACH ROW EXECUTE FUNCTION amfs_propagate_outcome();
+-- Created only when absent, rather than dropped and recreated every time.
+--
+-- This file is not run once. The adapter applies it on server startup, and CI
+-- applies it on every deploy, so an unconditional DROP TRIGGER took ACCESS
+-- EXCLUSIVE on these tables at each of those moments. That lock conflicts with
+-- reads, and Postgres queues later lock requests behind a pending exclusive
+-- one, so every query arriving while it waited queued behind it. Two
+-- production outages came out of that, the second with fifteen sessions
+-- blocked behind a single statement on amfs_memory_entries.
+--
+-- Dropping first was never doing anything anyway: the trigger is recreated
+-- identically, so on all but the first run the pair is an expensive no-op.
+--
+-- What a trigger *does* still updates normally, because the logic is in the
+-- function and CREATE OR REPLACE FUNCTION above needs no lock on the table.
+-- Only the binding itself -- which table, which events -- is frozen by this,
+-- and changing that is rare enough to belong in migrations/ where existing
+-- databases pick it up, which is how every other change to them travels.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'trg_propagate_outcome'
+          AND tgrelid = 'amfs_outcomes'::regclass
+          AND NOT tgisinternal
+    ) THEN
+        CREATE TRIGGER trg_propagate_outcome
+            AFTER INSERT ON amfs_outcomes
+            FOR EACH ROW EXECUTE FUNCTION amfs_propagate_outcome();
+    END IF;
+END $$;
 
 -- LISTEN/NOTIFY trigger: notify on new entry writes for watch()
 
@@ -464,10 +491,23 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_notify_write ON amfs_memory_entries;
-CREATE TRIGGER trg_notify_write
-    AFTER INSERT ON amfs_memory_entries
-    FOR EACH ROW EXECUTE FUNCTION amfs_notify_write();
+-- Conditional for the reason given at trg_propagate_outcome. This is the one
+-- that did the damage: amfs_memory_entries is the busiest table here, so it is
+-- where an exclusive lock is least likely to be granted quickly and most
+-- expensive to wait for.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'trg_notify_write'
+          AND tgrelid = 'amfs_memory_entries'::regclass
+          AND NOT tgisinternal
+    ) THEN
+        CREATE TRIGGER trg_notify_write
+            AFTER INSERT ON amfs_memory_entries
+            FOR EACH ROW EXECUTE FUNCTION amfs_notify_write();
+    END IF;
+END $$;
 
 -- Compiled digests table (Memory Cortex)
 
@@ -500,10 +540,20 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_notify_digest ON amfs_digests;
-CREATE TRIGGER trg_notify_digest
-    AFTER INSERT OR UPDATE ON amfs_digests
-    FOR EACH ROW EXECUTE FUNCTION amfs_notify_digest();
+-- Conditional for the reason given at trg_propagate_outcome.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'trg_notify_digest'
+          AND tgrelid = 'amfs_digests'::regclass
+          AND NOT tgisinternal
+    ) THEN
+        CREATE TRIGGER trg_notify_digest
+            AFTER INSERT OR UPDATE ON amfs_digests
+            FOR EACH ROW EXECUTE FUNCTION amfs_notify_digest();
+    END IF;
+END $$;
 
 -- ──────────────────────────────────────────────────────────────────────
 -- Commits — atomic groups of writes
