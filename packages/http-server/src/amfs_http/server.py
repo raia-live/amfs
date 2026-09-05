@@ -23,7 +23,7 @@ import re
 import secrets
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from typing import Any
 
 import uvicorn
@@ -48,6 +48,16 @@ from amfs_core.models import (
     MemoryEntry,
     SearchQuery,
     SemanticQuery,
+)
+from amfs_core.pagination import (
+    InvalidCursorError,
+    Page,
+    clamp_limit,
+    decode_cursor,
+    encode_cursor,
+    entry_tiebreak,
+    max_scan_rows,
+    page_from_overfetch,
 )
 from amfs_core.quality import HeuristicQualityEvaluator
 
@@ -283,10 +293,13 @@ try:
 
     from amfs_traces.store import PostgresImmutableTraceStore
     from amfs_traces.crypto import seal, get_signing_key, get_signing_key_id
-    from amfs_traces.models import ImmutableDecisionTrace, TraceEntry, TraceExternalContext
-    # Aliased because the OSS ``ToolCall`` of the same name is what arrives on the
-    # trace being sealed, and the two are easy to confuse at the mapping site.
-    from amfs_traces.models import ToolCall as ProToolCall
+    # The OSS -> immutable mapping lives with the Pro package, shared with its
+    # other two seal paths, so what this server seals is what they seal. It used
+    # to be inlined here and silently dropped the fields it did not know about.
+    from amfs_traces.seal_on_demand import (
+        finalize_spans as _pro_finalize_spans,
+        immutable_from_oss_trace as _pro_immutable_from_oss_trace,
+    )
     _HAS_PRO_TRACES = True
 except ImportError:
     _HAS_PRO_TRACES = False
@@ -514,6 +527,130 @@ def _require_agent_visible(request: Request, agent_id: str) -> None:
     vis = _active_visibility_filter(request)
     if vis is not None and not vis.is_agent_visible(agent_id):
         raise HTTPException(status_code=404, detail="Agent not found")
+
+
+# ── Keyset pagination and bounded scans ─────────────────────────────────
+#
+# Paged list routes return the existing list key plus ``next_cursor`` and
+# ``has_more``, the shape the rooms endpoints already use. ``limit``/``offset``
+# keep working for callers on the old contract; a cursor, when given, wins.
+
+
+def _check_cursor(cursor: str | None) -> str | None:
+    """Reject a malformed cursor at the boundary with a 400, not a 500 later."""
+    if not cursor:
+        return None
+    try:
+        decode_cursor(cursor)
+    except InvalidCursorError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid cursor: {exc}") from exc
+    return cursor
+
+
+def _page_meta(page: Page[Any]) -> dict[str, Any]:
+    return {"next_cursor": page.next_cursor, "has_more": page.has_more}
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    """ISO-8601 query parameter to an aware datetime; naive input is taken as UTC.
+
+    Adapters compare these against stored timestamps that are always aware,
+    and a naive value would raise from inside that comparison rather than
+    here, where it can be a 400.
+    """
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid timestamp: {value!r}") from exc
+    return ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
+
+
+async def _via_async_or_sync(method: str, *args: Any, **kwargs: Any) -> Any:
+    """Call *method* on the async adapter when there is one, else on the sync adapter.
+
+    The async adapter is the request path's; falling back to the sync adapter
+    is what keeps the filesystem adapter and the tests working. A failure on
+    the async side is logged and retried on the sync side so a transient
+    pool problem degrades to a blocking call rather than an error — the same
+    posture the read and search routes take.
+    """
+    if _async_adapter is not None and hasattr(_async_adapter, method):
+        try:
+            return await getattr(_async_adapter, method)(*args, **kwargs)
+        except InvalidCursorError:
+            raise
+        except Exception:
+            logger.warning("async %s failed — falling back to sync adapter", method, exc_info=True)
+    return getattr(_get_memory()._adapter, method)(*args, **kwargs)
+
+
+async def _list_traces_page(
+    *,
+    limit: int,
+    offset: int = 0,
+    cursor: str | None = None,
+    **filters: Any,
+) -> Page[DecisionTrace]:
+    """One page of traces, overfetching by one row to learn ``has_more``."""
+    rows = await _via_async_or_sync(
+        "list_traces", limit=limit + 1, offset=offset, cursor=cursor, **filters
+    )
+    return page_from_overfetch(
+        list(rows),
+        limit=limit,
+        timestamp=lambda t: t.created_at,
+        tiebreak=lambda t: t.id,
+    )
+
+
+async def _list_events_page(
+    agent_id: str,
+    namespace: str,
+    *,
+    limit: int,
+    offset: int = 0,
+    cursor: str | None = None,
+    **filters: Any,
+) -> Page[Event]:
+    rows = await _via_async_or_sync(
+        "list_events", agent_id, namespace, limit=limit + 1, offset=offset, cursor=cursor,
+        **filters,
+    )
+    return page_from_overfetch(
+        list(rows),
+        limit=limit,
+        timestamp=lambda e: e.created_at,
+        tiebreak=lambda e: e.id,
+    )
+
+
+async def _list_agent_entries_page(
+    agent_id: str,
+    *,
+    limit: int,
+    cursor: str | None = None,
+    **filters: Any,
+) -> Page[MemoryEntry]:
+    rows = await _via_async_or_sync(
+        "list_entries_for_agent", agent_id, limit=limit + 1, cursor=cursor, **filters
+    )
+    return page_from_overfetch(
+        list(rows),
+        limit=limit,
+        timestamp=lambda e: e.provenance.written_at,
+        tiebreak=entry_tiebreak,
+    )
+
+
+def _bounded_scan(items: list[Any], ceiling: int) -> tuple[list[Any], bool]:
+    """Trim a scan to *ceiling* rows and say whether anything was cut.
+
+    Callers fetch ``ceiling + 1`` so the flag is exact: a result exactly at
+    the ceiling is complete, one row past it is not.
+    """
+    return items[:ceiling], len(items) > ceiling
 
 
 def _require_account_admin(request: Request) -> None:
@@ -1856,15 +1993,20 @@ async def get_agent_profile(
         (e.provenance.written_at for e in entries),
         default=None,
     )
-    traces = mem._adapter.list_traces(agent_id=agent_id, limit=10000)
+    # Both numbers are aggregates the adapter computes where the traces live;
+    # this route used to pull up to 10,000 full traces to count them.
+    trace_count = mem._adapter.count_traces(agent_id=agent_id)
+    total_reads = sum(
+        sum(keys.values()) for keys in mem._adapter.trace_read_counts(agent_id).values()
+    )
 
     result: dict[str, Any] = {
         "agentId": agent_id,
         "entriesWritten": len(entries),
         "entitiesTouched": len(entities_touched),
         "entityPaths": sorted(entities_touched),
-        "totalReads": sum(len(t.causal_entries) for t in traces),
-        "decisionTraces": len(traces),
+        "totalReads": total_reads,
+        "decisionTraces": trace_count,
         "lastActive": last_active.isoformat() if last_active else None,
     }
 
@@ -1875,7 +2017,7 @@ async def get_agent_profile(
 
         if not profile and not capabilities and entries:
             profile, capabilities = _synthesize_agent_profile(
-                agent_id, entries, traces,
+                agent_id, entries, trace_count,
             )
 
         result["profile"] = profile.model_dump() if profile else {}
@@ -1889,7 +2031,7 @@ async def get_agent_profile(
 def _synthesize_agent_profile(
     agent_id: str,
     entries: list,
-    traces: list,
+    traces: list | int,
 ) -> tuple:
     """Build an AgentProfile and capabilities from observed activity."""
     from amfs_core.models import AgentProfile, AgentCapability, MemoryType
@@ -1916,8 +2058,10 @@ def _synthesize_agent_profile(
             f"Active across {len(entities_touched)} "
             f"entit{'y' if len(entities_touched) == 1 else 'ies'}."
         )
-    if traces:
-        desc_parts.append(f"{len(traces)} decision trace(s) recorded.")
+    # Callers pass the count; a list is still accepted for older call sites.
+    trace_count = traces if isinstance(traces, int) else len(traces)
+    if trace_count:
+        desc_parts.append(f"{trace_count} decision trace(s) recorded.")
 
     profile = AgentProfile(
         description=" ".join(desc_parts),
@@ -2252,11 +2396,29 @@ def _scan_captured_actions(
     return kept
 
 
-def _auto_seal_trace(mem: AgentMemory) -> str | None:
-    """If Pro traces are available, auto-seal the last OSS trace as immutable."""
+def _auto_seal_trace(
+    mem: AgentMemory,
+    oss_trace: Any | None = None,
+    *,
+    session_metadata: Any | None = None,
+) -> str | None:
+    """If Pro traces are available, seal an OSS trace as immutable.
+
+    ``oss_trace`` defaults to the trace ``mem`` just committed. ``POST
+    /api/v1/traces`` passes the trace it persisted instead, together with the
+    request body's raw ``session_metadata``: validating the body into the OSS
+    model discards keys the model does not declare, and the Pro recorder's spans
+    and LLM calls travel in exactly such keys.
+
+    The OSS -> immutable mapping is the Pro package's, not this file's. The copy
+    that lived here mapped only the fields it knew about, so every field added
+    to the sealed record afterwards — ``llm_calls`` first — was silently dropped
+    on this path while the other two seal paths carried it.
+    """
     if not _HAS_PRO_TRACES:
         return None
-    oss_trace = getattr(mem, "_last_trace", None)
+    if oss_trace is None:
+        oss_trace = getattr(mem, "_last_trace", None)
     if oss_trace is None:
         return None
     store = _get_immutable_store()
@@ -2266,50 +2428,11 @@ def _auto_seal_trace(mem: AgentMemory) -> str | None:
         from uuid import UUID as _UUID
 
         now = datetime.now(timezone.utc)
-        causal = [
-            TraceEntry(
-                entity_path=e.entity_path,
-                key=e.key,
-                version=e.version,
-                confidence=e.confidence,
-                value=e.value,
-                memory_type=getattr(e, "memory_type", None) or "fact",
-                written_by=getattr(e, "written_by", None),
-                read_at=getattr(e, "read_at", None) or now,
-            )
-            for e in (oss_trace.causal_entries or [])
-        ]
-        contexts = [
-            TraceExternalContext(
-                label=c.label,
-                summary=c.summary,
-                source=getattr(c, "source", None),
-                recorded_at=getattr(c, "recorded_at", None) or now,
-            )
-            for c in (oss_trace.external_contexts or [])
-        ]
-        # The action side of the training pair. Mapped field by field rather than
-        # by model_dump so that a shape change on either model surfaces here as a
-        # type error instead of a silently empty column.
-        actions = [
-            ProToolCall(
-                tool_name=t.tool_name,
-                arguments=t.arguments,
-                result_summary=t.result_summary,
-                result_hash=t.result_hash,
-                started_at=t.started_at or now,
-                duration_ms=t.duration_ms,
-                source=t.source,
-                success=t.success,
-            )
-            for t in (getattr(oss_trace, "tool_calls", None) or [])
-        ]
-
-        session_id = mem.session_id
+        # The trace's own session when it has one: a trace posted by a remote
+        # client belongs to that client's session, not to the server handle's.
+        session_id = getattr(oss_trace, "session_id", None) or mem.session_id
         seq = _seal_sequence.get(session_id, 0)
         parent_hash = store.get_latest_hash(session_id)
-
-        trace_id = _UUID(oss_trace.id) if oss_trace.id else None
 
         account_id = None
         try:
@@ -2320,9 +2443,11 @@ def _auto_seal_trace(mem: AgentMemory) -> str | None:
         except (ImportError, ValueError):
             pass
 
-        imm = ImmutableDecisionTrace(
-            **({"id": trace_id} if trace_id else {}),
-            **({"account_id": account_id} if account_id else {}),
+        imm = _pro_immutable_from_oss_trace(
+            oss_trace,
+            session_id=session_id,
+            sequence_number=seq,
+            account_id=account_id,
             # From the trace, not from ``mem``. ``mem`` is shared by every
             # request: the caller's agent is written onto its tagger for the
             # duration of the commit and restored in a ``finally``, and this runs
@@ -2332,18 +2457,10 @@ def _auto_seal_trace(mem: AgentMemory) -> str | None:
             # model trains on an empty set. The trace was built while the tagger
             # still pointed at the caller.
             agent_id=getattr(oss_trace, "agent_id", None) or mem.agent_id,
-            session_id=session_id,
-            sequence_number=seq,
-            outcome_ref=oss_trace.outcome_ref,
-            outcome_type=oss_trace.outcome_type,
-            decision_summary=getattr(oss_trace, "decision_summary", None),
-            task_input=getattr(oss_trace, "task_input", None),
-            response_text=getattr(oss_trace, "response_text", None),
-            causal_entries=causal,
-            external_contexts=contexts,
-            tool_calls=actions,
             created_at=now,
+            session_metadata=session_metadata,
         )
+        imm = _pro_finalize_spans(imm)
         sealed = seal(
             imm,
             get_signing_key(),
@@ -2354,7 +2471,7 @@ def _auto_seal_trace(mem: AgentMemory) -> str | None:
         saved = store.save(sealed)
         _seal_sequence[session_id] = seq + 1
         logger.info("Auto-sealed immutable trace %s for outcome %s",
-                     saved.id, oss_trace.outcome_ref)
+                     saved.id, getattr(oss_trace, "outcome_ref", None))
         return str(saved.id)
     except Exception:
         logger.warning("Failed to auto-seal immutable trace", exc_info=True)
@@ -2429,6 +2546,7 @@ async def list_outcomes(
     entity_path: str | None = Query(None),
     since: str | None = Query(None),
     limit: int = Query(100),
+    outcome_ref: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     mem = _get_memory()
@@ -2437,6 +2555,7 @@ async def list_outcomes(
         entity_path=entity_path,
         since=since_dt,
         limit=limit,
+        outcome_ref=outcome_ref,
     )
     allowed = _visible_agent_ids(request)
     if allowed is not None:
@@ -2472,8 +2591,10 @@ async def explain(
         # they can see; the ref-less session explain spans the whole account.
         if outcome_ref is None:
             raise HTTPException(status_code=403, detail="outcome_ref is required")
-        records = mem._adapter.list_outcomes(limit=10000)
-        record = next((r for r in records if r.outcome_ref == outcome_ref), None)
+        # Filtered where the outcomes live rather than paged through all of
+        # them here; an outcome_ref is not unique, so the newest record wins.
+        records = mem._adapter.list_outcomes(outcome_ref=outcome_ref, limit=1)
+        record = records[0] if records else None
         if record is None or record.agent_id not in allowed:
             raise HTTPException(status_code=404, detail="Outcome not found")
     return mem.explain(outcome_ref)
@@ -2490,20 +2611,35 @@ async def list_traces(
     entity_path: str | None = Query(None),
     agent_id: str | None = Query(None),
     outcome_type: str | None = Query(None),
-    limit: int = Query(100),
+    limit: int = Query(100, ge=1),
+    offset: int = Query(0, ge=0),
+    cursor: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    mem = _get_memory()
-    traces = mem._adapter.list_traces(
+    """Decision traces, newest first, keyset-paginated.
+
+    Follow ``next_cursor`` while ``has_more`` is true. ``offset`` is honoured
+    only when no cursor is given. The page's cursor points at the last row
+    read, so a caller whose visibility hides some agents still advances past
+    them rather than seeing the same rows again.
+    """
+    limit = clamp_limit(limit)
+    page = await _list_traces_page(
         entity_path=entity_path,
         agent_id=agent_id,
         outcome_type=outcome_type,
         limit=limit,
+        offset=offset,
+        cursor=_check_cursor(cursor),
     )
+    traces = page.items
     allowed = _visible_agent_ids(request)
     if allowed is not None:
         traces = [t for t in traces if t.agent_id in allowed]
-    return {"traces": [t.model_dump(mode="json") for t in traces]}
+    return {
+        "traces": [t.model_dump(mode="json") for t in traces],
+        **_page_meta(page),
+    }
 
 
 @app.post("/api/v1/traces")
@@ -2557,7 +2693,18 @@ async def save_trace(
             ),
         })
     saved = mem._adapter.save_trace(trace)
-    return saved.model_dump(mode="json")
+    # Sealed like a trace committed through /outcomes. Until this call, a trace
+    # arriving here — which is every trace an HttpAdapter client commits — was
+    # never sealed, so it had no immutable copy at all. The saved trace is what
+    # is sealed, so the immutable copy carries the persisted id; the raw body is
+    # passed alongside because ``model_validate`` above dropped the
+    # ``session_metadata`` keys the Pro recorder's spans travel in.
+    raw_meta = body.get("session_metadata") if isinstance(body, dict) else None
+    immutable_trace_id = _auto_seal_trace(mem, saved, session_metadata=raw_meta)
+    result = saved.model_dump(mode="json")
+    if immutable_trace_id:
+        result["immutable_trace_id"] = immutable_trace_id
+    return result
 
 
 # NOTE: must be registered before /api/v1/traces/{trace_id} so "share-stats"
@@ -2590,8 +2737,7 @@ async def get_trace(
     trace_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    mem = _get_memory()
-    trace = mem._adapter.get_trace(trace_id)
+    trace = await _via_async_or_sync("get_trace", trace_id)
     allowed = _visible_agent_ids(request)
     if trace is not None and allowed is not None and trace.agent_id not in allowed:
         trace = None
@@ -2775,7 +2921,9 @@ async def get_usage(
         }
     mem = _get_memory()
     st = mem.stats()
-    outcomes = mem._adapter.list_outcomes(limit=10000)
+    # Counted in SQL. This used to be len() over a list capped at 10,000, so
+    # every account past that reported exactly 10,000 decision traces.
+    outcome_count = mem._adapter.count_outcomes()
 
     top_agents = sorted(st.agents.items(), key=lambda x: x[1], reverse=True)[:10]
     top_entities = sorted(st.entities.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -2824,7 +2972,7 @@ async def get_usage(
         "avgLatencyMs": 0,
         "quotas": [
             {"label": "Memory entries", "current": st.total_entries, "limit": 0},
-            {"label": "Decision traces", "current": len(outcomes), "limit": 0},
+            {"label": "Decision traces", "current": outcome_count, "limit": 0},
             {"label": "API keys", "current": api_key_count, "limit": 0},
             {"label": "Users", "current": st.total_agents, "limit": 0},
         ],
@@ -3002,7 +3150,12 @@ async def agent_memory_graph(
 
     mem = _get_memory()
     entries = mem.list()
-    traces = mem._adapter.list_traces(agent_id=agent_id, limit=10000)
+    # Read counts and the trace count are aggregated by the adapter; this
+    # used to pull up to 10,000 full traces to tally causal_entries here.
+    trace_count = mem._adapter.count_traces(agent_id=agent_id)
+    read_entities: dict[str, dict[str, int]] = {
+        ep: dict(keys) for ep, keys in mem._adapter.trace_read_counts(agent_id).items()
+    }
 
     written_by_agent = [
         e for e in entries
@@ -3030,25 +3183,26 @@ async def agent_memory_graph(
     total_recalls = sum(getattr(e, "recall_count", 0) for e in written_by_agent)
     recalled_tokens_saved = sum(recall_tokens_saved(e) for e in written_by_agent)
 
-    # Build read counts from both traces (causal_entries) and timeline events.
-    read_entities: dict[str, dict[str, int]] = {}
-    for t in traces:
-        for ce in t.causal_entries:
-            ep = ce.entity_path
-            key = ce.key
-            if ep not in read_entities:
-                read_entities[ep] = {}
-            read_entities[ep][key] = read_entities[ep].get(key, 0) + 1
-
-    # Supplement with READ events from the timeline (persisted independently).
+    # Supplement the trace read counts with READ events from the timeline
+    # (persisted independently). Bounded by AMFS_MAX_SCAN_ROWS per event
+    # type, and the response says when the bound was hit.
     total_read_events = 0
+    read_events_truncated = False
+    ceiling = max_scan_rows()
     try:
-        read_events = mem._adapter.list_events(
-            agent_id, mem.namespace, event_type="read", limit=10000,
+        read_events, cut_a = _bounded_scan(
+            mem._adapter.list_events(
+                agent_id, mem.namespace, event_type="read", limit=ceiling + 1,
+            ),
+            ceiling,
         )
-        cross_read_events = mem._adapter.list_events(
-            agent_id, mem.namespace, event_type="cross_agent_read", limit=10000,
+        cross_read_events, cut_b = _bounded_scan(
+            mem._adapter.list_events(
+                agent_id, mem.namespace, event_type="cross_agent_read", limit=ceiling + 1,
+            ),
+            ceiling,
         )
+        read_events_truncated = cut_a or cut_b
         for ev in read_events + cross_read_events:
             ep = ev.details.get("entity_path", "")
             key = ev.details.get("key", "")
@@ -3088,12 +3242,13 @@ async def agent_memory_graph(
     return {
         "agentId": agent_id,
         "nodes": nodes,
-        "traceCount": len(traces),
+        "traceCount": trace_count,
         "totalWritten": len(written_by_agent),
         "totalReads": total_read_events,
         "totalRecalls": total_recalls,
         "recalledTokensSaved": recalled_tokens_saved,
         "crossAgentReads": cross_agent_reads,
+        "truncated": read_events_truncated,
     }
 
 
@@ -3110,20 +3265,14 @@ async def agent_cross_reads(
 
     mem = _get_memory()
     entries = mem.list()
-    traces = mem._adapter.list_traces(agent_id=agent_id, limit=10000)
 
     entry_authors: dict[str, str] = {}
     for e in entries:
         entry_authors[f"{e.entity_path}/{e.key}"] = e.provenance.agent_id
 
-    read_entities: dict[str, dict[str, int]] = {}
-    for t in traces:
-        for ce in t.causal_entries:
-            ep = ce.entity_path
-            key = ce.key
-            if ep not in read_entities:
-                read_entities[ep] = {}
-            read_entities[ep][key] = read_entities[ep].get(key, 0) + 1
+    # Aggregated by the adapter; previously up to 10,000 full traces were
+    # fetched to tally their causal_entries here.
+    read_entities = mem._adapter.trace_read_counts(agent_id)
 
     cross_reads: dict[str, list[dict[str, Any]]] = {}
     for ep, keys in read_entities.items():
@@ -3239,67 +3388,147 @@ async def agent_read_from(
     return _entry_to_response(entry)
 
 
+_ACTIVITY_SOURCES = ("w", "o", "e")  # writes, outcomes, events
+
+
+def _encode_activity_cursor(positions: dict[str, str | None]) -> str | None:
+    """A composite cursor over the three activity sources.
+
+    The activity feed merges three independently-ordered streams, so a
+    single ``(timestamp, id)`` position cannot resume it exactly: two
+    sources can share a timestamp, and dropping to a strict ``<`` on the
+    timestamp alone would skip rows. Each source keeps its own keyset
+    position instead, and the composite is just the three of them.
+    """
+    if all(v is None for v in positions.values()):
+        return None
+    return encode_cursor(datetime.now(UTC), {k: positions.get(k) for k in _ACTIVITY_SOURCES})
+
+
+def _decode_activity_cursor(cursor: str | None) -> dict[str, str | None]:
+    if not cursor:
+        return {k: None for k in _ACTIVITY_SOURCES}
+    _, positions = decode_cursor(cursor)
+    if not isinstance(positions, dict):
+        raise InvalidCursorError("cursor does not belong to the activity feed")
+    return {k: positions.get(k) for k in _ACTIVITY_SOURCES}
+
+
 @app.get("/api/v1/agents/{agent_id:path}/activity")
 async def agent_activity(
     request: Request,
     agent_id: str,
-    limit: int = Query(100),
+    limit: int = Query(100, ge=1),
+    cursor: str | None = Query(None),
+    since: str | None = Query(None),
+    until: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    """Timeline of writes, outcomes, reads, and other events for this agent."""
+    """Timeline of writes, outcomes, reads, and other events for this agent.
+
+    Each of the three sources — the agent's current entries, its traces, and
+    its timeline events — is filtered, ordered and paged by the adapter, so
+    this route reads at most ``3 * (limit + 1)`` rows however much history the
+    agent has. It used to list every entry in the namespace and filter here.
+
+    Keyset-paginated with a composite cursor: follow ``next_cursor`` while
+    ``has_more`` is true. ``since``/``until`` bound every source by time.
+    """
     vis = _get_visibility_filter(request)
     if vis is not None and vis.should_filter() and not vis.is_agent_visible(agent_id):
         raise HTTPException(status_code=404, detail="Agent not found")
 
+    limit = clamp_limit(limit)
+    try:
+        positions = _decode_activity_cursor(cursor)
+        for pos in positions.values():
+            _check_cursor(pos)
+    except InvalidCursorError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid cursor: {exc}") from exc
+    since_dt = _parse_ts(since)
+    until_dt = _parse_ts(until)
+
     mem = _get_memory()
-    entries = [
-        e for e in mem.list()
-        if e.provenance.agent_id == agent_id and not e.entity_path.startswith("_system/")
-    ]
-    entries.sort(key=lambda e: e.provenance.written_at, reverse=True)
+    entries_page = await _list_agent_entries_page(
+        agent_id, limit=limit, cursor=positions["w"], since=since_dt, until=until_dt,
+    )
+    traces_page = await _list_traces_page(
+        agent_id=agent_id, limit=limit, cursor=positions["o"], since=since_dt, until=until_dt,
+    )
+    events_page = await _list_events_page(
+        agent_id, mem.namespace, limit=limit, cursor=positions["e"],
+        since=since_dt, until=until_dt,
+    )
 
-    writes = [
-        {
-            "type": "write",
-            "entityPath": e.entity_path,
-            "key": e.key,
-            "version": e.version,
-            "confidence": e.confidence,
-            "timestamp": e.provenance.written_at.isoformat(),
-        }
-        for e in entries[:limit]
-    ]
-
-    traces = mem._adapter.list_traces(agent_id=agent_id, limit=limit)
-    outcomes = [
-        {
+    # Every candidate row carries the cursor its source would resume from if
+    # this row were the last one taken, so the merge can advance each source
+    # independently and exactly.
+    candidates: list[tuple[datetime, str, dict[str, Any], str]] = []
+    for e in entries_page.items:
+        candidates.append((
+            e.provenance.written_at, "w",
+            {
+                "type": "write",
+                "entityPath": e.entity_path,
+                "key": e.key,
+                "version": e.version,
+                "confidence": e.confidence,
+                "timestamp": e.provenance.written_at.isoformat(),
+            },
+            encode_cursor(e.provenance.written_at, entry_tiebreak(e)),
+        ))
+    for t in traces_page.items:
+        # Traces without an outcome_ref are not shown, but they still
+        # advance the trace cursor so paging never stalls on a run of them.
+        item = {
             "type": "outcome",
             "outcomeRef": t.outcome_ref,
             "outcomeType": t.outcome_type,
             "causalEntryCount": len(t.causal_entries),
             "timestamp": t.created_at.isoformat(),
-        }
-        for t in traces if t.outcome_ref
-    ]
+        } if t.outcome_ref else None
+        candidates.append((t.created_at, "o", item, encode_cursor(t.created_at, t.id)))
+    for evt in events_page.items:
+        candidates.append((
+            evt.created_at, "e",
+            {
+                "type": (
+                    evt.event_type.value
+                    if hasattr(evt.event_type, "value")
+                    else str(evt.event_type)
+                ),
+                "summary": evt.summary,
+                "details": evt.details,
+                "actorAgentId": evt.actor_agent_id,
+                "timestamp": evt.created_at.isoformat(),
+            },
+            encode_cursor(evt.created_at, evt.id),
+        ))
 
-    events = mem._adapter.list_events(agent_id, mem.namespace, limit=limit)
-    event_items = [
-        {
-            "type": evt.event_type.value if hasattr(evt.event_type, "value") else str(evt.event_type),
-            "summary": evt.summary,
-            "details": evt.details,
-            "actorAgentId": evt.actor_agent_id,
-            "timestamp": evt.created_at.isoformat(),
-        }
-        for evt in events
-    ]
+    def _sort_ts(ts: datetime) -> datetime:
+        return ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
 
-    timeline = sorted(
-        writes + outcomes + event_items,
-        key=lambda x: x["timestamp"],
-        reverse=True,
-    )[:limit]
-    return {"agentId": agent_id, "timeline": timeline}
+    candidates.sort(key=lambda c: (_sort_ts(c[0]), c[1]), reverse=True)
+
+    timeline: list[dict[str, Any]] = []
+    next_positions: dict[str, str | None] = dict(positions)
+    consumed = 0
+    for _, source, item, pos in candidates:
+        if len(timeline) >= limit:
+            break
+        next_positions[source] = pos
+        consumed += 1
+        if item is not None:
+            timeline.append(item)
+
+    leftover = len(candidates) - consumed
+    has_more = leftover > 0 or entries_page.has_more or traces_page.has_more or events_page.has_more
+    return {
+        "agentId": agent_id,
+        "timeline": timeline,
+        "next_cursor": _encode_activity_cursor(next_positions) if has_more else None,
+        "has_more": has_more,
+    }
 
 
 @app.get("/api/v1/agents/{agent_id:path}/timeline")
@@ -3308,26 +3537,37 @@ async def agent_timeline(
     agent_id: str,
     event_type: str | None = Query(None),
     since: str | None = Query(None),
-    limit: int = Query(100),
+    until: str | None = Query(None),
+    limit: int = Query(100, ge=1),
+    offset: int = Query(0, ge=0),
+    cursor: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Git-like event log for an agent — every write, outcome, and
-    cross-agent read is recorded as an event on the agent's timeline."""
+    cross-agent read is recorded as an event on the agent's timeline.
+
+    Keyset-paginated: follow ``next_cursor`` while ``has_more`` is true.
+    ``offset`` is honoured only when no cursor is given.
+    """
     vis = _get_visibility_filter(request)
     if vis is not None and vis.should_filter() and not vis.is_agent_visible(agent_id):
         raise HTTPException(status_code=404, detail="Agent not found")
 
     mem = _get_memory()
-    since_dt = datetime.fromisoformat(since) if since else None
-    events = mem._adapter.list_events(
+    since_dt = _parse_ts(since)
+    until_dt = _parse_ts(until)
+    limit = clamp_limit(limit)
+    page = await _list_events_page(
         agent_id, mem.namespace,
         event_type=event_type,
-        since=since_dt, limit=limit,
+        since=since_dt, until=until_dt,
+        limit=limit, offset=offset, cursor=_check_cursor(cursor),
     )
     return {
         "agentId": agent_id,
-        "events": [e.model_dump(mode="json") for e in events],
-        "count": len(events),
+        "events": [e.model_dump(mode="json") for e in page.items],
+        "count": len(page.items),
+        **_page_meta(page),
     }
 
 
@@ -3915,7 +4155,9 @@ async def rollback(
     if target_event_id:
         event = mem._adapter.get_event(target_event_id, mem.namespace)
         if event is None and agent_id:
-            for e in mem._adapter.list_events(agent_id, mem.namespace, limit=10000):
+            # Fallback for adapters without get_event: a bounded scan of the
+            # agent's timeline, newest first, capped by AMFS_MAX_SCAN_ROWS.
+            for e in mem._adapter.list_events(agent_id, mem.namespace, limit=max_scan_rows()):
                 if e.id == target_event_id:
                     event = e
                     break
@@ -4930,7 +5172,14 @@ async def run_pattern_scan(
 
     mem = _get_memory()
     entries = mem.list(req.entity_path)
-    outcomes = mem._adapter.list_outcomes(entity_path=req.entity_path, limit=10000)
+    # Pattern detection is a whole-history analysis, so it reads a bounded
+    # window of outcomes (AMFS_MAX_SCAN_ROWS, newest first) and reports when
+    # the window was not the whole history.
+    scan_ceiling = max_scan_rows()
+    outcomes, outcomes_truncated = _bounded_scan(
+        mem._adapter.list_outcomes(entity_path=req.entity_path, limit=scan_ceiling + 1),
+        scan_ceiling,
+    )
 
     if req.agent_id:
         entries = [e for e in entries if e.provenance.agent_id == req.agent_id]
@@ -4993,6 +5242,7 @@ async def run_pattern_scan(
     return {
         "scannedEntries": report.scanned_entries,
         "scannedOutcomes": report.scanned_outcomes,
+        "outcomesTruncated": outcomes_truncated,
         "scanDurationMs": round(report.scan_duration_ms, 2),
         "patternsFound": len(report.patterns),
         "patternsPersisted": persisted,
