@@ -25,7 +25,7 @@
     "@types/react-dom": "^19.1.0",
     "@wxt-dev/module-react": "^1.2.2",
     "typescript": "^5.8.0",
-    "wxt": "^0.20.27"
+    "wxt": "^0.21.4"
   },
   "license": "BSL-1.1"
 }
