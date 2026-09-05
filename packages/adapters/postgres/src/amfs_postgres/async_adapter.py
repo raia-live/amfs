@@ -25,6 +25,7 @@ from amfs_core.exceptions import VersionConflictError
 from amfs_core.models import (
     Agent,
     ArtifactRef,
+    DecisionTrace,
     Event,
     EventType,
     GraphEdge,
@@ -739,6 +740,179 @@ class AsyncPostgresAdapter:
             last_seen=row["last_seen"],
             provenance=row["provenance"],
         )
+
+    # ──────────────────────────────────────────────────────────────
+    # 7b. decision traces, agent activity, timeline
+    # ──────────────────────────────────────────────────────────────
+    #
+    # The trace list, trace detail, activity and timeline routes used to call
+    # the sync adapter from inside the event loop, so every page of traces
+    # was a blocking round-trip that stalled every other request. These share
+    # the WHERE builders and row mappers with the sync adapter, so a cursor
+    # issued by one is honoured identically by the other.
+
+    def _row_to_trace(self, row: dict[str, Any]) -> DecisionTrace:
+        # The sync mapper reads only ``self._namespace`` from its instance,
+        # which this adapter also carries under the same name.
+        return PostgresAdapter._row_to_trace(self, row)  # type: ignore[arg-type]
+
+    async def get_trace(self, trace_id: str) -> DecisionTrace | None:
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""
+                    SELECT {PostgresAdapter._TRACE_COLUMNS}
+                    FROM amfs_decision_traces
+                    WHERE id = %s AND namespace = %s
+                    """,
+                    (trace_id, self._namespace),
+                )
+                row = await cur.fetchone()
+        return self._row_to_trace(row) if row is not None else None
+
+    async def list_traces(
+        self,
+        *,
+        entity_path: str | None = None,
+        agent_id: str | None = None,
+        outcome_type: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        cursor: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[DecisionTrace]:
+        where, params = PostgresAdapter._trace_conditions(
+            self._namespace,
+            entity_path=entity_path,
+            agent_id=agent_id,
+            outcome_type=outcome_type,
+            since=since,
+            until=until,
+            cursor=cursor,
+        )
+        sql = f"""
+            SELECT {PostgresAdapter._TRACE_COLUMNS}
+            FROM amfs_decision_traces
+            WHERE {where}
+            ORDER BY created_at DESC, id DESC
+            LIMIT %s
+        """
+        params.append(limit)
+        if not cursor and offset > 0:
+            sql += " OFFSET %s"
+            params.append(offset)
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, params)
+                rows = await cur.fetchall()
+        return [self._row_to_trace(r) for r in rows]
+
+    async def count_traces(
+        self,
+        *,
+        entity_path: str | None = None,
+        agent_id: str | None = None,
+        outcome_type: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> int:
+        where, params = PostgresAdapter._trace_conditions(
+            self._namespace,
+            entity_path=entity_path,
+            agent_id=agent_id,
+            outcome_type=outcome_type,
+            since=since,
+            until=until,
+        )
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT count(*) AS cnt FROM amfs_decision_traces WHERE {where}", params
+                )
+                row = await cur.fetchone()
+        return int(row["cnt"]) if row else 0
+
+    async def trace_read_counts(self, agent_id: str) -> dict[str, dict[str, int]]:
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    PostgresAdapter._TRACE_READ_COUNTS_SQL, (self._namespace, agent_id)
+                )
+                rows = await cur.fetchall()
+        return PostgresAdapter._read_counts_from_rows(rows)
+
+    async def list_entries_for_agent(
+        self,
+        agent_id: str,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        cursor: str | None = None,
+        limit: int = 100,
+        exclude_prefixes: tuple[str, ...] = ("_system/",),
+    ) -> list[MemoryEntry]:
+        where, params = PostgresAdapter._entries_for_agent_conditions(
+            self._namespace,
+            agent_id,
+            since=since,
+            until=until,
+            cursor=cursor,
+            exclude_prefixes=exclude_prefixes,
+        )
+        sql = f"""
+            SELECT * FROM amfs_memory_entries
+            WHERE {where}
+            {PostgresAdapter._ENTRIES_FOR_AGENT_ORDER}
+            LIMIT %s
+        """
+        params.append(limit)
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, params)
+                rows = await cur.fetchall()
+        return [self._row_to_entry(r) for r in rows]
+
+    async def list_events(
+        self,
+        agent_id: str,
+        namespace: str = "default",
+        *,
+        branch: str | None = None,
+        event_type: str | None = None,
+        since: datetime | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        cursor: str | None = None,
+        until: datetime | None = None,
+    ) -> list[Event]:
+        where, params = PostgresAdapter._event_conditions(
+            namespace,
+            agent_id,
+            account_id=self._get_current_account_id(),
+            branch=branch,
+            event_type=event_type,
+            since=since,
+            until=until,
+            cursor=cursor,
+        )
+        sql = f"""
+            SELECT id, namespace, agent_id, branch, event_type,
+                   summary, details, actor_agent_id, created_at
+            FROM amfs_events
+            WHERE {where}
+            ORDER BY created_at DESC, id DESC
+            LIMIT %s
+        """
+        params.append(limit)
+        if not cursor and offset > 0:
+            sql += " OFFSET %s"
+            params.append(offset)
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, params)
+                rows = await cur.fetchall()
+        return [PostgresAdapter._row_to_event(r) for r in rows]
 
     # ──────────────────────────────────────────────────────────────
     # 8. increment_recall_count

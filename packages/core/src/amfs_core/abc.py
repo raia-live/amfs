@@ -116,14 +116,37 @@ class AdapterABC(ABC):
         entity_path: str | None = None,
         since: datetime | None = None,
         limit: int = 1000,
+        outcome_ref: str | None = None,
     ) -> list[OutcomeRecord]:
         """Return historical outcome records.
 
         Used by the Pro ML layer for training ranking models and calibrating
         confidence multipliers.  Default implementation returns an empty list;
         adapters that persist outcomes (e.g. Postgres) should override.
+
+        *outcome_ref* narrows to records with that reference. It exists so a
+        caller resolving one outcome does not have to page through all of
+        them to find it.
         """
         return []
+
+    def count_outcomes(
+        self,
+        *,
+        entity_path: str | None = None,
+        since: datetime | None = None,
+    ) -> int:
+        """How many outcome records match, counted where they are stored.
+
+        The default counts a bounded ``list_outcomes`` and so cannot see past
+        :func:`amfs_core.pagination.max_scan_rows`; adapters with SQL storage
+        override with ``COUNT(*)`` so the number is right at any volume.
+        """
+        from amfs_core.pagination import max_scan_rows
+
+        return len(
+            self.list_outcomes(entity_path=entity_path, since=since, limit=max_scan_rows())
+        )
 
     def read_at_version(
         self,
@@ -150,7 +173,9 @@ class AdapterABC(ABC):
         Default implementation scans ``list_traces()``; adapters with
         indexed storage (e.g. Postgres) should override for O(1) lookup.
         """
-        for t in self.list_traces(limit=10_000):
+        from amfs_core.pagination import max_scan_rows
+
+        for t in self.list_traces(limit=max_scan_rows()):
             if t.id == trace_id:
                 return t
         return None
@@ -167,9 +192,117 @@ class AdapterABC(ABC):
         agent_id: str | None = None,
         outcome_type: str | None = None,
         limit: int = 100,
+        offset: int = 0,
+        cursor: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[DecisionTrace]:
-        """Return persisted decision traces. Default returns an empty list."""
+        """Return persisted decision traces, newest first.
+
+        Ordering is total: ``created_at DESC, id DESC``. *cursor* is an opaque
+        keyset position from :func:`amfs_core.pagination.encode_cursor` naming
+        the last trace already seen; when given, only strictly older traces
+        are returned and *offset* is ignored. *offset* remains for callers on
+        the older contract. *since*/*until* bound ``created_at`` (inclusive
+        lower, exclusive upper) so a time-partitioned store can prune.
+
+        Callers wanting ``has_more`` ask for ``limit + 1`` rows and build the
+        page with :func:`amfs_core.pagination.page_from_overfetch`.
+
+        Every new parameter defaults to "no constraint", so adapters written
+        against the old signature keep working when called with the old
+        arguments. Default returns an empty list.
+        """
         return []
+
+    def count_traces(
+        self,
+        *,
+        entity_path: str | None = None,
+        agent_id: str | None = None,
+        outcome_type: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> int:
+        """How many traces match, counted where they are stored.
+
+        The default counts a bounded ``list_traces`` and cannot see past
+        :func:`amfs_core.pagination.max_scan_rows`; SQL adapters override
+        with ``COUNT(*)``.
+        """
+        from amfs_core.pagination import max_scan_rows
+
+        return len(
+            self.list_traces(
+                entity_path=entity_path,
+                agent_id=agent_id,
+                outcome_type=outcome_type,
+                since=since,
+                until=until,
+                limit=max_scan_rows(),
+            )
+        )
+
+    def trace_read_counts(self, agent_id: str) -> dict[str, dict[str, int]]:
+        """How often an agent's traces read each entry: ``{entity_path: {key: n}}``.
+
+        Summing every count gives the agent's total recorded reads. This is
+        the aggregate behind the memory-graph and cross-agent-read views,
+        which used to pull every trace over the wire to compute it.
+
+        The default scans a bounded ``list_traces``; SQL adapters override
+        with a JSONB unnest and ``GROUP BY`` so full traces never leave the
+        database.
+        """
+        from amfs_core.pagination import max_scan_rows
+
+        counts: dict[str, dict[str, int]] = {}
+        for t in self.list_traces(agent_id=agent_id, limit=max_scan_rows()):
+            for ce in t.causal_entries:
+                per_entity = counts.setdefault(ce.entity_path, {})
+                per_entity[ce.key] = per_entity.get(ce.key, 0) + 1
+        return counts
+
+    def list_entries_for_agent(
+        self,
+        agent_id: str,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        cursor: str | None = None,
+        limit: int = 100,
+        exclude_prefixes: tuple[str, ...] = ("_system/",),
+    ) -> list[MemoryEntry]:
+        """Current entries written by *agent_id*, newest first, keyset-paged.
+
+        Ordering is total: ``written_at DESC, entity_path DESC, key DESC,
+        version DESC``; the cursor tiebreak is
+        :func:`amfs_core.pagination.entry_tiebreak`. *exclude_prefixes* drops
+        entity paths the activity views never show (``_system/`` by default).
+
+        The default filters ``list()`` in memory. Adapters with indexed
+        storage override so the filter, order and page happen in the query.
+        """
+        from amfs_core.pagination import entry_tiebreak, paginate_desc
+
+        def keep(e: MemoryEntry) -> bool:
+            if e.provenance.agent_id != agent_id:
+                return False
+            if any(e.entity_path.startswith(p) for p in exclude_prefixes):
+                return False
+            written = e.provenance.written_at
+            if since is not None and written < since:
+                return False
+            return not (until is not None and written >= until)
+
+        page = paginate_desc(
+            (e for e in self.list() if keep(e)),
+            timestamp=lambda e: e.provenance.written_at,
+            tiebreak=entry_tiebreak,
+            limit=limit,
+            cursor=cursor,
+        )
+        return page.items
 
     def list_traces_for_entry(
         self,
@@ -387,9 +520,10 @@ class AdapterABC(ABC):
         override with a JSONB aggregate so full traces never leave the DB.
         """
         from amfs_core.aggregates import share_stats_from_traces
+        from amfs_core.pagination import max_scan_rows
 
         return share_stats_from_traces(
-            self.list_traces(limit=10_000),
+            self.list_traces(limit=max_scan_rows()),
             since=since,
             pair_limit=pair_limit,
             agent_ids=agent_ids,
@@ -654,8 +788,18 @@ class AdapterABC(ABC):
         event_type: str | None = None,
         since: datetime | None = None,
         limit: int = 100,
+        offset: int = 0,
+        cursor: str | None = None,
+        until: datetime | None = None,
     ) -> list[Event]:
-        """Return events on an agent's timeline. Default returns empty list."""
+        """Return events on an agent's timeline, newest first.
+
+        Ordering is total: ``created_at DESC, id DESC``. *cursor* is a keyset
+        position (see :func:`amfs_core.pagination.encode_cursor`) naming the
+        last event already seen; when given, only strictly older events are
+        returned and *offset* is ignored. *until* is an exclusive upper bound
+        on ``created_at``. Default returns an empty list.
+        """
         return []
 
     def get_event(self, event_id: str, namespace: str = "default") -> Event | None:

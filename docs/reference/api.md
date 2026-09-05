@@ -844,8 +844,10 @@ All entry endpoints accept a `branch` parameter (query param for GET, body field
 |:-------|:-----|:------------|
 | `GET` | `/api/v1/agents` | List agents with entry counts, entities touched, and last active time |
 | `GET` | `/api/v1/agents/{agent_id}/memory-graph` | Get agent's memory graph (entities and entries touched) |
-| `GET` | `/api/v1/agents/{agent_id}/activity` | Get agent's activity timeline (writes, outcomes, traces) |
-| `GET` | `/api/v1/agents/{agent_id}/timeline` | Git-like event log (every write, outcome, read, brief) |
+| `GET` | `/api/v1/agents/{agent_id}/activity` | Get agent's activity timeline (writes, outcomes, traces). Keyset-paginated: `?limit=`, `?cursor=`, `?since=`, `?until=` |
+| `GET` | `/api/v1/agents/{agent_id}/timeline` | Git-like event log (every write, outcome, read, brief). Keyset-paginated: `?limit=`, `?cursor=`, `?since=`, `?until=`, `?event_type=` |
+
+Paginated list endpoints return the existing list key plus `next_cursor` (opaque string, `null` on the last page) and `has_more`. Pass `next_cursor` back as `?cursor=` to fetch the next page; `offset` is still honoured when no cursor is given. Page size is capped at 1000.
 
 ### Outcomes
 
@@ -858,7 +860,7 @@ All entry endpoints accept a `branch` parameter (query param for GET, body field
 
 | Method | Path | Description |
 |:-------|:-----|:------------|
-| `GET` | `/api/v1/traces` | List decision traces (supports `?outcome_type=`, `?agent_id=`, `?limit=`) |
+| `GET` | `/api/v1/traces` | List decision traces (supports `?outcome_type=`, `?agent_id=`, `?entity_path=`, `?limit=`, `?offset=`, `?cursor=`). Returns `traces`, `next_cursor`, `has_more` |
 | `GET` | `/api/v1/traces/{trace_id}` | Get full trace detail with causal entries, external contexts, query/error events, state diff |
 
 ### Observability
@@ -1016,6 +1018,8 @@ amfs_export_training_data(
 Export decision traces as fine-tuning datasets. Format options: `"sft"` (supervised fine-tuning), `"dpo"` (direct preference optimization), `"reward_model"` (reward model training). See the [ML Layer guide](/amfs/guides/ml-layer/) for format details.
 
 ### amfs_record_llm_call
+
+> **Pro only.** This tool is implemented only in the private AMFS Pro MCP server. The OSS `amfs-mcp-server` package does not register it; calling it there returns an unknown-tool error.
 
 ```
 amfs_record_llm_call(

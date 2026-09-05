@@ -50,8 +50,19 @@ CREATE TABLE IF NOT EXISTS amfs_outcomes (
     account_id UUID
 );
 
+-- Range-partitioned by month on created_at. Traces are append-only and read by
+-- recency, so a page of recent traces touches one or two partitions, retention
+-- drops a month instead of deleting rows, and payload stripping runs per
+-- partition. The primary key carries created_at because a partitioned table's
+-- key must include the partition column; id is still unique per row and
+-- get_trace(id) still resolves by id alone.
+--
+-- Databases created before this was partitioned are rebuilt in place by
+-- _apply_migrations (see trace_partitions.migrate_to_partitioned). Monthly
+-- partitions are created by ensure_partitions at adapter start; the DEFAULT
+-- partition below catches anything created_at outside them.
 CREATE TABLE IF NOT EXISTS amfs_decision_traces (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID NOT NULL DEFAULT gen_random_uuid(),
     namespace TEXT NOT NULL,
     agent_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
@@ -69,14 +80,41 @@ CREATE TABLE IF NOT EXISTS amfs_decision_traces (
     session_started_at TIMESTAMPTZ,
     session_ended_at TIMESTAMPTZ,
     session_duration_ms NUMERIC,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (id, created_at)
+) PARTITION BY RANGE (created_at);
+
+-- Guarded so this file stays runnable against a database whose traces table
+-- is still flat and about to be rebuilt by _apply_migrations: PARTITION OF a
+-- non-partitioned table is an error, not a no-op.
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'amfs_decision_traces' AND c.relkind = 'p'
+          AND n.nspname = ANY (current_schemas(false))
+    ) THEN
+        CREATE TABLE IF NOT EXISTS amfs_decision_traces_default
+            PARTITION OF amfs_decision_traces DEFAULT;
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_traces_namespace
     ON amfs_decision_traces (namespace, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_traces_agent
     ON amfs_decision_traces (namespace, agent_id);
+
+-- Keyset pages per agent: ORDER BY created_at DESC, id DESC under an agent
+-- filter is answered by this index alone.
+CREATE INDEX IF NOT EXISTS idx_traces_agent_created
+    ON amfs_decision_traces (namespace, agent_id, created_at DESC, id DESC);
+
+-- Serves the entity_path filter, causal_entries @> '[{"entity_path": ...}]'.
+-- jsonb_path_ops supports only containment, which is the only operator used,
+-- and is smaller and faster for it than the default opclass.
+CREATE INDEX IF NOT EXISTS idx_traces_causal_entries_gin
+    ON amfs_decision_traces USING gin (causal_entries jsonb_path_ops);
 
 CREATE INDEX IF NOT EXISTS idx_traces_outcome
     ON amfs_decision_traces (namespace, outcome_type)
