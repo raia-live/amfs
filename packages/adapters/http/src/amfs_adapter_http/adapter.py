@@ -345,12 +345,15 @@ class HttpAdapter(AdapterABC):
         entity_path: str | None = None,
         since: datetime | None = None,
         limit: int = 1000,
+        outcome_ref: str | None = None,
     ) -> list[OutcomeRecord]:
         params: dict[str, Any] = {"limit": limit}
         if entity_path:
             params["entity_path"] = entity_path
         if since:
             params["since"] = since.isoformat()
+        if outcome_ref:
+            params["outcome_ref"] = outcome_ref
         data = self._get("/api/v1/outcomes", **params)
         return [OutcomeRecord.model_validate(o) for o in data.get("outcomes", [])]
 
@@ -361,15 +364,104 @@ class HttpAdapter(AdapterABC):
         agent_id: str | None = None,
         outcome_type: str | None = None,
         limit: int = 100,
+        offset: int = 0,
+        cursor: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[DecisionTrace]:
-        data = self._get(
-            "/api/v1/traces",
+        """One page of traces. The server caps a page at 1,000 rows; callers
+        that need more than that follow cursors (see :meth:`_iter_traces`)."""
+        data = self.list_traces_page(
             entity_path=entity_path,
             agent_id=agent_id,
             outcome_type=outcome_type,
             limit=limit,
+            offset=offset,
+            cursor=cursor,
+            since=since,
+            until=until,
         )
-        return [DecisionTrace.model_validate(t) for t in data.get("traces", [])]
+        return data[0]
+
+    def list_traces_page(
+        self,
+        *,
+        entity_path: str | None = None,
+        agent_id: str | None = None,
+        outcome_type: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        cursor: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> tuple[list[DecisionTrace], str | None, bool]:
+        """``(traces, next_cursor, has_more)`` straight from the server's page."""
+        params: dict[str, Any] = {
+            "entity_path": entity_path,
+            "agent_id": agent_id,
+            "outcome_type": outcome_type,
+            "limit": limit,
+        }
+        if cursor:
+            params["cursor"] = cursor
+        elif offset:
+            params["offset"] = offset
+        # The window is applied by the server's query, not to the page after
+        # the fact: filtering a page here would empty it whenever the window
+        # excludes the newest traces, and the cursor walk in _iter_traces
+        # stops on an empty page — so older matches would never be reached.
+        if since is not None:
+            params["since"] = since.isoformat()
+        if until is not None:
+            params["until"] = until.isoformat()
+        data = self._get("/api/v1/traces", **params)
+        traces = [DecisionTrace.model_validate(t) for t in data.get("traces", [])]
+        return traces, data.get("next_cursor"), bool(data.get("has_more", False))
+
+    def _iter_traces(self, *, max_rows: int, **filters: Any) -> list[DecisionTrace]:
+        """Follow cursors until *max_rows* traces have been read or the list ends."""
+        out: list[DecisionTrace] = []
+        cursor: str | None = None
+        while len(out) < max_rows:
+            page, cursor, has_more = self.list_traces_page(
+                limit=min(1000, max_rows - len(out)), cursor=cursor, **filters
+            )
+            out.extend(page)
+            if not has_more or not cursor or not page:
+                break
+        return out
+
+    def count_traces(
+        self,
+        *,
+        entity_path: str | None = None,
+        agent_id: str | None = None,
+        outcome_type: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> int:
+        from amfs_core.pagination import max_scan_rows
+
+        return len(
+            self._iter_traces(
+                max_rows=max_scan_rows(),
+                entity_path=entity_path,
+                agent_id=agent_id,
+                outcome_type=outcome_type,
+                since=since,
+                until=until,
+            )
+        )
+
+    def trace_read_counts(self, agent_id: str) -> dict[str, dict[str, int]]:
+        from amfs_core.pagination import max_scan_rows
+
+        counts: dict[str, dict[str, int]] = {}
+        for t in self._iter_traces(max_rows=max_scan_rows(), agent_id=agent_id):
+            for ce in t.causal_entries:
+                per_entity = counts.setdefault(ce.entity_path, {})
+                per_entity[ce.key] = per_entity.get(ce.key, 0) + 1
+        return counts
 
     def save_trace(self, trace: DecisionTrace) -> DecisionTrace:
         data = self._post("/api/v1/traces", trace.model_dump(mode="json"))
@@ -559,6 +651,9 @@ class HttpAdapter(AdapterABC):
         event_type: str | None = None,
         since: datetime | None = None,
         limit: int = 100,
+        offset: int = 0,
+        cursor: str | None = None,
+        until: datetime | None = None,
     ) -> list[Event]:
         params: dict[str, Any] = {"limit": limit}
         if branch:
@@ -567,8 +662,18 @@ class HttpAdapter(AdapterABC):
             params["event_type"] = event_type
         if since:
             params["since"] = since.isoformat()
+        if until:
+            params["until"] = until.isoformat()
+        if cursor:
+            params["cursor"] = cursor
+        elif offset:
+            params["offset"] = offset
         data = self._get(f"/api/v1/agents/{agent_id}/timeline", **params)
-        return [Event.model_validate(e) for e in data.get("events", [])]
+        events = [Event.model_validate(e) for e in data.get("events", [])]
+        if until is not None:
+            # Older servers ignore the parameter; keep the bound exact locally.
+            events = [e for e in events if e.created_at < until]
+        return events
 
     def upsert_graph_edge(
         self,

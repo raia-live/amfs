@@ -1407,8 +1407,12 @@ class AgentMemory:
         agent_id: str | None = None,
         outcome_type: str | None = None,
         limit: int = 100,
+        offset: int = 0,
+        cursor: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[DecisionTrace]:
-        """Browse persisted decision traces from past sessions.
+        """Browse persisted decision traces from past sessions, newest first.
 
         Each trace is the full causal chain a committed outcome snapshotted:
         the reads, external contexts, recorded actions, and the outcome itself.
@@ -1419,6 +1423,13 @@ class AgentMemory:
             agent_id: Only traces committed by this agent.
             outcome_type: Filter by outcome (e.g. "success", "failure").
             limit: Maximum traces to return (default 100).
+            offset: Rows to skip; honoured only when no cursor is given.
+            cursor: Opaque keyset position from a previous page — pass
+                ``amfs_core.pagination.encode_cursor(last.created_at, last.id)``
+                (or the ``next_cursor`` an HTTP page returned) to get the
+                traces strictly older than the last one seen.
+            since: Only traces created at or after this time.
+            until: Only traces created before this time.
 
         Returns an empty list on adapters without trace persistence (e.g. the
         default filesystem adapter) — traces live in Postgres or the hosted API.
@@ -1428,6 +1439,10 @@ class AgentMemory:
             agent_id=agent_id,
             outcome_type=outcome_type,
             limit=limit,
+            offset=offset,
+            cursor=cursor,
+            since=since,
+            until=until,
         )
 
     def get_trace(self, trace_id: str) -> DecisionTrace | None:
@@ -1598,20 +1613,14 @@ class AgentMemory:
             # {'deploy-agent': [{'entity_path': 'checkout-service', 'key': 'retry-pattern', 'read_count': 3}]}
         """
         entries = self.list()
-        traces = self._adapter.list_traces(agent_id=self.agent_id, limit=10000)
 
         entry_authors: dict[str, str] = {}
         for e in entries:
             entry_authors[f"{e.entity_path}/{e.key}"] = e.provenance.agent_id
 
-        read_entities: dict[str, dict[str, int]] = {}
-        for t in traces:
-            for ce in t.causal_entries:
-                ep = ce.entity_path
-                key = ce.key
-                if ep not in read_entities:
-                    read_entities[ep] = {}
-                read_entities[ep][key] = read_entities[ep].get(key, 0) + 1
+        # Aggregated by the adapter (in SQL on Postgres) instead of pulling up
+        # to 10,000 full traces here to tally their causal_entries.
+        read_entities = self._adapter.trace_read_counts(self.agent_id)
 
         cross_reads: dict[str, list[dict[str, Any]]] = {}
         for ep, keys in read_entities.items():

@@ -7,8 +7,16 @@ export type { AgentMemoryOptions, SearchOptions, MemoryStats } from "./memory.js
 export type { AmfsAdapter, WatchHandle } from "./adapter.js";
 export { createWatchHandle } from "./adapter.js";
 export { InMemoryAdapter } from "./adapters/filesystem.js";
-export { HttpAdapter } from "./adapters/http.js";
-export type { HttpAdapterOptions, DecisionTrace, DecisionTraceSummary } from "./adapters/http.js";
+export { HttpAdapter, toDecisionTrace, toDecisionTracePage } from "./adapters/http.js";
+export type {
+  HttpAdapterOptions,
+  DecisionTrace,
+  DecisionTraceSummary,
+  DecisionTracePage,
+  ListTracesOptions,
+  ToolCall,
+  SessionMetadata,
+} from "./adapters/http.js";
 export { CausalTagger, CoWEngine } from "./engine.js";
 export { ReadTracker } from "./tracker.js";
 export type { ExternalContext } from "./tracker.js";

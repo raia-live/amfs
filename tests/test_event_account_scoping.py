@@ -95,6 +95,13 @@ class TestTheTimelineStaysScoped:
         """These return whole event rows rather than counts, so the same
         omission would disclose another account's agent names and summaries."""
         body = _method(SYNC, method)
+        if "_event_conditions(" in body:
+            # The WHERE clause is built by a helper shared with the async adapter;
+            # the filter has to be in there, and the method has to pass the account.
+            assert "account_id=self._get_current_account_id()" in body, (
+                f"{method} does not pass the current account to _event_conditions"
+            )
+            body += _method(SYNC, "_event_conditions")
         assert "account_id = %s" in body, (
             f"{method} reads amfs_events without an account filter"
         )

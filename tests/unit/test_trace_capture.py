@@ -543,5 +543,8 @@ def test_the_postgres_read_queries_select_the_capture_columns() -> None:
 
     for fn in (pg.PostgresAdapter.get_trace, pg.PostgresAdapter.list_traces):
         source = inspect.getsource(fn)
+        if "_TRACE_COLUMNS" in source:
+            # The SELECT list lives in a shared class constant; check that instead.
+            source += pg.PostgresAdapter._TRACE_COLUMNS
         assert "task_input" in source, f"{fn.__name__} does not select task_input"
         assert "response_text" in source, f"{fn.__name__} does not select response_text"

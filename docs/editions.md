@@ -407,7 +407,8 @@ recorder = TraceRecorder(memory, store, account_id=acct.id)
 recorder.memory.read("svc", "retry-pattern")
 recorder.memory.record_context("pagerduty", "3 SEV-1", source="PagerDuty API")
 
-# Record LLM calls for token/cost tracking
+# Record LLM calls for token/cost tracking (Pro: amfs_traces / amfs_record_llm_call;
+# the OSS MCP server does not expose this tool)
 recorder.record_llm_call(
     model="gpt-4o", provider="openai",
     prompt_tokens=1200, completion_tokens=450,
@@ -564,9 +565,13 @@ Extends the OSS MCP server with additional tools:
 | `amfs_retrain` | Train the learned ranking model from outcome data |
 | `amfs_calibrate` | Learn optimal confidence multipliers from outcome history |
 | `amfs_export_training_data` | Export decision traces as SFT/DPO/reward model datasets |
-| `amfs_record_llm_call` | Record an LLM call with model, tokens, cost, and latency |
+| `amfs_record_llm_call` | Record an LLM call with model, tokens, cost, and latency. **Pro only** — not registered by the OSS MCP server |
 | `amfs_graph_path` | Find shortest trust-weighted path between two entities in the knowledge graph |
 | `amfs_graph_query` | Flexible graph edge search by relation, entity type, or confidence range |
+
+### Agent evaluation surfaces (Pro, hosted only)
+
+Pro adds an evaluation layer on top of sealed traces: LLM **judges** (versioned rubrics with sampling, budgets and dry runs), **verdicts** with evidence, **behaviors** mined from or authored against traces, **incidents** when a behavior breaks from baseline, blast-radius and dimension **segmentation**, **attribution** of failures to the memory entries that caused them, a **fix loop** that hands a coding agent a reproduction-and-tests payload, and an **investigator** that answers questions across runs. All of it runs on the hosted `/api/v1/eval` service and is reached three ways — the Pro MCP server's `amfs_judge_*` / `amfs_verdicts` / `amfs_behavior*` / `amfs_incident` / `amfs_propose_fix` / `amfs_investigate` tools (which refuse with `"mode": "local"` without `AMFS_HTTP_URL`), the private `amfs_pro` Python client (`ProClient` / `AsyncProClient`, dist `amfs-sdk-pro`), and the `amfs-pro` CLI (`eval`, `behaviors`, `incidents`, `fixes`, `cases`, `traces`, `investigate`; `--json` everywhere, `--fail-on-fail` for CI). None of these are in the OSS SDKs; the column map lives in [SDK ↔ MCP Parity]({{ site.baseurl }}/reference/sdk-mcp-parity/#agent-evaluation-pro-hosted-only).
 
 ---
 

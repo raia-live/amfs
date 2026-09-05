@@ -2285,7 +2285,10 @@ def _http_api_call(method: str, path: str, *, params: dict | None = None, body: 
             resp = httpx.get(f"{base_url}{path}", params=params, headers=headers, timeout=30.0)
         else:
             resp = httpx.post(f"{base_url}{path}", params=params, json=body or {}, headers=headers, timeout=30.0)
-        if resp.status_code == 200:
+        if 200 <= resp.status_code < 300:
+            # 201 Created / 202 Accepted are success too; 204 has no body.
+            if resp.status_code == 204 or not resp.content:
+                return json.dumps({})
             return json.dumps(resp.json(), default=str)
         return json.dumps({"error": f"API returned {resp.status_code}", "detail": resp.text})
     except ImportError:

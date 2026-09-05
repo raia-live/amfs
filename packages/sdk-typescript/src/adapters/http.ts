@@ -51,6 +51,12 @@ export class HttpAdapter implements AmfsAdapter {
     path: string,
     init?: RequestInit
   ): Promise<T> {
+    const raw = await this.fetchRaw(path, init);
+    return convertKeys(raw) as T;
+  }
+
+  /** Like `fetch` but returns the server's JSON untouched (snake_case keys). */
+  private async fetchRaw(path: string, init?: RequestInit): Promise<unknown> {
     const resp = await globalThis.fetch(`${this.baseUrl}${path}`, {
       ...init,
       headers: { ...this.headers, ...(init?.headers as Record<string, string>) },
@@ -59,8 +65,7 @@ export class HttpAdapter implements AmfsAdapter {
       const body = await resp.text().catch(() => "");
       throw new Error(`AMFS API ${resp.status}: ${body}`);
     }
-    const raw = await resp.json();
-    return convertKeys(raw) as T;
+    return resp.json();
   }
 
   read(
@@ -296,28 +301,46 @@ export class HttpAdapter implements AmfsAdapter {
     });
   }
 
-  async listTracesAsync(options?: {
-    entityPath?: string;
-    agentId?: string;
-    outcomeType?: string;
-    limit?: number;
-  }): Promise<DecisionTraceSummary[]> {
+  /**
+   * One page of decision traces, newest first, exactly as the server pages them.
+   *
+   * Mirrors GET /api/v1/traces: pass `cursor` (the previous page's `nextCursor`)
+   * to continue; `offset` is honoured only when no cursor is given. `since`
+   * (inclusive) and `until` (exclusive) are sent to the server and bound the
+   * query itself, so a window that excludes the newest traces still returns
+   * the older matches rather than an empty first page.
+   */
+  async listTracesPageAsync(options?: ListTracesOptions): Promise<DecisionTracePage> {
     const params = new URLSearchParams();
     if (options?.entityPath) params.set("entity_path", options.entityPath);
     if (options?.agentId) params.set("agent_id", options.agentId);
     if (options?.outcomeType) params.set("outcome_type", options.outcomeType);
     if (options?.limit) params.set("limit", String(options.limit));
+    if (options?.cursor) params.set("cursor", options.cursor);
+    else if (options?.offset) params.set("offset", String(options.offset));
+    const since = toIsoString(options?.since);
+    const until = toIsoString(options?.until);
+    if (since) params.set("since", since);
+    if (until) params.set("until", until);
     const qs = params.toString();
-    const data = await this.fetch<{ traces: DecisionTraceSummary[] } | DecisionTraceSummary[]>(
-      `/api/v1/traces${qs ? `?${qs}` : ""}`
-    );
-    if (Array.isArray(data)) return data;
-    return data.traces ?? [];
+    const raw = await this.fetchRaw(`/api/v1/traces${qs ? `?${qs}` : ""}`);
+    return toDecisionTracePage(raw);
+  }
+
+  /**
+   * Decision traces as a flat array. Accepts the same paging options as
+   * {@link listTracesPageAsync}; use that method when you need `nextCursor` /
+   * `hasMore` to walk beyond one page.
+   */
+  async listTracesAsync(options?: ListTracesOptions): Promise<DecisionTraceSummary[]> {
+    const page = await this.listTracesPageAsync(options);
+    return page.traces;
   }
 
   async getTraceAsync(traceId: string): Promise<DecisionTrace | null> {
     try {
-      return await this.fetch<DecisionTrace>(`/api/v1/traces/${encodeURIComponent(traceId)}`);
+      const raw = await this.fetchRaw(`/api/v1/traces/${encodeURIComponent(traceId)}`);
+      return toDecisionTrace(raw);
     } catch {
       return null;
     }
@@ -449,6 +472,55 @@ export interface DecisionTraceSummary {
   createdAt: string;
 }
 
+/** Filters and paging for GET /api/v1/traces. */
+export interface ListTracesOptions {
+  entityPath?: string;
+  agentId?: string;
+  outcomeType?: string;
+  limit?: number;
+  /** Rows to skip; honoured only when no `cursor` is given. */
+  offset?: number;
+  /** Opaque keyset position — the `nextCursor` of the previous page. */
+  cursor?: string;
+  /** Only traces created at or after this instant (ISO-8601 string or Date). */
+  since?: string | Date;
+  /** Only traces created before this instant (ISO-8601 string or Date). */
+  until?: string | Date;
+}
+
+/** One page of GET /api/v1/traces. Follow `nextCursor` while `hasMore` is true. */
+export interface DecisionTracePage {
+  traces: DecisionTraceSummary[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+/**
+ * An action the agent recorded during the session (`amfs_record_action`).
+ * `arguments` is passed through exactly as stored — its keys are the caller's,
+ * not the API's, so they are not converted to camelCase.
+ */
+export interface ToolCall {
+  toolName: string;
+  arguments: Record<string, unknown>;
+  resultSummary: string;
+  resultHash: string;
+  startedAt?: string;
+  durationMs: number;
+  source?: string | null;
+  success: boolean;
+}
+
+/** Which model, client and toolset produced the session's decisions. */
+export interface SessionMetadata {
+  model?: string | null;
+  clientName?: string | null;
+  platform?: string | null;
+  toolsAvailable: string[];
+  mcpClientId?: string | null;
+  mcpSessionId?: string | null;
+}
+
 export interface DecisionTrace {
   id: string;
   agentId: string;
@@ -456,6 +528,13 @@ export interface DecisionTrace {
   outcomeRef: string;
   outcomeType: string;
   decisionSummary?: string;
+  /** The request that started the work, as it arrived (may be redacted). */
+  taskInput?: string | null;
+  /** The agent's answer, when it was captured. */
+  responseText?: string | null;
+  /** Actions the agent recorded; empty for read/write-only sessions. */
+  toolCalls: ToolCall[];
+  sessionMetadata?: SessionMetadata | null;
   causalEntries: Array<{
     entityPath: string;
     key: string;
@@ -494,4 +573,90 @@ export interface DecisionTrace {
   sessionEndedAt?: string;
   sessionDurationMs?: number;
   createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Trace mappers (snake_case wire → camelCase SDK types)
+// ---------------------------------------------------------------------------
+
+type Raw = Record<string, unknown>;
+
+function asRecord(value: unknown): Raw {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Raw)
+    : {};
+}
+
+function toToolCall(raw: unknown): ToolCall {
+  const r = asRecord(raw);
+  return {
+    toolName: String(r.tool_name ?? ""),
+    // Caller-owned keys: never camelCased.
+    arguments: asRecord(r.arguments),
+    resultSummary: String(r.result_summary ?? ""),
+    resultHash: String(r.result_hash ?? ""),
+    startedAt: typeof r.started_at === "string" ? r.started_at : undefined,
+    durationMs: typeof r.duration_ms === "number" ? r.duration_ms : 0,
+    source: (r.source as string | null | undefined) ?? null,
+    success: r.success !== false,
+  };
+}
+
+function toSessionMetadata(raw: unknown): SessionMetadata | null {
+  if (raw === null || raw === undefined) return null;
+  const r = asRecord(raw);
+  return {
+    model: (r.model as string | null | undefined) ?? null,
+    clientName: (r.client_name as string | null | undefined) ?? null,
+    platform: (r.platform as string | null | undefined) ?? null,
+    toolsAvailable: Array.isArray(r.tools_available) ? r.tools_available.map(String) : [],
+    mcpClientId: (r.mcp_client_id as string | null | undefined) ?? null,
+    mcpSessionId: (r.mcp_session_id as string | null | undefined) ?? null,
+  };
+}
+
+/**
+ * Map a raw (snake_case) trace from the server to a `DecisionTrace`.
+ *
+ * The bulk of the object goes through the generic key converter, as before;
+ * the fields the converter would get wrong are set explicitly afterwards:
+ * `toolCalls[].arguments` must keep the caller's own keys, and
+ * `taskInput` / `responseText` / `sessionMetadata` must exist (null, not
+ * undefined) so consumers can distinguish "not captured" from "old server".
+ */
+export function toDecisionTrace(raw: unknown): DecisionTrace {
+  const r = asRecord(raw);
+  const converted = convertKeys(r) as Raw;
+  const toolCalls = Array.isArray(r.tool_calls) ? r.tool_calls.map(toToolCall) : [];
+  return {
+    ...(converted as unknown as DecisionTrace),
+    taskInput: (r.task_input as string | null | undefined) ?? null,
+    responseText: (r.response_text as string | null | undefined) ?? null,
+    toolCalls,
+    sessionMetadata: toSessionMetadata(r.session_metadata),
+  };
+}
+
+/** ISO-8601 for a query parameter; `undefined` when absent or unparseable. */
+function toIsoString(value: string | Date | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? undefined : value.toISOString();
+  return Number.isNaN(Date.parse(value)) ? undefined : value;
+}
+
+/** Map a raw GET /api/v1/traces body (new page shape or legacy array) to a page. */
+export function toDecisionTracePage(raw: unknown): DecisionTracePage {
+  const rows: unknown[] = Array.isArray(raw)
+    ? raw
+    : Array.isArray(asRecord(raw).traces)
+      ? (asRecord(raw).traces as unknown[])
+      : [];
+  const body = Array.isArray(raw) ? {} : asRecord(raw);
+  const traces = rows.map((t) => toDecisionTrace(t) as unknown as DecisionTraceSummary);
+
+  return {
+    traces,
+    nextCursor: typeof body.next_cursor === "string" ? body.next_cursor : null,
+    hasMore: body.has_more === true,
+  };
 }
