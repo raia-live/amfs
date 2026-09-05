@@ -860,7 +860,7 @@ Paginated list endpoints return the existing list key plus `next_cursor` (opaque
 
 | Method | Path | Description |
 |:-------|:-----|:------------|
-| `GET` | `/api/v1/traces` | List decision traces (supports `?outcome_type=`, `?agent_id=`, `?entity_path=`, `?limit=`, `?offset=`, `?cursor=`). Returns `traces`, `next_cursor`, `has_more` |
+| `GET` | `/api/v1/traces` | List decision traces (supports `?outcome_type=`, `?agent_id=`, `?entity_path=`, `?limit=`, `?offset=`, `?cursor=`, `?since=` (inclusive), `?until=` (exclusive), ISO-8601). Returns `traces`, `next_cursor`, `has_more` |
 | `GET` | `/api/v1/traces/{trace_id}` | Get full trace detail with causal entries, external contexts, query/error events, state diff |
 
 ### Observability
