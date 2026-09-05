@@ -406,17 +406,16 @@ class HttpAdapter(AdapterABC):
             params["cursor"] = cursor
         elif offset:
             params["offset"] = offset
-        # since/until are not query parameters on the server; applied here
-        # so the contract matches the other adapters.
+        # The window is applied by the server's query, not to the page after
+        # the fact: filtering a page here would empty it whenever the window
+        # excludes the newest traces, and the cursor walk in _iter_traces
+        # stops on an empty page — so older matches would never be reached.
+        if since is not None:
+            params["since"] = since.isoformat()
+        if until is not None:
+            params["until"] = until.isoformat()
         data = self._get("/api/v1/traces", **params)
         traces = [DecisionTrace.model_validate(t) for t in data.get("traces", [])]
-        if since is not None or until is not None:
-            traces = [
-                t
-                for t in traces
-                if (since is None or t.created_at >= since)
-                and (until is None or t.created_at < until)
-            ]
         return traces, data.get("next_cursor"), bool(data.get("has_more", False))
 
     def _iter_traces(self, *, max_rows: int, **filters: Any) -> list[DecisionTrace]:

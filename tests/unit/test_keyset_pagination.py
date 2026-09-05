@@ -470,6 +470,25 @@ class TestTracesRoute:
         assert client.get("/api/v1/traces", params={"limit": 50_000}).status_code == 200
         assert adapter.calls[-1][1]["limit"] == MAX_PAGE_SIZE + 1
 
+    def test_since_until_bound_the_query_not_the_page(self, monkeypatch):
+        # A window that excludes the newest traces must still return the older
+        # matches on the first page. Filtering the page after the fact would
+        # return [] here and stop any cursor walk before reaching OUT-1/OUT-2.
+        adapter = _FakeAdapter(traces=[_trace(i) for i in range(7)])
+        client = _client(monkeypatch, adapter)
+        r = client.get(
+            "/api/v1/traces",
+            params={
+                "limit": 2,
+                "since": (T0 + timedelta(minutes=1)).isoformat(),
+                "until": (T0 + timedelta(minutes=3)).isoformat(),  # exclusive
+            },
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert [t["outcome_ref"] for t in body["traces"]] == ["OUT-2", "OUT-1"]
+        assert body["has_more"] is False
+
 
 class TestTimelineRoute:
     def test_pages_with_cursor(self, monkeypatch):

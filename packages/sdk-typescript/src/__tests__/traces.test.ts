@@ -141,22 +141,33 @@ describe("toDecisionTracePage", () => {
     expect(page.hasMore).toBe(false);
   });
 
-  it("applies since/until to createdAt client-side", () => {
+  it("keeps every row the server returned — the window is the server's job", () => {
     const older = { ...RAW_TRACE, id: "old", created_at: "2026-08-01T00:00:00Z" };
     const newer = { ...RAW_TRACE, id: "new", created_at: "2026-09-05T00:01:00Z" };
     const body = { traces: [newer, older], next_cursor: null, has_more: false };
-
-    expect(toDecisionTracePage(body, { since: "2026-09-01T00:00:00Z" }).traces.map((t) => t.id))
-      .toEqual(["new"]);
-    expect(toDecisionTracePage(body, { until: new Date("2026-09-01T00:00:00Z") }).traces.map((t) => t.id))
-      .toEqual(["old"]);
-    // until is exclusive
-    expect(toDecisionTracePage(body, { until: "2026-09-05T00:01:00Z" }).traces.map((t) => t.id))
-      .toEqual(["old"]);
+    expect(toDecisionTracePage(body).traces.map((t) => t.id)).toEqual(["new", "old"]);
   });
 });
 
 describe("HttpAdapter traces", () => {
+  it("sends since/until as query parameters instead of filtering the page", async () => {
+    // A window that excludes the newest traces must reach the server: filtering
+    // the returned page would empty it and stop a cursor walk before the older
+    // matches were ever read.
+    const older = { ...RAW_TRACE, id: "old", created_at: "2026-08-01T00:00:00Z" };
+    const { calls } = mockFetch([{ body: { traces: [older], next_cursor: null, has_more: false } }]);
+    const adapter = new HttpAdapter({ url: "https://api.test" });
+    const page = await adapter.listTracesPageAsync({
+      since: "2026-07-01T00:00:00Z",
+      until: new Date("2026-09-01T00:00:00Z"),
+    });
+    expect(page.traces.map((t) => t.id)).toEqual(["old"]);
+    expect(Object.fromEntries(new URL(calls[0].url).searchParams)).toEqual({
+      since: "2026-07-01T00:00:00Z",
+      until: "2026-09-01T00:00:00.000Z",
+    });
+  });
+
   it("listTracesPageAsync sends filters + cursor and returns page metadata", async () => {
     const { calls } = mockFetch([
       { body: { traces: [RAW_TRACE], next_cursor: "cur-2", has_more: true } },

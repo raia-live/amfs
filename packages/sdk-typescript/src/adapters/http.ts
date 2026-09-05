@@ -305,10 +305,10 @@ export class HttpAdapter implements AmfsAdapter {
    * One page of decision traces, newest first, exactly as the server pages them.
    *
    * Mirrors GET /api/v1/traces: pass `cursor` (the previous page's `nextCursor`)
-   * to continue; `offset` is honoured only when no cursor is given. `since` and
-   * `until` are not server-side parameters — like the Python HttpAdapter, they
-   * are applied here to the page's `createdAt`, so a filtered page may hold fewer
-   * than `limit` rows while `hasMore` still reports the server's view.
+   * to continue; `offset` is honoured only when no cursor is given. `since`
+   * (inclusive) and `until` (exclusive) are sent to the server and bound the
+   * query itself, so a window that excludes the newest traces still returns
+   * the older matches rather than an empty first page.
    */
   async listTracesPageAsync(options?: ListTracesOptions): Promise<DecisionTracePage> {
     const params = new URLSearchParams();
@@ -318,9 +318,13 @@ export class HttpAdapter implements AmfsAdapter {
     if (options?.limit) params.set("limit", String(options.limit));
     if (options?.cursor) params.set("cursor", options.cursor);
     else if (options?.offset) params.set("offset", String(options.offset));
+    const since = toIsoString(options?.since);
+    const until = toIsoString(options?.until);
+    if (since) params.set("since", since);
+    if (until) params.set("until", until);
     const qs = params.toString();
     const raw = await this.fetchRaw(`/api/v1/traces${qs ? `?${qs}` : ""}`);
-    return toDecisionTracePage(raw, options);
+    return toDecisionTracePage(raw);
   }
 
   /**
@@ -633,36 +637,22 @@ export function toDecisionTrace(raw: unknown): DecisionTrace {
   };
 }
 
-function toInstant(value: string | Date | undefined): number | undefined {
+/** ISO-8601 for a query parameter; `undefined` when absent or unparseable. */
+function toIsoString(value: string | Date | undefined): string | undefined {
   if (value === undefined) return undefined;
-  const ms = value instanceof Date ? value.getTime() : Date.parse(value);
-  return Number.isNaN(ms) ? undefined : ms;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? undefined : value.toISOString();
+  return Number.isNaN(Date.parse(value)) ? undefined : value;
 }
 
 /** Map a raw GET /api/v1/traces body (new page shape or legacy array) to a page. */
-export function toDecisionTracePage(
-  raw: unknown,
-  options?: Pick<ListTracesOptions, "since" | "until">
-): DecisionTracePage {
+export function toDecisionTracePage(raw: unknown): DecisionTracePage {
   const rows: unknown[] = Array.isArray(raw)
     ? raw
     : Array.isArray(asRecord(raw).traces)
       ? (asRecord(raw).traces as unknown[])
       : [];
   const body = Array.isArray(raw) ? {} : asRecord(raw);
-  let traces = rows.map((t) => toDecisionTrace(t) as unknown as DecisionTraceSummary);
-
-  const since = toInstant(options?.since);
-  const until = toInstant(options?.until);
-  if (since !== undefined || until !== undefined) {
-    traces = traces.filter((t) => {
-      const created = Date.parse(t.createdAt);
-      if (Number.isNaN(created)) return true;
-      if (since !== undefined && created < since) return false;
-      if (until !== undefined && created >= until) return false;
-      return true;
-    });
-  }
+  const traces = rows.map((t) => toDecisionTrace(t) as unknown as DecisionTraceSummary);
 
   return {
     traces,

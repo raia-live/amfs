@@ -2614,6 +2614,8 @@ async def list_traces(
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     cursor: str | None = Query(None),
+    since: datetime | None = Query(None),
+    until: datetime | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Decision traces, newest first, keyset-paginated.
@@ -2622,6 +2624,10 @@ async def list_traces(
     only when no cursor is given. The page's cursor points at the last row
     read, so a caller whose visibility hides some agents still advances past
     them rather than seeing the same rows again.
+
+    ``since`` (inclusive) and ``until`` (exclusive) bound ``created_at`` in
+    the query itself, so a window that excludes the newest traces still
+    returns the older matches instead of an empty first page.
     """
     limit = clamp_limit(limit)
     page = await _list_traces_page(
@@ -2631,6 +2637,8 @@ async def list_traces(
         limit=limit,
         offset=offset,
         cursor=_check_cursor(cursor),
+        since=since,
+        until=until,
     )
     traces = page.items
     allowed = _visible_agent_ids(request)
