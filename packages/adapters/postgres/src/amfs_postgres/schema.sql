@@ -470,6 +470,19 @@ BEGIN
             AFTER INSERT ON amfs_outcomes
             FOR EACH ROW EXECUTE FUNCTION amfs_propagate_outcome();
     END IF;
+EXCEPTION WHEN duplicate_object THEN
+    -- Another process got there between the check and the CREATE, which the
+    -- drop-then-create pair tolerated by construction and a bare check does
+    -- not. Containers start in parallel and each applies this file, so the
+    -- window is reached in practice on a database being bootstrapped: both see
+    -- no trigger, the second blocks on the first's lock, and inherits an
+    -- already-existing trigger the moment it is granted.
+    --
+    -- Swallowing it is the whole point. _apply_schema retries only errors
+    -- mentioning a lock or a deadlock, so this one would propagate and leave
+    -- that container unable to boot -- and the outcome it is complaining about
+    -- is the one wanted anyway: the trigger exists.
+    NULL;
 END $$;
 
 -- LISTEN/NOTIFY trigger: notify on new entry writes for watch()
@@ -507,6 +520,9 @@ BEGIN
             AFTER INSERT ON amfs_memory_entries
             FOR EACH ROW EXECUTE FUNCTION amfs_notify_write();
     END IF;
+EXCEPTION WHEN duplicate_object THEN
+    -- Concurrent bootstrap; see trg_propagate_outcome.
+    NULL;
 END $$;
 
 -- Compiled digests table (Memory Cortex)
@@ -553,6 +569,9 @@ BEGIN
             AFTER INSERT OR UPDATE ON amfs_digests
             FOR EACH ROW EXECUTE FUNCTION amfs_notify_digest();
     END IF;
+EXCEPTION WHEN duplicate_object THEN
+    -- Concurrent bootstrap; see trg_propagate_outcome.
+    NULL;
 END $$;
 
 -- ──────────────────────────────────────────────────────────────────────
