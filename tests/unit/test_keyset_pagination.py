@@ -489,6 +489,25 @@ class TestTracesRoute:
         assert [t["outcome_ref"] for t in body["traces"]] == ["OUT-2", "OUT-1"]
         assert body["has_more"] is False
 
+    def test_naive_since_until_are_taken_as_utc(self, monkeypatch):
+        # Stored timestamps are aware; a naive query value must not reach the
+        # adapter's comparison naive (TypeError) or be read in the session
+        # timezone. Same window as above, written without an offset.
+        adapter = _FakeAdapter(traces=[_trace(i) for i in range(7)])
+        client = _client(monkeypatch, adapter)
+        r = client.get(
+            "/api/v1/traces",
+            params={"since": "2026-01-01T00:01:00", "until": "2026-01-01T00:03:00"},
+        )
+        assert r.status_code == 200
+        assert [t["outcome_ref"] for t in r.json()["traces"]] == ["OUT-2", "OUT-1"]
+
+    def test_bad_timestamp_is_a_400(self, monkeypatch):
+        client = _client(monkeypatch, _FakeAdapter())
+        r = client.get("/api/v1/traces", params={"since": "yesterday"})
+        assert r.status_code == 400
+        assert "timestamp" in r.json()["detail"].lower()
+
 
 class TestTimelineRoute:
     def test_pages_with_cursor(self, monkeypatch):
