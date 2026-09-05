@@ -6,14 +6,34 @@ import type { AmfsAdapter } from "./adapter.js";
 import type { MemoryEntry, Provenance } from "./models.js";
 import { ReadTracker } from "./tracker.js";
 
+type WebCrypto = {
+  getRandomValues<T extends ArrayBufferView>(array: T): T;
+};
+
+/**
+ * Mirrors the Python engine (`sess-` + 8 hex chars from a CSPRNG). Uses the
+ * Web Crypto API, which is a global in browsers and in Node.js >= 19, so the
+ * SDK stays runtime-agnostic without depending on `node:crypto` types.
+ */
+function newSessionId(): string {
+  const webCrypto = (globalThis as { crypto?: WebCrypto }).crypto;
+  if (!webCrypto?.getRandomValues) {
+    throw new Error(
+      "AMFS: Web Crypto API is unavailable in this runtime; pass an explicit sessionId to CausalTagger"
+    );
+  }
+  const bytes = webCrypto.getRandomValues(new Uint8Array(4));
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `sess-${hex}`;
+}
+
 export class CausalTagger {
   readonly agentId: string;
   readonly sessionId: string;
 
   constructor(agentId: string, sessionId?: string) {
     this.agentId = agentId;
-    this.sessionId =
-      sessionId ?? `sess-${Math.random().toString(36).substring(2, 10)}`;
+    this.sessionId = sessionId ?? newSessionId();
   }
 
   tag(patternRefs: string[] = []): Provenance {
