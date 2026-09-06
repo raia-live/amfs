@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 import math
 import threading
+import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -65,6 +66,135 @@ def _get_sdk_executor() -> ThreadPoolExecutor:
                     max_workers=1, thread_name_prefix="amfs-sdk-bg"
                 )
     return _sdk_bg_executor
+
+
+# ---------------------------------------------------------------------------
+# Session metadata extras: the attribute bag and the LLM-call list a session
+# collects for its trace. Both travel in ``DecisionTrace.session_metadata``
+# under the keys below, which is what the server lifts into the sealed trace.
+# ---------------------------------------------------------------------------
+
+SESSION_ATTRIBUTES_KEY = "attributes"
+SESSION_LLM_CALLS_KEY = "llm_calls"
+
+#: Attributes are dimensions to filter and group traces by (customer, task
+#: type, ...). They are indexed server-side, so the bag is kept small and flat.
+SESSION_ATTRIBUTES_MAX_KEYS = 20
+SESSION_ATTRIBUTE_KEY_MAX_LEN = 64
+SESSION_ATTRIBUTE_VALUE_MAX_LEN = 256
+
+_ATTRIBUTE_SCALARS = (str, int, float, bool)
+
+
+def _check_attribute_count(attributes: dict[str, Any], what: str = "session attributes") -> None:
+    """``ValueError`` when *attributes* holds more than ``SESSION_ATTRIBUTES_MAX_KEYS``.
+
+    Applied to each incoming bag and again to every merge (the session bag as
+    it grows, and the trace's bag of identity metadata + session bag + commit
+    attributes): a per-call check alone lets three bags of 20 become one of 60.
+    """
+    if len(attributes) > SESSION_ATTRIBUTES_MAX_KEYS:
+        raise ValueError(
+            f"at most {SESSION_ATTRIBUTES_MAX_KEYS} {what} are allowed "
+            f"(got {len(attributes)})"
+        )
+
+
+def validate_session_attributes(attributes: Any) -> dict[str, str | int | float | bool]:
+    """The validated form of a session attribute bag, or ``ValueError``.
+
+    Keys are stripped and lowercased (the server indexes them that way, so two
+    spellings of one dimension would otherwise never group together). Values
+    must be ``str``, ``int``, ``float`` or ``bool``; at most
+    ``SESSION_ATTRIBUTES_MAX_KEYS`` keys, each at most
+    ``SESSION_ATTRIBUTE_KEY_MAX_LEN`` characters, string values at most
+    ``SESSION_ATTRIBUTE_VALUE_MAX_LEN``. Rejected rather than trimmed: this is a
+    developer-facing API, and a silently shortened customer id is worse than an
+    error at the call site.
+    """
+    if attributes is None:
+        return {}
+    if not isinstance(attributes, dict):
+        raise TypeError("attributes must be a dict of scalar values")
+    _check_attribute_count(attributes)
+    out: dict[str, str | int | float | bool] = {}
+    for raw_key, value in attributes.items():
+        key = str(raw_key).strip().lower()
+        if not key:
+            raise ValueError("attribute keys must be non-empty strings")
+        if len(key) > SESSION_ATTRIBUTE_KEY_MAX_LEN:
+            raise ValueError(
+                f"attribute key {key[:20]!r}... exceeds {SESSION_ATTRIBUTE_KEY_MAX_LEN} characters"
+            )
+        if not isinstance(value, _ATTRIBUTE_SCALARS):
+            raise TypeError(
+                f"attribute {key!r} must be str, int, float or bool, "
+                f"not {type(value).__name__}"
+            )
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            raise ValueError(f"attribute {key!r} must be a finite number")
+        if isinstance(value, str) and len(value) > SESSION_ATTRIBUTE_VALUE_MAX_LEN:
+            raise ValueError(
+                f"attribute {key!r} exceeds {SESSION_ATTRIBUTE_VALUE_MAX_LEN} characters"
+            )
+        out[key] = value
+    return out
+
+
+def _normalize_llm_call(call: Any) -> dict[str, Any] | None:
+    """A JSON-safe LLM call record in the shape the trace pipeline reads
+    (``call_id``, ``model``, ``provider``, ``input_tokens``, ``output_tokens``,
+    ``cost_usd``, ``latency_ms``, ``started_at``), or ``None`` for an entry that
+    is not a usable call. Unknown keys are kept, so a richer client record
+    (cached tokens, finish reason, request id) travels intact."""
+    if not isinstance(call, dict):
+        return None
+    try:
+        input_tokens = int(call.get("input_tokens") or 0)
+        output_tokens = int(call.get("output_tokens") or 0)
+    except (TypeError, ValueError):
+        return None
+    model = call.get("model")
+    if not model and not input_tokens and not output_tokens:
+        return None
+    started_at = call.get("started_at")
+    if isinstance(started_at, datetime):
+        started_at = started_at.isoformat()
+    elif not isinstance(started_at, str) or not started_at:
+        started_at = datetime.now(UTC).isoformat()
+
+    def _num(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        return out if math.isfinite(out) else None
+
+    normalized: dict[str, Any] = {
+        **call,
+        "call_id": str(call.get("call_id") or uuid.uuid4()),
+        "model": str(model or ""),
+        "provider": str(call.get("provider") or ""),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cost_usd": _num(call.get("cost_usd")),
+        "latency_ms": _num(call.get("latency_ms")),
+        "started_at": started_at,
+    }
+    return normalized
+
+
+def _metadata_to_dict(meta: Any) -> dict[str, Any]:
+    """``session_metadata`` as a plain dict, extras included, whatever it is held as."""
+    if meta is None:
+        return {}
+    if hasattr(meta, "model_dump"):
+        return meta.model_dump(mode="json")
+    if isinstance(meta, dict):
+        return dict(meta)
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +307,10 @@ class AgentMemory:
         self._importance_evaluator = importance_evaluator
         self._branch = "main"
         self._session_metadata: SessionMetadata | None = None
+        # Buffered separately from ``_session_metadata`` — which callers (and the
+        # MCP server) reassign wholesale — and merged into it at commit time.
+        self._session_attributes: dict[str, str | int | float | bool] = {}
+        self._session_llm_calls: list[dict[str, Any]] = []
 
         self._lifecycle: LifecycleManager | None = None
         if ttl_sweep_interval is not None:
@@ -204,6 +338,16 @@ class AgentMemory:
     @session_metadata.setter
     def session_metadata(self, value: SessionMetadata | None) -> None:
         self._session_metadata = value
+
+    @property
+    def session_attributes(self) -> dict[str, str | int | float | bool]:
+        """The attribute bag the next ``commit_outcome`` will stamp on its trace."""
+        return dict(self._session_attributes)
+
+    @property
+    def session_llm_calls(self) -> list[dict[str, Any]]:
+        """The LLM calls recorded since the last ``commit_outcome``."""
+        return [dict(c) for c in self._session_llm_calls]
 
     @property
     def namespace(self) -> str:
@@ -1014,6 +1158,8 @@ class AgentMemory:
         task_input: str | None = None,
         response_text: str | None = None,
         tool_calls: list[dict[str, Any]] | None = None,
+        attributes: dict[str, Any] | None = None,
+        llm_calls: list[dict[str, Any]] | None = None,
     ) -> list[MemoryEntry]:
         """Record an outcome and back-propagate confidence changes.
 
@@ -1029,7 +1175,27 @@ class AgentMemory:
         to the session's own log, filled in by ``record_action``; pass a list to
         supply them directly, which is what the HTTP server does when relaying a
         remote client's actions.
+
+        *attributes* are merged over the bag built by ``set_session_attributes``
+        and stored in ``session_metadata["attributes"]`` — the dimensions the
+        trace can later be filtered and grouped by. *llm_calls* are appended to
+        the calls recorded with ``record_llm_call`` and stored in
+        ``session_metadata["llm_calls"]``; like *tool_calls*, the explicit form
+        exists for a server relaying a remote client's session. Both buffers are
+        cleared once the trace is built.
         """
+        # Validated first so a bad bag fails before anything is written.
+        commit_attributes = validate_session_attributes(attributes)
+        explicit_calls = [
+            c for c in (_normalize_llm_call(lc) for lc in (llm_calls or [])) if c is not None
+        ]
+        # Built here, before the record leaves for the adapter: the server seals
+        # its trace from the outcome call, so the bag has to travel on it. This
+        # is also where the merged bag (session metadata + set_session_attributes
+        # + *attributes*) is checked against the key cap, so an oversized merge
+        # raises before anything is sent.
+        session_metadata = self._session_metadata_for_trace(commit_attributes, explicit_calls)
+
         if causal_entry_keys is None:
             causal_entry_keys = self._read_tracker.causal_keys
 
@@ -1068,6 +1234,7 @@ class AgentMemory:
             task_input=task_input,
             response_text=response_text,
             tool_calls=tool_calls,
+            session_metadata=_metadata_to_dict(session_metadata) or None,
         )
         updated = self._propagator.propagate(record)
 
@@ -1159,7 +1326,7 @@ class AgentMemory:
             causal_entries=causal_trace_entries,
             external_contexts=ext_contexts,
             query_events=query_events,
-            session_metadata=self._session_metadata,
+            session_metadata=session_metadata,
             session_started_at=session_started,
             session_ended_at=now,
             session_duration_ms=session_duration,
@@ -1207,7 +1374,143 @@ class AgentMemory:
         # reinforces them again, and the trace's duration keeps growing from
         # process start rather than describing the work it covers.
         self._read_tracker.clear()
+        self._session_attributes = {}
+        self._session_llm_calls = []
         return updated
+
+    def _session_metadata_for_trace(
+        self,
+        commit_attributes: dict[str, Any],
+        explicit_calls: list[dict[str, Any]],
+    ) -> SessionMetadata | None:
+        """The metadata the trace carries: the session's own, with the attribute
+        bag and LLM calls merged in under ``attributes`` / ``llm_calls``.
+
+        Built from a dump of the current metadata so extras already on it — a
+        span tree a Pro recorder placed there, say — are kept, and so the trace
+        holds its own instance rather than the one the session keeps mutating.
+        ``None`` stays ``None`` when there is nothing to add.
+
+        Raises ``ValueError`` when the merged bag exceeds
+        ``SESSION_ATTRIBUTES_MAX_KEYS``: each source is capped on its own, so
+        only the merge can tell whether the trace's bag is within the limit.
+        """
+        data = _metadata_to_dict(self._session_metadata)
+        existing_attrs = data.get(SESSION_ATTRIBUTES_KEY)
+        attributes = {
+            **(existing_attrs if isinstance(existing_attrs, dict) else {}),
+            **self._session_attributes,
+            **commit_attributes,
+        }
+        _check_attribute_count(attributes, "the merged session attributes")
+        existing_calls = data.get(SESSION_LLM_CALLS_KEY)
+        llm_calls = [
+            *(existing_calls if isinstance(existing_calls, list) else []),
+            *self._session_llm_calls,
+            *explicit_calls,
+        ]
+        if attributes:
+            data[SESSION_ATTRIBUTES_KEY] = attributes
+        else:
+            data.pop(SESSION_ATTRIBUTES_KEY, None)
+        if llm_calls:
+            data[SESSION_LLM_CALLS_KEY] = llm_calls
+        else:
+            data.pop(SESSION_LLM_CALLS_KEY, None)
+        if not data:
+            return None
+        try:
+            return SessionMetadata(**data)
+        except (TypeError, ValidationError):
+            logger.debug("session metadata could not be rebuilt; sending it as-is", exc_info=True)
+            return self._session_metadata
+
+    def set_session_attributes(
+        self, attributes: dict[str, Any]
+    ) -> dict[str, str | int | float | bool]:
+        """Merge *attributes* into the bag the next ``commit_outcome`` stamps on
+        its trace (``session_metadata["attributes"]``). Returns the bag as it
+        now stands.
+
+        Attributes are the dimensions a run is later filtered and grouped by —
+        ``customer``, ``task_type``, ``environment``. Scalars only (``str``,
+        ``int``, ``float``, ``bool``), at most 20 keys of up to 64 characters,
+        string values up to 256 characters; anything else raises. Keys are
+        lowercased. The bag is cleared when the trace is committed.
+
+        The key cap applies to the bag as merged, not to each call: a merge that
+        would take it past 20 keys raises ``ValueError`` and leaves the bag as
+        it was.
+
+        Example::
+
+            mem.set_session_attributes({"customer": "acme", "task_type": "deploy"})
+        """
+        validated = validate_session_attributes(attributes)
+        merged = {**self._session_attributes, **validated}
+        _check_attribute_count(merged, "the session attribute bag")
+        self._session_attributes = merged
+        return dict(self._session_attributes)
+
+    def record_llm_call(
+        self,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        *,
+        cost_usd: float | None = None,
+        latency_ms: float | None = None,
+        provider: str | None = None,
+        call_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Record one LLM call for the trace the next ``commit_outcome`` builds.
+
+        Token counts and cost are only ever known if the agent reports them, so
+        this is what makes a trace's duration, token and cost figures real
+        rather than blank. Stored in ``session_metadata["llm_calls"]`` as::
+
+            {"call_id", "model", "provider", "input_tokens", "output_tokens",
+             "cost_usd", "latency_ms", "started_at"}
+
+        Returns the record as stored. Cleared when the trace is committed.
+
+        Example::
+
+            resp = client.chat.completions.create(...)
+            mem.record_llm_call(
+                resp.model, resp.usage.prompt_tokens, resp.usage.completion_tokens,
+                provider="openai", latency_ms=412.0,
+            )
+        """
+        if not isinstance(model, str) or not model:
+            raise ValueError("model must be a non-empty string")
+        try:
+            in_tokens = int(input_tokens)
+            out_tokens = int(output_tokens)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("input_tokens and output_tokens must be integers") from exc
+        if in_tokens < 0 or out_tokens < 0:
+            raise ValueError("token counts must be non-negative")
+        for label, value in (("cost_usd", cost_usd), ("latency_ms", latency_ms)):
+            if value is not None and (
+                not isinstance(value, (int, float)) or isinstance(value, bool)
+                or not math.isfinite(float(value)) or value < 0
+            ):
+                raise ValueError(f"{label} must be a non-negative number or None")
+        record = _normalize_llm_call({
+            "call_id": call_id,
+            "model": model,
+            "provider": provider or "",
+            "input_tokens": in_tokens,
+            "output_tokens": out_tokens,
+            "cost_usd": cost_usd,
+            "latency_ms": latency_ms,
+            "started_at": datetime.now(UTC),
+        })
+        if record is None:  # pragma: no cover - a named model always normalises
+            raise ValueError("could not build an LLM call record")
+        self._session_llm_calls.append(record)
+        return dict(record)
 
     def _materialize_causal_edges(
         self,

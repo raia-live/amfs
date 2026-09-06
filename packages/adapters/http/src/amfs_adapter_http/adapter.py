@@ -213,6 +213,12 @@ class HttpAdapter(AdapterABC):
             body["response_text"] = record.response_text
         if record.tool_calls:
             body["tool_calls"] = record.tool_calls
+        # Same story for the session's attribute bag and LLM calls: the server
+        # reads ``session_metadata.attributes`` / ``.llm_calls`` from this body
+        # when it seals, so a bag sent only with the trace never reached the
+        # sealed copy.
+        if record.session_metadata:
+            body["session_metadata"] = record.session_metadata
         data = self._post("/api/v1/outcomes", body)
         return [_parse_entry(e) for e in data.get("entries", [])]
 

@@ -234,6 +234,11 @@ export class HttpAdapter implements AmfsAdapter {
     causalEntryKeys?: string[];
     causalConfidence?: number;
     agentId?: string;
+    /**
+     * Already in wire shape (`attributes`, `llm_calls`, ...); the server lifts
+     * these onto the trace it seals for this outcome.
+     */
+    sessionMetadata?: Record<string, unknown>;
   }): Promise<unknown> {
     const agentId = record.agentId ?? this.agentId;
     return this.fetch("/api/v1/outcomes", {
@@ -245,6 +250,9 @@ export class HttpAdapter implements AmfsAdapter {
         ...(record.causalEntryKeys?.length ? { causal_entry_keys: record.causalEntryKeys } : {}),
         ...(record.causalConfidence != null ? { causal_confidence: record.causalConfidence } : {}),
         ...(agentId ? { agent_id: agentId } : {}),
+        ...(record.sessionMetadata && Object.keys(record.sessionMetadata).length
+          ? { session_metadata: record.sessionMetadata }
+          : {}),
       }),
     });
   }
@@ -519,6 +527,10 @@ export interface SessionMetadata {
   toolsAvailable: string[];
   mcpClientId?: string | null;
   mcpSessionId?: string | null;
+  /** The run's dimensions (`customer`, `task_type`, ...), when any were set. */
+  attributes: Record<string, string | number | boolean>;
+  /** LLM calls recorded for the run, in wire shape (snake_case keys). */
+  llmCalls: Array<Record<string, unknown>>;
 }
 
 export interface DecisionTrace {
@@ -612,7 +624,18 @@ function toSessionMetadata(raw: unknown): SessionMetadata | null {
     toolsAvailable: Array.isArray(r.tools_available) ? r.tools_available.map(String) : [],
     mcpClientId: (r.mcp_client_id as string | null | undefined) ?? null,
     mcpSessionId: (r.mcp_session_id as string | null | undefined) ?? null,
+    attributes: toAttributeBag(r.attributes),
+    // Caller-owned records: keys stay as the wire has them.
+    llmCalls: Array.isArray(r.llm_calls) ? r.llm_calls.map(asRecord) : [],
   };
+}
+
+function toAttributeBag(raw: unknown): Record<string, string | number | boolean> {
+  const out: Record<string, string | number | boolean> = {};
+  for (const [k, v] of Object.entries(asRecord(raw))) {
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") out[k] = v;
+  }
+  return out;
 }
 
 /**

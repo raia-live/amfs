@@ -16,6 +16,13 @@ import { CausalTagger, CoWEngine } from "./engine.js";
 import type { AMFSConfig, Commit, MemoryEntry, RecallConfig, ScopeInfo, ScoredEntry } from "./models.js";
 import { OutcomeType } from "./models.js";
 import { OutcomeBackPropagator } from "./outcome.js";
+import {
+  buildSessionMetadata,
+  SESSION_ATTRIBUTES_MAX_KEYS,
+  toLlmCallRecord,
+  validateSessionAttributes,
+} from "./session.js";
+import type { LlmCallRecord, RecordLlmCallInput, SessionAttributes } from "./session.js";
 import { ReadTracker } from "./tracker.js";
 
 export interface AgentMemoryOptions {
@@ -57,6 +64,9 @@ export class AgentMemory {
 
   private engine: CoWEngine;
   private propagator: OutcomeBackPropagator;
+  /** Cleared when an outcome is committed; see {@link setSessionAttributes}. */
+  private _sessionAttributes: SessionAttributes = {};
+  private _sessionLlmCalls: LlmCallRecord[] = [];
 
   constructor(agentId: string, options?: AgentMemoryOptions) {
     const config = options?.config ?? defaultConfig();
@@ -394,7 +404,7 @@ export class AgentMemory {
     outcomeRef: string,
     outcomeType: OutcomeType,
     causalEntryKeys?: string[],
-    options?: { causalConfidence?: number }
+    options?: { causalConfidence?: number; attributes?: SessionAttributes }
   ): MemoryEntry[] {
     const keys = causalEntryKeys ?? this.readTracker.causalKeys;
     const record = OutcomeBackPropagator.makeRecord(
@@ -404,7 +414,73 @@ export class AgentMemory {
       this.agentId,
       { causalConfidence: options?.causalConfidence }
     );
+    // Local adapters propagate confidence but build no trace, so the session
+    // bag has nowhere to go here; it is still validated and consumed so the
+    // next run starts clean, as on the HTTP path.
+    if (options?.attributes) this.setSessionAttributes(options.attributes);
+    this.resetSessionMetadata();
     return this.propagator.propagate(record);
+  }
+
+  // ------------------------------------------------------------------
+  // Session metadata — attributes and LLM calls for the next trace
+  // ------------------------------------------------------------------
+
+  /**
+   * Merge `attributes` into the bag the next committed outcome stamps on its
+   * trace (`session_metadata.attributes`); returns the bag as it now stands.
+   *
+   * Attributes are the dimensions a run is later filtered and grouped by —
+   * `customer`, `task_type`, `environment`. Scalars only (string, number,
+   * boolean), at most 20 keys of up to 64 characters, string values up to 256
+   * characters; anything else throws. Keys are lowercased. Cleared when the
+   * outcome is committed.
+   *
+   * The key cap applies to the bag as merged, not to each call: a merge that
+   * would take it past 20 keys throws a `RangeError` and leaves the bag as it
+   * was.
+   */
+  setSessionAttributes(attributes: SessionAttributes): SessionAttributes {
+    const merged = { ...this._sessionAttributes, ...validateSessionAttributes(attributes) };
+    const size = Object.keys(merged).length;
+    if (size > SESSION_ATTRIBUTES_MAX_KEYS) {
+      throw new RangeError(
+        `at most ${SESSION_ATTRIBUTES_MAX_KEYS} session attributes are allowed (the bag would hold ${size})`,
+      );
+    }
+    this._sessionAttributes = merged;
+    return { ...this._sessionAttributes };
+  }
+
+  /** The attribute bag waiting for the next commit. */
+  get sessionAttributes(): SessionAttributes {
+    return { ...this._sessionAttributes };
+  }
+
+  /**
+   * Record one LLM call for the trace the next committed outcome builds.
+   *
+   * Token counts and cost are only ever known if the agent reports them, so
+   * this is what makes a trace's token and cost figures real rather than
+   * blank. `instrumentOpenAI` / `instrumentAnthropic` call this for you.
+   * Stored in `session_metadata.llm_calls` as
+   * `{call_id, model, provider, input_tokens, output_tokens, cost_usd, latency_ms, started_at}`.
+   * Returns the record as stored. Cleared when the outcome is committed.
+   */
+  recordLlmCall(call: RecordLlmCallInput, startedAt?: Date): LlmCallRecord {
+    const record = toLlmCallRecord(call, startedAt);
+    this._sessionLlmCalls.push(record);
+    return { ...record };
+  }
+
+  /** The LLM calls waiting for the next commit. */
+  get sessionLlmCalls(): LlmCallRecord[] {
+    return this._sessionLlmCalls.map((c) => ({ ...c }));
+  }
+
+  private resetSessionMetadata(): void {
+    this._sessionAttributes = {};
+    this._sessionLlmCalls = [];
   }
 
   // ------------------------------------------------------------------
@@ -620,21 +696,39 @@ export class AgentMemory {
     return this.requireHttp("briefingAsync").briefingAsync(options);
   }
 
-  /** Commit an outcome remotely, snapshotting the session's causal chain. */
+  /**
+   * Commit an outcome remotely, snapshotting the session's causal chain.
+   *
+   * The session's attributes (from {@link setSessionAttributes} and
+   * `options.attributes`) and recorded LLM calls travel as `session_metadata`
+   * and are cleared once the server has accepted them, so each commit
+   * describes one run. A refused commit — a 422 for a bad bag, a 5xx — leaves
+   * them in place: the run still happened, and a retry should carry them.
+   */
   async commitOutcomeAsync(
     outcomeRef: string,
     outcomeType: OutcomeType,
-    options?: { entityPath?: string; causalEntryKeys?: string[]; causalConfidence?: number }
+    options?: {
+      entityPath?: string;
+      causalEntryKeys?: string[];
+      causalConfidence?: number;
+      attributes?: SessionAttributes;
+    }
   ): Promise<unknown> {
     const keys = options?.causalEntryKeys ?? this.readTracker.causalKeys;
-    return this.requireHttp("commitOutcomeAsync").commitOutcomeAsync({
+    if (options?.attributes) this.setSessionAttributes(options.attributes);
+    const sessionMetadata = buildSessionMetadata(this._sessionAttributes, this._sessionLlmCalls);
+    const result = await this.requireHttp("commitOutcomeAsync").commitOutcomeAsync({
       outcomeRef,
       outcomeType: String(outcomeType),
       entityPath: options?.entityPath,
       causalEntryKeys: keys,
       causalConfidence: options?.causalConfidence,
       agentId: this.agentId,
+      sessionMetadata,
     });
+    this.resetSessionMetadata();
+    return result;
   }
 
   /** Version history of a key from the remote server. */

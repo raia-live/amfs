@@ -13,10 +13,19 @@
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {},
+  "peerDependencies": {
+    "openai": ">=4.0.0",
+    "@anthropic-ai/sdk": ">=0.20.0"
+  },
+  "peerDependenciesMeta": {
+    "openai": { "optional": true },
+    "@anthropic-ai/sdk": { "optional": true }
+  },
   "devDependencies": {
     "typescript": "^5.4",
     "vitest": "^3.1"

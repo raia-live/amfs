@@ -48,6 +48,45 @@ AMFS exposes memory three ways: the **MCP server** (for agents), the **Python SD
 | Timeline | `amfs_timeline` | `timeline` | `timelineAsync` |
 | List traces | `amfs_list_traces` | `list_traces` (cursor / since / until) | `listTracesAsync`, `listTracesPageAsync` (`{traces, nextCursor, hasMore}`) |
 | Get trace | `amfs_get_trace` | `get_trace` | `getTraceAsync` |
+| Session attributes on the trace | `amfs_set_trace_attributes` (Pro) | `set_session_attributes`, `commit_outcome(attributes=...)` | `setSessionAttributes`, `commitOutcome(..., {attributes})`, `commitOutcomeAsync(..., {attributes})` |
+| Record an LLM call by hand | `amfs_record_llm_call` (Pro) | `record_llm_call` | `recordLlmCall` |
+| Record LLM calls automatically | — | `amfs_pro.tracing.instrument_openai` / `instrument_anthropic` / `instrument_litellm` (Pro) | `instrumentOpenAI`, `instrumentAnthropic` |
+
+### Capturing runs for the Behavior section
+
+The dashboard's Behavior section shows, per run, a duration, a span tree, token counts, a cost and the attributes the run can be grouped by. None of that exists unless the SDK sends it: a trace committed by an uninstrumented agent reaches the server flat — blank duration, no spans, no attributes, and a cost it cannot know. What each figure needs:
+
+| Figure | Captured | How |
+|:--|:--|:--|
+| Session duration (`session_started_at` / `session_ended_at` / `session_duration_ms`) | **Automatically** | Every `commit_outcome` / `commitOutcomeAsync` — the session starts at the first memory operation. |
+| Memory operations as spans (reads, writes, `record_action`, `record_context`) | **Automatically inside `trace_session`** (Python, Pro) | `with trace_session(mem): ...` — the recorder mirrors the memory's own operations as `memory_read` / `memory_write` / `tool` / `context` spans under a `session` root, so even a run that records nothing else gets a real tree and duration. The Pro MCP server does the same for MCP agents. |
+| LLM calls — model, tokens, latency | **One line** | Python (Pro): `client = instrument_openai(OpenAI())` / `instrument_anthropic(Anthropic())` / `instrument_litellm()`. TypeScript: `const openai = instrumentOpenAI(new OpenAI(), memory)` / `instrumentAnthropic(client, memory)`. Sync, async and streaming calls are all recorded; an instrumentation failure never breaks the call. Any other provider: `record_llm_call(model, input_tokens, output_tokens, ...)` / `memory.recordLlmCall({...})`. |
+| Cost | **Only when LLM calls are recorded** | The Python instrumentation estimates `cost_usd` from a small price table (`AMFS_LLM_PRICE_TABLE` overrides it; LiteLLM's registry is used when `litellm` is already imported); a model it cannot price records `None`. The TypeScript SDK records tokens and leaves `cost_usd` null unless you pass `costUsd`. A run with no recorded LLM calls has an **unknown** cost, shown as a dash — never `$0.00`. |
+| Your own steps (`plan`, `pagerduty.list_incidents`, ...) | **By the developer** (Python, Pro) | `with span("plan", kind="agent"):` / `@traced("fetch", kind="tool")`; exceptions mark the span `error` and propagate. Payloads are redacted and capped at 32 000 characters (`AMFS_SPAN_PAYLOAD_MAX_CHARS`). |
+| Attributes (`customer`, `task_type`, `environment`, ...) | **By the developer** | `trace_session(mem, attributes={...})`, `mem.set_session_attributes({...})`, `mem.commit_outcome(..., attributes={...})`; TS: `memory.setSessionAttributes({...})` or `commitOutcomeAsync(..., { attributes })`. Scalars only, at most 20 keys of up to 64 characters, string values up to 256 characters; keys are lowercased. `source`, `model`, `client` and `outcome_type` are reserved and stamped by the server. |
+
+```python
+from amfs import AgentMemory
+from amfs_core.models import OutcomeType
+from amfs_pro.tracing import trace_session, span, instrument_openai
+
+client = instrument_openai(OpenAI())
+with trace_session(mem, attributes={"customer": "acme", "task_type": "deploy"}):
+    with span("plan", kind="agent"):
+        plan = client.chat.completions.create(model="gpt-4o-mini", messages=[...])
+    with span("pagerduty.list_incidents", kind="tool", input={"service": "checkout"}) as s:
+        s.set_output(incidents)
+    mem.commit_outcome("deploy-42", OutcomeType.SUCCESS, task_input="roll back checkout")
+```
+
+```ts
+const openai = instrumentOpenAI(new OpenAI(), memory);
+memory.setSessionAttributes({ customer: "acme", task_type: "deploy" });
+const r = await openai.chat.completions.create({ model: "gpt-4o-mini", messages });
+await memory.commitOutcomeAsync("deploy-42", OutcomeType.SUCCESS);
+```
+
+Everything travels in `DecisionTrace.session_metadata` — `attributes` (a flat bag), `llm_calls` (`{call_id, model, provider, input_tokens, output_tokens, cost_usd, latency_ms, started_at}`) and, from `amfs_pro.tracing`, `spans` — and the server lifts those keys onto the sealed trace. OSS keeps only the generic parts: the two `AgentMemory` methods, the `attributes` argument, and the TypeScript instrumentation; cost estimation, span trees and the Python instrumentation are `amfs-sdk-pro`. Inspect the result with `amfs-pro traces show <trace_id>` or `amfs-pro traces search --agent X --attr customer=acme`.
 
 ### Spans & trace navigation (Pro)
 
@@ -55,12 +94,13 @@ These ship in the **Pro MCP server** (`amfs-mcp-server-pro`) only. The recording
 
 | Capability | MCP tool (Pro) | Python SDK | TypeScript SDK |
 |:--|:--|:--|:--|
-| Record a completed span | `amfs_record_span` | `SpanRecorder.record_span` (`amfs_traces`) | — |
-| Open / close a span | `amfs_start_span` / `amfs_end_span` | `SpanRecorder.start_span` / `end_span`, `with recorder.span(...)` | — |
-| Trace attribute bag | `amfs_set_trace_attributes` | `SpanRecorder.set_attributes` | — |
-| Record an LLM call (also emits an `llm` span) | `amfs_record_llm_call` | `SpanRecorder.record_llm_call` | — |
-| Search traces by content, attributes, span name/kind, errors | `amfs_trace_search` | — (HTTP `POST /api/v1/pro/traces/search`) | — |
-| Span tree with text outline | `amfs_trace_spans` | — (HTTP `GET /api/v1/pro/traces/{id}/spans`) | — |
+| Trace one run (root `session` span, memory ops mirrored as child spans) | — (the Pro MCP server does this per session) | `amfs_pro.tracing.trace_session(mem, attributes=...)` | — |
+| Record a completed span | `amfs_record_span` | `SessionRecorder.record_span` (`amfs_pro.tracing`), `SpanRecorder.record_span` (`amfs_traces`) | — |
+| Open / close a span | `amfs_start_span` / `amfs_end_span` | `with span("plan", kind="agent")`, `@traced(name, kind)` (`amfs_pro.tracing`); `SpanRecorder.start_span` / `end_span` | — |
+| Trace attribute bag | `amfs_set_trace_attributes` | `trace_session(..., attributes=)`, `session.set_attributes`; OSS `set_session_attributes` | `setSessionAttributes` (OSS) |
+| Record an LLM call (also emits an `llm` span) | `amfs_record_llm_call` | `amfs_pro.tracing.record_llm_call`, `instrument_openai` / `instrument_anthropic` / `instrument_litellm`; OSS `record_llm_call` (no span) | `recordLlmCall`, `instrumentOpenAI` / `instrumentAnthropic` (OSS, no span) |
+| Search traces by content, attributes, span name/kind, errors | `amfs_trace_search` | `ProClient.traces.search(attributes=..., span_kind=...)`; CLI `amfs-pro traces search --agent X --attr customer=acme` | — |
+| Span tree with text outline | `amfs_trace_spans` | `ProClient.traces.spans`; CLI `amfs-pro traces show <trace_id>` | — |
 | One span's input/output payloads | `amfs_span_payload` | — (HTTP `GET /api/v1/pro/traces/{id}/spans/{span_id}`) | — |
 | Compare two traces span by span | `amfs_trace_compare` | — (HTTP `POST /api/v1/pro/traces/compare`) | — |
 
@@ -97,7 +137,7 @@ Judges, verdicts, behaviors, incidents, the fix loop and the investigator are **
 | Regression cases | — | `eval.cases.sets` / `.create_set` / `.get_set` / `.cases` / `.run` (inline or queued) / `.get_run` / `.runs` / `.compare` | `cases run <set_id> --label [--since --compare-to --fail-on-fail]` |
 | Investigate a question across runs | `amfs_investigate` (non-streaming) | `eval.investigate`, `eval.investigate_stream` (SSE events) | `investigate <agent> "<question>" [--trace --max-steps --no-stream]` (streams steps) |
 | Alerts | `amfs_alerts` | `eval.alerts.list` / `.ack` / `.mute` / `.rules` | — |
-| Sealed traces | `amfs_trace_search`, `amfs_trace_spans`, `amfs_span_payload`, `amfs_trace_compare` | `traces.search` / `.iter_search` / `.get` / `.spans` / `.span` / `.compare` / `.otlp_export` | `traces search [--query --agent --since --until --has-error --outcome --limit --cursor]` |
+| Sealed traces | `amfs_trace_search`, `amfs_trace_spans`, `amfs_span_payload`, `amfs_trace_compare` | `traces.search` / `.iter_search` / `.get` / `.spans` / `.span` / `.compare` / `.otlp_export` | `traces search [--query --agent --attr key=value --span-name --span-kind --since --until --has-error --outcome --limit --cursor]`, `traces show <trace_id>` (span tree with durations, tokens, cost, attributes; unknown cost and duration print as `—`) |
 
 Where the Python SDK column above says "—", the same routes are reachable by any HTTP client with the `X-AMFS-API-Key` header; the `amfs_pro` client is the supported wrapper.
 
@@ -115,7 +155,7 @@ These MCP tools are **not** mirrored 1:1 in the SDKs, by design. They are either
 |:--|:--|:--|
 | `amfs_consolidate`, `amfs_consolidation_status/proposals/candidates` | Pro (HTTP-proxied) | Backed by the Cortex consolidation API, not the OSS adapter ABC. The TypeScript `HttpAdapter` exposes `consolidation*Async` passthroughs; the Python SDK reaches them via the HTTP API directly. See the caveat below. |
 | `amfs_export_training_data` | Pro (HTTP-proxied) | Calls `GET /api/v1/pro/export`. Exposed on the TS `HttpAdapter` as `exportTrainingDataAsync`; Python calls the endpoint directly. |
-| `amfs_record_span`, `amfs_start_span`, `amfs_end_span`, `amfs_set_trace_attributes`, `amfs_record_llm_call` | Pro (works locally and over HTTP) | Spans live on the Pro `ImmutableDecisionTrace`; the OSS `DecisionTrace` carries them only as `session_metadata` extras that the seal path lifts out. The Python side is the `amfs_traces.spans.SpanRecorder` in the private repo, not an `AgentMemory` method; the TS SDK has no span recorder yet. |
+| `amfs_record_span`, `amfs_start_span`, `amfs_end_span`, `amfs_set_trace_attributes`, `amfs_record_llm_call` | Pro (works locally and over HTTP) | Spans live on the Pro `ImmutableDecisionTrace`; the OSS `DecisionTrace` carries them only as `session_metadata` extras that the seal path lifts out. The Python side is `amfs_pro.tracing` (`trace_session`, `span`, `traced`, `record_llm_call`, `instrument_*`) in the private `amfs-sdk-pro` dist; OSS `AgentMemory` has only the generic `set_session_attributes` / `record_llm_call` / `commit_outcome(attributes=...)`. The TS SDK has `setSessionAttributes`, `recordLlmCall` and `instrumentOpenAI` / `instrumentAnthropic` but no span recorder. |
 | `amfs_trace_search`, `amfs_trace_spans`, `amfs_span_payload`, `amfs_trace_compare` | Pro (HTTP-proxied, local fallback) | Backed by the Pro traces API (`/api/v1/pro/traces/search`, `/{id}/spans`, `/{id}/spans/{span_id}`, `/compare`). The local fallback has no semantic search or paging and can only see traces the adapter persists plus the last one committed in-process. No SDK methods yet; call the endpoints through the `HttpAdapter`. |
 | `amfs_judge_trace`, `amfs_judge_define`, `amfs_judges`, `amfs_seed_starter_judges`, `amfs_verdicts`, `amfs_eval_summary`, `amfs_backfill`, `amfs_behaviors`, `amfs_behavior_define`, `amfs_behavior_from_trace`, `amfs_blast_radius`, `amfs_incident`, `amfs_segment`, `amfs_dimensions`, `amfs_attribute_failure`, `amfs_propose_fix`, `amfs_fixes`, `amfs_approve_fix_memory`, `amfs_investigate`, `amfs_alerts` | Pro (HTTP-proxied, **no local mode**) | Agent evaluation runs on the hosted `/api/v1/eval` service (LLM judges, budgets, behavior mining). Without `AMFS_HTTP_URL` the tools answer `{"mode": "local"}` and do nothing. The OSS SDKs have no methods for these; use the private `amfs_pro` client or the `amfs-pro` CLI (see *Agent evaluation* above). |
 | `amfs_room_*`, `amfs_negotiate_*` | Pro (rooms backend) | Multi-agent rooms/negotiation require the Pro rooms service. The TS SDK has `room*`/`negotiate*` methods; `amfs_negotiate_cancel` has **no OSS backend endpoint**, so it's not added as an SDK method (it would be a broken stub). |
