@@ -41,6 +41,11 @@ class OutcomeRequest(BaseModel):
     #: Already scanned by the client before they reach here, and scanned again on
     #: the way in, because this endpoint is reachable by anything with a key.
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    #: The client's session metadata. Only ``attributes`` (the trace's dimension
+    #: bag) and ``llm_calls`` (token/cost records) are read from it; a remote
+    #: client has no other way to get either onto the trace this commit builds,
+    #: since the trace is assembled here from the server's own handle.
+    session_metadata: dict[str, Any] | None = None
 
 
 class SearchRequest(BaseModel):

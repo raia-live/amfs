@@ -89,6 +89,8 @@ describe("toDecisionTrace", () => {
       toolsAvailable: ["amfs_write", "deploy_rollback"],
       mcpClientId: "c1",
       mcpSessionId: null,
+      attributes: {},
+      llmCalls: [],
     });
     // The rest still goes through the generic converter.
     expect(trace.causalEntries[0].entityPath).toBe("shop/checkout");

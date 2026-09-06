@@ -17,6 +17,20 @@ export type {
   ToolCall,
   SessionMetadata,
 } from "./adapters/http.js";
+export {
+  validateSessionAttributes,
+  SESSION_ATTRIBUTES_MAX_KEYS,
+  SESSION_ATTRIBUTE_KEY_MAX_LEN,
+  SESSION_ATTRIBUTE_VALUE_MAX_LEN,
+} from "./session.js";
+export type {
+  AttributeValue,
+  SessionAttributes,
+  RecordLlmCallInput,
+  LlmCallRecord,
+} from "./session.js";
+export { instrumentOpenAI, instrumentAnthropic } from "./instrument/index.js";
+export type { LlmCallSink } from "./instrument/index.js";
 export { CausalTagger, CoWEngine } from "./engine.js";
 export { ReadTracker } from "./tracker.js";
 export type { ExternalContext } from "./tracker.js";

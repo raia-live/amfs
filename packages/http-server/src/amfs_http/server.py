@@ -34,6 +34,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
+from amfs.memory import validate_session_attributes
 from pydantic import BaseModel, Field
 from amfs_core.aggregates import REUSE_CREDIT_K
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
@@ -2501,6 +2502,20 @@ async def commit_outcome(
             mem._adapter.ensure_agent(req.agent_id, mem.namespace)
         except Exception:
             pass
+    # The remote session's attribute bag and LLM calls, passed explicitly for
+    # the same reason ``tool_calls`` is: ``mem`` is shared, so nothing may be
+    # buffered on it between requests. Attributes are validated by
+    # ``commit_outcome``; a bad bag is a 422 here rather than a lost commit.
+    client_meta = req.session_metadata or {}
+    try:
+        client_attributes = validate_session_attributes(client_meta.get("attributes"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422, detail=f"session_metadata.attributes: {exc}"
+        ) from exc
+    client_llm_calls = client_meta.get("llm_calls")
+    if not isinstance(client_llm_calls, list):
+        client_llm_calls = []
     try:
         entries = mem.commit_outcome(
             req.outcome_ref,
@@ -2517,6 +2532,8 @@ async def commit_outcome(
             # requests, so letting this fall through to its tracker would attribute
             # whatever actions happen to be buffered there to this caller.
             tool_calls=req.tool_calls,
+            attributes=client_attributes or None,
+            llm_calls=client_llm_calls or None,
         )
     finally:
         if original_agent is not None:

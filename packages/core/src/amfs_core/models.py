@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class MemoryType(str, Enum):
@@ -649,7 +649,17 @@ class SessionMetadata(BaseModel):
     Captured once per session (typically via amfs_set_identity) and attached
     to the AgentProfile and DecisionTrace so every trace records which model,
     platform, and toolset produced the decisions.
+
+    Extra keys are kept and serialised. Session-scoped data the SDKs collect for
+    a trace — the ``attributes`` bag set by ``AgentMemory.set_session_attributes``
+    and the ``llm_calls`` list built by ``AgentMemory.record_llm_call`` — rides
+    here rather than as new fields on ``DecisionTrace``, and a subclass or
+    extension may add keys of its own. Without ``extra="allow"`` such keys were
+    dropped twice: once when a dict was validated into this model and again when
+    a trace was dumped for the HTTP adapter, which serialises by declared type.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     model: str | None = None
     client_name: str | None = None

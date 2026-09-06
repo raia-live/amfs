@@ -110,6 +110,11 @@ AMFS is GitHub for agent memory, split into two layers. The open-source core giv
 | Session-level causal explainability (`explain`) | Yes | Yes |
 | Enriched decision traces (query events, error events, state diff) | Yes | Yes |
 | Session timing and per-operation latency tracking | Yes | Yes |
+| Session attributes on traces (`set_session_attributes` / `setSessionAttributes`, `commit_outcome(attributes=...)`) | Yes | Yes |
+| Manual LLM call recording (`record_llm_call` / `recordLlmCall`) — tokens, cost, latency on the trace | Yes | Yes |
+| Automatic LLM call capture (`instrumentOpenAI` / `instrumentAnthropic`, TypeScript) | Yes | Yes |
+| Automatic LLM call capture with cost estimation and `llm` spans (`amfs_pro.tracing.instrument_openai` / `instrument_anthropic` / `instrument_litellm`, Python) | — | Yes |
+| Span tree per run (`trace_session`, `span()`, `@traced`; memory ops auto-mirrored as spans) | — | Yes |
 | Per-agent memory graph and activity timeline | Yes | Yes |
 | Composite recall scoring | Yes | Yes |
 | Multi-scope search | Yes | Yes |
@@ -390,6 +395,8 @@ The OSS `explain()` only works within the active session and captures enriched t
 - **Error events** — any errors during reads, writes, or tool calls
 - **State diff** — entries created, updated, and confidence changes during the session
 - **Full entry snapshots** — `value`, `memory_type`, and `written_by` captured at read time
+- **Session attributes** — `set_session_attributes({"customer": "acme"})` / `commit_outcome(..., attributes=...)` (TS: `setSessionAttributes`, `commitOutcome({attributes})`) stamp the dimensions a run is filtered and grouped by onto `session_metadata["attributes"]`
+- **LLM calls** — `record_llm_call(model, input_tokens, output_tokens, cost_usd=..., latency_ms=...)` (TS: `recordLlmCall`, or `instrumentOpenAI(client, memory)` / `instrumentAnthropic` to capture them automatically) fill `session_metadata["llm_calls"]`, which is the only way a trace gets real token and cost figures
 
 **Pro immutable traces** add:
 
@@ -397,6 +404,7 @@ The OSS `explain()` only works within the active session and captures enriched t
 - **LLM call spans** — model, provider, prompt/completion token counts, cost, latency, temperature, finish reason
 - **Write events, tool calls, agent interactions** — full record of every action
 - **Token and cost aggregates** — `total_llm_calls`, `total_tokens`, `total_cost_usd` per trace
+- **Span trees from the SDK** — `amfs_pro.tracing`: `trace_session(mem, attributes=...)` opens a root span and mirrors the memory's reads/writes/actions/contexts as child spans; `span()` / `@traced` add your own steps; `instrument_openai` / `instrument_anthropic` / `instrument_litellm` turn LLM calls into `llm` spans with estimated cost
 
 ```python
 from amfs_traces import TraceRecorder, InMemoryTraceStore
@@ -659,6 +667,7 @@ The Pro API layer wraps `AgentMemory` and `CoWEngine` with authentication, tenan
 | Enriched decision traces with error/query events and session timing | OSS |
 | Per-agent memory graph and activity timeline | OSS |
 | Immutable, cryptographically signed traces | **Pro** |
+| Session attributes and manually recorded LLM calls on traces | OSS |
 | LLM call span tracking with token/cost analytics | **Pro** |
 | OpenTelemetry export for existing observability stacks | **Pro** |
 | Auto entity/relationship extraction from traces | **Pro** |
