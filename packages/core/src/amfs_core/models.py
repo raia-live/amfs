@@ -261,6 +261,11 @@ class OutcomeRecord(BaseModel):
     #: Typed as plain dicts because ``ToolCall`` is declared further down this
     #: module; they are the ``model_dump`` of one.
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    #: The session's metadata as the trace will carry it — the ``attributes``
+    #: bag and ``llm_calls`` list merged in — carried here for the same reason:
+    #: the server seals from this call, and a bag that arrived only on the later
+    #: trace left the sealed copy with no attributes and no token or cost figures.
+    session_metadata: dict[str, Any] | None = None
 
 
 class TraceEntry(BaseModel):

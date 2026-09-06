@@ -86,6 +86,20 @@ SESSION_ATTRIBUTE_VALUE_MAX_LEN = 256
 _ATTRIBUTE_SCALARS = (str, int, float, bool)
 
 
+def _check_attribute_count(attributes: dict[str, Any], what: str = "session attributes") -> None:
+    """``ValueError`` when *attributes* holds more than ``SESSION_ATTRIBUTES_MAX_KEYS``.
+
+    Applied to each incoming bag and again to every merge (the session bag as
+    it grows, and the trace's bag of identity metadata + session bag + commit
+    attributes): a per-call check alone lets three bags of 20 become one of 60.
+    """
+    if len(attributes) > SESSION_ATTRIBUTES_MAX_KEYS:
+        raise ValueError(
+            f"at most {SESSION_ATTRIBUTES_MAX_KEYS} {what} are allowed "
+            f"(got {len(attributes)})"
+        )
+
+
 def validate_session_attributes(attributes: Any) -> dict[str, str | int | float | bool]:
     """The validated form of a session attribute bag, or ``ValueError``.
 
@@ -102,11 +116,7 @@ def validate_session_attributes(attributes: Any) -> dict[str, str | int | float 
         return {}
     if not isinstance(attributes, dict):
         raise TypeError("attributes must be a dict of scalar values")
-    if len(attributes) > SESSION_ATTRIBUTES_MAX_KEYS:
-        raise ValueError(
-            f"at most {SESSION_ATTRIBUTES_MAX_KEYS} session attributes are allowed "
-            f"(got {len(attributes)})"
-        )
+    _check_attribute_count(attributes)
     out: dict[str, str | int | float | bool] = {}
     for raw_key, value in attributes.items():
         key = str(raw_key).strip().lower()
@@ -1179,6 +1189,12 @@ class AgentMemory:
         explicit_calls = [
             c for c in (_normalize_llm_call(lc) for lc in (llm_calls or [])) if c is not None
         ]
+        # Built here, before the record leaves for the adapter: the server seals
+        # its trace from the outcome call, so the bag has to travel on it. This
+        # is also where the merged bag (session metadata + set_session_attributes
+        # + *attributes*) is checked against the key cap, so an oversized merge
+        # raises before anything is sent.
+        session_metadata = self._session_metadata_for_trace(commit_attributes, explicit_calls)
 
         if causal_entry_keys is None:
             causal_entry_keys = self._read_tracker.causal_keys
@@ -1218,6 +1234,7 @@ class AgentMemory:
             task_input=task_input,
             response_text=response_text,
             tool_calls=tool_calls,
+            session_metadata=_metadata_to_dict(session_metadata) or None,
         )
         updated = self._propagator.propagate(record)
 
@@ -1292,8 +1309,6 @@ class AgentMemory:
             entries_created=sum(1 for w in writes if w.get("is_new")),
             entries_updated=sum(1 for w in writes if not w.get("is_new")),
         )
-
-        session_metadata = self._session_metadata_for_trace(commit_attributes, explicit_calls)
 
         trace = DecisionTrace(
             agent_id=self.agent_id,
@@ -1375,6 +1390,10 @@ class AgentMemory:
         span tree a Pro recorder placed there, say — are kept, and so the trace
         holds its own instance rather than the one the session keeps mutating.
         ``None`` stays ``None`` when there is nothing to add.
+
+        Raises ``ValueError`` when the merged bag exceeds
+        ``SESSION_ATTRIBUTES_MAX_KEYS``: each source is capped on its own, so
+        only the merge can tell whether the trace's bag is within the limit.
         """
         data = _metadata_to_dict(self._session_metadata)
         existing_attrs = data.get(SESSION_ATTRIBUTES_KEY)
@@ -1383,6 +1402,7 @@ class AgentMemory:
             **self._session_attributes,
             **commit_attributes,
         }
+        _check_attribute_count(attributes, "the merged session attributes")
         existing_calls = data.get(SESSION_LLM_CALLS_KEY)
         llm_calls = [
             *(existing_calls if isinstance(existing_calls, list) else []),
@@ -1418,12 +1438,18 @@ class AgentMemory:
         string values up to 256 characters; anything else raises. Keys are
         lowercased. The bag is cleared when the trace is committed.
 
+        The key cap applies to the bag as merged, not to each call: a merge that
+        would take it past 20 keys raises ``ValueError`` and leaves the bag as
+        it was.
+
         Example::
 
             mem.set_session_attributes({"customer": "acme", "task_type": "deploy"})
         """
         validated = validate_session_attributes(attributes)
-        self._session_attributes.update(validated)
+        merged = {**self._session_attributes, **validated}
+        _check_attribute_count(merged, "the session attribute bag")
+        self._session_attributes = merged
         return dict(self._session_attributes)
 
     def record_llm_call(

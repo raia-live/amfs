@@ -161,13 +161,63 @@ describe("AgentMemory session metadata", () => {
     expect(body(calls[1])).not.toHaveProperty("session_metadata");
   });
 
-  it("commitOutcomeAsync clears the bag even when the request fails", async () => {
-    mockFetch([{ status: 500, body: { detail: "boom" } }]);
+  it("commitOutcomeAsync keeps the bag when the server refuses the commit", async () => {
+    // A 422 for the bag, then a 5xx, then success: the attributes and LLM
+    // calls must survive both refusals and go out with the retry that lands.
+    const { calls } = mockFetch([
+      { status: 422, body: { detail: "session_metadata.attributes: bad" } },
+      { status: 500, body: { detail: "boom" } },
+      { body: { ok: true } },
+    ]);
     const adapter = new HttpAdapter({ url: "http://amfs.test", apiKey: "k", agentId: "a" });
     const mem = new AgentMemory("a", { adapter });
     mem.setSessionAttributes({ customer: "acme" });
+    const call = mem.recordLlmCall({ model: "m", inputTokens: 1, outputTokens: 1 });
+
     await expect(mem.commitOutcomeAsync("x", OutcomeType.SUCCESS)).rejects.toThrow();
+    expect(mem.sessionAttributes).toEqual({ customer: "acme" });
+    expect(mem.sessionLlmCalls).toEqual([call]);
+    await expect(mem.commitOutcomeAsync("x", OutcomeType.SUCCESS)).rejects.toThrow();
+    expect(mem.sessionAttributes).toEqual({ customer: "acme" });
+    expect(mem.sessionLlmCalls).toEqual([call]);
+
+    await mem.commitOutcomeAsync("x", OutcomeType.SUCCESS);
+    expect(body(calls[2]).session_metadata).toEqual({
+      attributes: { customer: "acme" },
+      llm_calls: [call],
+    });
     expect(mem.sessionAttributes).toEqual({});
+    expect(mem.sessionLlmCalls).toEqual([]);
+  });
+
+  it("setSessionAttributes caps the merged bag, not each call", () => {
+    const mem = new AgentMemory("a");
+    const first = Object.fromEntries(Array.from({ length: 15 }, (_, i) => [`a${i}`, i]));
+    mem.setSessionAttributes(first);
+    expect(() =>
+      mem.setSessionAttributes(Object.fromEntries(Array.from({ length: 15 }, (_, i) => [`b${i}`, i]))),
+    ).toThrow(RangeError);
+    expect(mem.sessionAttributes).toEqual(first);
+    // Keys already in the bag do not count twice.
+    expect(Object.keys(mem.setSessionAttributes({ a0: 99, a1: 98 }))).toHaveLength(15);
+    expect(
+      Object.keys(mem.setSessionAttributes(Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`c${i}`, i])))),
+    ).toHaveLength(20);
+    expect(() => mem.setSessionAttributes({ one_too_many: true })).toThrow(/at most 20/);
+  });
+
+  it("commitOutcomeAsync rejects an over-cap merge before sending anything", async () => {
+    const { fn } = mockFetch([]);
+    const adapter = new HttpAdapter({ url: "http://amfs.test", apiKey: "k", agentId: "a" });
+    const mem = new AgentMemory("a", { adapter });
+    mem.setSessionAttributes(Object.fromEntries(Array.from({ length: 15 }, (_, i) => [`s${i}`, i])));
+    await expect(
+      mem.commitOutcomeAsync("x", OutcomeType.SUCCESS, {
+        attributes: Object.fromEntries(Array.from({ length: 15 }, (_, i) => [`c${i}`, i])),
+      }),
+    ).rejects.toThrow(RangeError);
+    expect(fn).not.toHaveBeenCalled();
+    expect(Object.keys(mem.sessionAttributes)).toHaveLength(15);
   });
 
   it("commitOutcomeAsync rejects a bad attribute bag before sending anything", async () => {

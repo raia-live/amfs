@@ -18,6 +18,7 @@ import { OutcomeType } from "./models.js";
 import { OutcomeBackPropagator } from "./outcome.js";
 import {
   buildSessionMetadata,
+  SESSION_ATTRIBUTES_MAX_KEYS,
   toLlmCallRecord,
   validateSessionAttributes,
 } from "./session.js";
@@ -434,9 +435,20 @@ export class AgentMemory {
    * boolean), at most 20 keys of up to 64 characters, string values up to 256
    * characters; anything else throws. Keys are lowercased. Cleared when the
    * outcome is committed.
+   *
+   * The key cap applies to the bag as merged, not to each call: a merge that
+   * would take it past 20 keys throws a `RangeError` and leaves the bag as it
+   * was.
    */
   setSessionAttributes(attributes: SessionAttributes): SessionAttributes {
-    Object.assign(this._sessionAttributes, validateSessionAttributes(attributes));
+    const merged = { ...this._sessionAttributes, ...validateSessionAttributes(attributes) };
+    const size = Object.keys(merged).length;
+    if (size > SESSION_ATTRIBUTES_MAX_KEYS) {
+      throw new RangeError(
+        `at most ${SESSION_ATTRIBUTES_MAX_KEYS} session attributes are allowed (the bag would hold ${size})`,
+      );
+    }
+    this._sessionAttributes = merged;
     return { ...this._sessionAttributes };
   }
 
@@ -689,8 +701,9 @@ export class AgentMemory {
    *
    * The session's attributes (from {@link setSessionAttributes} and
    * `options.attributes`) and recorded LLM calls travel as `session_metadata`
-   * and are cleared once the request has been sent, so each commit describes
-   * one run.
+   * and are cleared once the server has accepted them, so each commit
+   * describes one run. A refused commit — a 422 for a bad bag, a 5xx — leaves
+   * them in place: the run still happened, and a retry should carry them.
    */
   async commitOutcomeAsync(
     outcomeRef: string,
@@ -705,19 +718,17 @@ export class AgentMemory {
     const keys = options?.causalEntryKeys ?? this.readTracker.causalKeys;
     if (options?.attributes) this.setSessionAttributes(options.attributes);
     const sessionMetadata = buildSessionMetadata(this._sessionAttributes, this._sessionLlmCalls);
-    try {
-      return await this.requireHttp("commitOutcomeAsync").commitOutcomeAsync({
-        outcomeRef,
-        outcomeType: String(outcomeType),
-        entityPath: options?.entityPath,
-        causalEntryKeys: keys,
-        causalConfidence: options?.causalConfidence,
-        agentId: this.agentId,
-        sessionMetadata,
-      });
-    } finally {
-      this.resetSessionMetadata();
-    }
+    const result = await this.requireHttp("commitOutcomeAsync").commitOutcomeAsync({
+      outcomeRef,
+      outcomeType: String(outcomeType),
+      entityPath: options?.entityPath,
+      causalEntryKeys: keys,
+      causalConfidence: options?.causalConfidence,
+      agentId: this.agentId,
+      sessionMetadata,
+    });
+    this.resetSessionMetadata();
+    return result;
   }
 
   /** Version history of a key from the remote server. */
