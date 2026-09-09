@@ -400,6 +400,64 @@ class TestMCPTools:
 
         assert "task_input" in result["training"]["missing"]
 
+    def test_response_text_lands_on_the_trace(self) -> None:
+        """The reply is the half a judge reads; the tool has to carry it.
+
+        The SDK has taken ``response_text`` for a while, but the MCP tool never
+        exposed it, so every run committed through MCP had an empty response
+        and judges grading the answer failed on ``"response_text": null``.
+        """
+        import amfs_mcp.server as srv
+        from amfs_mcp.server import amfs_commit_outcome, amfs_write
+
+        amfs_write("svc", "key", "value")
+
+        result = json.loads(
+            amfs_commit_outcome(
+                "task-52",
+                "success",
+                task_input="roll api back to v41",
+                response_text="Rolled back to v41; p99 recovered.",
+            )
+        )
+
+        trace = srv._get_memory()._last_trace
+        assert trace.response_text == "Rolled back to v41; p99 recovered."
+        assert "response_text_captured" not in result
+        assert "response_text_note" not in result
+
+    def test_a_commit_without_a_response_says_so(self) -> None:
+        """Named at the one moment the agent can still supply it."""
+        from amfs_mcp.server import amfs_commit_outcome, amfs_write
+
+        amfs_write("svc", "key", "value")
+
+        result = json.loads(amfs_commit_outcome("task-53", "success"))
+        assert result["response_text_captured"] is False
+        assert "response_text" in result["response_text_note"]
+
+    def test_a_response_the_gate_redacted_away_is_reported_absent(self) -> None:
+        """Reported off the trace, not the argument, like task_input."""
+        import amfs_mcp.server as srv
+        from amfs_mcp.server import amfs_commit_outcome, amfs_write
+
+        amfs_write("svc", "key", "value")
+
+        original = srv._get_memory().commit_outcome
+
+        def drop_response(ref, otype, **kwargs):
+            kwargs.pop("response_text", None)
+            return original(ref, otype, **kwargs)
+
+        with patch.object(
+            srv._get_memory(), "commit_outcome", side_effect=drop_response
+        ):
+            result = json.loads(
+                amfs_commit_outcome("task-54", "success", response_text="done")
+            )
+
+        assert result["response_text_captured"] is False
+
     def test_the_explanation_is_absent_once_something_was_read(self) -> None:
         from amfs_mcp.server import amfs_commit_outcome, amfs_read, amfs_write
 

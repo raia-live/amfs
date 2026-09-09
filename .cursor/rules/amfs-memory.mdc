@@ -115,10 +115,13 @@ Use `amfs_whoami()` to check the active identity. Use `amfs_reset_identity()` to
 
 - **After completing a significant task**: This snapshots all reads, writes, decisions, contexts, and recorded actions from the session into a persisted `DecisionTrace`. Always do this at the end of meaningful work.
   ```
-  amfs_commit_outcome("tenant-rls-fix", "success", task_input="tenant queries leaking across accounts")
+  amfs_commit_outcome("tenant-rls-fix", "success",
+                      task_input="tenant queries leaking across accounts",
+                      response_text="Added the tenant_id predicate to the RLS policy; the leak is closed.")
   amfs_commit_outcome("mcp-pypi-publish", "success")
   ```
 - **Pass `task_input` whenever you have it** — the request that started the work, in the words it arrived in (the user's ask, the alert payload, the ticket body). Without it the trace records what you decided but not what you were asked, which is the half that makes it reusable. Secrets are scanned and redacted before storage.
+- **Pass `response_text` on every commit** — your final message to the user, in full. AMFS sees only its own tools, so what you answered is invisible unless you hand it over here; a judge grading the answer reads nothing otherwise.
 - After a **bug or minor setback**: `amfs_commit_outcome("<ticket>", "minor_failure")`
 - After a **severe failure**: `amfs_commit_outcome("<incident-id>", "critical_failure")` or `"failure"`
 - **Don't skip this step** — without `commit_outcome`, the decision trace is lost when the session ends.

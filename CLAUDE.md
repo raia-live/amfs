@@ -118,13 +118,18 @@ what you did. Use the real tool name, and use it consistently.
 ### After completing significant work (commit the trace)
 **Always call `commit_outcome`** after finishing a task. This snapshots all reads, writes, decisions, contexts, and recorded actions into a persisted `DecisionTrace`:
 ```
-amfs_commit_outcome("tenant-rls-fix", "success", task_input="tenant queries leaking across accounts")
+amfs_commit_outcome("tenant-rls-fix", "success",
+                    task_input="tenant queries leaking across accounts",
+                    response_text="Added the tenant_id predicate to the RLS policy; the leak is closed.")
 amfs_commit_outcome("<ticket>", "minor_failure")
 amfs_commit_outcome("<incident-id>", "critical_failure")
 ```
 Pass `task_input` whenever you have it — the request that started the work, in the
 words it arrived in. Without it the trace records what you decided but not what you
-were asked. Secrets are scanned and redacted before storage.
+were asked. Pass `response_text` on every commit — your final message to the user, in
+full. AMFS sees only its own tools, so what you answered is invisible unless you hand
+it over here, and a judge grading the answer reads nothing otherwise. Secrets are
+scanned and redacted before storage.
 
 Without this, the decision trace is lost when the session ends.
 
