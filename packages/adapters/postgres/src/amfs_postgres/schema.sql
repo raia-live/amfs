@@ -449,7 +449,7 @@ BEGIN
           AND entity_path = ep
           AND key = k
           AND superseded_at IS NULL
-          AND (account_id = NEW.account_id OR NEW.account_id IS NULL)
+          AND account_id IS NOT DISTINCT FROM NEW.account_id
         ORDER BY version DESC LIMIT 1;
 
         IF FOUND THEN

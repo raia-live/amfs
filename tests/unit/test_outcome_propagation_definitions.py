@@ -131,9 +131,16 @@ def test_every_definition_scopes_the_lookup_by_account(
 ) -> None:
     """Otherwise an outcome in one account reinforces another's entry.
 
-    A no-op in a single-account install, where every ``account_id`` is NULL.
+    Specifically ``IS NOT DISTINCT FROM``, not
+    ``account_id = NEW.account_id OR NEW.account_id IS NULL``. The second looks
+    equivalent and is not: it matches entries in every account whenever the
+    outcome row carries no account, and nothing in this adapter sets one.
     """
     for name, sql in definitions.items():
-        assert "account_id = NEW.account_id OR NEW.account_id IS NULL" in sql, (
+        assert "account_id IS NOT DISTINCT FROM NEW.account_id" in sql, (
             f"{name} does not scope the entry lookup by account"
+        )
+        assert "NEW.account_id IS NULL" not in sql, (
+            f"{name} uses the permissive account clause: an outcome with no "
+            "account would reinforce entries in every account"
         )

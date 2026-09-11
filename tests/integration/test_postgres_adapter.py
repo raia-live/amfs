@@ -787,3 +787,63 @@ def test_outcome_preserves_the_embedding(adapter) -> None:
             " WHERE key = 'retry-pattern' AND superseded_at IS NULL"
         ).fetchone()
     assert row[0] == vector, "the embedding was lost, so the entry left vector search"
+
+
+def test_an_outcome_without_an_account_leaves_other_accounts_alone(adapter) -> None:
+    """The account clause has to hold when the outcome carries no account.
+
+    Nothing in this adapter sets account_id on the outcome row — deployments
+    rely on a column default — so an outcome written by a path that never
+    established one is the realistic case, not a contrived one. Written as
+    `account_id = NEW.account_id OR NEW.account_id IS NULL`, that outcome
+    matched entries in EVERY account and reinforced all of them.
+    """
+    import uuid as _uuid
+
+    import psycopg
+
+    adapter.write(_make_entry(confidence=0.9))
+    other_account = str(_uuid.uuid4())
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE amfs_memory_entries SET account_id = %s::uuid"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL",
+            (other_account,),
+        )
+
+    # The outcome carries no account, as this adapter always writes it.
+    _commit_success_on(adapter)
+
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT version, confidence FROM amfs_memory_entries"
+            " WHERE key = 'retry-pattern' ORDER BY version"
+        ).fetchall()
+    assert len(rows) == 1, (
+        "an outcome with no account reinforced an entry belonging to an "
+        "account, creating a new version across the tenancy boundary"
+    )
+    assert abs(float(rows[0][1]) - 0.9) < 1e-6, "the other account's entry was modified"
+
+
+def test_an_outcome_still_reinforces_when_neither_side_has_an_account(adapter) -> None:
+    """The single-account case, which is every self-hosted install.
+
+    IS NOT DISTINCT FROM is what keeps this working while still rejecting the
+    case above; plain equality would make NULL = NULL unknown and propagation
+    would silently never fire for anyone.
+    """
+    import psycopg
+
+    adapter.write(_make_entry(confidence=0.9))
+    _commit_success_on(adapter)
+
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT confidence FROM amfs_memory_entries"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL"
+        ).fetchone()
+    assert abs(float(row[0]) - 0.927) < 1e-6, (
+        "propagation stopped firing for entries with no account, which is all "
+        "of them in a single-account install"
+    )

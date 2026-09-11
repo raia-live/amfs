@@ -31,8 +31,23 @@
 --
 -- The account filter on the SELECT is new here too. Without it, an outcome
 -- recorded under one account can reinforce an identically-pathed entry
--- belonging to another. In a single-account install every account_id is NULL
--- and the clause is a no-op.
+-- belonging to another.
+--
+-- It is written IS NOT DISTINCT FROM rather than the more obvious
+-- `account_id = NEW.account_id OR NEW.account_id IS NULL`. That version looks
+-- like it is being generous to single-account installs, where every account_id
+-- is NULL on both sides, but the generosity is unbounded in the other
+-- direction: an outcome row that happens to carry no account matches entries
+-- in EVERY account, which is precisely the cross-account reinforcement the
+-- clause exists to prevent. Nothing in this adapter sets account_id on the
+-- outcome — deployments rely on a column default for that — so an outcome
+-- written by a path that did not establish one would have reinforced the whole
+-- table.
+--
+-- IS NOT DISTINCT FROM treats NULL as a value: NULL matches NULL, so the
+-- single-account case still works, and an outcome with no account reaches only
+-- entries with no account. Where a deployment expects propagation and it stops
+-- happening, the account on the outcome row is the thing to look at.
 --
 -- Idempotent: CREATE OR REPLACE FUNCTION, and the trigger binding is unchanged.
 -- Existing stored confidences are NOT rewritten, following 006.
@@ -81,7 +96,7 @@ BEGIN
           AND entity_path = ep
           AND key = k
           AND superseded_at IS NULL
-          AND (account_id = NEW.account_id OR NEW.account_id IS NULL)
+          AND account_id IS NOT DISTINCT FROM NEW.account_id
         ORDER BY version DESC LIMIT 1;
 
         IF FOUND THEN
