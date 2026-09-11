@@ -252,9 +252,14 @@ def _tables_created_by(sql: str) -> frozenset[str]:
     bootstrap runs is covered without anyone remembering to update a second
     place — which is the kind of upkeep that silently stops happening.
     """
+    # Partitions (``CREATE TABLE x PARTITION OF parent``) are excluded: they
+    # exist only once the parent is partitioned, which on a database where the
+    # partitioning migration was deliberately skipped is never, and a table
+    # that can never be present would make the schema never "current" and
+    # re-run the DDL on every start — the convoy this check exists to stop.
     return frozenset(
         re.findall(
-            r"CREATE TABLE IF NOT EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"CREATE TABLE IF NOT EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)\b(?!\s+PARTITION\s+OF\b)",
             sql,
             re.IGNORECASE,
         )
@@ -478,6 +483,13 @@ class PostgresAdapter(AdapterABC):
         self._pool = _TenantRLSPoolWrapper(self._pool)
         if auto_schema:
             self._apply_schema()
+            # Every start, not only when the schema changes: the partitions
+            # that need to exist move forward one month at a time and the
+            # schema marker does not. One catalog query on a warm database.
+            try:
+                self.ensure_trace_partitions()
+            except Exception:  # noqa: BLE001
+                logger.warning("trace partitioning: partition upkeep skipped", exc_info=True)
         self._detect_optional_columns()
         self._listen_thread: threading.Thread | None = None
         self._listen_stop = threading.Event()
@@ -551,7 +563,13 @@ class PostgresAdapter(AdapterABC):
         try:
             import inspect
 
-            return inspect.getsource(type(self)._apply_migrations)
+            from amfs_postgres import trace_partitions
+
+            # The partitioning and retention DDL lives in its own module, and a
+            # change there is a schema change just as much as one in here.
+            return inspect.getsource(type(self)._apply_migrations) + inspect.getsource(
+                trace_partitions
+            )
         except Exception:  # noqa: BLE001
             return None
 
@@ -634,8 +652,11 @@ class PostgresAdapter(AdapterABC):
                         cur.execute("SET lock_timeout = '5s'")
                         try:
                             cur.execute(_SCHEMA_SQL)
-                            self._apply_migrations(cur)
-                            if fingerprint:
+                            complete = self._apply_migrations(cur)
+                            # A migration that failed for a transient reason
+                            # reports False so the marker is withheld and the
+                            # next start tries again; everything else is done.
+                            if fingerprint and complete is not False:
                                 self._record_schema_fingerprint(cur, fingerprint)
                         finally:
                             cur.execute("SET lock_timeout = DEFAULT")
@@ -686,7 +707,7 @@ class PostgresAdapter(AdapterABC):
                         SELECT count(*) AS present
                         FROM pg_catalog.pg_class c
                         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-                        WHERE c.relkind = 'r'
+                        WHERE c.relkind IN ('r', 'p')
                           AND n.nspname = ANY (current_schemas(false))
                           AND c.relname = ANY (%s)
                         """,
@@ -745,8 +766,14 @@ class PostgresAdapter(AdapterABC):
         )
 
     @staticmethod
-    def _apply_migrations(cur: psycopg.Cursor) -> None:
-        """Additive migrations for columns added after initial schema."""
+    def _apply_migrations(cur: psycopg.Cursor) -> bool:
+        """Additive migrations for columns added after initial schema.
+
+        Returns False when a migration could not be applied for a reason that
+        may clear on its own, so ``_apply_schema`` withholds the schema marker
+        and the next start retries. True (or None, from older code paths)
+        means the database is at this build's schema.
+        """
         cur.execute("""
             ALTER TABLE amfs_memory_entries
             ADD COLUMN IF NOT EXISTS shared BOOLEAN NOT NULL DEFAULT TRUE
@@ -1209,6 +1236,14 @@ class PostgresAdapter(AdapterABC):
             ON amfs_memory_entries (namespace, branch, entity_path, key)
             WHERE superseded_at IS NULL
         """)
+        # The per-agent activity listing: current entries by one agent, newest
+        # first, keyset-paged on written_at. Without this it is a scan of every
+        # current entry in the namespace filtered by agent afterwards.
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_agent_written
+            ON amfs_memory_entries (namespace, agent_id, written_at DESC)
+            WHERE superseded_at IS NULL
+        """)
 
         cur.execute("""
             ALTER TABLE amfs_api_keys
@@ -1258,6 +1293,91 @@ class PostgresAdapter(AdapterABC):
                 PRIMARY KEY (account_id, cluster_id)
             )
         """)
+
+        # Decision traces at volume: monthly range partitioning by created_at,
+        # then the GIN index the entity_path filter needs. The partitioning
+        # step is a one-time table rebuild inside its own transaction (see
+        # trace_partitions.migrate_to_partitioned for the approach and its
+        # rollback). It comes after every ALTER above so the parent is built
+        # from a table that already has every column; the index comes after
+        # the partitioning so it is created once, on the parent, rather than
+        # on a table about to be rebuilt.
+        from amfs_postgres import trace_partitions
+
+        complete = True
+        try:
+            trace_partitions.migrate_to_partitioned(cur)
+        except Exception:  # noqa: BLE001
+            # Already rolled back and logged. Not re-raised: a failed rebuild
+            # must not stop the process booting, since the flat table still
+            # works. Reported as incomplete so the next start tries again.
+            complete = False
+        trace_partitions.create_causal_entries_index(cur)
+        try:
+            trace_partitions.ensure_partitions(cur)
+        except Exception:  # noqa: BLE001
+            logger.warning("trace partitioning: could not create partitions ahead", exc_info=True)
+        return complete
+
+    # ------------------------------------------------------------------
+    # decision-trace partition upkeep and retention
+    # ------------------------------------------------------------------
+
+    def ensure_trace_partitions(self, months_ahead: int = 2) -> list[str]:
+        """Create trace partitions for this month and *months_ahead* more.
+
+        Runs at adapter start and is safe to call any time: it reads the
+        catalog and creates only what is missing, so on a warm database it is
+        one query and no DDL. Returns the partition names it created. A no-op
+        when the table is not partitioned.
+        """
+        from amfs_postgres import trace_partitions
+
+        with self._maintenance_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SET lock_timeout = '5s'")
+                try:
+                    return trace_partitions.ensure_partitions(cur, months_ahead=months_ahead)
+                finally:
+                    cur.execute("SET lock_timeout = DEFAULT")
+
+    def apply_trace_retention(
+        self,
+        *,
+        hot_days: int = 30,
+        strip_payloads: bool = True,
+        drop_after_days: int | None = None,
+    ) -> dict[str, Any]:
+        """Age decision traces out of the hot tier; see ``trace_partitions.apply_retention``.
+
+        Payload stripping is scoped to this adapter's namespace and keeps every
+        trace, its causal entries, contexts and metadata; only ``task_input``,
+        ``response_text``, ``tool_calls``, ``query_events`` and ``error_events``
+        are cleared for traces older than *hot_days*. *drop_after_days*, when
+        set, drops whole monthly partitions older than that — across every
+        namespace, since a partition is a month, not a tenant — so it is off
+        by default. Nothing schedules this; call it from a job or the
+        ``python -m amfs_postgres.retention`` entry point.
+
+        Runs on the maintenance checkout, which carries no tenant, so on a
+        deployment that scopes traces with row-level security it runs as the
+        table owner or not at all.
+        """
+        from amfs_postgres import trace_partitions
+
+        with self._maintenance_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SET lock_timeout = '5s'")
+                try:
+                    return trace_partitions.apply_retention(
+                        cur,
+                        namespace=self._namespace,
+                        hot_days=hot_days,
+                        strip_payloads=strip_payloads,
+                        drop_after_days=drop_after_days,
+                    )
+                finally:
+                    cur.execute("SET lock_timeout = DEFAULT")
 
     def _detect_optional_columns(self) -> None:
         """Check whether optional columns (embedding, search_tsv) exist.
@@ -2772,13 +2892,13 @@ class PostgresAdapter(AdapterABC):
     # list_outcomes
     # ------------------------------------------------------------------
 
-    def list_outcomes(
+    def _outcome_conditions(
         self,
         *,
-        entity_path: str | None = None,
-        since: datetime | None = None,
-        limit: int = 1000,
-    ) -> list[OutcomeRecord]:
+        entity_path: str | None,
+        since: datetime | None,
+        outcome_ref: str | None = None,
+    ) -> tuple[str, list[Any]]:
         conditions = ["namespace = %s"]
         params: list[Any] = [self._namespace]
 
@@ -2792,7 +2912,37 @@ class PostgresAdapter(AdapterABC):
             conditions.append("committed_at >= %s")
             params.append(since)
 
-        where = " AND ".join(conditions)
+        if outcome_ref is not None:
+            conditions.append("outcome_ref = %s")
+            params.append(outcome_ref)
+
+        return " AND ".join(conditions), params
+
+    def count_outcomes(
+        self,
+        *,
+        entity_path: str | None = None,
+        since: datetime | None = None,
+    ) -> int:
+        """``COUNT(*)`` over outcomes, so the number is right past any page cap."""
+        where, params = self._outcome_conditions(entity_path=entity_path, since=since)
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT count(*) AS cnt FROM amfs_outcomes WHERE {where}", params)
+                row = cur.fetchone()
+        return int(row["cnt"]) if row else 0
+
+    def list_outcomes(
+        self,
+        *,
+        entity_path: str | None = None,
+        since: datetime | None = None,
+        limit: int = 1000,
+        outcome_ref: str | None = None,
+    ) -> list[OutcomeRecord]:
+        where, params = self._outcome_conditions(
+            entity_path=entity_path, since=since, outcome_ref=outcome_ref
+        )
         sql = f"""
             SELECT outcome_ref, outcome_type, causal_confidence,
                    committed_at, causal_entry_keys, agent_id
@@ -2906,6 +3056,69 @@ class PostgresAdapter(AdapterABC):
                 row = cur.fetchone()
         return trace.model_copy(update={"id": str(row["id"]), "created_at": row["created_at"]})
 
+    @staticmethod
+    def _trace_conditions(
+        namespace: str,
+        *,
+        entity_path: str | None = None,
+        agent_id: str | None = None,
+        outcome_type: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        cursor: str | None = None,
+    ) -> tuple[str, list[Any]]:
+        """WHERE clause shared by the trace list and count queries.
+
+        Shared between the sync and async adapters, which is why it is static:
+        the two must agree on what a page contains or a cursor issued by one
+        would mean something else to the other.
+        """
+        conditions = ["namespace = %s"]
+        params: list[Any] = [namespace]
+
+        if entity_path is not None:
+            # Containment rather than ``jsonb_array_elements``: ``@>`` is what
+            # the jsonb_path_ops GIN index on causal_entries can serve, and it
+            # asks the same question — is there an element whose entity_path
+            # is this string.
+            conditions.append("causal_entries @> %s::jsonb")
+            params.append(json.dumps([{"entity_path": entity_path}]))
+        if agent_id is not None:
+            conditions.append("agent_id = %s")
+            params.append(agent_id)
+        if outcome_type is not None:
+            conditions.append("outcome_type = %s")
+            params.append(outcome_type)
+        if since is not None:
+            conditions.append("created_at >= %s")
+            params.append(since)
+        if until is not None:
+            conditions.append("created_at < %s")
+            params.append(until)
+        if cursor:
+            from amfs_core.pagination import decode_cursor
+
+            cursor_ts, cursor_id = decode_cursor(cursor)
+            # The row comparison is the keyset step; the plain ``created_at <=``
+            # beside it is redundant for correctness but is a single-column
+            # predicate the planner can use to prune partitions, which the
+            # row comparison is not.
+            conditions.append("created_at <= %s")
+            params.append(cursor_ts)
+            conditions.append("(created_at, id) < (%s, %s::uuid)")
+            params.extend([cursor_ts, str(cursor_id)])
+
+        return " AND ".join(conditions), params
+
+    _TRACE_COLUMNS = """
+        id, agent_id, session_id, outcome_ref, outcome_type,
+        decision_summary, task_input, response_text, tool_calls,
+        causal_entries, external_contexts,
+        query_events, session_started_at, session_ended_at,
+        session_duration_ms,
+        error_events, state_diff, session_metadata, created_at
+    """
+
     def list_traces(
         self,
         *,
@@ -2913,37 +3126,31 @@ class PostgresAdapter(AdapterABC):
         agent_id: str | None = None,
         outcome_type: str | None = None,
         limit: int = 100,
+        offset: int = 0,
+        cursor: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[DecisionTrace]:
-        conditions = ["namespace = %s"]
-        params: list[Any] = [self._namespace]
-
-        if entity_path is not None:
-            conditions.append(
-                "EXISTS (SELECT 1 FROM jsonb_array_elements(causal_entries) AS ce "
-                "WHERE ce->>'entity_path' = %s)"
-            )
-            params.append(entity_path)
-        if agent_id is not None:
-            conditions.append("agent_id = %s")
-            params.append(agent_id)
-        if outcome_type is not None:
-            conditions.append("outcome_type = %s")
-            params.append(outcome_type)
-
-        where = " AND ".join(conditions)
+        where, params = self._trace_conditions(
+            self._namespace,
+            entity_path=entity_path,
+            agent_id=agent_id,
+            outcome_type=outcome_type,
+            since=since,
+            until=until,
+            cursor=cursor,
+        )
         sql = f"""
-            SELECT id, agent_id, session_id, outcome_ref, outcome_type,
-                   decision_summary, task_input, response_text, tool_calls,
-                   causal_entries, external_contexts,
-                   query_events, session_started_at, session_ended_at,
-                   session_duration_ms,
-                   error_events, state_diff, session_metadata, created_at
+            SELECT {self._TRACE_COLUMNS}
             FROM amfs_decision_traces
             WHERE {where}
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT %s
         """
         params.append(limit)
+        if not cursor and offset > 0:
+            sql += " OFFSET %s"
+            params.append(offset)
 
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
@@ -2951,6 +3158,132 @@ class PostgresAdapter(AdapterABC):
                 rows = cur.fetchall()
 
         return [self._row_to_trace(row) for row in rows]
+
+    def count_traces(
+        self,
+        *,
+        entity_path: str | None = None,
+        agent_id: str | None = None,
+        outcome_type: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> int:
+        where, params = self._trace_conditions(
+            self._namespace,
+            entity_path=entity_path,
+            agent_id=agent_id,
+            outcome_type=outcome_type,
+            since=since,
+            until=until,
+        )
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT count(*) AS cnt FROM amfs_decision_traces WHERE {where}", params
+                )
+                row = cur.fetchone()
+        return int(row["cnt"]) if row else 0
+
+    _TRACE_READ_COUNTS_SQL = """
+        SELECT ce->>'entity_path' AS entity_path, ce->>'key' AS key, COUNT(*) AS cnt
+        FROM amfs_decision_traces t
+        CROSS JOIN LATERAL jsonb_array_elements(t.causal_entries) AS ce
+        WHERE t.namespace = %s AND t.agent_id = %s
+        GROUP BY ce->>'entity_path', ce->>'key'
+    """
+
+    @staticmethod
+    def _read_counts_from_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+        counts: dict[str, dict[str, int]] = {}
+        for r in rows:
+            ep, key = r["entity_path"], r["key"]
+            if ep is None or key is None:
+                continue
+            counts.setdefault(ep, {})[key] = int(r["cnt"])
+        return counts
+
+    def trace_read_counts(self, agent_id: str) -> dict[str, dict[str, int]]:
+        """Per-entry read counts across an agent's traces, aggregated in SQL."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(self._TRACE_READ_COUNTS_SQL, (self._namespace, agent_id))
+                rows = cur.fetchall()
+        return self._read_counts_from_rows(rows)
+
+    _ENTRIES_FOR_AGENT_ORDER = "ORDER BY written_at DESC, entity_path DESC, key DESC, version DESC"
+
+    @staticmethod
+    def _entries_for_agent_conditions(
+        namespace: str,
+        agent_id: str,
+        *,
+        since: datetime | None,
+        until: datetime | None,
+        cursor: str | None,
+        exclude_prefixes: tuple[str, ...],
+    ) -> tuple[str, list[Any]]:
+        conditions = [
+            "namespace = %s",
+            "agent_id = %s",
+            "superseded_at IS NULL",
+            "branch = 'main'",
+        ]
+        params: list[Any] = [namespace, agent_id]
+        for prefix in exclude_prefixes:
+            conditions.append("entity_path NOT LIKE %s")
+            params.append(prefix.replace("%", r"\%").replace("_", r"\_") + "%")
+        if since is not None:
+            conditions.append("written_at >= %s")
+            params.append(since)
+        if until is not None:
+            conditions.append("written_at < %s")
+            params.append(until)
+        if cursor:
+            from amfs_core.pagination import decode_cursor
+
+            cursor_ts, tiebreak = decode_cursor(cursor)
+            try:
+                ep, key, version = tiebreak
+            except (TypeError, ValueError) as exc:
+                from amfs_core.pagination import InvalidCursorError
+
+                raise InvalidCursorError("cursor does not belong to this listing") from exc
+            conditions.append(
+                "(written_at, entity_path, key, version) < (%s, %s, %s, %s)"
+            )
+            params.extend([cursor_ts, ep, key, int(version)])
+        return " AND ".join(conditions), params
+
+    def list_entries_for_agent(
+        self,
+        agent_id: str,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        cursor: str | None = None,
+        limit: int = 100,
+        exclude_prefixes: tuple[str, ...] = ("_system/",),
+    ) -> list[MemoryEntry]:
+        where, params = self._entries_for_agent_conditions(
+            self._namespace,
+            agent_id,
+            since=since,
+            until=until,
+            cursor=cursor,
+            exclude_prefixes=exclude_prefixes,
+        )
+        sql = f"""
+            SELECT * FROM amfs_memory_entries
+            WHERE {where}
+            {self._ENTRIES_FOR_AGENT_ORDER}
+            LIMIT %s
+        """
+        params.append(limit)
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        return [self._row_to_entry(r) for r in rows]
 
     def list_traces_for_entry(
         self,
@@ -4074,15 +4407,59 @@ class PostgresAdapter(AdapterABC):
         event_type: str | None = None,
         since: datetime | None = None,
         limit: int = 100,
+        offset: int = 0,
+        cursor: str | None = None,
+        until: datetime | None = None,
     ) -> list[Event]:
+        where, params = self._event_conditions(
+            namespace,
+            agent_id,
+            account_id=self._get_current_account_id(),
+            branch=branch,
+            event_type=event_type,
+            since=since,
+            until=until,
+            cursor=cursor,
+        )
+        sql = f"""
+            SELECT id, namespace, agent_id, branch, event_type,
+                   summary, details, actor_agent_id, created_at
+            FROM amfs_events
+            WHERE {where}
+            ORDER BY created_at DESC, id DESC
+            LIMIT %s
+        """
+        params.append(limit)
+        if not cursor and offset > 0:
+            sql += " OFFSET %s"
+            params.append(offset)
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        return [self._row_to_event(r) for r in rows]
+
+    @staticmethod
+    def _event_conditions(
+        namespace: str,
+        agent_id: str,
+        *,
+        account_id: str | None,
+        branch: str | None,
+        event_type: str | None,
+        since: datetime | None,
+        until: datetime | None,
+        cursor: str | None,
+    ) -> tuple[str, list[Any]]:
+        """WHERE clause for the timeline, shared with the async adapter."""
         conditions = ["namespace = %s", "agent_id = %s"]
         params: list[Any] = [namespace, agent_id]
 
-        account_id = self._get_current_account_id()
         if account_id:
             conditions.append("account_id = %s")
             params.append(account_id)
-
         if branch is not None:
             conditions.append("branch = %s")
             params.append(branch)
@@ -4092,24 +4469,16 @@ class PostgresAdapter(AdapterABC):
         if since is not None:
             conditions.append("created_at >= %s")
             params.append(since)
+        if until is not None:
+            conditions.append("created_at < %s")
+            params.append(until)
+        if cursor:
+            from amfs_core.pagination import decode_cursor
 
-        where = " AND ".join(conditions)
-        sql = f"""
-            SELECT id, namespace, agent_id, branch, event_type,
-                   summary, details, actor_agent_id, created_at
-            FROM amfs_events
-            WHERE {where}
-            ORDER BY created_at DESC
-            LIMIT %s
-        """
-        params.append(limit)
-
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
-                rows = cur.fetchall()
-
-        return [self._row_to_event(r) for r in rows]
+            cursor_ts, cursor_id = decode_cursor(cursor)
+            conditions.append("(created_at, id) < (%s, %s::uuid)")
+            params.extend([cursor_ts, str(cursor_id)])
+        return " AND ".join(conditions), params
 
     def get_event(self, event_id: str, namespace: str = "default") -> Event | None:
         """Fetch one event by id, scoped to the caller's account.

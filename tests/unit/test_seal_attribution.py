@@ -73,11 +73,24 @@ def sealed(monkeypatch) -> list[Any]:
     records: list[Any] = []
 
     monkeypatch.setattr(http_server, "_HAS_PRO_TRACES", True, raising=False)
-    for name in ("ImmutableDecisionTrace", "TraceEntry", "TraceExternalContext",
-                 "ProToolCall"):
-        monkeypatch.setattr(
-            http_server, name, lambda **kw: SimpleNamespace(**kw), raising=False
-        )
+
+    # The OSS -> immutable mapping is the Pro package's; the server hands it the
+    # trace plus the identity it resolved. The stub keeps both so the assertions
+    # below read what the server passed, not what the trace happened to carry.
+    def _map(oss_trace, **kw):
+        fields = {
+            k: getattr(oss_trace, k, None)
+            for k in ("outcome_ref", "outcome_type", "task_input", "agent_id")
+        }
+        fields.update(kw)
+        return SimpleNamespace(**fields)
+
+    monkeypatch.setattr(
+        http_server, "_pro_immutable_from_oss_trace", _map, raising=False
+    )
+    monkeypatch.setattr(
+        http_server, "_pro_finalize_spans", lambda imm: imm, raising=False
+    )
     monkeypatch.setattr(
         http_server, "seal", lambda imm, *a, **kw: imm, raising=False
     )

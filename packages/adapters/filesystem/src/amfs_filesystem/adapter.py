@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import heapq
 import json
 import os
 import logging
+from collections.abc import Iterator
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import Callable
 
@@ -237,6 +240,71 @@ class FilesystemAdapter(AdapterABC):
                     except Exception:
                         logger.warning("Skipping unreadable file: %s", f)
         return entries
+
+    def _iter_current_entries(self) -> Iterator[MemoryEntry]:
+        """Yield current entries one file at a time, never holding them all."""
+        layout = self._layout
+        for ep in layout.all_entity_paths():
+            for key in layout.all_keys(ep):
+                for f in layout.all_version_files(ep, key, include_superseded=False):
+                    try:
+                        yield self._read_entry(f)
+                    except Exception:
+                        logger.warning("Skipping unreadable file: %s", f)
+
+    def list_entries_for_agent(
+        self,
+        agent_id: str,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        cursor: str | None = None,
+        limit: int = 100,
+        exclude_prefixes: tuple[str, ...] = ("_system/",),
+    ) -> list[MemoryEntry]:
+        """Stream the store once and keep only the ``limit`` newest matches.
+
+        The base implementation materialises ``list()`` first; here a bounded
+        heap holds at most *limit* entries at any point, so the memory cost
+        is the page, not the store. Ordering and the cursor tiebreak match
+        the base implementation exactly.
+        """
+        from amfs_core.pagination import decode_cursor, entry_tiebreak
+
+        limit = max(1, int(limit))
+        cursor_key: tuple[datetime, str] | None = None
+        if cursor:
+            ts, tiebreak = decode_cursor(cursor)
+            cursor_key = (ts, json.dumps(tiebreak, default=str, sort_keys=True))
+
+        def sort_key(e: MemoryEntry) -> tuple[datetime, str]:
+            ts = e.provenance.written_at
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            return ts, json.dumps(entry_tiebreak(e), default=str, sort_keys=True)
+
+        heap: list[tuple[tuple[datetime, str], int, MemoryEntry]] = []
+        seq = 0
+        for e in self._iter_current_entries():
+            if e.provenance.agent_id != agent_id:
+                continue
+            if any(e.entity_path.startswith(p) for p in exclude_prefixes):
+                continue
+            written = e.provenance.written_at
+            if since is not None and written < since:
+                continue
+            if until is not None and written >= until:
+                continue
+            key = sort_key(e)
+            if cursor_key is not None and key >= cursor_key:
+                continue
+            seq += 1
+            if len(heap) < limit:
+                heapq.heappush(heap, (key, seq, e))
+            elif key > heap[0][0]:
+                heapq.heapreplace(heap, (key, seq, e))
+
+        return [e for _, _, e in sorted(heap, key=lambda h: h[0], reverse=True)]
 
     # ------------------------------------------------------------------
     # watch

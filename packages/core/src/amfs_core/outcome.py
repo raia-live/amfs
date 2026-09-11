@@ -91,6 +91,7 @@ class OutcomeBackPropagator:
         task_input: str | None = None,
         response_text: str | None = None,
         tool_calls: list[dict[str, Any]] | None = None,
+        session_metadata: dict[str, Any] | None = None,
     ) -> OutcomeRecord:
         """Convenience factory for creating OutcomeRecord instances."""
         return OutcomeRecord(
@@ -103,4 +104,5 @@ class OutcomeBackPropagator:
             task_input=task_input,
             response_text=response_text,
             tool_calls=tool_calls or [],
+            session_metadata=session_metadata or None,
         )

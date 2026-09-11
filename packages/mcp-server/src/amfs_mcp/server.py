@@ -109,7 +109,7 @@ you have no memory of something without checking first.
 3. **Record decisions as they happen**: `amfs_record_context("user-decision", "User chose X over Y", source="chat")`. Only record meaningful decisions — not every micro-step.
 4. **Record actions as you take them**: `amfs_record_action("deploy_rollback", {"service": "checkout"})` right after a consequential action — deploy, rollback, refund, file edit, PR. Record failed ones too with `success=False`. AMFS sees only its own tools, so your other tools are invisible unless you record them.
 5. **Write knowledge**: `amfs_write("<repo>/<module>", "task-summary-<desc>", "<what and why>")`. Use `memory_type="belief"` for hypotheses, `"experience"` for actions taken.
-6. **Commit outcomes**: `amfs_commit_outcome("<ref>", "success", task_input="<the request that started this>")` after completing significant work. This is FREE and snapshots the full decision trace. Pass `task_input` whenever you have it — without it the trace records what you decided but not what you were asked.
+6. **Commit outcomes**: `amfs_commit_outcome("<ref>", "success", task_input="<the request that started this>", response_text="<your final answer to the user>")` after completing significant work. This is FREE and snapshots the full decision trace. Pass `task_input` whenever you have it — without it the trace records what you decided but not what you were asked. Pass `response_text` on every commit — SenseLab sees only its own tools, so what you told the user is invisible unless you hand it over here, and a judge grading the answer reads nothing otherwise.
 
 ## What to Save (worth 2 ops)
 
@@ -1431,11 +1431,19 @@ def _training_note(missing: list[str]) -> str:
     )
 
 
+_RESPONSE_TEXT_NOTE = (
+    "This run has no response: what you told the user is not on the trace, so "
+    "a judge grading the answer sees nothing. Pass response_text on this call "
+    "— your final message, in full."
+)
+
+
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "destructiveHint": False})
 def amfs_commit_outcome(
     outcome_ref: str,
     outcome_type: str,
     task_input: str | None = None,
+    response_text: str | None = None,
 ) -> str:
     """Record an outcome and auto-link it to everything read this session.
 
@@ -1462,9 +1470,19 @@ def amfs_commit_outcome(
             body). Pass it whenever you have it: it is the prompt half of the
             trace, and without it the trace records what you decided but not
             what you were asked. Secrets are scanned and redacted before storage.
+        response_text: Optional. What you answered — the final message to the
+            user, or the summary you would give them, in full. SenseLab cannot
+            see your reply on its own: it sees only its own tool calls, so
+            without this the run's response is empty and a judge grading what
+            the agent said (a promise it could not keep, a claim nothing
+            supports, a missing next step) has nothing to read. Pass it on
+            every commit. Secrets are scanned and redacted before storage.
 
     Example: amfs_commit_outcome("task-42", "success")
     Example: amfs_commit_outcome("INC-2047", "success", task_input="API p99 latency above 2s in us-east")
+    Example: amfs_commit_outcome("INC-2047", "success",
+                                 task_input="API p99 latency above 2s in us-east",
+                                 response_text="Rolled api back to v41; p99 is back under 400 ms.")
     """
     mem = _get_memory()
 
@@ -1486,7 +1504,9 @@ def amfs_commit_outcome(
             "error": f"Invalid outcome_type '{outcome_type}'. Must be one of: {valid}"
         })
 
-    entries = mem.commit_outcome(outcome_ref, otype, task_input=task_input)
+    entries = mem.commit_outcome(
+        outcome_ref, otype, task_input=task_input, response_text=response_text
+    )
     trace = getattr(mem, "_last_trace", None)
     result: dict[str, Any] = {
         "outcome_ref": outcome_ref,
@@ -1530,6 +1550,12 @@ def amfs_commit_outcome(
         if missing:
             result["training"]["missing"] = missing
             result["training"]["note"] = _training_note(missing)
+        # The response is the half judges read most. Like task_input it is
+        # reported off the trace, so a reply the gate redacted away is "absent",
+        # and named at the one moment the agent can still supply it.
+        if not getattr(trace, "response_text", None):
+            result["response_text_captured"] = False
+            result["response_text_note"] = _RESPONSE_TEXT_NOTE
         result["session_duration_ms"] = trace.session_duration_ms
         diff = getattr(trace, "state_diff", None)
         if diff is not None:
@@ -2291,7 +2317,10 @@ def _http_api_call(method: str, path: str, *, params: dict | None = None, body: 
             resp = httpx.get(f"{base_url}{path}", params=params, headers=headers, timeout=30.0)
         else:
             resp = httpx.post(f"{base_url}{path}", params=params, json=body or {}, headers=headers, timeout=30.0)
-        if resp.status_code == 200:
+        if 200 <= resp.status_code < 300:
+            # 201 Created / 202 Accepted are success too; 204 has no body.
+            if resp.status_code == 204 or not resp.content:
+                return json.dumps({})
             return json.dumps(resp.json(), default=str)
         return json.dumps({"error": f"API returned {resp.status_code}", "detail": resp.text})
     except ImportError:
