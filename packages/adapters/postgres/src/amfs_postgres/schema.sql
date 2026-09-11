@@ -403,26 +403,33 @@ CREATE INDEX IF NOT EXISTS idx_pr_reviews_pr
 -- Back-propagation trigger: when an outcome is inserted,
 -- for each causal_entry_key: supersede current entry and insert
 -- a new version with confidence *= multiplier * causal_confidence.
+--
+-- This definition must stay identical to migrations/007. It is the fourth place
+-- this function has been defined, and the reason to keep them in step is that
+-- every one of them is a CREATE OR REPLACE: whichever runs last silently
+-- becomes the function, so a stale copy here is not dead code, it is a
+-- regression waiting for the next deploy. This file carried the pre-006
+-- inverted multipliers for exactly that long — corrected here in the same
+-- change that removed the column list. See 007 for the full reasoning.
 
 CREATE OR REPLACE FUNCTION amfs_propagate_outcome() RETURNS TRIGGER AS $$
 DECLARE
     multiplier NUMERIC;
     entry_key TEXT;
-    parts TEXT[];
     ep TEXT;
     k TEXT;
     cur RECORD;
 BEGIN
-    -- Determine multiplier from outcome type
+    -- SUCCESS reinforces confidence (>1.0), failures erode it (<1.0).
     CASE NEW.outcome_type
-        WHEN 'critical_failure' THEN multiplier := 1.15;
-        WHEN 'failure' THEN multiplier := 1.10;
-        WHEN 'minor_failure' THEN multiplier := 1.08;
-        WHEN 'success' THEN multiplier := 0.97;
-        WHEN 'p1_incident' THEN multiplier := 1.15;
-        WHEN 'p2_incident' THEN multiplier := 1.10;
-        WHEN 'regression' THEN multiplier := 1.08;
-        WHEN 'clean_deploy' THEN multiplier := 0.97;
+        WHEN 'critical_failure' THEN multiplier := 0.85;
+        WHEN 'failure' THEN multiplier := 0.90;
+        WHEN 'minor_failure' THEN multiplier := 0.92;
+        WHEN 'success' THEN multiplier := 1.03;
+        WHEN 'p1_incident' THEN multiplier := 0.85;
+        WHEN 'p2_incident' THEN multiplier := 0.90;
+        WHEN 'regression' THEN multiplier := 0.92;
+        WHEN 'clean_deploy' THEN multiplier := 1.03;
         ELSE multiplier := 1.0;
     END CASE;
 
@@ -442,6 +449,7 @@ BEGIN
           AND entity_path = ep
           AND key = k
           AND superseded_at IS NULL
+          AND (account_id = NEW.account_id OR NEW.account_id IS NULL)
         ORDER BY version DESC LIMIT 1;
 
         IF FOUND THEN
@@ -450,18 +458,19 @@ BEGIN
             SET superseded_at = NOW()
             WHERE id = cur.id;
 
-            -- Insert new version with updated confidence
-            INSERT INTO amfs_memory_entries (
-                namespace, entity_path, key, version, value,
-                agent_id, session_id, written_at, pattern_refs,
-                confidence, outcome_count, recall_count, ttl_at, memory_type,
-                shared, artifact_refs
-            ) VALUES (
-                cur.namespace, cur.entity_path, cur.key, cur.version + 1, cur.value,
-                cur.agent_id, cur.session_id, cur.written_at, cur.pattern_refs,
-                cur.confidence * multiplier * NEW.causal_confidence,
-                cur.outcome_count + 1, cur.recall_count, cur.ttl_at, cur.memory_type,
-                cur.shared, cur.artifact_refs
+            -- Copy the row; override only what a new version changes. A column
+            -- list here silently reset every column added after it was written.
+            INSERT INTO amfs_memory_entries
+            SELECT * FROM jsonb_populate_record(
+                NULL::amfs_memory_entries,
+                to_jsonb(cur) || jsonb_build_object(
+                    'id', gen_random_uuid(),
+                    'version', cur.version + 1,
+                    'confidence', LEAST(1.0, GREATEST(0.0,
+                        cur.confidence * multiplier * NEW.causal_confidence)),
+                    'outcome_count', cur.outcome_count + 1,
+                    'superseded_at', NULL
+                )
             );
         END IF;
     END LOOP;
