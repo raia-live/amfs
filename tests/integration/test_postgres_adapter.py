@@ -663,3 +663,187 @@ def test_retention_cli_dry_run_reports_without_changing_anything(adapter, pg_con
     assert code == 0
     rows = adapter.list_traces(agent_id="cli-agent", limit=10)
     assert rows[0].task_input == "keep me"
+
+
+# ----------------------------------------------------------------------
+# Outcome propagation carries the row forward
+#
+# The trigger used to name the columns a new version should carry, so any
+# column added after that list was written took its DEFAULT on every outcome.
+# Nothing failed; the entry simply came back different. These cover the fields
+# the adapter contract cannot reach because write() does not accept them.
+# ----------------------------------------------------------------------
+
+
+def _commit_success_on(adapter, entity_path="checkout-service", key="retry-pattern"):
+    import uuid
+    from datetime import UTC, datetime
+
+    from amfs_core.models import OutcomeRecord, OutcomeType
+
+    return adapter.commit_outcome(
+        OutcomeRecord(
+            outcome_ref=f"DEP-{uuid.uuid4()}",
+            outcome_type=OutcomeType.SUCCESS,
+            causal_confidence=1.0,
+            committed_at=datetime.now(UTC),
+            causal_entry_keys=[f"{entity_path}/{key}"],
+            agent_id="release-agent",
+        )
+    )
+
+
+def test_outcome_preserves_recall_count_and_tier(adapter) -> None:
+    """Both are maintained by the store, so write() cannot set them.
+
+    recall_count is the counter the product reports back to users as evidence
+    that memory is being reused, and it was reset to 0 by every outcome.
+    """
+    import psycopg
+
+    adapter.write(_make_entry(confidence=0.9))
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE amfs_memory_entries SET recall_count = 7, tier = 1"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL"
+        )
+
+    _commit_success_on(adapter)
+
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT recall_count, tier FROM amfs_memory_entries"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL"
+        ).fetchone()
+    assert row[0] == 7, "an outcome erased the entry's reuse history"
+    assert row[1] == 1, "an outcome moved the entry to a different tier"
+
+
+def test_outcome_carries_forward_a_column_the_trigger_never_heard_of(adapter) -> None:
+    """The regression guard for the whole class, not three instances of it.
+
+    A deployment that extends this table gets columns the trigger's author
+    never saw. This adds one, sets it, and asserts the value survives an
+    outcome — which is only true because the INSERT copies the row.
+    """
+    import psycopg
+
+    adapter.write(_make_entry(confidence=0.9))
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        conn.execute(
+            "ALTER TABLE amfs_memory_entries"
+            " ADD COLUMN IF NOT EXISTS zz_downstream TEXT DEFAULT 'default-value'"
+        )
+        conn.execute(
+            "UPDATE amfs_memory_entries SET zz_downstream = 'set-by-deployment'"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL"
+        )
+
+    _commit_success_on(adapter)
+
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT zz_downstream FROM amfs_memory_entries"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL"
+        ).fetchone()
+    assert row[0] == "set-by-deployment", (
+        "a column the trigger does not name was reset to its default, which is "
+        "how recall_count, shared, tier, branch and embedding were all lost"
+    )
+
+
+def test_outcome_preserves_the_embedding(adapter) -> None:
+    """A NULL embedding drops the live version out of vector search.
+
+    Also the one column whose jsonb round-trip cannot be assumed, pgvector
+    being an extension type, so this asserts it rather than trusting it.
+    """
+    import psycopg
+
+    adapter.write(_make_entry(confidence=0.9))
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        if not conn.execute(
+            "SELECT 1 FROM pg_extension WHERE extname = 'vector'"
+        ).fetchone():
+            pytest.skip("pgvector not installed in this database")
+        # The adapter bootstrap does not create this column — migration 002
+        # does, and the fixture drops the table — so add it the way 002 would.
+        conn.execute(
+            "ALTER TABLE amfs_memory_entries"
+            " ADD COLUMN IF NOT EXISTS embedding vector(384)"
+        )
+        vector = "[" + ",".join(["0.5"] * 384) + "]"
+        conn.execute(
+            "UPDATE amfs_memory_entries SET embedding = %s::vector"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL",
+            (vector,),
+        )
+
+    _commit_success_on(adapter)
+
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT embedding::text FROM amfs_memory_entries"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL"
+        ).fetchone()
+    assert row[0] == vector, "the embedding was lost, so the entry left vector search"
+
+
+def test_an_outcome_without_an_account_leaves_other_accounts_alone(adapter) -> None:
+    """The account clause has to hold when the outcome carries no account.
+
+    Nothing in this adapter sets account_id on the outcome row — deployments
+    rely on a column default — so an outcome written by a path that never
+    established one is the realistic case, not a contrived one. Written as
+    `account_id = NEW.account_id OR NEW.account_id IS NULL`, that outcome
+    matched entries in EVERY account and reinforced all of them.
+    """
+    import uuid as _uuid
+
+    import psycopg
+
+    adapter.write(_make_entry(confidence=0.9))
+    other_account = str(_uuid.uuid4())
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE amfs_memory_entries SET account_id = %s::uuid"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL",
+            (other_account,),
+        )
+
+    # The outcome carries no account, as this adapter always writes it.
+    _commit_success_on(adapter)
+
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT version, confidence FROM amfs_memory_entries"
+            " WHERE key = 'retry-pattern' ORDER BY version"
+        ).fetchall()
+    assert len(rows) == 1, (
+        "an outcome with no account reinforced an entry belonging to an "
+        "account, creating a new version across the tenancy boundary"
+    )
+    assert abs(float(rows[0][1]) - 0.9) < 1e-6, "the other account's entry was modified"
+
+
+def test_an_outcome_still_reinforces_when_neither_side_has_an_account(adapter) -> None:
+    """The single-account case, which is every self-hosted install.
+
+    IS NOT DISTINCT FROM is what keeps this working while still rejecting the
+    case above; plain equality would make NULL = NULL unknown and propagation
+    would silently never fire for anyone.
+    """
+    import psycopg
+
+    adapter.write(_make_entry(confidence=0.9))
+    _commit_success_on(adapter)
+
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT confidence FROM amfs_memory_entries"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL"
+        ).fetchone()
+    assert abs(float(row[0]) - 0.927) < 1e-6, (
+        "propagation stopped firing for entries with no account, which is all "
+        "of them in a single-account install"
+    )

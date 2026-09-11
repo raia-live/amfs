@@ -930,11 +930,16 @@ class PostgresAdapter(AdapterABC):
             WHERE tier <= 2 AND superseded_at IS NULL
         """)
         cur.execute("""
+            -- Must stay identical to schema.sql and migrations/007. All three
+            -- are CREATE OR REPLACE, so whichever runs last silently becomes
+            -- the function and a stale copy is a regression, not dead code.
+            -- This one runs at container start whenever the schema fingerprint
+            -- changes, which makes it the copy most able to overwrite the
+            -- others after a deploy.
             CREATE OR REPLACE FUNCTION amfs_propagate_outcome() RETURNS TRIGGER AS $$
             DECLARE
                 multiplier NUMERIC;
                 entry_key TEXT;
-                parts TEXT[];
                 ep TEXT;
                 k TEXT;
                 cur RECORD;
@@ -966,6 +971,7 @@ class PostgresAdapter(AdapterABC):
                       AND entity_path = ep
                       AND key = k
                       AND superseded_at IS NULL
+                      AND account_id IS NOT DISTINCT FROM NEW.account_id
                     ORDER BY version DESC LIMIT 1;
 
                     IF FOUND THEN
@@ -973,20 +979,23 @@ class PostgresAdapter(AdapterABC):
                         SET superseded_at = NOW()
                         WHERE id = cur.id;
 
-                        INSERT INTO amfs_memory_entries (
-                            namespace, entity_path, key, version, value,
-                            agent_id, session_id, written_at, pattern_refs,
-                            confidence, outcome_count, recall_count,
-                            ttl_at, memory_type, shared, artifact_refs,
-                            is_artifact
-                        ) VALUES (
-                            cur.namespace, cur.entity_path, cur.key, cur.version + 1, cur.value,
-                            cur.agent_id, cur.session_id, cur.written_at, cur.pattern_refs,
-                            LEAST(1.0, GREATEST(0.0, cur.confidence * multiplier * NEW.causal_confidence)),
-                            cur.outcome_count + 1, cur.recall_count,
-                            cur.ttl_at, cur.memory_type,
-                            cur.shared, cur.artifact_refs,
-                            cur.is_artifact
+                        -- Copy the row; override only what a new version
+                        -- changes. The column list this replaces was the live
+                        -- one, and it reset every column added after it was
+                        -- written: recall_count, shared, tier, branch,
+                        -- embedding, and any column a deployment adds. See
+                        -- migrations/007 for the full reasoning.
+                        INSERT INTO amfs_memory_entries
+                        SELECT * FROM jsonb_populate_record(
+                            NULL::amfs_memory_entries,
+                            to_jsonb(cur) || jsonb_build_object(
+                                'id', gen_random_uuid(),
+                                'version', cur.version + 1,
+                                'confidence', LEAST(1.0, GREATEST(0.0,
+                                    cur.confidence * multiplier * NEW.causal_confidence)),
+                                'outcome_count', cur.outcome_count + 1,
+                                'superseded_at', NULL
+                            )
                         );
                     END IF;
                 END LOOP;
