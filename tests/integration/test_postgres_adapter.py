@@ -590,6 +590,227 @@ def test_ensure_trace_partitions_creates_months_ahead_and_drains_default(adapter
     assert adapter.ensure_trace_partitions() == []
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Row-level security on the partitions
+#
+# A partitioned parent's policies are applied to rows reached through the parent.
+# A query naming a partition directly is checked against that partition's own
+# policies, and a partition starts with none — so upkeep has to put them there.
+#
+# The isolation key here is ``agent_id`` rather than the ``account_id`` the hosted
+# deployment scopes on, because that column belongs to the tenant package and is
+# not in this schema. That is the right shape for the test regardless: the code
+# under test copies whatever policies the parent carries without reading them, so
+# a test that proved it only for one predicate would be proving less than it looks.
+# ──────────────────────────────────────────────────────────────────────
+
+PROBE_ROLE = "amfs_rls_probe"
+
+
+def _make_parent_tenant_scoped(conn) -> None:
+    """Do to the parent what a deployment with row-level security does to it."""
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE amfs_decision_traces ENABLE ROW LEVEL SECURITY")
+        cur.execute("ALTER TABLE amfs_decision_traces FORCE ROW LEVEL SECURITY")
+        cur.execute(
+            "CREATE POLICY agent_isolation ON amfs_decision_traces "
+            "USING (agent_id = NULLIF(current_setting('amfs.test_agent', true), ''))"
+        )
+        cur.execute(
+            f"DO $$ BEGIN IF NOT EXISTS ("
+            f"  SELECT 1 FROM pg_roles WHERE rolname = '{PROBE_ROLE}'"
+            f") THEN CREATE ROLE {PROBE_ROLE} NOSUPERUSER NOBYPASSRLS; END IF; END $$"
+        )
+
+
+def _grant_to_probe(conn, tables: list[str]) -> None:
+    with conn.cursor() as cur:
+        for t in tables:
+            cur.execute(f"GRANT SELECT ON {t} TO {PROBE_ROLE}")
+
+
+def _read_as_probe(conn, table: str, agent: str) -> list[str]:
+    """SELECT from *table* as an unprivileged role with *agent* in scope."""
+    with conn.cursor() as cur:
+        cur.execute(f"SET ROLE {PROBE_ROLE}")
+        try:
+            cur.execute("SELECT set_config('amfs.test_agent', %s, false)", (agent,))
+            cur.execute(f"SELECT agent_id FROM {table} ORDER BY agent_id")
+            return [r[0] for r in cur.fetchall()]
+        finally:
+            cur.execute("RESET ROLE")
+
+
+def _rls_flags(conn, name: str) -> tuple[bool, bool]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = %s",
+            (name,),
+        )
+        row = cur.fetchone()
+    return (row[0], row[1]) if row else (False, False)
+
+
+def _policy_names(conn, name: str) -> list[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT policyname FROM pg_policies WHERE tablename = %s ORDER BY policyname",
+            (name,),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def _save_two_agents(adapter):
+    from amfs_core.models import DecisionTrace
+
+    for agent in ("agent-a", "agent-b"):
+        adapter.save_trace(
+            DecisionTrace(
+                agent_id=agent, session_id="s", outcome_ref=f"REF-{agent}",
+                outcome_type="success",
+            )
+        )
+
+
+def test_postgres_does_not_give_a_partition_its_parents_row_security(adapter, pg_conn) -> None:
+    """The behaviour the sync exists for, stated as the fact it is.
+
+    If a future Postgres inherits policies down to partitions, this test fails and
+    ``sync_partition_rls`` becomes unnecessary — which is worth being told about
+    rather than left to keep running.
+    """
+    _make_parent_tenant_scoped(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "CREATE TABLE amfs_decision_traces_y2031m01 PARTITION OF amfs_decision_traces "
+            "FOR VALUES FROM ('2031-01-01') TO ('2031-02-01')"
+        )
+
+    assert _rls_flags(pg_conn, "amfs_decision_traces") == (True, True)
+    assert _rls_flags(pg_conn, "amfs_decision_traces_y2031m01") == (False, False)
+    assert _policy_names(pg_conn, "amfs_decision_traces_y2031m01") == []
+
+
+def test_a_partition_without_the_sync_is_readable_with_no_agent_in_scope(adapter, pg_conn) -> None:
+    """The gap itself: the parent filters, the partition named directly does not."""
+    _save_two_agents(adapter)
+    _make_parent_tenant_scoped(pg_conn)
+    from amfs_postgres.trace_partitions import partition_name
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    this_month = partition_name(now.year, now.month)
+    _grant_to_probe(pg_conn, ["amfs_decision_traces", this_month])
+
+    assert _read_as_probe(pg_conn, "amfs_decision_traces", "agent-a") == ["agent-a"]
+    # Same rows, same role, same session — reached by name instead of through the parent.
+    assert _read_as_probe(pg_conn, this_month, "agent-a") == ["agent-a", "agent-b"]
+
+
+def test_upkeep_scopes_a_partition_read_directly(adapter, pg_conn) -> None:
+    """The property that matters: after upkeep, by-name is scoped like the parent."""
+    _save_two_agents(adapter)
+    _make_parent_tenant_scoped(pg_conn)
+    from amfs_postgres.trace_partitions import partition_name
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    this_month = partition_name(now.year, now.month)
+
+    adapter.ensure_trace_partitions()
+    _grant_to_probe(pg_conn, ["amfs_decision_traces", this_month])
+
+    assert _read_as_probe(pg_conn, this_month, "agent-a") == ["agent-a"]
+    assert _read_as_probe(pg_conn, this_month, "agent-b") == ["agent-b"]
+
+
+def test_upkeep_does_not_leave_a_partition_denying_everything(adapter, pg_conn) -> None:
+    """Enabling row security without copying the policies would read as an empty month.
+
+    The failure this guards against is quieter than the one it replaces: no error,
+    no refusal, just zero rows where there are two.
+    """
+    _save_two_agents(adapter)
+    _make_parent_tenant_scoped(pg_conn)
+    from amfs_postgres.trace_partitions import partition_name
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    this_month = partition_name(now.year, now.month)
+
+    adapter.ensure_trace_partitions()
+    assert _rls_flags(pg_conn, this_month) == (True, True)
+    assert _policy_names(pg_conn, this_month) == ["agent_isolation"]
+    _grant_to_probe(pg_conn, [this_month])
+    assert _read_as_probe(pg_conn, this_month, "agent-a") != []
+
+
+def test_upkeep_covers_every_partition_not_only_the_new_ones(adapter, pg_conn) -> None:
+    """Convergence, not stamping at creation.
+
+    The partitions for this month and the next two exist from init, before any
+    policy did. A fix applied only where a partition is created would leave exactly
+    those three — the ones production is reading — as the gap.
+    """
+    from amfs_postgres.trace_partitions import sync_partition_rls
+
+    _make_parent_tenant_scoped(pg_conn)
+    before = _partitions(pg_conn)
+    assert len(before) >= 3
+
+    adapter.ensure_trace_partitions()
+    for name in before:
+        assert _policy_names(pg_conn, name) == ["agent_isolation"], name
+        assert _rls_flags(pg_conn, name) == (True, True), name
+
+    # Idempotent: nothing left to change on a second pass.
+    with pg_conn.cursor() as cur:
+        assert sync_partition_rls(cur) == []
+
+
+def test_upkeep_leaves_an_install_with_no_row_security_alone(adapter, pg_conn) -> None:
+    """An install whose parent carries nothing must not have security switched on for it.
+
+    Enabling it here would take an OSS deployment's own traces away from it, since
+    there would be no policy to let them back in.
+    """
+    _save_two_agents(adapter)
+    assert _rls_flags(pg_conn, "amfs_decision_traces") == (False, False)
+
+    adapter.ensure_trace_partitions()
+    for name in _partitions(pg_conn):
+        assert _rls_flags(pg_conn, name) == (False, False), name
+    assert adapter.count_traces() == 2
+
+
+def test_a_restrictive_policy_is_copied_as_restrictive(adapter, pg_conn) -> None:
+    """The catalogue is replayed, not paraphrased.
+
+    A restrictive policy copied as permissive would widen what it was written to
+    narrow, which is the kind of mistake a hand-written copy of the predicate makes.
+    """
+    from amfs_postgres.trace_partitions import partition_name
+    from datetime import UTC, datetime
+
+    _make_parent_tenant_scoped(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "CREATE POLICY no_placeholders ON amfs_decision_traces AS RESTRICTIVE "
+            "FOR SELECT USING (outcome_ref <> 'PLACEHOLDER')"
+        )
+    adapter.ensure_trace_partitions()
+
+    now = datetime.now(UTC)
+    this_month = partition_name(now.year, now.month)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT permissive, cmd FROM pg_policies "
+            "WHERE tablename = %s AND policyname = 'no_placeholders'",
+            (this_month,),
+        )
+        assert cur.fetchone() == ("RESTRICTIVE", "SELECT")
+
+
 def test_apply_trace_retention_strips_payloads_and_drops_old_partitions(adapter, pg_conn) -> None:
     from datetime import UTC, datetime, timedelta
 
