@@ -2534,6 +2534,16 @@ async def commit_outcome(
             tool_calls=req.tool_calls,
             attributes=client_attributes or None,
             llm_calls=client_llm_calls or None,
+            # The same declaration that suppresses the seal below, applied one
+            # layer deeper. The trace this would write is assembled on the shared
+            # handle, so it carried this process's session and whatever the last
+            # request left on its tracker; the caller's own trace arrives on
+            # ``/traces`` moments later. Persisting both left two decision_traces
+            # rows per outcome, indistinguishable by agent because the tagger is
+            # pointed at the caller for exactly this block — so every count and
+            # ratio taken over that table was measured against a population
+            # roughly twice its true size, half of it untrue.
+            persist_trace=not req.trace_follows,
         )
     finally:
         if original_agent is not None:
