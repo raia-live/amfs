@@ -1198,12 +1198,23 @@ def _seed_real_and_system(adapter) -> None:
 
 
 def test_the_sql_totals_leave_out_bench_and_system_rows(adapter) -> None:
+    """Both the counts and the breakdowns beside them.
+
+    ``stats`` ran three separate queries, and filtering only the first left
+    ``total_agents`` counting one thing while ``agents`` listed another — a
+    disagreement inside a single response, which is why the breakdowns are
+    asserted here and not just the scalars.
+    """
     _seed_real_and_system(adapter)
 
     stats = adapter.stats()
     assert stats.total_entries == 2
     assert stats.total_entities == 2
     assert stats.total_agents == 1
+    assert set(stats.entities) == {"repo/module", "repo/other"}
+    assert set(stats.agents) == {"agent-a"}
+    assert stats.total_agents == len(stats.agents)
+    assert stats.total_entities == len(stats.entities)
 
 
 def test_the_extended_sql_totals_leave_them_out_too(adapter) -> None:

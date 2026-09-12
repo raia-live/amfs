@@ -56,7 +56,17 @@ def recall_tokens_saved(entry: "MemoryEntry") -> int:
 
 
 def entity_summaries_from_entries(entries: "list[MemoryEntry]") -> list[dict]:
-    """Group entries per entity path: count, avg confidence, last write, agents."""
+    """Group entries per entity path: count, avg confidence, last write, agents.
+
+    Benchmark and system rows are left out, as they are from the totals — an
+    entity list that disagreed with the count above it would be worse than
+    either number alone. Always safe to do here because this helper has no
+    entity_path argument to opt into one: see the note in
+    :func:`agent_entity_stats_from_entries`' caller for the case that does.
+    """
+    from amfs_core.exclusions import is_excluded_entry
+
+    entries = [e for e in entries if not is_excluded_entry(e)]
     grouped: dict[str, list] = {}
     for entry in entries:
         grouped.setdefault(entry.entity_path, []).append(entry)

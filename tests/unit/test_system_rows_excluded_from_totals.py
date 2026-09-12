@@ -149,3 +149,68 @@ class TestTheTotals:
         assert stats.total_entries == 1
         assert stats.total_agents == 1
         assert set(stats.entities) == {"repo/module"}
+
+
+class TestTheBreakdownsBesideTheTotals:
+    """A list that disagrees with the count above it is worse than either alone."""
+
+    def _entries(self) -> list[MemoryEntry]:
+        return [
+            _entry(key="real-1"),
+            _entry(key="real-2", entity_path="repo/other"),
+            _entry(key="b1", entity_path="bench-x", agent_id="bench-runner"),
+            _entry(key="b2", entity_path="_system/e", agent_id="amfs-server"),
+        ]
+
+    def test_the_entity_list_leaves_them_out(self) -> None:
+        """Feeds the room-scoped /api/v1/entities and the adapter default."""
+        from amfs_core.aggregates import entity_summaries_from_entries
+
+        summaries = entity_summaries_from_entries(self._entries())
+        assert {s["entity_path"] for s in summaries} == {"repo/module", "repo/other"}
+
+    def test_the_entity_list_agrees_with_the_totals(self) -> None:
+        from amfs_core.aggregates import (
+            entity_summaries_from_entries,
+            extended_stats_from_entries,
+        )
+
+        entries = self._entries()
+        assert len(entity_summaries_from_entries(entries)) == (
+            extended_stats_from_entries(entries)["total_entities"]
+        )
+
+    def test_the_unscoped_agent_breakdown_leaves_them_out(self) -> None:
+        from amfs_core.abc import AdapterABC
+
+        class _Listing:
+            def __init__(self, entries: list[MemoryEntry]) -> None:
+                self._entries = entries
+
+            def list(self) -> list[MemoryEntry]:
+                return self._entries
+
+        rows = AdapterABC.agent_entity_stats(_Listing(self._entries()))
+        assert {r["agent_id"] for r in rows} == {"agent-a"}
+        assert {r["entity_path"] for r in rows} == {"repo/module", "repo/other"}
+
+    def test_a_briefing_on_a_benchmarks_own_path_still_sees_it(self) -> None:
+        """Naming a path is the act of opting into it.
+
+        The default implementation has to draw the same line the SQL override
+        draws, or a briefing would work on one adapter and come back empty on
+        another.
+        """
+        from amfs_core.abc import AdapterABC
+
+        class _Listing:
+            def __init__(self, entries: list[MemoryEntry]) -> None:
+                self._entries = entries
+
+            def list(self) -> list[MemoryEntry]:
+                return self._entries
+
+        rows = AdapterABC.agent_entity_stats(
+            _Listing(self._entries()), entity_path="bench-x"
+        )
+        assert [r["agent_id"] for r in rows] == ["bench-runner"]

@@ -2446,6 +2446,13 @@ class PostgresAdapter(AdapterABC):
         Unscoped by construction, so shared namespaces are excluded here for
         the same reason as in entity_summaries and stats_extended.
         """
+        # One clause, used by the totals and by both breakdowns below. They were
+        # three separate inline WHEREs, and a filter added to the first of them
+        # left `total_agents` counting one thing and `agents` listing another.
+        where = (
+            f"namespace = %s AND superseded_at IS NULL "
+            f"AND {_EXCLUDE_SHARED_PATHS} AND {_EXCLUDE_SYSTEM_ROWS}"
+        )
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -2461,9 +2468,7 @@ class PostgresAdapter(AdapterABC):
                         MIN(written_at) as oldest_entry_at,
                         MAX(written_at) as newest_entry_at
                     FROM amfs_memory_entries
-                    WHERE namespace = %s AND superseded_at IS NULL
-                      AND {_EXCLUDE_SHARED_PATHS}
-                      AND {_EXCLUDE_SYSTEM_ROWS}
+                    WHERE {where}
                     """,
                     (self._namespace,),
                 )
@@ -2472,10 +2477,7 @@ class PostgresAdapter(AdapterABC):
                 cur.execute(
                     f"""
                     SELECT agent_id, COUNT(*) as cnt
-                    FROM amfs_memory_entries
-                    WHERE namespace = %s AND superseded_at IS NULL
-                      AND {_EXCLUDE_SHARED_PATHS}
-                    GROUP BY agent_id
+                    FROM amfs_memory_entries WHERE {where} GROUP BY agent_id
                     """,
                     (self._namespace,),
                 )
@@ -2484,10 +2486,7 @@ class PostgresAdapter(AdapterABC):
                 cur.execute(
                     f"""
                     SELECT entity_path, COUNT(*) as cnt
-                    FROM amfs_memory_entries
-                    WHERE namespace = %s AND superseded_at IS NULL
-                      AND {_EXCLUDE_SHARED_PATHS}
-                    GROUP BY entity_path
+                    FROM amfs_memory_entries WHERE {where} GROUP BY entity_path
                     """,
                     (self._namespace,),
                 )
