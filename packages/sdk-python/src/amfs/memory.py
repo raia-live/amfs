@@ -1235,6 +1235,11 @@ class AgentMemory:
             response_text=response_text,
             tool_calls=tool_calls,
             session_metadata=_metadata_to_dict(session_metadata) or None,
+            # Declared here rather than in the adapter because this is the
+            # method that makes the promise: the trace is built and posted below
+            # on every path out of it. An adapter's commit_outcome called
+            # directly by a caller of its own promises nothing of the sort.
+            trace_follows=True,
         )
         updated = self._propagator.propagate(record)
 
@@ -1336,7 +1341,13 @@ class AgentMemory:
         try:
             trace = self._adapter.save_trace(trace)
         except Exception:
-            logger.debug("Failed to persist decision trace", exc_info=True)
+            # Warned rather than debugged because of the declaration on the record
+            # above: the server was told this trace was coming and did not seal one
+            # of its own, so on the SaaS path a failure here is the difference
+            # between one sealed trace and none. It is the right trade — what the
+            # server would have sealed was assembled from its shared handle — but
+            # it is no longer a failure whose only cost is a missing OSS row.
+            logger.warning("Failed to persist decision trace", exc_info=True)
 
         executor = _get_sdk_executor()
         adapter = self._adapter

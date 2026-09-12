@@ -219,6 +219,12 @@ class HttpAdapter(AdapterABC):
         # sealed copy.
         if record.session_metadata:
             body["session_metadata"] = record.session_metadata
+        # The counterpart of all of the above: everything this call carries is
+        # carried so the server can seal from it, and none of it makes the server's
+        # copy as good as the trace that follows on ``save_trace``. When one is
+        # coming, say so, and the server seals once from the better of the two.
+        if record.trace_follows:
+            body["trace_follows"] = True
         data = self._post("/api/v1/outcomes", body)
         return [_parse_entry(e) for e in data.get("entries", [])]
 

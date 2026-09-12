@@ -266,6 +266,19 @@ class OutcomeRecord(BaseModel):
     #: the server seals from this call, and a bag that arrived only on the later
     #: trace left the sealed copy with no attributes and no token or cost figures.
     session_metadata: dict[str, Any] | None = None
+    #: Set by ``AgentMemory.commit_outcome``, which always posts the full trace
+    #: straight after this record goes out. It tells the server not to seal a
+    #: trace of its own from this call, because a better one is seconds away.
+    #: The server has no trace of the caller's to seal: it assembles one on its
+    #: shared handle, so the causal entries, query events, state diff and
+    #: session window come from whatever other requests left on that handle,
+    #: and the session is the server process's rather than the caller's. Two
+    #: sealed traces per outcome also doubled every count and average measured
+    #: over them, and chained the fabricated one into a hash chain keyed by the
+    #: process's session and therefore shared across accounts.
+    #: Default ``False``, so a caller that posts no trace — a direct REST client
+    #: — still gets the server-side seal, which for it is the only one there is.
+    trace_follows: bool = False
 
 
 class TraceEntry(BaseModel):
