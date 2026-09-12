@@ -24,6 +24,10 @@ from amfs_core.abc import AdapterABC, WatchHandle
 from amfs_core.content import ARTIFACT_PENALTY, classify_artifact, embedding_input
 from amfs_core.embedder import EmbedderABC
 from amfs_core.exceptions import AdapterError, VersionConflictError
+from amfs_core.exclusions import (
+    AGENT_ID_NOT_EXCLUDED_SQL,
+    ENTITY_PATH_NOT_EXCLUDED_SQL,
+)
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
     Agent,
@@ -96,6 +100,18 @@ logger = logging.getLogger(__name__)
 # the paths that pass the string through verbatim, consecutive LIKE wildcards
 # collapse, so '@%%/%%' matches exactly what '@%/%' does.
 _EXCLUDE_SHARED_PATHS = "entity_path NOT LIKE '@%%/%%'"
+
+# Benchmark and system rows, kept out of the aggregates that describe how much
+# memory an account has. The predicates come from amfs_core.exclusions so that
+# this and the Python aggregate cannot answer differently; see that module.
+#
+# Applied only where a query names no entity_path — the same line the shared-path
+# exclusion draws, and for the same reason: naming a path is the act of opting
+# into it. ``agent_entity_stats`` scoped to a path is how a briefing is built,
+# including a briefing on a benchmark's own path, and that must keep working.
+_EXCLUDE_SYSTEM_ROWS = (
+    f"({ENTITY_PATH_NOT_EXCLUDED_SQL} AND {AGENT_ID_NOT_EXCLUDED_SQL})"
+)
 
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
 
@@ -2447,6 +2463,7 @@ class PostgresAdapter(AdapterABC):
                     FROM amfs_memory_entries
                     WHERE namespace = %s AND superseded_at IS NULL
                       AND {_EXCLUDE_SHARED_PATHS}
+                      AND {_EXCLUDE_SYSTEM_ROWS}
                     """,
                     (self._namespace,),
                 )
@@ -2509,6 +2526,7 @@ class PostgresAdapter(AdapterABC):
         # which would otherwise list a shared namespace's topics as though
         # they were this account's own.
         conditions.append(_EXCLUDE_SHARED_PATHS)
+        conditions.append(_EXCLUDE_SYSTEM_ROWS)
         where = " AND ".join(conditions)
 
         sql = f"""
@@ -2580,6 +2598,10 @@ class PostgresAdapter(AdapterABC):
             # though they were this account's own. Naming a path is the act of
             # opting into it.
             conditions.append(_EXCLUDE_SHARED_PATHS)
+            # And in this branch only. Scoped to a path, this is how a briefing
+            # is built — including a briefing on a benchmark's own path, which
+            # has to keep working.
+            conditions.append(_EXCLUDE_SYSTEM_ROWS)
         where = " AND ".join(conditions)
 
         sql = f"""
@@ -2632,6 +2654,10 @@ class PostgresAdapter(AdapterABC):
         # namespace's topics appear in the account's own entity list and its
         # entries inflate every total on the stats page.
         conditions.append(_EXCLUDE_SHARED_PATHS)
+        # And the system's own rows, for the same reason the Python aggregate in
+        # amfs_core.aggregates drops them: this number is shown to a user as the
+        # size of their memory.
+        conditions.append(_EXCLUDE_SYSTEM_ROWS)
         where = " AND ".join(conditions)
 
         with self._pool.connection() as conn:

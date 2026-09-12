@@ -117,7 +117,17 @@ def agent_entity_stats_from_entries(entries: "list[MemoryEntry]") -> list[dict]:
 
 
 def extended_stats_from_entries(entries: "list[MemoryEntry]") -> dict:
-    """MemoryStats fields plus recall totals, weekly deltas, and type counts."""
+    """MemoryStats fields plus recall totals, weekly deltas, and type counts.
+
+    Benchmark and system rows are left out — see :mod:`amfs_core.exclusions`.
+    These are an account's own totals, so the exclusion belongs here rather than
+    at each caller: the adapter default, the room-scoped HTTP path and the SQL
+    aggregate are meant to be three routes to one number, and a filter applied
+    to some of them would make that untrue in a way nobody would notice.
+    """
+    from amfs_core.exclusions import is_excluded_entry
+
+    entries = [e for e in entries if not is_excluded_entry(e)]
     now = datetime.now(timezone.utc)
     week_ago = now - timedelta(days=7)
     two_weeks_ago = now - timedelta(days=14)

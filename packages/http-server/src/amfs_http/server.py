@@ -281,11 +281,18 @@ def set_retrieval_enhancers(reranker: Any = None, query_rewriter: Any = None) ->
 # Benchmark/system scratch namespaces must never outrank a user's real memory
 # in recall (the incident that motivated this had bench rows crowding out real
 # task summaries). Matched against the leading segment of entity_path.
-_EXCLUDED_ENTITY_RE = re.compile(r"^(?:_system(?:/|$)|_?bench[-/])", re.I)
-
-
-def _is_excluded_entity(entity_path: str) -> bool:
-    return bool(entity_path) and bool(_EXCLUDED_ENTITY_RE.match(entity_path))
+#
+# Defined in amfs_core.exclusions, not here. The pattern used to be written out
+# in four places — this one and three in the hosted packages, each carrying a
+# comment asking whoever edited it to remember the others — and the aggregates
+# need it as SQL as well as Python, which is two more chances for the same
+# rule to say two things.
+from amfs_core.exclusions import (  # noqa: E402
+    EXCLUDED_ENTITY_RE as _EXCLUDED_ENTITY_RE,
+)
+from amfs_core.exclusions import (  # noqa: E402
+    is_excluded_entity as _is_excluded_entity,
+)
 
 
 def _retrieve_min_semantic() -> float:

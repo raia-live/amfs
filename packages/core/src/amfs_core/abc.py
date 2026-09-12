@@ -385,7 +385,10 @@ class AdapterABC(ABC):
 
         Adapters may override with optimised implementations (e.g. SQL aggregates).
         """
-        entries = self.list()
+        from amfs_core.exclusions import is_excluded_entry
+
+        # An account's own totals, so the system's own rows are not part of them.
+        entries = [e for e in self.list() if not is_excluded_entry(e)]
         if not entries:
             return MemoryStats()
 

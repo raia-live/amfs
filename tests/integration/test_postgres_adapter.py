@@ -1123,3 +1123,145 @@ def test_an_outcome_still_reinforces_when_neither_side_has_an_account(adapter) -
         "propagation stopped firing for entries with no account, which is all "
         "of them in a single-account install"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Benchmark and system rows are not part of an account's totals
+#
+# The exclusion exists twice, as a Python predicate and as a SQL fragment,
+# because aggregation happens in the database where an adapter can express it
+# and in Python where it cannot. The first test here is the one that keeps the
+# two honest; the rest check the aggregates that report totals, and the one
+# aggregate that must keep counting them.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_the_sql_and_python_exclusions_agree(pg_conn) -> None:
+    """One rule in two languages, held together by running the same paths through both.
+
+    Includes the near misses on purpose: ``benchmarking-agent`` and ``_systemic``
+    must survive, so a user who named a path that way keeps seeing it in their own
+    totals. A drift between the two forms would show up as an account whose totals
+    depend on which adapter served them.
+    """
+    from amfs_core.exclusions import (
+        ENTITY_PATH_NOT_EXCLUDED_SQL,
+        is_excluded_entity,
+    )
+
+    paths = [
+        "_system", "_system/x", "_systemic", "_systemic/x", "_systems/x",
+        "bench-1", "bench/1", "_bench-1", "_bench/1", "BENCH-1", "_SYSTEM/x",
+        "benchmarking-agent", "benchmark/x", "bencher", "bench", "_bench",
+        "amfs/core-engine", "user/preferences", "x/_system", "a-bench/1",
+    ]
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            f"SELECT p, ({ENTITY_PATH_NOT_EXCLUDED_SQL.replace('entity_path', 'p')}) "
+            f"FROM unnest(%s::text[]) AS t(p)",
+            (paths,),
+        )
+        from_sql = {row[0]: not row[1] for row in cur.fetchall()}
+
+    disagreements = {
+        p: (is_excluded_entity(p), from_sql[p])
+        for p in paths
+        if is_excluded_entity(p) != from_sql[p]
+    }
+    assert not disagreements, f"python vs sql: {disagreements}"
+
+
+def _write(adapter, entity_path: str, key: str, agent_id: str = "agent-a"):
+    from datetime import UTC, datetime
+
+    from amfs_core.models import MemoryEntry, Provenance
+
+    return adapter.write(
+        MemoryEntry(
+            entity_path=entity_path,
+            key=key,
+            value={"v": 1},
+            provenance=Provenance(
+                agent_id=agent_id, session_id="s1", written_at=datetime.now(UTC)
+            ),
+            confidence=0.8,
+        )
+    )
+
+
+def _seed_real_and_system(adapter) -> None:
+    _write(adapter, "repo/module", "real-1")
+    _write(adapter, "repo/other", "real-2")
+    _write(adapter, "bench-retrieval", "b1", agent_id="bench-runner")
+    _write(adapter, "_system/embeddings", "b2", agent_id="amfs-server")
+    _write(adapter, "repo/module", "b3", agent_id="bench-runner")
+
+
+def test_the_sql_totals_leave_out_bench_and_system_rows(adapter) -> None:
+    _seed_real_and_system(adapter)
+
+    stats = adapter.stats()
+    assert stats.total_entries == 2
+    assert stats.total_entities == 2
+    assert stats.total_agents == 1
+
+
+def test_the_extended_sql_totals_leave_them_out_too(adapter) -> None:
+    """``stats_extended`` is what the hosted /api/v1/stats answers with."""
+    _seed_real_and_system(adapter)
+
+    stats = adapter.stats_extended()
+    assert stats["total_entries"] == 2
+    assert stats["total_entities"] == 2
+    assert stats["total_agents"] == 1
+    assert set(stats["entities"]) == {"repo/module", "repo/other"}
+    assert set(stats["agents"]) == {"agent-a"}
+
+
+def test_the_entity_list_leaves_them_out(adapter) -> None:
+    _seed_real_and_system(adapter)
+
+    paths = {s["entity_path"] for s in adapter.entity_summaries()}
+    assert paths == {"repo/module", "repo/other"}
+
+
+def test_the_unscoped_agent_breakdown_leaves_them_out(adapter) -> None:
+    _seed_real_and_system(adapter)
+
+    rows = adapter.agent_entity_stats()
+    assert {r["entity_path"] for r in rows} == {"repo/module", "repo/other"}
+    assert {r["agent_id"] for r in rows} == {"agent-a"}
+
+
+def test_a_briefing_on_a_benchmarks_own_path_still_sees_it(adapter) -> None:
+    """Naming a path is the act of opting into it — the same line the shared-path
+    exclusion draws.
+
+    ``agent_entity_stats`` scoped to an entity_path is how a briefing's authority
+    ranking is built. Filtering it there would leave a benchmark unable to brief
+    on its own work, which is the silent-empty failure rather than a fix.
+    """
+    _seed_real_and_system(adapter)
+
+    rows = adapter.agent_entity_stats(entity_path="bench-retrieval")
+    assert [r["agent_id"] for r in rows] == ["bench-runner"]
+
+
+def test_the_python_and_sql_totals_report_the_same_thing(adapter) -> None:
+    """The filtered-in-Python path and the SQL path are two routes to one number.
+
+    The room-scoped branch of /api/v1/stats aggregates in Python because a room's
+    per-user visibility cannot be expressed as a WHERE clause. It must not answer
+    a different total than the branch below it.
+    """
+    from amfs_core.aggregates import extended_stats_from_entries
+
+    _seed_real_and_system(adapter)
+
+    in_sql = adapter.stats_extended()
+    in_python = extended_stats_from_entries(
+        adapter.list("repo/module") + adapter.list("repo/other")
+        + adapter.list("bench-retrieval") + adapter.list("_system/embeddings")
+    )
+    for field in ("total_entries", "total_entities", "total_agents"):
+        assert in_sql[field] == in_python[field], field
