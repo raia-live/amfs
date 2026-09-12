@@ -18,8 +18,10 @@ adapter's maintenance checkout) because each manages its own transactions:
 - :func:`apply_retention` strips captured payloads from traces past the hot
   window and optionally drops partitions past a longer one. Nothing schedules
   it; the adapter exposes it and an operator or a job calls it.
-- :func:`sync_partition_rls` copies whatever row-level security the parent
-  carries onto each partition, which Postgres does not do by itself.
+- :func:`sync_partition_rls` copies the parent's row-security policies onto each
+  partition and enables row security there, which Postgres does not do by
+  itself. It stops short of ``FORCE``, so the owner — the role that runs
+  retention — stays exempt; that function's docstring says why.
   ``ensure_partitions`` calls it, so it runs on every start; it is public
   because it is worth being able to call and assert on directly.
 
@@ -611,12 +613,32 @@ def sync_partition_rls(cur: Any) -> list[str]:
     applies, the partition yields nothing at all, and a maintenance query would
     quietly read zero rows rather than be refused. Both halves or neither.
 
+    What this deliberately does not do: ``FORCE``
+    --------------------------------------------
+    The parent is forced, and this does not pass that down, because the owner is
+    also the role that maintains these tables. Retention strips payloads with an
+    ``UPDATE`` naming a partition, and ``ensure_partitions`` drains the default
+    one by reading it, both on the maintenance checkout, which blanks the tenant
+    settings by design (see ``PostgresAdapter._maintenance_connection``). Forced,
+    those statements match no rows — measured, not supposed: the strip returns
+    ``UPDATE 0`` and reports success having changed nothing, and months stuck in
+    the default partition are never drained. Unforced, the owner is exempt from
+    the policy and both keep working, while every other role reading a partition
+    by name is scoped exactly as it is through the parent.
+
+    So this closes the gap for every role except the one that owns the tables.
+    Covering the owner too means giving maintenance a sanctioned way through —
+    a role with ``BYPASSRLS`` for the retention and drain statements — and only
+    then forcing the partitions. That is a deployment change, not one this
+    function can make, and doing half of it here would swap a bypass nothing
+    currently uses for a retention job that silently stops working.
+
     Returns the partitions changed, so a caller can log or assert on it. Idempotent:
     a partition already carrying the parent's policies is left alone.
     """
     if not is_partitioned(cur):
         return []
-    enabled, forced = _parent_rls(cur)
+    enabled, _forced = _parent_rls(cur)
     if not enabled:
         # Nothing to inherit. An OSS install without the tenant package has no
         # policies on the parent either, and enabling security here would take its
@@ -633,14 +655,12 @@ def sync_partition_rls(cur: Any) -> list[str]:
                 continue
             cur.execute(_create_policy_sql(name, policy))
             touched = True
-        part_enabled, part_forced = _partition_rls(cur, name)
+        part_enabled, _ = _partition_rls(cur, name)
         # After the policies, never before: a partition that had security enabled
         # for the instant it had no policy would answer that instant with no rows.
+        # ENABLE only — see the note on FORCE in this function's docstring.
         if not part_enabled:
             cur.execute(f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY")
-            touched = True
-        if forced and not part_forced:
-            cur.execute(f"ALTER TABLE {name} FORCE ROW LEVEL SECURITY")
             touched = True
         if touched:
             changed.append(name)

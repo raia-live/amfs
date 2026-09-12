@@ -739,7 +739,7 @@ def test_upkeep_does_not_leave_a_partition_denying_everything(adapter, pg_conn) 
     this_month = partition_name(now.year, now.month)
 
     adapter.ensure_trace_partitions()
-    assert _rls_flags(pg_conn, this_month) == (True, True)
+    assert _rls_flags(pg_conn, this_month) == (True, False)
     assert _policy_names(pg_conn, this_month) == ["agent_isolation"]
     _grant_to_probe(pg_conn, [this_month])
     assert _read_as_probe(pg_conn, this_month, "agent-a") != []
@@ -761,7 +761,7 @@ def test_upkeep_covers_every_partition_not_only_the_new_ones(adapter, pg_conn) -
     adapter.ensure_trace_partitions()
     for name in before:
         assert _policy_names(pg_conn, name) == ["agent_isolation"], name
-        assert _rls_flags(pg_conn, name) == (True, True), name
+        assert _rls_flags(pg_conn, name) == (True, False), name
 
     # Idempotent: nothing left to change on a second pass.
     with pg_conn.cursor() as cur:
@@ -781,6 +781,61 @@ def test_upkeep_leaves_an_install_with_no_row_security_alone(adapter, pg_conn) -
     for name in _partitions(pg_conn):
         assert _rls_flags(pg_conn, name) == (False, False), name
     assert adapter.count_traces() == 2
+
+
+def test_maintenance_can_still_strip_payloads_on_a_scoped_partition(adapter, pg_conn) -> None:
+    """Retention names a partition on a checkout that deliberately carries no tenant.
+
+    ``PostgresAdapter._maintenance_connection`` blanks the tenant settings, so a
+    forced partition answers the payload-strip ``UPDATE`` with ``UPDATE 0`` — no
+    error, no refusal, a retention job reporting success having changed nothing,
+    and months stuck in the default partition never drained. Enabled-but-unforced
+    exempts the owner, which is the role that runs maintenance.
+
+    The owner is what makes this test mean anything, so it hands the partition to
+    the probe role and becomes it. Run as the superuser the suite connects as, it
+    would pass whatever the flags said.
+    """
+    _save_two_agents(adapter)
+    _make_parent_tenant_scoped(pg_conn)
+    from amfs_postgres.trace_partitions import partition_name
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    this_month = partition_name(now.year, now.month)
+    adapter.ensure_trace_partitions()
+
+    with pg_conn.cursor() as cur:
+        cur.execute(f"ALTER TABLE {this_month} OWNER TO {PROBE_ROLE}")
+        cur.execute("SELECT set_config('amfs.test_agent', '', false)")
+        cur.execute(f"SET ROLE {PROBE_ROLE}")
+        try:
+            cur.execute(f"UPDATE {this_month} SET task_input = NULL")
+            stripped = cur.rowcount
+        finally:
+            cur.execute("RESET ROLE")
+            cur.execute(f"ALTER TABLE {this_month} OWNER TO CURRENT_USER")
+
+    assert stripped == 2, (
+        "the payload strip matched no rows — a forced partition blinds retention "
+        "instead of refusing it"
+    )
+
+
+def test_partitions_are_not_forced_so_the_owner_stays_exempt(adapter, pg_conn) -> None:
+    """The parent is forced and that is deliberately not passed down.
+
+    Stated as its own assertion because the consequence of forcing is invisible:
+    nothing raises, retention just stops doing anything. Covering the owner as
+    well needs maintenance to have a sanctioned way through first — a role with
+    BYPASSRLS for the strip and drain statements — and only then forcing these.
+    """
+    _make_parent_tenant_scoped(pg_conn)
+    adapter.ensure_trace_partitions()
+
+    assert _rls_flags(pg_conn, "amfs_decision_traces") == (True, True)
+    for name in _partitions(pg_conn):
+        assert _rls_flags(pg_conn, name) == (True, False), name
 
 
 def test_a_restrictive_policy_is_copied_as_restrictive(adapter, pg_conn) -> None:
