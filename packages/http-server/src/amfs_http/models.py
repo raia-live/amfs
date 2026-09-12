@@ -46,6 +46,13 @@ class OutcomeRequest(BaseModel):
     #: client has no other way to get either onto the trace this commit builds,
     #: since the trace is assembled here from the server's own handle.
     session_metadata: dict[str, Any] | None = None
+    #: The caller will post its own trace to ``POST /api/v1/traces`` immediately
+    #: after this call, so this endpoint must not seal one of its own. The trace
+    #: assembled here comes off the server's shared handle — see the note above —
+    #: so alongside the caller's it is both the poorer copy and a second sealed
+    #: trace for one outcome. Only the SDK sets this, and only because its
+    #: ``commit_outcome`` posts the trace on every path out of itself.
+    trace_follows: bool = False
 
 
 class SearchRequest(BaseModel):

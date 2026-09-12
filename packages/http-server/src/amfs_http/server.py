@@ -2544,7 +2544,15 @@ async def commit_outcome(
         ip_address=request.client.host if request.client else None,
     )
 
-    immutable_trace_id = _auto_seal_trace(mem)
+    # Skipped when the caller's own trace is on its way. What would be sealed here
+    # is assembled on the shared handle: the caller's actions and attribute bag were
+    # passed in explicitly above, but the causal entries, query events, state diff
+    # and session window are read off that handle's tracker, so they belong to
+    # whichever requests last touched it. Sealing it as well as the caller's left two
+    # traces per outcome — doubling every count and average taken over them — and
+    # chained the fabricated one under this process's session id, a chain every
+    # account on the process shares.
+    immutable_trace_id = None if req.trace_follows else _auto_seal_trace(mem)
 
     result: dict[str, Any] = {
         "outcome_ref": req.outcome_ref,
