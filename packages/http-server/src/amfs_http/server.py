@@ -38,6 +38,7 @@ from amfs.memory import validate_session_attributes
 from pydantic import BaseModel, Field
 from amfs_core.aggregates import REUSE_CREDIT_K
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
+from amfs_core.engine import read_tracker_scope
 from amfs_core.models import (
     AgentGroup,
     AMFSConfig,
@@ -156,6 +157,30 @@ async def _dashboard_tenant_middleware(request: Request, call_next):
     finally:
         if did_set:
             clear_tenant_headers()
+
+
+@app.middleware("http")
+async def _read_tracker_scope_middleware(request: Request, call_next):
+    """Give every request its own session on the shared memory handle's tracker.
+
+    ``_get_memory`` returns one ``AgentMemory`` for the whole process, so a single
+    ``ReadTracker`` sits behind every request. It accumulates what the reads
+    returned, along with the contexts, queries and writes of the session, and it is
+    emptied only inside ``commit_outcome`` — so without a scope what one request
+    left there was still in place for the next, and anything reading it back
+    described a session belonging to no one caller.
+
+    A request is the right unit: within one, the reads and any commit belong to the
+    same caller, and across requests they do not, because a remote caller's own
+    session lives in its own process and names its causal entries when it commits.
+
+    Registered last so it runs outermost — Starlette builds the stack in reverse
+    registration order — because it has to still be in force while the middlewares
+    inside it unwind, or something tearing down could write into the next request's
+    session.
+    """
+    with read_tracker_scope():
+        return await call_next(request)
 
 
 _memory: AgentMemory | None = None

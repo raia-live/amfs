@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterator
 
 from amfs_core.abc import AdapterABC
 from amfs_core.hashing import content_hash, integrity_chain_hash
@@ -44,6 +47,65 @@ class CausalTagger:
 _MAX_ACTION_RESULT_CHARS = 2000
 
 
+@dataclass
+class _TrackerState:
+    """Everything a :class:`ReadTracker` accumulates over one session.
+
+    Held apart from the tracker so that a server sharing one tracker across
+    requests can give each request a session of its own — see
+    :func:`read_tracker_scope`.
+    """
+
+    reads: dict[str, datetime] = field(default_factory=dict)
+    versions: dict[str, int] = field(default_factory=dict)
+    entries: dict[str, dict] = field(default_factory=dict)
+    contexts: list[ExternalContext] = field(default_factory=list)
+    queries: list[dict] = field(default_factory=list)
+    session_started_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+    errors: list[dict] = field(default_factory=list)
+    writes: list[dict] = field(default_factory=list)
+    actions: list[dict] = field(default_factory=list)
+
+
+#: The session in force for the current context, if any. Unset in a normal
+#: single-agent process, where a tracker's own state is its session.
+_TRACKER_SCOPE: ContextVar[_TrackerState | None] = ContextVar(
+    "amfs_read_tracker_scope", default=None
+)
+
+
+@contextmanager
+def read_tracker_scope() -> Iterator[_TrackerState]:
+    """Give the enclosed block a session of its own on every shared tracker.
+
+    A ``ReadTracker`` accumulates the reads, contexts, queries and writes of one
+    session, which is exactly right for the process it was designed for: one
+    agent, one memory handle, one session. A server is not that. It serves every
+    caller from a single ``AgentMemory``, so one tracker holds them all, and what
+    it accumulated for one caller is still in place for the next — leaving anything
+    that reads it back, whether ``explain`` or a ``commit_outcome`` falling back to
+    it for causal entries, describing a session that belongs to no one caller.
+
+    The state is moved rather than the tracker replaced because the tracker
+    instance is captured at construction, by ``CoWEngine`` among others; changing
+    what a caller *sees* then needs no cooperation from anything holding a
+    reference.
+
+    Scoped per request, because that is the unit the state belongs to: within one
+    request the reads and the commit go together, and across requests they do not,
+    since a remote caller's own session lives in its own process and names its
+    causal entries when it commits.
+    """
+    state = _TrackerState()
+    token = _TRACKER_SCOPE.set(state)
+    try:
+        yield state
+    finally:
+        _TRACKER_SCOPE.reset(token)
+
+
 class ReadTracker:
     """Automatically records every read within a session for causal linking
     and conflict detection.
@@ -57,15 +119,58 @@ class ReadTracker:
     """
 
     def __init__(self) -> None:
-        self._reads: dict[str, datetime] = {}
-        self._versions: dict[str, int] = {}
-        self._entries: dict[str, dict] = {}
-        self._contexts: list[ExternalContext] = []
-        self._queries: list[dict] = []
-        self._session_started_at: datetime = datetime.now(timezone.utc)
-        self._errors: list[dict] = []
-        self._writes: list[dict] = []
-        self._actions: list[dict] = []
+        #: This tracker's own session, used whenever no scope is in force — which
+        #: is every single-agent process. The fields below read through to it, or
+        #: to the scope's state where one is set, so nothing that touches them by
+        #: name has to know which it got.
+        self._own_state = _TrackerState()
+
+    @property
+    def _state(self) -> _TrackerState:
+        scoped = _TRACKER_SCOPE.get()
+        return scoped if scoped is not None else self._own_state
+
+    @property
+    def _reads(self) -> dict[str, datetime]:
+        return self._state.reads
+
+    @property
+    def _versions(self) -> dict[str, int]:
+        return self._state.versions
+
+    @property
+    def _entries(self) -> dict[str, dict]:
+        return self._state.entries
+
+    @property
+    def _contexts(self) -> list[ExternalContext]:
+        return self._state.contexts
+
+    @property
+    def _queries(self) -> list[dict]:
+        return self._state.queries
+
+    @property
+    def _errors(self) -> list[dict]:
+        return self._state.errors
+
+    @property
+    def _writes(self) -> list[dict]:
+        return self._state.writes
+
+    @property
+    def _actions(self) -> list[dict]:
+        return self._state.actions
+
+    @property
+    def _session_started_at(self) -> datetime:
+        return self._state.session_started_at
+
+    @_session_started_at.setter
+    def _session_started_at(self, when: datetime) -> None:
+        # Assigned by ``clear()`` and by the Pro span recorder, which backdates the
+        # window to the first tool call. Writable for that reason.
+        self._state.session_started_at = when
 
     def record(self, entry: MemoryEntry) -> None:
         """Record that an entry was read during this session."""

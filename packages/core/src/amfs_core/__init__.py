@@ -10,7 +10,7 @@ from amfs_core.content import (
     is_code_like,
 )
 from amfs_core.embedder import EmbedderABC, cosine_similarity
-from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker
+from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker, read_tracker_scope
 from amfs_core.exceptions import (
     AMFSError,
     AdapterError,
@@ -129,6 +129,7 @@ __all__ = [
     "QualityReport",
     "QueryEvent",
     "ReadTracker",
+    "read_tracker_scope",
     "SearchQuery",
     "SemanticQuery",
     "StaleWriteError",
