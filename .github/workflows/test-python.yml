@@ -1,10 +1,15 @@
 name: Python Tests
 
+  # Added ``dev`` because ``trigger-deploy.yml`` fires on a push to it: code was
+  # deploying from a branch whose tests had never run. Every test added on a PR
+  # into ``dev`` — the branch all work merges to — was inert until the eventual
+  # promotion to ``main``, which is a long way from where it could still be cheap
+  # to act on.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 jobs:
   test:
