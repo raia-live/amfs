@@ -1160,6 +1160,7 @@ class AgentMemory:
         tool_calls: list[dict[str, Any]] | None = None,
         attributes: dict[str, Any] | None = None,
         llm_calls: list[dict[str, Any]] | None = None,
+        persist_trace: bool = True,
     ) -> list[MemoryEntry]:
         """Record an outcome and back-propagate confidence changes.
 
@@ -1183,6 +1184,16 @@ class AgentMemory:
         ``session_metadata["llm_calls"]``; like *tool_calls*, the explicit form
         exists for a server relaying a remote client's session. Both buffers are
         cleared once the trace is built.
+
+        *persist_trace* is for the one caller that has a trace of its own coming:
+        the HTTP server, whose ``/outcomes`` handler commits on a single shared
+        handle. The trace it would write here is assembled from that handle — the
+        causal entries, query events, state diff and session window come off its
+        tracker, so they belong to whichever requests last touched it, and the
+        session is the server process's. The client then posts its own trace to
+        ``/traces``, so the row written here was both a duplicate of it and the
+        untrue one of the two. The trace is still built and still left on
+        ``_last_trace``; only the write is skipped.
         """
         # Validated first so a bad bag fails before anything is written.
         commit_attributes = validate_session_attributes(attributes)
@@ -1338,8 +1349,12 @@ class AgentMemory:
             error_events=error_events,
             state_diff=state_diff,
         )
+        # The trace is built either way, and ``_last_trace`` is set below either
+        # way; only the write is conditional. A caller that suppresses it has said
+        # someone else is writing this trace, not that there is no trace.
         try:
-            trace = self._adapter.save_trace(trace)
+            if persist_trace:
+                trace = self._adapter.save_trace(trace)
         except Exception:
             # Warned rather than debugged because of the declaration on the record
             # above: the server was told this trace was coming and did not seal one
