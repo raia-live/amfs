@@ -238,6 +238,36 @@ class TestMCPTools:
         assert "error" in result
         assert "Invalid outcome_type" in result["error"]
 
+    def test_the_servers_memory_gap_report_reaches_the_agent(self) -> None:
+        """The report is computed on the outcomes route and was surfaced only by
+        the hosted gateway, so the two stdio servers dropped it — the feature was
+        hosted-only by omission rather than by design.
+
+        Driven by setting the block on the adapter, which is exactly what
+        ``HttpAdapter.commit_outcome`` does, so this exercises the real chain
+        adapter -> AgentMemory -> tool rather than handing the tool a fixture.
+        """
+        from amfs_mcp.server import _get_memory, amfs_commit_outcome, amfs_write
+
+        amfs_write("svc", "key", "value")
+        gap = {"matched": 4, "linked_to_outcome": 0, "note": "4 stored memories match."}
+        _get_memory()._adapter._last_memory_gap = gap
+
+        result = json.loads(amfs_commit_outcome("deploy-9", "success"))
+
+        assert result["memory_gap"] == gap
+        assert next(iter(result)) == "memory_gap", "it has to lead to be acted on"
+
+    def test_an_adapter_that_computes_no_gap_reports_none(self) -> None:
+        """The filesystem and Postgres adapters never reach the route that
+        computes it. Absent is right; a zeroed block would read as "nothing
+        matched this task", which is a different and false claim."""
+        from amfs_mcp.server import amfs_commit_outcome, amfs_write
+
+        amfs_write("svc", "key", "value")
+
+        assert "memory_gap" not in json.loads(amfs_commit_outcome("deploy-10", "success"))
+
     def test_amfs_commit_outcome_clean_deploy(self) -> None:
         from amfs_mcp.server import amfs_commit_outcome, amfs_read, amfs_write
 

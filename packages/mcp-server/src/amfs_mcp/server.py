@@ -1586,6 +1586,18 @@ def amfs_commit_outcome(
                     "nothing to adjust. The trace was still saved, including "
                     "any writes and contexts."
                 )
+    # The server computes this on the outcomes route and the SDK carries it here;
+    # forwarding is all that is left, and skipping it is what made the report a
+    # hosted-only feature when it is meant to reach every surface. Leads the
+    # payload because it is the one field that says what the session left unused,
+    # and a field an agent has to scroll to is one it does not act on.
+    #
+    # ``None`` on the filesystem and Postgres adapters, which never reach the
+    # route that computes it, so this stays absent rather than reporting a zero
+    # that would read as "nothing matched".
+    gap = getattr(mem, "_last_memory_gap", None)
+    if isinstance(gap, dict) and gap:
+        return json.dumps({"memory_gap": gap, **result}, default=str)
     return json.dumps(result, default=str)
 
 

@@ -590,6 +590,282 @@ def test_ensure_trace_partitions_creates_months_ahead_and_drains_default(adapter
     assert adapter.ensure_trace_partitions() == []
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Row-level security on the partitions
+#
+# A partitioned parent's policies are applied to rows reached through the parent.
+# A query naming a partition directly is checked against that partition's own
+# policies, and a partition starts with none — so upkeep has to put them there.
+#
+# The isolation key here is ``agent_id`` rather than the ``account_id`` the hosted
+# deployment scopes on, because that column belongs to the tenant package and is
+# not in this schema. That is the right shape for the test regardless: the code
+# under test copies whatever policies the parent carries without reading them, so
+# a test that proved it only for one predicate would be proving less than it looks.
+# ──────────────────────────────────────────────────────────────────────
+
+PROBE_ROLE = "amfs_rls_probe"
+
+
+def _make_parent_tenant_scoped(conn) -> None:
+    """Do to the parent what a deployment with row-level security does to it."""
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE amfs_decision_traces ENABLE ROW LEVEL SECURITY")
+        cur.execute("ALTER TABLE amfs_decision_traces FORCE ROW LEVEL SECURITY")
+        cur.execute(
+            "CREATE POLICY agent_isolation ON amfs_decision_traces "
+            "USING (agent_id = NULLIF(current_setting('amfs.test_agent', true), ''))"
+        )
+        cur.execute(
+            f"DO $$ BEGIN IF NOT EXISTS ("
+            f"  SELECT 1 FROM pg_roles WHERE rolname = '{PROBE_ROLE}'"
+            f") THEN CREATE ROLE {PROBE_ROLE} NOSUPERUSER NOBYPASSRLS; END IF; END $$"
+        )
+
+
+def _grant_to_probe(conn, tables: list[str]) -> None:
+    with conn.cursor() as cur:
+        for t in tables:
+            cur.execute(f"GRANT SELECT ON {t} TO {PROBE_ROLE}")
+
+
+def _read_as_probe(conn, table: str, agent: str) -> list[str]:
+    """SELECT from *table* as an unprivileged role with *agent* in scope."""
+    with conn.cursor() as cur:
+        cur.execute(f"SET ROLE {PROBE_ROLE}")
+        try:
+            cur.execute("SELECT set_config('amfs.test_agent', %s, false)", (agent,))
+            cur.execute(f"SELECT agent_id FROM {table} ORDER BY agent_id")
+            return [r[0] for r in cur.fetchall()]
+        finally:
+            cur.execute("RESET ROLE")
+
+
+def _rls_flags(conn, name: str) -> tuple[bool, bool]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = %s",
+            (name,),
+        )
+        row = cur.fetchone()
+    return (row[0], row[1]) if row else (False, False)
+
+
+def _policy_names(conn, name: str) -> list[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT policyname FROM pg_policies WHERE tablename = %s ORDER BY policyname",
+            (name,),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def _save_two_agents(adapter):
+    from amfs_core.models import DecisionTrace
+
+    for agent in ("agent-a", "agent-b"):
+        adapter.save_trace(
+            DecisionTrace(
+                agent_id=agent, session_id="s", outcome_ref=f"REF-{agent}",
+                outcome_type="success",
+            )
+        )
+
+
+def test_postgres_does_not_give_a_partition_its_parents_row_security(adapter, pg_conn) -> None:
+    """The behaviour the sync exists for, stated as the fact it is.
+
+    If a future Postgres inherits policies down to partitions, this test fails and
+    ``sync_partition_rls`` becomes unnecessary — which is worth being told about
+    rather than left to keep running.
+    """
+    _make_parent_tenant_scoped(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "CREATE TABLE amfs_decision_traces_y2031m01 PARTITION OF amfs_decision_traces "
+            "FOR VALUES FROM ('2031-01-01') TO ('2031-02-01')"
+        )
+
+    assert _rls_flags(pg_conn, "amfs_decision_traces") == (True, True)
+    assert _rls_flags(pg_conn, "amfs_decision_traces_y2031m01") == (False, False)
+    assert _policy_names(pg_conn, "amfs_decision_traces_y2031m01") == []
+
+
+def test_a_partition_without_the_sync_is_readable_with_no_agent_in_scope(adapter, pg_conn) -> None:
+    """The gap itself: the parent filters, the partition named directly does not."""
+    _save_two_agents(adapter)
+    _make_parent_tenant_scoped(pg_conn)
+    from amfs_postgres.trace_partitions import partition_name
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    this_month = partition_name(now.year, now.month)
+    _grant_to_probe(pg_conn, ["amfs_decision_traces", this_month])
+
+    assert _read_as_probe(pg_conn, "amfs_decision_traces", "agent-a") == ["agent-a"]
+    # Same rows, same role, same session — reached by name instead of through the parent.
+    assert _read_as_probe(pg_conn, this_month, "agent-a") == ["agent-a", "agent-b"]
+
+
+def test_upkeep_scopes_a_partition_read_directly(adapter, pg_conn) -> None:
+    """The property that matters: after upkeep, by-name is scoped like the parent."""
+    _save_two_agents(adapter)
+    _make_parent_tenant_scoped(pg_conn)
+    from amfs_postgres.trace_partitions import partition_name
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    this_month = partition_name(now.year, now.month)
+
+    adapter.ensure_trace_partitions()
+    _grant_to_probe(pg_conn, ["amfs_decision_traces", this_month])
+
+    assert _read_as_probe(pg_conn, this_month, "agent-a") == ["agent-a"]
+    assert _read_as_probe(pg_conn, this_month, "agent-b") == ["agent-b"]
+
+
+def test_upkeep_does_not_leave_a_partition_denying_everything(adapter, pg_conn) -> None:
+    """Enabling row security without copying the policies would read as an empty month.
+
+    The failure this guards against is quieter than the one it replaces: no error,
+    no refusal, just zero rows where there are two.
+    """
+    _save_two_agents(adapter)
+    _make_parent_tenant_scoped(pg_conn)
+    from amfs_postgres.trace_partitions import partition_name
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    this_month = partition_name(now.year, now.month)
+
+    adapter.ensure_trace_partitions()
+    assert _rls_flags(pg_conn, this_month) == (True, False)
+    assert _policy_names(pg_conn, this_month) == ["agent_isolation"]
+    _grant_to_probe(pg_conn, [this_month])
+    assert _read_as_probe(pg_conn, this_month, "agent-a") != []
+
+
+def test_upkeep_covers_every_partition_not_only_the_new_ones(adapter, pg_conn) -> None:
+    """Convergence, not stamping at creation.
+
+    The partitions for this month and the next two exist from init, before any
+    policy did. A fix applied only where a partition is created would leave exactly
+    those three — the ones production is reading — as the gap.
+    """
+    from amfs_postgres.trace_partitions import sync_partition_rls
+
+    _make_parent_tenant_scoped(pg_conn)
+    before = _partitions(pg_conn)
+    assert len(before) >= 3
+
+    adapter.ensure_trace_partitions()
+    for name in before:
+        assert _policy_names(pg_conn, name) == ["agent_isolation"], name
+        assert _rls_flags(pg_conn, name) == (True, False), name
+
+    # Idempotent: nothing left to change on a second pass.
+    with pg_conn.cursor() as cur:
+        assert sync_partition_rls(cur) == []
+
+
+def test_upkeep_leaves_an_install_with_no_row_security_alone(adapter, pg_conn) -> None:
+    """An install whose parent carries nothing must not have security switched on for it.
+
+    Enabling it here would take an OSS deployment's own traces away from it, since
+    there would be no policy to let them back in.
+    """
+    _save_two_agents(adapter)
+    assert _rls_flags(pg_conn, "amfs_decision_traces") == (False, False)
+
+    adapter.ensure_trace_partitions()
+    for name in _partitions(pg_conn):
+        assert _rls_flags(pg_conn, name) == (False, False), name
+    assert adapter.count_traces() == 2
+
+
+def test_maintenance_can_still_strip_payloads_on_a_scoped_partition(adapter, pg_conn) -> None:
+    """Retention names a partition on a checkout that deliberately carries no tenant.
+
+    ``PostgresAdapter._maintenance_connection`` blanks the tenant settings, so a
+    forced partition answers the payload-strip ``UPDATE`` with ``UPDATE 0`` — no
+    error, no refusal, a retention job reporting success having changed nothing,
+    and months stuck in the default partition never drained. Enabled-but-unforced
+    exempts the owner, which is the role that runs maintenance.
+
+    The owner is what makes this test mean anything, so it hands the partition to
+    the probe role and becomes it. Run as the superuser the suite connects as, it
+    would pass whatever the flags said.
+    """
+    _save_two_agents(adapter)
+    _make_parent_tenant_scoped(pg_conn)
+    from amfs_postgres.trace_partitions import partition_name
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    this_month = partition_name(now.year, now.month)
+    adapter.ensure_trace_partitions()
+
+    with pg_conn.cursor() as cur:
+        cur.execute(f"ALTER TABLE {this_month} OWNER TO {PROBE_ROLE}")
+        cur.execute("SELECT set_config('amfs.test_agent', '', false)")
+        cur.execute(f"SET ROLE {PROBE_ROLE}")
+        try:
+            cur.execute(f"UPDATE {this_month} SET task_input = NULL")
+            stripped = cur.rowcount
+        finally:
+            cur.execute("RESET ROLE")
+            cur.execute(f"ALTER TABLE {this_month} OWNER TO CURRENT_USER")
+
+    assert stripped == 2, (
+        "the payload strip matched no rows — a forced partition blinds retention "
+        "instead of refusing it"
+    )
+
+
+def test_partitions_are_not_forced_so_the_owner_stays_exempt(adapter, pg_conn) -> None:
+    """The parent is forced and that is deliberately not passed down.
+
+    Stated as its own assertion because the consequence of forcing is invisible:
+    nothing raises, retention just stops doing anything. Covering the owner as
+    well needs maintenance to have a sanctioned way through first — a role with
+    BYPASSRLS for the strip and drain statements — and only then forcing these.
+    """
+    _make_parent_tenant_scoped(pg_conn)
+    adapter.ensure_trace_partitions()
+
+    assert _rls_flags(pg_conn, "amfs_decision_traces") == (True, True)
+    for name in _partitions(pg_conn):
+        assert _rls_flags(pg_conn, name) == (True, False), name
+
+
+def test_a_restrictive_policy_is_copied_as_restrictive(adapter, pg_conn) -> None:
+    """The catalogue is replayed, not paraphrased.
+
+    A restrictive policy copied as permissive would widen what it was written to
+    narrow, which is the kind of mistake a hand-written copy of the predicate makes.
+    """
+    from amfs_postgres.trace_partitions import partition_name
+    from datetime import UTC, datetime
+
+    _make_parent_tenant_scoped(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "CREATE POLICY no_placeholders ON amfs_decision_traces AS RESTRICTIVE "
+            "FOR SELECT USING (outcome_ref <> 'PLACEHOLDER')"
+        )
+    adapter.ensure_trace_partitions()
+
+    now = datetime.now(UTC)
+    this_month = partition_name(now.year, now.month)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT permissive, cmd FROM pg_policies "
+            "WHERE tablename = %s AND policyname = 'no_placeholders'",
+            (this_month,),
+        )
+        assert cur.fetchone() == ("RESTRICTIVE", "SELECT")
+
+
 def test_apply_trace_retention_strips_payloads_and_drops_old_partitions(adapter, pg_conn) -> None:
     from datetime import UTC, datetime, timedelta
 
@@ -663,3 +939,340 @@ def test_retention_cli_dry_run_reports_without_changing_anything(adapter, pg_con
     assert code == 0
     rows = adapter.list_traces(agent_id="cli-agent", limit=10)
     assert rows[0].task_input == "keep me"
+
+
+# ----------------------------------------------------------------------
+# Outcome propagation carries the row forward
+#
+# The trigger used to name the columns a new version should carry, so any
+# column added after that list was written took its DEFAULT on every outcome.
+# Nothing failed; the entry simply came back different. These cover the fields
+# the adapter contract cannot reach because write() does not accept them.
+# ----------------------------------------------------------------------
+
+
+def _commit_success_on(adapter, entity_path="checkout-service", key="retry-pattern"):
+    import uuid
+    from datetime import UTC, datetime
+
+    from amfs_core.models import OutcomeRecord, OutcomeType
+
+    return adapter.commit_outcome(
+        OutcomeRecord(
+            outcome_ref=f"DEP-{uuid.uuid4()}",
+            outcome_type=OutcomeType.SUCCESS,
+            causal_confidence=1.0,
+            committed_at=datetime.now(UTC),
+            causal_entry_keys=[f"{entity_path}/{key}"],
+            agent_id="release-agent",
+        )
+    )
+
+
+def test_outcome_preserves_recall_count_and_tier(adapter) -> None:
+    """Both are maintained by the store, so write() cannot set them.
+
+    recall_count is the counter the product reports back to users as evidence
+    that memory is being reused, and it was reset to 0 by every outcome.
+    """
+    import psycopg
+
+    adapter.write(_make_entry(confidence=0.9))
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE amfs_memory_entries SET recall_count = 7, tier = 1"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL"
+        )
+
+    _commit_success_on(adapter)
+
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT recall_count, tier FROM amfs_memory_entries"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL"
+        ).fetchone()
+    assert row[0] == 7, "an outcome erased the entry's reuse history"
+    assert row[1] == 1, "an outcome moved the entry to a different tier"
+
+
+def test_outcome_carries_forward_a_column_the_trigger_never_heard_of(adapter) -> None:
+    """The regression guard for the whole class, not three instances of it.
+
+    A deployment that extends this table gets columns the trigger's author
+    never saw. This adds one, sets it, and asserts the value survives an
+    outcome — which is only true because the INSERT copies the row.
+    """
+    import psycopg
+
+    adapter.write(_make_entry(confidence=0.9))
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        conn.execute(
+            "ALTER TABLE amfs_memory_entries"
+            " ADD COLUMN IF NOT EXISTS zz_downstream TEXT DEFAULT 'default-value'"
+        )
+        conn.execute(
+            "UPDATE amfs_memory_entries SET zz_downstream = 'set-by-deployment'"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL"
+        )
+
+    _commit_success_on(adapter)
+
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT zz_downstream FROM amfs_memory_entries"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL"
+        ).fetchone()
+    assert row[0] == "set-by-deployment", (
+        "a column the trigger does not name was reset to its default, which is "
+        "how recall_count, shared, tier, branch and embedding were all lost"
+    )
+
+
+def test_outcome_preserves_the_embedding(adapter) -> None:
+    """A NULL embedding drops the live version out of vector search.
+
+    Also the one column whose jsonb round-trip cannot be assumed, pgvector
+    being an extension type, so this asserts it rather than trusting it.
+    """
+    import psycopg
+
+    adapter.write(_make_entry(confidence=0.9))
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        if not conn.execute(
+            "SELECT 1 FROM pg_extension WHERE extname = 'vector'"
+        ).fetchone():
+            pytest.skip("pgvector not installed in this database")
+        # The adapter bootstrap does not create this column — migration 002
+        # does, and the fixture drops the table — so add it the way 002 would.
+        conn.execute(
+            "ALTER TABLE amfs_memory_entries"
+            " ADD COLUMN IF NOT EXISTS embedding vector(384)"
+        )
+        vector = "[" + ",".join(["0.5"] * 384) + "]"
+        conn.execute(
+            "UPDATE amfs_memory_entries SET embedding = %s::vector"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL",
+            (vector,),
+        )
+
+    _commit_success_on(adapter)
+
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT embedding::text FROM amfs_memory_entries"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL"
+        ).fetchone()
+    assert row[0] == vector, "the embedding was lost, so the entry left vector search"
+
+
+def test_an_outcome_without_an_account_leaves_other_accounts_alone(adapter) -> None:
+    """The account clause has to hold when the outcome carries no account.
+
+    Nothing in this adapter sets account_id on the outcome row — deployments
+    rely on a column default — so an outcome written by a path that never
+    established one is the realistic case, not a contrived one. Written as
+    `account_id = NEW.account_id OR NEW.account_id IS NULL`, that outcome
+    matched entries in EVERY account and reinforced all of them.
+    """
+    import uuid as _uuid
+
+    import psycopg
+
+    adapter.write(_make_entry(confidence=0.9))
+    other_account = str(_uuid.uuid4())
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE amfs_memory_entries SET account_id = %s::uuid"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL",
+            (other_account,),
+        )
+
+    # The outcome carries no account, as this adapter always writes it.
+    _commit_success_on(adapter)
+
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT version, confidence FROM amfs_memory_entries"
+            " WHERE key = 'retry-pattern' ORDER BY version"
+        ).fetchall()
+    assert len(rows) == 1, (
+        "an outcome with no account reinforced an entry belonging to an "
+        "account, creating a new version across the tenancy boundary"
+    )
+    assert abs(float(rows[0][1]) - 0.9) < 1e-6, "the other account's entry was modified"
+
+
+def test_an_outcome_still_reinforces_when_neither_side_has_an_account(adapter) -> None:
+    """The single-account case, which is every self-hosted install.
+
+    IS NOT DISTINCT FROM is what keeps this working while still rejecting the
+    case above; plain equality would make NULL = NULL unknown and propagation
+    would silently never fire for anyone.
+    """
+    import psycopg
+
+    adapter.write(_make_entry(confidence=0.9))
+    _commit_success_on(adapter)
+
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT confidence FROM amfs_memory_entries"
+            " WHERE key = 'retry-pattern' AND superseded_at IS NULL"
+        ).fetchone()
+    assert abs(float(row[0]) - 0.927) < 1e-6, (
+        "propagation stopped firing for entries with no account, which is all "
+        "of them in a single-account install"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Benchmark and system rows are not part of an account's totals
+#
+# The exclusion exists twice, as a Python predicate and as a SQL fragment,
+# because aggregation happens in the database where an adapter can express it
+# and in Python where it cannot. The first test here is the one that keeps the
+# two honest; the rest check the aggregates that report totals, and the one
+# aggregate that must keep counting them.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_the_sql_and_python_exclusions_agree(pg_conn) -> None:
+    """One rule in two languages, held together by running the same paths through both.
+
+    Includes the near misses on purpose: ``benchmarking-agent`` and ``_systemic``
+    must survive, so a user who named a path that way keeps seeing it in their own
+    totals. A drift between the two forms would show up as an account whose totals
+    depend on which adapter served them.
+    """
+    from amfs_core.exclusions import (
+        ENTITY_PATH_NOT_EXCLUDED_SQL,
+        is_excluded_entity,
+    )
+
+    paths = [
+        "_system", "_system/x", "_systemic", "_systemic/x", "_systems/x",
+        "bench-1", "bench/1", "_bench-1", "_bench/1", "BENCH-1", "_SYSTEM/x",
+        "benchmarking-agent", "benchmark/x", "bencher", "bench", "_bench",
+        "amfs/core-engine", "user/preferences", "x/_system", "a-bench/1",
+    ]
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            f"SELECT p, ({ENTITY_PATH_NOT_EXCLUDED_SQL.replace('entity_path', 'p')}) "
+            f"FROM unnest(%s::text[]) AS t(p)",
+            (paths,),
+        )
+        from_sql = {row[0]: not row[1] for row in cur.fetchall()}
+
+    disagreements = {
+        p: (is_excluded_entity(p), from_sql[p])
+        for p in paths
+        if is_excluded_entity(p) != from_sql[p]
+    }
+    assert not disagreements, f"python vs sql: {disagreements}"
+
+
+def _write(adapter, entity_path: str, key: str, agent_id: str = "agent-a"):
+    from datetime import UTC, datetime
+
+    from amfs_core.models import MemoryEntry, Provenance
+
+    return adapter.write(
+        MemoryEntry(
+            entity_path=entity_path,
+            key=key,
+            value={"v": 1},
+            provenance=Provenance(
+                agent_id=agent_id, session_id="s1", written_at=datetime.now(UTC)
+            ),
+            confidence=0.8,
+        )
+    )
+
+
+def _seed_real_and_system(adapter) -> None:
+    _write(adapter, "repo/module", "real-1")
+    _write(adapter, "repo/other", "real-2")
+    _write(adapter, "bench-retrieval", "b1", agent_id="bench-runner")
+    _write(adapter, "_system/embeddings", "b2", agent_id="amfs-server")
+    _write(adapter, "repo/module", "b3", agent_id="bench-runner")
+
+
+def test_the_sql_totals_leave_out_bench_and_system_rows(adapter) -> None:
+    """Both the counts and the breakdowns beside them.
+
+    ``stats`` ran three separate queries, and filtering only the first left
+    ``total_agents`` counting one thing while ``agents`` listed another — a
+    disagreement inside a single response, which is why the breakdowns are
+    asserted here and not just the scalars.
+    """
+    _seed_real_and_system(adapter)
+
+    stats = adapter.stats()
+    assert stats.total_entries == 2
+    assert stats.total_entities == 2
+    assert stats.total_agents == 1
+    assert set(stats.entities) == {"repo/module", "repo/other"}
+    assert set(stats.agents) == {"agent-a"}
+    assert stats.total_agents == len(stats.agents)
+    assert stats.total_entities == len(stats.entities)
+
+
+def test_the_extended_sql_totals_leave_them_out_too(adapter) -> None:
+    """``stats_extended`` is what the hosted /api/v1/stats answers with."""
+    _seed_real_and_system(adapter)
+
+    stats = adapter.stats_extended()
+    assert stats["total_entries"] == 2
+    assert stats["total_entities"] == 2
+    assert stats["total_agents"] == 1
+    assert set(stats["entities"]) == {"repo/module", "repo/other"}
+    assert set(stats["agents"]) == {"agent-a"}
+
+
+def test_the_entity_list_leaves_them_out(adapter) -> None:
+    _seed_real_and_system(adapter)
+
+    paths = {s["entity_path"] for s in adapter.entity_summaries()}
+    assert paths == {"repo/module", "repo/other"}
+
+
+def test_the_unscoped_agent_breakdown_leaves_them_out(adapter) -> None:
+    _seed_real_and_system(adapter)
+
+    rows = adapter.agent_entity_stats()
+    assert {r["entity_path"] for r in rows} == {"repo/module", "repo/other"}
+    assert {r["agent_id"] for r in rows} == {"agent-a"}
+
+
+def test_a_briefing_on_a_benchmarks_own_path_still_sees_it(adapter) -> None:
+    """Naming a path is the act of opting into it — the same line the shared-path
+    exclusion draws.
+
+    ``agent_entity_stats`` scoped to an entity_path is how a briefing's authority
+    ranking is built. Filtering it there would leave a benchmark unable to brief
+    on its own work, which is the silent-empty failure rather than a fix.
+    """
+    _seed_real_and_system(adapter)
+
+    rows = adapter.agent_entity_stats(entity_path="bench-retrieval")
+    assert [r["agent_id"] for r in rows] == ["bench-runner"]
+
+
+def test_the_python_and_sql_totals_report_the_same_thing(adapter) -> None:
+    """The filtered-in-Python path and the SQL path are two routes to one number.
+
+    The room-scoped branch of /api/v1/stats aggregates in Python because a room's
+    per-user visibility cannot be expressed as a WHERE clause. It must not answer
+    a different total than the branch below it.
+    """
+    from amfs_core.aggregates import extended_stats_from_entries
+
+    _seed_real_and_system(adapter)
+
+    in_sql = adapter.stats_extended()
+    in_python = extended_stats_from_entries(
+        adapter.list("repo/module") + adapter.list("repo/other")
+        + adapter.list("bench-retrieval") + adapter.list("_system/embeddings")
+    )
+    for field in ("total_entries", "total_entities", "total_agents"):
+        assert in_sql[field] == in_python[field], field

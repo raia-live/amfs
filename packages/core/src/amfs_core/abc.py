@@ -385,7 +385,10 @@ class AdapterABC(ABC):
 
         Adapters may override with optimised implementations (e.g. SQL aggregates).
         """
-        entries = self.list()
+        from amfs_core.exclusions import is_excluded_entry
+
+        # An account's own totals, so the system's own rows are not part of them.
+        entries = [e for e in self.list() if not is_excluded_entry(e)]
         if not entries:
             return MemoryStats()
 
@@ -467,6 +470,7 @@ class AdapterABC(ABC):
         storage should override with GROUP BY aggregates.
         """
         from amfs_core.aggregates import agent_entity_stats_from_entries
+        from amfs_core.exclusions import is_excluded_entry
 
         entries = self.list()
         if agent_ids is not None:
@@ -479,6 +483,12 @@ class AdapterABC(ABC):
                 for e in entries
                 if e.entity_path == prefix or e.entity_path.startswith(prefix + "/")
             ]
+        else:
+            # Only when no path was named, which mirrors the SQL override and the
+            # shared-path rule beside it: naming a path is the act of opting into
+            # it. Scoped, this call is how a briefing's authority ranking is
+            # built, including a briefing on a benchmark's own path.
+            entries = [e for e in entries if not is_excluded_entry(e)]
         return agent_entity_stats_from_entries(entries)
 
     def stats_extended(

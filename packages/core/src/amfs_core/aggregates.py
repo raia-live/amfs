@@ -56,7 +56,17 @@ def recall_tokens_saved(entry: "MemoryEntry") -> int:
 
 
 def entity_summaries_from_entries(entries: "list[MemoryEntry]") -> list[dict]:
-    """Group entries per entity path: count, avg confidence, last write, agents."""
+    """Group entries per entity path: count, avg confidence, last write, agents.
+
+    Benchmark and system rows are left out, as they are from the totals — an
+    entity list that disagreed with the count above it would be worse than
+    either number alone. Always safe to do here because this helper has no
+    entity_path argument to opt into one: see the note in
+    :func:`agent_entity_stats_from_entries`' caller for the case that does.
+    """
+    from amfs_core.exclusions import is_excluded_entry
+
+    entries = [e for e in entries if not is_excluded_entry(e)]
     grouped: dict[str, list] = {}
     for entry in entries:
         grouped.setdefault(entry.entity_path, []).append(entry)
@@ -117,7 +127,17 @@ def agent_entity_stats_from_entries(entries: "list[MemoryEntry]") -> list[dict]:
 
 
 def extended_stats_from_entries(entries: "list[MemoryEntry]") -> dict:
-    """MemoryStats fields plus recall totals, weekly deltas, and type counts."""
+    """MemoryStats fields plus recall totals, weekly deltas, and type counts.
+
+    Benchmark and system rows are left out — see :mod:`amfs_core.exclusions`.
+    These are an account's own totals, so the exclusion belongs here rather than
+    at each caller: the adapter default, the room-scoped HTTP path and the SQL
+    aggregate are meant to be three routes to one number, and a filter applied
+    to some of them would make that untrue in a way nobody would notice.
+    """
+    from amfs_core.exclusions import is_excluded_entry
+
+    entries = [e for e in entries if not is_excluded_entry(e)]
     now = datetime.now(timezone.utc)
     week_ago = now - timedelta(days=7)
     two_weeks_ago = now - timedelta(days=14)
