@@ -152,6 +152,53 @@ class AdapterContractTests:
         # SUCCESS reinforces confidence: 0.9 * 1.03 = 0.927
         assert abs(updated[0].confidence - 0.927) < 1e-6
 
+    def test_commit_outcome_preserves_the_rest_of_the_entry(
+        self, adapter: AdapterABC
+    ) -> None:
+        """An outcome changes confidence. It must not change anything else.
+
+        The Postgres trigger listed the columns a new version should carry, so
+        every field absent from that list quietly took its default on every
+        outcome: an entry's whole reuse history reset to zero, a private entry
+        was republished, and its retrieval tier moved. None of it failed, and
+        none of it was visible without comparing versions.
+
+        Stated as a contract rather than a Postgres test because it is a
+        promise about what committing an outcome means, and any adapter that
+        breaks it is wrong in the same way.
+
+        Only ``shared`` is asserted here because it is the one such field every
+        adapter persists on write. ``recall_count`` and ``tier`` are maintained
+        by the store rather than supplied by the caller, so they are covered in
+        the Postgres tests where they can actually be set.
+        """
+        entry = _make_entry(confidence=0.9)
+        entry.shared = False
+        adapter.write(entry)
+
+        stored = adapter.read("checkout-service", "retry-pattern")
+        assert stored is not None
+        assert stored.shared is False, "setup failed: write did not persist shared"
+
+        record = OutcomeRecord(
+            outcome_ref="DEP-002",
+            outcome_type=OutcomeType.SUCCESS,
+            causal_confidence=1.0,
+            committed_at=datetime.now(timezone.utc),
+            causal_entry_keys=["checkout-service/retry-pattern"],
+            agent_id="release-agent",
+        )
+        updated = adapter.commit_outcome(record)
+        assert len(updated) == 1
+
+        current = adapter.read("checkout-service", "retry-pattern")
+        assert current is not None
+        assert abs(current.confidence - 0.927) < 1e-6, "confidence should change"
+        assert current.shared is False, (
+            "an outcome republished a private entry — the new version took the "
+            "column default instead of carrying the value forward"
+        )
+
     def test_commit_outcome_missing_entry_skipped(self, adapter: AdapterABC) -> None:
         record = OutcomeRecord(
             outcome_ref="INC-002",

@@ -18,6 +18,12 @@ adapter's maintenance checkout) because each manages its own transactions:
 - :func:`apply_retention` strips captured payloads from traces past the hot
   window and optionally drops partitions past a longer one. Nothing schedules
   it; the adapter exposes it and an operator or a job calls it.
+- :func:`sync_partition_rls` copies the parent's row-security policies onto each
+  partition and enables row security there, which Postgres does not do by
+  itself. It stops short of ``FORCE``, so the owner — the role that runs
+  retention — stays exempt; that function's docstring says why.
+  ``ensure_partitions`` calls it, so it runs on every start; it is public
+  because it is worth being able to call and assert on directly.
 
 Why copy rather than attach
 ---------------------------
@@ -527,6 +533,158 @@ def _create_partition(cur: Any, name: str, start: datetime, end: datetime) -> No
         raise
 
 
+def _parent_rls(cur: Any) -> tuple[bool, bool]:
+    """Whether the parent has row-level security enabled, and forced."""
+    cur.execute(
+        "SELECT relrowsecurity, relforcerowsecurity FROM pg_catalog.pg_class "
+        "WHERE oid = %s::regclass",
+        (TABLE,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return (False, False)
+    if isinstance(row, dict):
+        return (bool(row["relrowsecurity"]), bool(row["relforcerowsecurity"]))
+    return (bool(row[0]), bool(row[1]))
+
+
+def _policies_on(cur: Any, table: str) -> dict[str, dict[str, Any]]:
+    """The policies defined on one table, by name, as ``pg_policies`` reports them."""
+    cur.execute(
+        """
+        SELECT policyname, permissive, roles, cmd, qual, with_check
+        FROM pg_catalog.pg_policies
+        WHERE schemaname = current_schema() AND tablename = %s
+        """,
+        (table,),
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for r in cur.fetchall():
+        if isinstance(r, dict):
+            out[r["policyname"]] = r
+        else:
+            out[r[0]] = {
+                "policyname": r[0], "permissive": r[1], "roles": r[2],
+                "cmd": r[3], "qual": r[4], "with_check": r[5],
+            }
+    return out
+
+
+def _create_policy_sql(table: str, p: dict[str, Any]) -> str:
+    """Rebuild one policy's DDL for another table.
+
+    Replayed from the catalogue rather than restated here: the predicate belongs
+    to whoever defined it on the parent — the tenant package, in the deployment
+    that has one — and a copy written out in this file would be a second version
+    of it, free to drift the moment either changed. This file does not need to
+    know what the policy says.
+    """
+    parts = [f'CREATE POLICY "{p["policyname"]}" ON {table}']
+    if (p.get("permissive") or "PERMISSIVE").upper() == "RESTRICTIVE":
+        parts.append("AS RESTRICTIVE")
+    cmd = (p.get("cmd") or "ALL").upper()
+    if cmd != "ALL":
+        parts.append(f"FOR {cmd}")
+    roles = p.get("roles") or []
+    if isinstance(roles, str):  # rendered as '{public}' by some drivers
+        roles = [r for r in roles.strip("{}").split(",") if r]
+    if roles and list(roles) != ["public"] and list(roles) != ["-"]:
+        parts.append("TO " + ", ".join(f'"{r}"' for r in roles))
+    if p.get("qual"):
+        parts.append(f"USING ({p['qual']})")
+    if p.get("with_check"):
+        parts.append(f"WITH CHECK ({p['with_check']})")
+    return " ".join(parts)
+
+
+def sync_partition_rls(cur: Any) -> list[str]:
+    """Give every partition the row-level security its parent carries.
+
+    A partition inherits neither the parent's ``relrowsecurity`` nor its policies.
+    Postgres applies the parent's policies to rows reached *through* the parent, but
+    a query naming a partition directly is checked against that partition's own
+    policies — of which a fresh partition has none — so a table whose parent is
+    forced can still be read a month at a time with no tenant in scope. Nothing in
+    this repository selects from a partition by name, which is what kept it latent;
+    it is one convenient query away from not being.
+
+    Enabling row security on the partition without also copying the policies would
+    trade that for the opposite failure: with security enabled and no policy that
+    applies, the partition yields nothing at all, and a maintenance query would
+    quietly read zero rows rather than be refused. Both halves or neither.
+
+    What this deliberately does not do: ``FORCE``
+    --------------------------------------------
+    The parent is forced, and this does not pass that down, because the owner is
+    also the role that maintains these tables. Retention strips payloads with an
+    ``UPDATE`` naming a partition, and ``ensure_partitions`` drains the default
+    one by reading it, both on the maintenance checkout, which blanks the tenant
+    settings by design (see ``PostgresAdapter._maintenance_connection``). Forced,
+    those statements match no rows — measured, not supposed: the strip returns
+    ``UPDATE 0`` and reports success having changed nothing, and months stuck in
+    the default partition are never drained. Unforced, the owner is exempt from
+    the policy and both keep working, while every other role reading a partition
+    by name is scoped exactly as it is through the parent.
+
+    So this closes the gap for every role except the one that owns the tables.
+    Covering the owner too means giving maintenance a sanctioned way through —
+    a role with ``BYPASSRLS`` for the retention and drain statements — and only
+    then forcing the partitions. That is a deployment change, not one this
+    function can make, and doing half of it here would swap a bypass nothing
+    currently uses for a retention job that silently stops working.
+
+    Returns the partitions changed, so a caller can log or assert on it. Idempotent:
+    a partition already carrying the parent's policies is left alone.
+    """
+    if not is_partitioned(cur):
+        return []
+    enabled, _forced = _parent_rls(cur)
+    if not enabled:
+        # Nothing to inherit. An OSS install without the tenant package has no
+        # policies on the parent either, and enabling security here would take its
+        # traces away from it.
+        return []
+
+    parent_policies = _policies_on(cur, TABLE)
+    changed: list[str] = []
+    for name in list_partitions(cur):
+        touched = False
+        have = _policies_on(cur, name)
+        for policy_name, policy in parent_policies.items():
+            if policy_name in have:
+                continue
+            cur.execute(_create_policy_sql(name, policy))
+            touched = True
+        part_enabled, _ = _partition_rls(cur, name)
+        # After the policies, never before: a partition that had security enabled
+        # for the instant it had no policy would answer that instant with no rows.
+        # ENABLE only — see the note on FORCE in this function's docstring.
+        if not part_enabled:
+            cur.execute(f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY")
+            touched = True
+        if touched:
+            changed.append(name)
+    if changed:
+        logger.info(
+            "trace partitioning: row-level security synced onto %s", ", ".join(changed)
+        )
+    return changed
+
+
+def _partition_rls(cur: Any, name: str) -> tuple[bool, bool]:
+    cur.execute(
+        "SELECT relrowsecurity, relforcerowsecurity FROM pg_catalog.pg_class "
+        "WHERE oid = %s::regclass",
+        (name,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return (False, False)
+    if isinstance(row, dict):
+        return (bool(row["relrowsecurity"]), bool(row["relforcerowsecurity"]))
+    return (bool(row[0]), bool(row[1]))
+
+
 def ensure_partitions(cur: Any, *, months_ahead: int = 2, now: datetime | None = None) -> list[str]:
     """Create partitions for this month and *months_ahead* more. Returns the names created.
 
@@ -558,6 +716,17 @@ def ensure_partitions(cur: Any, *, months_ahead: int = 2, now: datetime | None =
         created.append(name)
     if created:
         logger.info("trace partitioning: created %s", ", ".join(created))
+    # Every partition, not only the ones just created: this converges rather than
+    # stamping at creation, so a partition made by an older version of this file,
+    # or by hand, is brought into line on the next start rather than staying the
+    # one month that is readable without a tenant.
+    try:
+        sync_partition_rls(cur)
+    except Exception:
+        # Altering a partition needs ownership of it. A deployment where the
+        # connecting role does not own its tables should say so loudly and keep
+        # serving, rather than fail to start over a gap it already had.
+        logger.warning("trace partitioning: could not sync row-level security", exc_info=True)
     return created
 
 

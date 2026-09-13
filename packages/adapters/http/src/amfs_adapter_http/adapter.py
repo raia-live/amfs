@@ -219,7 +219,22 @@ class HttpAdapter(AdapterABC):
         # sealed copy.
         if record.session_metadata:
             body["session_metadata"] = record.session_metadata
+        # The counterpart of all of the above: everything this call carries is
+        # carried so the server can seal from it, and none of it makes the server's
+        # copy as good as the trace that follows on ``save_trace``. When one is
+        # coming, say so, and the server seals once from the better of the two.
+        if record.trace_follows:
+            body["trace_follows"] = True
         data = self._post("/api/v1/outcomes", body)
+        # The ABC returns entries, so anything else the server computed for this
+        # commit has nowhere to go in the signature and would be dropped here.
+        # The gap report is computed server-side on purpose — that is the only
+        # place a retrieve is free and side-effect-free — so it needs a way
+        # across. Stashed rather than returned, and read once by
+        # ``AgentMemory.commit_outcome``: widening the ABC would oblige every
+        # adapter, including the filesystem one that has no retrieval, to carry a
+        # concept only the server can produce.
+        self._last_memory_gap = data.get("memory_gap")
         return [_parse_entry(e) for e in data.get("entries", [])]
 
     # ── optional overrides ────────────────────────────────────────────

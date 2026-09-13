@@ -10,7 +10,7 @@ from amfs_core.content import (
     is_code_like,
 )
 from amfs_core.embedder import EmbedderABC, cosine_similarity
-from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker
+from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker, read_tracker_scope
 from amfs_core.exceptions import (
     AMFSError,
     AdapterError,
@@ -18,6 +18,11 @@ from amfs_core.exceptions import (
     LockTimeoutError,
     StaleWriteError,
     VersionConflictError,
+)
+from amfs_core.exclusions import (
+    is_excluded_agent,
+    is_excluded_entity,
+    is_excluded_entry,
 )
 from amfs_core.lifecycle import LifecycleManager
 from amfs_core.models import (
@@ -72,6 +77,9 @@ from amfs_core.quality import (
 )
 
 __all__ = [
+    "is_excluded_entry",
+    "is_excluded_entity",
+    "is_excluded_agent",
     "ARTIFACT_PENALTY",
     "AMFSConfig",
     "AMFSError",
@@ -129,6 +137,7 @@ __all__ = [
     "QualityReport",
     "QueryEvent",
     "ReadTracker",
+    "read_tracker_scope",
     "SearchQuery",
     "SemanticQuery",
     "StaleWriteError",
