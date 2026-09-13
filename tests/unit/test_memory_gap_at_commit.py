@@ -281,7 +281,7 @@ class TestWhatCountsAsMatched:
         gap = _commit(adapter, monkeypatch)["memory_gap"]
 
         assert gap["matched"] == 1
-        assert gap["unlinked"] == ["api/deploy/runbook"]
+        assert gap["unlinked_sample"] == ["api/deploy/runbook"]
 
     def test_a_weak_semantic_hit_still_counts_if_the_words_match(self, monkeypatch):
         """Deliberately generous in the same way retrieve is: the lexical channel
@@ -304,12 +304,39 @@ class TestWhatCountsAsMatched:
         gap = _commit(adapter, monkeypatch)["memory_gap"]
 
         assert gap["matched"] == 1
-        assert gap["unlinked"] == ["api/deploy/runbook"]
+        assert gap["unlinked_sample"] == ["api/deploy/runbook"]
 
     def test_the_same_entry_from_both_channels_is_counted_once(self, monkeypatch):
         both = _entry("api/deploy", "runbook")
         adapter = _Adapter(semantic=[(both, 0.9)], lexical=[both])
         assert _commit(adapter, monkeypatch)["memory_gap"]["matched"] == 1
+
+    def test_a_date_in_the_request_is_not_searched_for(self, monkeypatch):
+        """Found in review, and it broke the reproducibility claim above.
+
+        Retrieve splits temporal intent out and searches only the topical
+        remainder, so a request phrased "like we did yesterday" searches for the
+        rollback and treats the date as a recency signal. This counted matches
+        against the raw text, putting "yesterday" into both the embedding and the
+        keyword query as noise — so the number the note invites the agent to
+        reproduce with retrieve was one retrieve would not produce.
+        """
+        adapter = _Adapter(semantic=[(_entry("api/deploy", "runbook"), 0.9)])
+        _commit(adapter, monkeypatch, task_input="roll the api back like we did yesterday")
+
+        assert adapter.embedded, "the semantic channel should still have run"
+        searched = adapter.embedded[0] + " " + adapter.lexical_queries[0]
+        assert "yesterday" not in searched.lower()
+        assert "roll the api back" in searched.lower(), "the topical half must survive"
+
+    def test_a_request_that_is_only_a_date_still_searches(self, monkeypatch):
+        """The edge of the fix above: stripping "yesterday" from "yesterday"
+        leaves nothing. ``normalize_temporal`` falls back to the original text
+        rather than returning empty, and the count must not silently become 0."""
+        adapter = _Adapter(semantic=[(_entry("api/deploy", "runbook"), 0.9)])
+        gap = _commit(adapter, monkeypatch, task_input="yesterday")["memory_gap"]
+
+        assert gap["matched"] == 1
 
 
 class TestTheCountIsNotALeakPath:
@@ -326,7 +353,7 @@ class TestTheCountIsNotALeakPath:
         gap = _commit(adapter, monkeypatch, vis=_Vis({mine.entry_key}))["memory_gap"]
 
         assert gap["matched"] == 1
-        assert gap["unlinked"] == ["api/deploy/runbook"]
+        assert gap["unlinked_sample"] == ["api/deploy/runbook"]
 
     def test_a_filtered_semantic_hit_is_not_counted_either(self, monkeypatch):
         theirs = _entry("api/secrets", "someone-elses")
@@ -349,8 +376,9 @@ class TestWhatTheBlockSays:
 
         assert gap["matched"] == 3
         assert gap["linked_to_outcome"] == 1
-        assert "api/deploy/runbook" not in gap["unlinked"]
-        assert gap["unlinked"] == ["api/deploy/postmortem", "api/deploy/oncall"]
+        assert gap["unlinked"] == 2
+        assert "api/deploy/runbook" not in gap["unlinked_sample"]
+        assert gap["unlinked_sample"] == ["api/deploy/postmortem", "api/deploy/oncall"]
 
     def test_a_read_of_something_unrelated_does_not_count_as_linkage(self, monkeypatch):
         """Linkage is counted against what matched, not against read volume — an
@@ -368,7 +396,8 @@ class TestWhatTheBlockSays:
         gap = _commit(adapter, monkeypatch)["memory_gap"]
 
         assert gap["matched"] == 12
-        assert len(gap["unlinked"]) == server._GAP_SAMPLE
+        assert gap["unlinked"] == 12
+        assert len(gap["unlinked_sample"]) == server._GAP_SAMPLE
 
     def test_the_strongest_match_is_named_first(self, monkeypatch):
         adapter = _Adapter(
@@ -378,7 +407,7 @@ class TestWhatTheBlockSays:
             ]
         )
         gap = _commit(adapter, monkeypatch)["memory_gap"]
-        assert gap["unlinked"][0] == "api/deploy/strong"
+        assert gap["unlinked_sample"][0] == "api/deploy/strong"
 
     def test_one_match_is_described_in_the_singular(self, monkeypatch):
         adapter = _Adapter(semantic=[(_entry("api/deploy", "runbook"), 0.9)])
@@ -396,6 +425,40 @@ class TestWhatTheBlockSays:
 
         assert "2 stored memories match" in note
         assert "1 are linked" in note
+        assert "1 that are not" in note
+
+    def test_the_note_does_not_pass_a_sample_off_as_the_whole_list(self, monkeypatch):
+        """Found in review. The note used to say "the rest are listed in unlinked"
+        beside a field capped at three, which reads as a complete list on any
+        commit with more than three unmatched keys.
+
+        A block whose only job is to be believed cannot round its own numbers, so
+        the count and the sample are separate fields and the note says which it is
+        showing.
+        """
+        adapter = _Adapter(
+            semantic=[(_entry("api/deploy", f"entry-{n}"), 0.9 - n / 100) for n in range(9)]
+        )
+        gap = _commit(adapter, monkeypatch, read=["api/deploy/entry-0"])["memory_gap"]
+
+        assert gap["unlinked"] == 8
+        assert len(gap["unlinked_sample"]) == server._GAP_SAMPLE
+        assert "8 that are not" in gap["note"]
+        assert "the strongest are in unlinked_sample" in gap["note"]
+
+    def test_a_short_unlinked_list_is_not_called_a_sample(self, monkeypatch):
+        """The other half of the fix: when everything unlinked does fit, the note
+        should say so rather than hedge about strength for no reason."""
+        adapter = _Adapter(
+            semantic=[
+                (_entry("api/deploy", "runbook"), 0.95),
+                (_entry("api/deploy", "postmortem"), 0.85),
+            ]
+        )
+        note = _commit(adapter, monkeypatch, read=["api/deploy/runbook"])["memory_gap"]["note"]
+
+        assert "they are in unlinked_sample" in note
+        assert "strongest" not in note
 
 
 class TestNoTimeOrMoneyFigureCreepsIn:

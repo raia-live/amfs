@@ -2548,11 +2548,20 @@ async def _memories_matching_task(
     costs no metered operation and no HTTP hop. Returns keys ordered strongest
     first, semantic hits ahead of lexical-only ones.
     """
-    query = task_input.strip()[:_GAP_QUERY_CHARS]
-    if not query:
-        return []
+    from amfs_core.query_norm import normalize_temporal
+
     if _async_adapter is None:
         return []
+    # Truncated before normalising so the regex pass is not run over 200k of text.
+    text = task_input.strip()[:_GAP_QUERY_CHARS]
+    if not text:
+        return []
+    # Retrieve searches only the topical remainder, so this must too, or the count
+    # is one the agent cannot reproduce with ``amfs_retrieve`` on the same text —
+    # which the note below invites it to do. ``topical`` falls back to the original
+    # when stripping would empty it, so a request that is only a date still
+    # searches for something.
+    query = normalize_temporal(text).topical
 
     embedder = _get_server_embedder()
     # entry_key -> {"entry", "sim", "keyword"}, the same slot shape retrieve uses.
@@ -2655,13 +2664,22 @@ async def _memory_gap(req: OutcomeRequest, *, request: Request) -> dict[str, Any
     }
     if not unlinked:
         return gap
-    gap["unlinked"] = unlinked[:_GAP_SAMPLE]
+    # Count and sample are separate fields so no wording can pass a capped list
+    # off as a complete one. This block's only job is to be believed.
+    gap["unlinked"] = len(unlinked)
+    gap["unlinked_sample"] = unlinked[:_GAP_SAMPLE]
     plural = "memory" if len(matched) == 1 else "memories"
     if linked_count:
+        shown = (
+            "the strongest are in unlinked_sample"
+            if len(unlinked) > _GAP_SAMPLE
+            else "they are in unlinked_sample"
+        )
         gap["note"] = (
             f"{len(matched)} stored {plural} match this task and "
-            f"{linked_count} are linked to this outcome. The rest are listed in "
-            "unlinked — worth a look if this task touches them again."
+            f"{linked_count} are linked to this outcome. Of the "
+            f"{len(unlinked)} that are not, {shown} — worth a look if this task "
+            "comes round again."
         )
     else:
         gap["note"] = (
