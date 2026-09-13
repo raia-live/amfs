@@ -1432,6 +1432,15 @@ def _attach_reuse_value(
             reused_before=getattr(credited, "recall_count", 0) or 0,
             written_by=written_by,
             reused_by=request.headers.get("x-amfs-agent-id"),
+            # Which row the credit landed on, so a caller answering with one
+            # memory can check the block is about that memory. recall and
+            # read_from credit the current version and may then answer with an
+            # older one from history.
+            credited={
+                "entity_path": credited.entity_path,
+                "key": credited.key,
+                "version": getattr(credited, "version", None),
+            },
         )
         if block:
             # Separators without spaces: a header value is not read by a human and
