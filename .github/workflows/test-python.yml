@@ -11,6 +11,15 @@ on:
   pull_request:
     branches: [main, dev]
 
+# Both jobs only read the checkout: one runs the test suites, the other compares
+# a version string across two commits. Neither writes to the repo, comments on a
+# PR, or publishes anything, so read is the whole requirement — and the default
+# token is far broader than that. Declared at the top rather than per job so a
+# job added later inherits the narrow set instead of silently getting the wide
+# one, which is how this was missed on the version gate.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
