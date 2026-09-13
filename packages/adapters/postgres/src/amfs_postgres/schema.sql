@@ -661,3 +661,72 @@ CREATE INDEX IF NOT EXISTS idx_commits_log
 
 CREATE INDEX IF NOT EXISTS idx_commits_author
     ON amfs_commits (namespace, author_agent_id);
+
+-- ──────────────────────────────────────────────────────────────────────
+-- Reuse events — one row each time a memory is credited as reused
+-- ──────────────────────────────────────────────────────────────────────
+--
+-- recall_count on amfs_memory_entries already counts reuse, and it is the right
+-- thing for "which memories earn their keep". What it cannot answer is anything
+-- with a WHEN or a WHO in it: when reuse happened, which agent did the reusing,
+-- and whether the agent that reused a memory is the one that wrote it. Those are
+-- the questions behind every user-facing claim memory can make — a weekly digest
+-- of what your agents learned, a panel showing reuse without an agent having to
+-- narrate it, and above all "your Claude session just used what your Cursor agent
+-- worked out on Tuesday", which is the one thing a local file or a single tool's
+-- memory structurally cannot do. A counter has no Tuesday in it.
+--
+-- Until now the only per-event record of reuse was an in-memory session ledger
+-- whose own docstring said "never persisted", so it died with the session and
+-- nothing could be shown to anyone who was not watching the chat at the time.
+--
+-- Not amfs_events, which was the obvious candidate and is the wrong home twice
+-- over: it has no RLS (the adapter says so where it reads it back), and it backs a
+-- user-facing timeline that one row per credited read would bury.
+--
+-- account_id is deliberately absent here, as it is from every other table in this
+-- file: the hosted product adds the column, its default and its RLS policy in a
+-- tenant migration, and OSS INSERTs omit it. A self-hoster gets the table from
+-- this file with no tenancy at all, which is correct for one account.
+--
+-- No partitioning and no rollup table yet. Volume is bounded by billing — a
+-- credited read is a metered read — and the eval package already establishes the
+-- partition-plus-daily-rollup shape to copy if that stops being true.
+CREATE TABLE IF NOT EXISTS amfs_reuse_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace TEXT NOT NULL DEFAULT 'default',
+    branch TEXT NOT NULL DEFAULT 'main',
+    entity_path TEXT NOT NULL,
+    key TEXT NOT NULL,
+    -- Which version was reused. The row is a fact about a specific version, and
+    -- recall_count cannot say which one it counted.
+    entry_version INTEGER,
+    -- The author, and the agent that reused it. Equal on an ordinary re-read;
+    -- different is the cross-surface moment worth telling someone about.
+    written_by TEXT,
+    reused_by TEXT,
+    -- Estimated, and stored as such. Same clamp as the block the caller was shown,
+    -- so a figure in a digest cannot disagree with the figure in the chat.
+    est_tokens_saved INTEGER NOT NULL DEFAULT 0,
+    -- Which read credited it: read, search or retrieve.
+    surface TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The digest and the account-level panel: everything in a window, newest first.
+CREATE INDEX IF NOT EXISTS idx_reuse_events_recent
+    ON amfs_reuse_events (namespace, created_at DESC);
+
+-- The per-agent panel: what this agent has been drawing on.
+CREATE INDEX IF NOT EXISTS idx_reuse_events_reader
+    ON amfs_reuse_events (namespace, reused_by, created_at DESC);
+
+-- The cross-surface claim. Partial, so the index stays small: one agent reusing
+-- another's memory is the minority of reuse and the only part this serves.
+CREATE INDEX IF NOT EXISTS idx_reuse_events_cross_surface
+    ON amfs_reuse_events (namespace, created_at DESC)
+    WHERE written_by IS DISTINCT FROM reused_by;
+
+-- Reuse of one entry over time, for the entry and entity pages.
+CREATE INDEX IF NOT EXISTS idx_reuse_events_entry
+    ON amfs_reuse_events (namespace, entity_path, key, created_at DESC);

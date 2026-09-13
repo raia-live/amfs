@@ -23,7 +23,7 @@ import re
 import secrets
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import uvicorn
@@ -966,7 +966,9 @@ async def _read_entry(
     # wrote it. The bump is the only thing that legitimately precedes the check,
     # because it records that the row was touched and reveals nothing.
     if credited:
-        _attach_reuse_value(response, request, credited=entry, hits=1)
+        _attach_reuse_value(
+            response, request, credited=entry, hits=1, surface="read", branch=branch
+        )
     return _entry_to_response(entry)
 
 
@@ -1410,8 +1412,10 @@ def _attach_reuse_value(
     *,
     credited: MemoryEntry | None,
     hits: int,
+    surface: str | None = None,
+    branch: str = "main",
 ) -> None:
-    """Compute the reuse block for a credited read and put it on the response.
+    """Compute the reuse block for a credited read, return it and persist it.
 
     Called at the point ``recall_count`` is bumped, which is the only place that
     already knows which entry the reuse is being credited to. Everything the
@@ -1419,19 +1423,26 @@ def _attach_reuse_value(
     recall count before this reuse, who wrote it, and — from the header the
     gateway has always sent — who is reading it now.
 
+    The row written to ``amfs_reuse_events`` carries the same estimate as the
+    block, taken from the block rather than recomputed, so a figure in a weekly
+    digest cannot disagree with the figure the user was shown in chat. The block
+    answers "what did memory just do for you"; the row is what lets anyone ask
+    that later, when the session it happened in is long gone.
+
     Best-effort in the same sense the recall bump above it is: this is reporting,
     and a defect in it must never change the answer the caller came for.
     """
-    if response is None or credited is None or hits <= 0:
+    if credited is None or hits <= 0:
         return
     try:
         written_by = getattr(getattr(credited, "provenance", None), "agent_id", None)
+        reused_by = request.headers.get("x-amfs-agent-id")
         block = reuse_value_block(
             hits=hits,
             content_chars=entry_content_chars(credited),
             reused_before=getattr(credited, "recall_count", 0) or 0,
             written_by=written_by,
-            reused_by=request.headers.get("x-amfs-agent-id"),
+            reused_by=reused_by,
             # Which row the credit landed on, so a caller answering with one
             # memory can check the block is about that memory. recall and
             # read_from credit the current version and may then answer with an
@@ -1442,14 +1453,64 @@ def _attach_reuse_value(
                 "version": getattr(credited, "version", None),
             },
         )
-        if block:
+        if not block:
+            return
+        # A caller invoking the handler in-process has no response to decorate,
+        # and the reuse still happened, so the row is written either way.
+        if response is not None:
             # Separators without spaces: a header value is not read by a human and
             # the default ", " padding is wasted bytes on every read response.
             response.headers[REUSE_VALUE_HEADER] = json.dumps(
                 block, separators=(",", ":"), default=str
             )
+        _persist_reuse_event(
+            credited,
+            block,
+            written_by=written_by,
+            reused_by=reused_by,
+            surface=surface,
+            branch=branch,
+        )
     except Exception:  # noqa: BLE001 - reporting must not break the read
         logger.debug("reuse value block failed", exc_info=True)
+
+
+def _persist_reuse_event(
+    credited: MemoryEntry,
+    block: dict[str, Any],
+    *,
+    written_by: str | None,
+    reused_by: str | None,
+    surface: str | None,
+    branch: str,
+) -> None:
+    """Keep the reuse the block just described, so it outlives the session.
+
+    Scheduled rather than awaited, like the recall bump it accompanies: the read
+    has already been answered and nothing about it should wait on bookkeeping.
+    Silent when there is no async adapter (an in-process caller, or a filesystem
+    backend) and when there is no running loop, because both mean there is
+    nowhere to write and neither is an error.
+    """
+    recorder = getattr(_async_adapter, "record_reuse_event", None)
+    if recorder is None:
+        return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    asyncio.create_task(
+        recorder(
+            credited.entity_path,
+            credited.key,
+            branch=branch,
+            entry_version=getattr(credited, "version", None),
+            written_by=written_by,
+            reused_by=reused_by,
+            est_tokens_saved=block.get("est_tokens_saved") or 0,
+            surface=surface,
+        )
+    )
 
 
 @app.post("/api/v1/search")
@@ -1542,7 +1603,12 @@ async def search_entries(
             except Exception:  # noqa: BLE001 - reuse accounting is best-effort
                 logger.debug("search recall bump failed", exc_info=True)
         _attach_reuse_value(
-            response, request, credited=credited_entry, hits=credited
+            response,
+            request,
+            credited=credited_entry,
+            hits=credited,
+            surface="search",
+            branch=branch,
         )
 
     return [_entry_to_response(e) for e in results]
@@ -1789,7 +1855,12 @@ async def retrieve_entries(
         except Exception:  # noqa: BLE001 - reuse accounting is best-effort
             logger.debug("retrieve recall bump failed", exc_info=True)
     _attach_reuse_value(
-        response, request, credited=credited_entry, hits=credited_hits
+        response,
+        request,
+        credited=credited_entry,
+        hits=credited_hits,
+        surface="retrieve",
+        branch=branch,
     )
 
     out: list[dict[str, Any]] = []
@@ -3490,6 +3561,42 @@ async def list_agents(
             "platform": platform,
         })
     return {"agents": agents}
+
+
+@app.get("/api/v1/reuse")
+async def reuse_summary(
+    request: Request,
+    days: int = 7,
+    limit: int = 10,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Reuse over a window: how much, of what, by which agents, and across which.
+
+    The read side of ``amfs_reuse_events``. It exists so that seeing what memory
+    did for you does not depend on an agent choosing to mention it in chat — the
+    same failure mode as an always-applied rule being ignored. A dashboard panel
+    and a weekly digest can both answer from here, days after the session ended.
+
+    Defaults to a week because that is the digest's window; ``days`` is clamped so
+    a hand-written URL cannot ask for an unbounded scan.
+    """
+    days = max(1, min(int(days or 7), 365))
+    limit = max(1, min(int(limit or 10), 100))
+    since = datetime.now(UTC) - timedelta(days=days)
+
+    adapter = _get_memory()._adapter
+    summarise = getattr(adapter, "reuse_summary", None)
+    if summarise is None:
+        # A filesystem backend keeps no events. Saying so beats a 500 and beats
+        # an empty body that reads as "no reuse happened".
+        return {
+            "since": since.isoformat(),
+            "days": days,
+            "available": False,
+            "reason": "reuse events need the Postgres adapter",
+        }
+    summary = summarise(since=since, limit=limit)
+    return {"since": since.isoformat(), "days": days, "available": True, **summary}
 
 
 @app.get("/api/v1/agents/{agent_id:path}/memory-graph")
