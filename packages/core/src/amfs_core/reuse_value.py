@@ -49,10 +49,19 @@ from amfs_core.aggregates import (
 
 __all__ = [
     "BASIS",
+    "REUSE_VALUE_HEADER",
     "format_tokens",
     "plain",
     "reuse_value_block",
 ]
+
+#: Header the block travels in. A header because both read endpoints answer with
+#: a bare JSON array — there is no envelope to add a key to, and wrapping the
+#: array would break every existing client in order to carry a diagnostic. Named
+#: here, in the one package both the server and the HTTP adapter already depend
+#: on, because a client and a server disagreeing about the string would produce
+#: exactly the silence this whole change exists to remove.
+REUSE_VALUE_HEADER = "X-SenseLab-Value"
 
 #: How the token figure is arrived at, carried with it so a caller repeating the
 #: number can also say where it came from. Stated as a method rather than a

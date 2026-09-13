@@ -37,7 +37,7 @@ from amfs.config import load_config_or_default
 from amfs.memory import validate_session_attributes
 from pydantic import BaseModel, Field
 from amfs_core.aggregates import REUSE_CREDIT_K, entry_content_chars
-from amfs_core.reuse_value import reuse_value_block
+from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
 from amfs_core.engine import read_tracker_scope
 from amfs_core.models import (
@@ -887,6 +887,7 @@ async def read_entry_by_query(
     entity_path: str = Query(...),
     key: str = Query(...),
     branch: str = Query("main"),
+    response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """The same read, with the coordinates where they cannot be confused.
@@ -909,7 +910,7 @@ async def read_entry_by_query(
     has no slash, which is most of the time, and rewriting every caller to gain
     nothing is a worse trade than leaving them alone.
     """
-    return await _read_entry(request, entity_path, key, branch)
+    return await _read_entry(request, entity_path, key, branch, response)
 
 
 @app.get("/api/v1/entries/{entity_path:path}/{key}")
@@ -918,9 +919,10 @@ async def read_entry(
     entity_path: str,
     key: str,
     branch: str = Query("main"),
+    response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    return await _read_entry(request, entity_path, key, branch)
+    return await _read_entry(request, entity_path, key, branch, response)
 
 
 async def _read_entry(
@@ -928,8 +930,10 @@ async def _read_entry(
     entity_path: str,
     key: str,
     branch: str,
+    response: Response | None = None,
 ) -> dict[str, Any]:
     mem = _get_memory()
+    credited = False
     if _async_adapter is not None:
         try:
             entry = await _async_adapter.read(entity_path, key, branch=branch)
@@ -945,6 +949,7 @@ async def _read_entry(
                 )
         if entry is not None:
             asyncio.create_task(_async_adapter.increment_recall_count(entity_path, key, branch=branch))
+            credited = True
     else:
         entry = mem.read(entity_path, key, branch=branch)
     if entry is None:
@@ -954,6 +959,14 @@ async def _read_entry(
     if vis is not None and vis.should_filter() and not vis.is_entry_visible(entry):
         return {"status": "not_found", "entity_path": entity_path, "key": key}
 
+    # After the visibility check, never before it. The recall bump above is
+    # issued on the entry as fetched, but the block carries the author's agent id
+    # for the cross-surface claim — attached earlier, a read of an entry this
+    # caller may not see would answer "not found" while the header named who
+    # wrote it. The bump is the only thing that legitimately precedes the check,
+    # because it records that the row was touched and reveals nothing.
+    if credited:
+        _attach_reuse_value(response, request, credited=entry, hits=1)
     return _entry_to_response(entry)
 
 
@@ -1389,14 +1402,6 @@ async def aggregate_entries_endpoint(
 # ──────────────────────────────────────────────────────────────────────
 # Search
 # ──────────────────────────────────────────────────────────────────────
-
-
-#: Header carrying the reuse block. A header rather than the body because both
-#: read endpoints answer with a bare JSON array — there is no envelope to add a
-#: key to, and wrapping the list would break every existing client for the sake
-#: of a diagnostic. Clients that do not know the header simply ignore it, which
-#: is the whole reason this can ship without a coordinated release.
-REUSE_VALUE_HEADER = "X-SenseLab-Value"
 
 
 def _attach_reuse_value(

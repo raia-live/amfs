@@ -31,7 +31,6 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-import pytest
 from amfs_core.aggregates import (
     RECALL_TOKENS_CEIL,
     RECALL_TOKENS_FLOOR,
@@ -180,8 +179,8 @@ def test_the_server_puts_the_block_on_the_response_header():
     There is no envelope to add a key to, and wrapping the array would break
     every existing client in order to carry a diagnostic.
     """
-    from fastapi import Response
     from amfs_http import server as srv
+    from fastapi import Response
 
     response = Response()
     request = _fake_request(agent="reader-agent")
@@ -201,8 +200,8 @@ def test_the_server_puts_the_block_on_the_response_header():
 
 
 def test_a_read_that_credited_nothing_sets_no_header():
-    from fastapi import Response
     from amfs_http import server as srv
+    from fastapi import Response
 
     response = Response()
     srv._attach_reuse_value(response, _fake_request(), credited=None, hits=0)
@@ -215,8 +214,8 @@ def test_the_credit_measures_the_entry_not_the_payload():
     A response carrying five entries plus scores and metadata is not what one
     credited memory saved.
     """
-    from fastapi import Response
     from amfs_http import server as srv
+    from fastapi import Response
 
     small = Response()
     srv._attach_reuse_value(
@@ -231,8 +230,8 @@ def test_a_broken_block_never_breaks_the_read():
 
     Same rule the recall bump above it already follows.
     """
-    from fastapi import Response
     from amfs_http import server as srv
+    from fastapi import Response
 
     class Exploding:
         @property
@@ -254,18 +253,12 @@ def _fake_request(*, agent: str | None = None):
 # ── the adapter carries it across, and does not let it go stale ───────
 
 
-class _FakeHeaders(dict):
-    pass
-
-
 def _adapter_with_header(value: str | None):
-    from amfs_adapter_http.adapter import HttpAdapter
+    from amfs_adapter_http import adapter as mod
 
-    adapter = HttpAdapter.__new__(HttpAdapter)
-    adapter._last_reuse_value = None
-    adapter._last_headers = _FakeHeaders(
-        {"X-SenseLab-Value": value} if value is not None else {}
-    )
+    adapter = mod.HttpAdapter.__new__(mod.HttpAdapter)
+    mod._LAST_REUSE_HEADER.set(value)
+    mod._LAST_REUSE_VALUE.set(None)
     return adapter
 
 
@@ -281,11 +274,13 @@ def test_a_later_read_that_credited_nothing_clears_the_block():
     Two reads in a row, the first crediting and the second not: without the
     clear, the second read reports the first read's reuse.
     """
+    from amfs_adapter_http import adapter as mod
+
     adapter = _adapter_with_header('{"memories_used":1}')
     adapter._capture_reuse_value()
     assert adapter._last_reuse_value is not None
 
-    adapter._last_headers = _FakeHeaders({})
+    mod._LAST_REUSE_HEADER.set(None)
     adapter._capture_reuse_value()
     assert adapter._last_reuse_value is None
 
@@ -303,6 +298,54 @@ def test_a_header_that_is_not_an_object_is_refused():
     assert adapter._last_reuse_value is None
 
 
+def test_two_reads_in_flight_do_not_take_each_others_block():
+    """The staleness bug in its concurrent form, which is the one that bites.
+
+    One adapter serves many calls. The gateway builds a separate adapter per
+    session so this was never cross-tenant, but a client may have two reads in
+    flight on one session, and "A responds, B responds, A reads the value" handed
+    A the block describing B's lookup. Held on the adapter this is unfixable
+    without a lock; scoped to the calling context it cannot happen, because the
+    value belongs to the call rather than to the object.
+    """
+    import asyncio
+
+    from amfs_adapter_http import adapter as mod
+
+    adapter = mod.HttpAdapter.__new__(mod.HttpAdapter)
+
+    async def read(label: str, delay: float) -> dict | None:
+        mod._LAST_REUSE_HEADER.set(f'{{"memories_used":1,"who":"{label}"}}')
+        adapter._capture_reuse_value()
+        # Whatever else runs while this call is suspended, the value it comes
+        # back to must be its own.
+        await asyncio.sleep(delay)
+        return adapter._last_reuse_value
+
+    async def both():
+        return await asyncio.gather(read("A", 0.02), read("B", 0.0))
+
+    a, b = asyncio.run(both())
+    assert a["who"] == "A", f"read A came back holding {a['who']}'s block"
+    assert b["who"] == "B"
+
+
+def test_the_gap_report_is_scoped_the_same_way():
+    """Same hazard, same file, and it predates this change.
+
+    The gap block crossed from the response as an adapter attribute too. Left
+    alone it would be the one remaining way a commit could report another call's
+    findings, and the mechanism to fix it is already here.
+    """
+    from amfs_adapter_http import adapter as mod
+
+    adapter = mod.HttpAdapter.__new__(mod.HttpAdapter)
+    mod._LAST_MEMORY_GAP.set({"matched": 4})
+    assert adapter._last_memory_gap == {"matched": 4}
+    mod._LAST_MEMORY_GAP.set(None)
+    assert adapter._last_memory_gap is None
+
+
 # ── the stdio server forwards it, which is the coverage this adds ─────
 
 
@@ -313,6 +356,7 @@ def test_the_stdio_server_leads_a_read_with_the_block():
     because the block was client-side in two copies and this server had no third.
     """
     import types
+
     from amfs_mcp import server as oss
 
     mem = types.SimpleNamespace(last_reuse_value={"memories_used": 1})
@@ -324,6 +368,7 @@ def test_the_stdio_server_leads_a_read_with_the_block():
 def test_an_adapter_that_credits_nothing_adds_no_key():
     """Absent rather than zero: a zero reads as "your memory did nothing"."""
     import types
+
     from amfs_mcp import server as oss
 
     for value in (None, {}, "not-a-dict"):
@@ -338,6 +383,7 @@ def test_the_sdk_reads_through_to_the_adapter_on_every_path():
     the same adapter attribute.
     """
     import types
+
     from amfs import memory as mem_mod
 
     m = mem_mod.AgentMemory.__new__(mem_mod.AgentMemory)

@@ -863,7 +863,7 @@ def amfs_read(entity_path: str, key: str) -> str:
                                    "coordinates, call amfs_retrieve(query=\"<the user's words>\") to "
                                    "search by meaning instead — do NOT tell the user nothing is stored "
                                    "until you've tried amfs_retrieve."})
-    return json.dumps(_serialize_entry(entry), default=str)
+    return json.dumps(_with_reuse_value(mem, _serialize_entry(entry)), default=str)
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
@@ -1762,7 +1762,7 @@ def amfs_recall(entity_path: str, key: str) -> str:
                            "hint": "No entry at that exact key. Do NOT conclude nothing is stored — "
                                    "call amfs_retrieve(query=\"<the user's words>\") to search by meaning "
                                    "across everything you can see (no path/key needed)."})
-    return json.dumps(_serialize_entry(entry), default=str)
+    return json.dumps(_with_reuse_value(mem, _serialize_entry(entry)), default=str)
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
@@ -1805,7 +1805,7 @@ def amfs_read_from(agent_id: str, entity_path: str, key: str) -> str:
     if entry is None:
         return json.dumps({"status": "not_found", "agent_id": agent_id,
                            "entity_path": entity_path, "key": key})
-    return json.dumps(_serialize_entry(entry), default=str)
+    return json.dumps(_with_reuse_value(mem, _serialize_entry(entry)), default=str)
 
 
 @mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
