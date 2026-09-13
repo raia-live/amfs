@@ -2511,6 +2511,169 @@ def _auto_seal_trace(
         return None
 
 
+# The longest slice of a request used to look for matching memory. task_input is
+# capped at MAX_CAPTURED_CHARS (200k), and embedding a novel to count how many
+# entries relate to it would cost more than the commit it rides on. The opening
+# of a request carries what it is about; the rest is detail.
+_GAP_QUERY_CHARS = 2_000
+
+# Named rather than inlined because it is the one number a reader will want to
+# argue with: enough keys to act on, few enough that the block stays a summary.
+_GAP_SAMPLE = 3
+
+
+async def _memories_matching_task(
+    task_input: str,
+    *,
+    request: Request,
+    branch: str = "main",
+) -> list[str]:
+    """Entry keys that would surface for ``task_input`` — without reading them.
+
+    This is the candidate half of ``/api/v1/retrieve``: the semantic and lexical
+    channels, the excluded-namespace drop, and the visibility filter. It is
+    deliberately not the other half. No blend, no rerank, no ``limit`` trim, and
+    above all **no ``recall_count`` bump** — this runs to measure what the agent
+    could have consulted, and a measurement that credits reuse inflates the very
+    number it exists to report. ``AgentMemory.explain`` refuses the same trap for
+    the same reason, serving from read-time snapshots rather than re-reading.
+
+    Where it does stay in step with retrieve is relevance: the predicate below is
+    retrieve's own abstain rule — a real semantic hit, or a lexical one — so an
+    entry counted here is one the agent would have been shown had it asked. That
+    matters because the agent can check this claim by running ``retrieve`` on the
+    same text, and a number it cannot reproduce is worse than no number.
+
+    Runs in-process against the async adapter and the local ONNX embedder, so it
+    costs no metered operation and no HTTP hop. Returns keys ordered strongest
+    first, semantic hits ahead of lexical-only ones.
+    """
+    query = task_input.strip()[:_GAP_QUERY_CHARS]
+    if not query:
+        return []
+    if _async_adapter is None:
+        return []
+
+    embedder = _get_server_embedder()
+    # entry_key -> {"entry", "sim", "keyword"}, the same slot shape retrieve uses.
+    candidates: dict[str, dict[str, Any]] = {}
+
+    if embedder is not None:
+        try:
+            pairs = await _async_adapter.semantic_search(
+                SemanticQuery(text=query, limit=150), embedder, branch=branch
+            )
+        except Exception:  # noqa: BLE001 - a gap report never costs a commit
+            logger.debug("gap semantic_search failed", exc_info=True)
+            pairs = []
+        for entry, sim in pairs:
+            slot = candidates.get(entry.entry_key)
+            if slot is None:
+                candidates[entry.entry_key] = {"entry": entry, "sim": sim, "keyword": 0.0}
+            elif sim > slot["sim"]:
+                slot["sim"] = sim
+
+    # Always run, exactly as retrieve does, and load-bearing here beyond parity:
+    # the semantic channel requires ``embedding IS NOT NULL``, and outcome
+    # propagation has historically stripped embeddings from precisely the entries
+    # that outcomes validated. Without the lexical channel the report would be
+    # blindest about the memories that earned their confidence.
+    try:
+        lex = await _async_adapter.search(
+            SearchQuery(query=query, limit=150, sort_by="confidence", depth=3),
+            branch=branch,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("gap lexical search failed", exc_info=True)
+        lex = []
+    for entry in lex:
+        slot = candidates.get(entry.entry_key)
+        if slot is None:
+            candidates[entry.entry_key] = {"entry": entry, "sim": 0.0, "keyword": 1.0}
+        else:
+            slot["keyword"] = 1.0
+
+    candidates = {
+        k: v
+        for k, v in candidates.items()
+        if not _is_excluded_entity(getattr(v["entry"], "entity_path", ""))
+    }
+
+    # Applied over the merged set, once, for the same reason retrieve does it
+    # there: a lexical-only hit must be filtered exactly like a semantic one or
+    # the count itself becomes a leak path.
+    vis = _get_visibility_filter(request)
+    if vis is not None and vis.should_filter():
+        allowed = {
+            e.entry_key for e in vis.filter_entries([v["entry"] for v in candidates.values()])
+        }
+        candidates = {k: v for k, v in candidates.items() if k in allowed}
+
+    floor = _retrieve_min_semantic()
+    matched = [
+        (k, v["sim"])
+        for k, v in candidates.items()
+        if v["sim"] >= floor or v["keyword"]
+    ]
+    matched.sort(key=lambda kv: kv[1], reverse=True)
+    return [k for k, _ in matched]
+
+
+async def _memory_gap(req: OutcomeRequest, *, request: Request) -> dict[str, Any] | None:
+    """Report the memory this task matched against the memory it drew on.
+
+    The loop this product claims only closes if storing a memory leads to using
+    one, and nothing in a session tells the agent it skipped something. The
+    commit is where that can still be said: the request is in hand, so what
+    *would* have matched is computable, and the trace already knows what was
+    linked to the outcome.
+
+    On wording, which is the whole risk here. ``causal_entry_keys`` holds entries
+    that were explicitly recorded as read — direct reads, and retrieve's top hit.
+    A briefing records none, and neither does a bare search. So an entry that is
+    matched-but-unlinked is **not** an entry the agent ignored, and this must
+    never say it was: a session that opened with a briefing and used a dozen
+    entries well would be the one accused. It reports linkage, which is what it
+    can prove, and names both readings in the note so the agent can tell which
+    applies to it.
+
+    Returns ``None`` when there is nothing worth saying, so a commit that matched
+    nothing stays quiet rather than reporting a zero.
+    """
+    if not (req.task_input or "").strip():
+        return None
+    matched = await _memories_matching_task(req.task_input or "", request=request)
+    if not matched:
+        return None
+
+    linked = set(req.causal_entry_keys or [])
+    unlinked = [k for k in matched if k not in linked]
+    linked_count = len(matched) - len(unlinked)
+    gap: dict[str, Any] = {
+        "matched": len(matched),
+        "linked_to_outcome": linked_count,
+    }
+    if not unlinked:
+        return gap
+    gap["unlinked"] = unlinked[:_GAP_SAMPLE]
+    plural = "memory" if len(matched) == 1 else "memories"
+    if linked_count:
+        gap["note"] = (
+            f"{len(matched)} stored {plural} match this task and "
+            f"{linked_count} are linked to this outcome. The rest are listed in "
+            "unlinked — worth a look if this task touches them again."
+        )
+    else:
+        gap["note"] = (
+            f"{len(matched)} stored {plural} match this task and none are linked "
+            "to this outcome. If you did not consult them, amfs_retrieve on the "
+            "task text will surface them. If you did — through a briefing or a "
+            "search, which record no read — reading the entry directly is what "
+            "records the link."
+        )
+    return gap
+
+
 @app.post("/api/v1/outcomes")
 async def commit_outcome(
     req: OutcomeRequest,
@@ -2604,6 +2767,18 @@ async def commit_outcome(
     }
     if immutable_trace_id:
         result["immutable_trace_id"] = immutable_trace_id
+    # Fail-open, and not as a formality: this is the least valuable thing on the
+    # response and the commit is the most valuable thing in the session, so the
+    # order of those two should be visible in the code. The same reasoning put
+    # the loose annotation on the MCP ``actions`` parameter — a defect in the
+    # reporting half must never cost the seal.
+    try:
+        gap = await _memory_gap(req, request=request)
+    except Exception:  # noqa: BLE001
+        logger.debug("memory gap report failed", exc_info=True)
+        gap = None
+    if gap is not None:
+        result["memory_gap"] = gap
     return result
 
 

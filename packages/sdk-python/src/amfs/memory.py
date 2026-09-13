@@ -1394,6 +1394,12 @@ class AgentMemory:
         executor.submit(_bg_log_and_edges)
 
         self._last_trace = trace
+        # Alongside the trace, and read the same way by callers that want it: the
+        # server's gap report for this commit, when the adapter is one that talks
+        # to a server. Left as None elsewhere rather than computed locally — the
+        # local adapters could run the retrieve, but doing it client-side is what
+        # bumps recall_count and charges an operation for a diagnostic.
+        self._last_memory_gap = getattr(self._adapter, "_last_memory_gap", None)
         # Start a fresh causal window. The reads, contexts and queries just
         # snapshotted belong to this outcome; without this a second
         # commit_outcome in the same session re-links the first task's reads and
