@@ -365,6 +365,79 @@ def test_the_stdio_server_leads_a_read_with_the_block():
     assert out["count"] == 2
 
 
+def test_recall_answering_with_an_older_version_forwards_no_block():
+    """The false cross-surface claim, which is the worst thing this could say.
+
+    ``recall`` reads the CURRENT row — the read the server credits — and then
+    walks history for a version this agent wrote, answering with that instead. So
+    the credited row and the returned row are different memories, by different
+    authors. Unchecked, the block describes the current row and its cross_surface
+    section names its author as someone whose work you just reused, over a body
+    that is your own older entry.
+
+    ``read_from`` has the same shape for the same reason.
+    """
+    import types
+
+    from amfs_mcp import server as oss
+
+    current = _entry("current text", agent_id="someone-else")
+    mine = _entry("my older text", agent_id="me")
+    mine.version = current.version + 1  # a different row either way
+
+    block = {
+        "memories_used": 1,
+        "cross_surface": {"written_by": "someone-else", "reused_by": "me"},
+        "credited": {
+            "entity_path": current.entity_path,
+            "key": current.key,
+            "version": current.version,
+        },
+    }
+    mem = types.SimpleNamespace(last_reuse_value=block)
+
+    out = oss._with_reuse_value(mem, {"key": mine.key}, entry=mine)
+    assert "senselab_value" not in out, (
+        "the block described the credited row, not the memory returned"
+    )
+
+    # The ordinary case still reports: the row credited IS the row answered with.
+    out = oss._with_reuse_value(mem, {"key": current.key}, entry=current)
+    assert out["senselab_value"] is block
+
+
+def test_a_block_with_no_credited_section_is_not_attached_to_one_entry():
+    """A server too old to name the row cannot be checked, so it stays silent.
+
+    Silence beats an unverifiable claim, and this only affects a mixed-version
+    deployment where the whole point of the block is not yet available anyway.
+    """
+    import types
+
+    from amfs_mcp import server as oss
+
+    entry = _entry()
+    mem = types.SimpleNamespace(last_reuse_value={"memories_used": 1})
+    assert "senselab_value" not in oss._with_reuse_value(mem, {}, entry=entry)
+    # Without an entry to check against — search and retrieve — it still reports.
+    assert "senselab_value" in oss._with_reuse_value(mem, {})
+
+
+def test_the_server_names_the_row_it_credited():
+    from amfs_http import server as srv
+    from fastapi import Response
+
+    entry = _entry("y" * 8000, recall_count=2)
+    response = Response()
+    srv._attach_reuse_value(response, _fake_request(), credited=entry, hits=1)
+    block = json.loads(response.headers[srv.REUSE_VALUE_HEADER])
+    assert block["credited"] == {
+        "entity_path": entry.entity_path,
+        "key": entry.key,
+        "version": entry.version,
+    }
+
+
 def test_an_adapter_that_credits_nothing_adds_no_key():
     """Absent rather than zero: a zero reads as "your memory did nothing"."""
     import types

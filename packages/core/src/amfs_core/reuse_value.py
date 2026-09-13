@@ -50,6 +50,7 @@ from amfs_core.aggregates import (
 __all__ = [
     "BASIS",
     "REUSE_VALUE_HEADER",
+    "describes_entry",
     "format_tokens",
     "plain",
     "reuse_value_block",
@@ -102,6 +103,7 @@ def reuse_value_block(
     reused_before: int = 0,
     written_by: str | None = None,
     reused_by: str | None = None,
+    credited: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Build the reuse block for one lookup that credited *hits* memories.
 
@@ -120,6 +122,14 @@ def reuse_value_block(
     another worked out. That is the strongest thing memory can demonstrate and it
     costs nothing extra here: both ids are already in hand at the point the
     credit is applied.
+
+    ``credited`` names the row the credit was applied to, so a caller can check
+    that the block describes the memory it is about to attach it to. It is not
+    decoration. ``recall`` and ``read_from`` read the *current* row — which is
+    what gets credited — and then may answer with an older version from history
+    instead. Without this the block would describe the current row, cross-surface
+    claim and all, while the body held a different memory: "another agent's
+    memory was just reused by you" over your own older entry.
     """
     if hits <= 0:
         return None
@@ -137,6 +147,8 @@ def reuse_value_block(
         "estimate": True,
         "basis": BASIS,
     }
+    if credited:
+        block["credited"] = credited
 
     cross_surface = bool(written_by and reused_by and written_by != reused_by)
     if cross_surface:
@@ -160,6 +172,32 @@ def reuse_value_block(
             "avoided on this call, by the estimate above."
         )
     return block
+
+
+def describes_entry(block: dict[str, Any] | None, entry: Any) -> bool:
+    """Whether *block* is about *entry*, for a tool answering with one memory.
+
+    The check exists because two tools do not answer with the row they caused to
+    be credited. ``recall`` and ``read_from`` read the current version — the read
+    the server credits — and then walk history for a version by the agent asked
+    about, answering with that instead. The block would then describe the current
+    row while the body held a different memory, and its cross-surface claim would
+    name the current row's author as someone whose work you had just reused.
+
+    A block with no ``credited`` section came from a server too old to send one.
+    Treated as not matching: silence is the safe answer when the alternative is a
+    claim that cannot be checked.
+    """
+    if not block:
+        return False
+    credited = block.get("credited")
+    if not isinstance(credited, dict):
+        return False
+    return (
+        credited.get("entity_path") == getattr(entry, "entity_path", None)
+        and credited.get("key") == getattr(entry, "key", None)
+        and credited.get("version") == getattr(entry, "version", None)
+    )
 
 
 def _ordinal(n: int) -> str:

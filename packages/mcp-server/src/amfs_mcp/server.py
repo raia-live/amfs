@@ -36,6 +36,7 @@ from amfs import AgentMemory, MemoryType, OutcomeType, SessionMetadata
 from amfs.config import load_config_or_default
 from amfs_core.abc import AdapterABC
 from amfs_core.models import AMFSConfig, LayerConfig
+from amfs_core.reuse_value import describes_entry
 from amfs_core.quality import (
     HeuristicQualityEvaluator,
     MemoryQualityEvaluator,
@@ -527,8 +528,19 @@ def _serialize_entry(entry: Any) -> dict[str, Any]:
 LIST_VALUE_CHAR_LIMIT = 2000
 
 
-def _with_reuse_value(mem: Any, payload: dict[str, Any]) -> dict[str, Any]:
+def _with_reuse_value(
+    mem: Any, payload: dict[str, Any], *, entry: Any = None
+) -> dict[str, Any]:
     """Lead a read's answer with what the server credited for it, if anything.
+
+    Pass ``entry`` when the answer is a single memory, and the block is attached
+    only if it describes that memory. ``recall`` and ``read_from`` read the
+    current version — the read the server credits — then walk history for a
+    version by the agent in question and answer with that instead. Unchecked, the
+    block would describe the current row while the body held a different memory,
+    and a cross-surface claim would name the current row's author as someone whose
+    work you had just reused. Silence is correct there: what the server credited
+    is genuinely not what the caller was handed.
 
     The stdio server had no value shaper at all, so a self-hoster or anyone on
     the SDK saw nothing while the hosted surfaces showed a reuse line. That was
@@ -544,9 +556,11 @@ def _with_reuse_value(mem: Any, payload: dict[str, Any]) -> dict[str, Any]:
     after a list of entries it is the first thing a client truncates.
     """
     block = getattr(mem, "last_reuse_value", None)
-    if isinstance(block, dict) and block:
-        return {"senselab_value": block, **payload}
-    return payload
+    if not isinstance(block, dict) or not block:
+        return payload
+    if entry is not None and not describes_entry(block, entry):
+        return payload
+    return {"senselab_value": block, **payload}
 
 
 def _serialize_entries(entries: Iterable[Any]) -> list[dict[str, Any]]:
@@ -863,7 +877,7 @@ def amfs_read(entity_path: str, key: str) -> str:
                                    "coordinates, call amfs_retrieve(query=\"<the user's words>\") to "
                                    "search by meaning instead — do NOT tell the user nothing is stored "
                                    "until you've tried amfs_retrieve."})
-    return json.dumps(_with_reuse_value(mem, _serialize_entry(entry)), default=str)
+    return json.dumps(_with_reuse_value(mem, _serialize_entry(entry), entry=entry), default=str)
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
@@ -1762,7 +1776,7 @@ def amfs_recall(entity_path: str, key: str) -> str:
                            "hint": "No entry at that exact key. Do NOT conclude nothing is stored — "
                                    "call amfs_retrieve(query=\"<the user's words>\") to search by meaning "
                                    "across everything you can see (no path/key needed)."})
-    return json.dumps(_with_reuse_value(mem, _serialize_entry(entry)), default=str)
+    return json.dumps(_with_reuse_value(mem, _serialize_entry(entry), entry=entry), default=str)
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
@@ -1805,7 +1819,7 @@ def amfs_read_from(agent_id: str, entity_path: str, key: str) -> str:
     if entry is None:
         return json.dumps({"status": "not_found", "agent_id": agent_id,
                            "entity_path": entity_path, "key": key})
-    return json.dumps(_with_reuse_value(mem, _serialize_entry(entry)), default=str)
+    return json.dumps(_with_reuse_value(mem, _serialize_entry(entry), entry=entry), default=str)
 
 
 @mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
