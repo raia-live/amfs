@@ -8,6 +8,7 @@ synchronous.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime
@@ -94,6 +95,13 @@ class HttpAdapter(AdapterABC):
             headers={"X-AMFS-API-Key": api_key},
             timeout=timeout or _TIMEOUT,
         )
+        #: Reuse block from the most recent read, or None. Declared here rather
+        #: than left to appear on first use because every read must *overwrite*
+        #: it, including a read that credited nothing: left stale, a lookup that
+        #: reused no memory would report the previous lookup's reuse, and a block
+        #: whose whole purpose is to be believed would be lying about which call
+        #: it describes.
+        self._last_reuse_value: dict[str, Any] | None = None
 
     # ── helpers ────────────────────────────────────────────────────────
 
@@ -107,6 +115,12 @@ class HttpAdapter(AdapterABC):
                 time.sleep(wait)
                 continue
             _raise_with_detail(resp)
+            # Headers of the answered request, kept for the callers that need
+            # something the ABC's return type has no room for. The reuse block
+            # travels this way because /search and /retrieve answer with a bare
+            # JSON array: there is no envelope to add a key to, and wrapping the
+            # array would break every existing client to carry a diagnostic.
+            self._last_headers = resp.headers
             return resp.json()
 
     def _get(self, path: str, **params: Any) -> Any:
@@ -237,6 +251,29 @@ class HttpAdapter(AdapterABC):
         self._last_memory_gap = data.get("memory_gap")
         return [_parse_entry(e) for e in data.get("entries", [])]
 
+    def _capture_reuse_value(self) -> None:
+        """Take the reuse block off the last response, or clear it.
+
+        Always assigns, so a read that credited no reuse — a miss, or a
+        filter-only search — leaves None behind rather than the previous read's
+        block. A server too old to send the header is the same case as a read
+        that credited nothing, and correctly reports nothing.
+        """
+        raw = None
+        headers = getattr(self, "_last_headers", None)
+        if headers is not None:
+            raw = headers.get("X-SenseLab-Value")
+        if not raw:
+            self._last_reuse_value = None
+            return
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            logger.debug("Unparseable reuse value header", exc_info=True)
+            self._last_reuse_value = None
+            return
+        self._last_reuse_value = parsed if isinstance(parsed, dict) else None
+
     # ── optional overrides ────────────────────────────────────────────
 
     def search(self, query: SearchQuery, **kwargs: Any) -> list[MemoryEntry]:
@@ -266,6 +303,7 @@ class HttpAdapter(AdapterABC):
         if branch:
             body["branch"] = branch
         data = self._post("/api/v1/search", body)
+        self._capture_reuse_value()
         if isinstance(data, list):
             return [_parse_entry(e) for e in data]
         return [_parse_entry(e) for e in data.get("entries", data if isinstance(data, list) else [])]
@@ -304,6 +342,7 @@ class HttpAdapter(AdapterABC):
         if entity_path:
             body["entity_path"] = entity_path
         data = self._post("/api/v1/retrieve", body)
+        self._capture_reuse_value()
         rows = data if isinstance(data, list) else data.get("entries", [])
         out: list[tuple[MemoryEntry, float, dict[str, float]]] = []
         for e in rows:

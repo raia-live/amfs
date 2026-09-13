@@ -527,6 +527,28 @@ def _serialize_entry(entry: Any) -> dict[str, Any]:
 LIST_VALUE_CHAR_LIMIT = 2000
 
 
+def _with_reuse_value(mem: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """Lead a read's answer with what the server credited for it, if anything.
+
+    The stdio server had no value shaper at all, so a self-hoster or anyone on
+    the SDK saw nothing while the hosted surfaces showed a reuse line. That was
+    not a decision, it was the cost of the block being built client-side in two
+    copies that this server had no third copy of. Computed server-side now, so
+    forwarding it is the whole implementation.
+
+    ``None`` on the filesystem and Postgres adapters, which never reach the route
+    that credits reuse — so the key stays absent rather than reporting a zero
+    that would read as "your memory did nothing".
+
+    First key rather than last, for the same reason the gap block leads: appended
+    after a list of entries it is the first thing a client truncates.
+    """
+    block = getattr(mem, "last_reuse_value", None)
+    if isinstance(block, dict) and block:
+        return {"senselab_value": block, **payload}
+    return payload
+
+
 def _serialize_entries(entries: Iterable[Any]) -> list[dict[str, Any]]:
     """Serialize entries for a multi-result response, previewing long values."""
     out: list[dict[str, Any]] = []
@@ -1027,10 +1049,10 @@ def amfs_search(
                 "min_confidence": min_confidence,
             },
         })
-    return json.dumps({
+    return json.dumps(_with_reuse_value(mem, {
         "count": len(results),
         "entries": _serialize_entries(results),
-    }, default=str)
+    }), default=str)
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
@@ -1111,10 +1133,10 @@ def amfs_retrieve(
             "query": query,
             "entity_path": entity_path,
         })
-    return json.dumps({
+    return json.dumps(_with_reuse_value(mem, {
         "count": len(serialized),
         "entries": serialized,
-    }, default=str)
+    }), default=str)
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})

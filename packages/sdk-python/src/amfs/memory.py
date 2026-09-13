@@ -840,6 +840,23 @@ class AgentMemory:
         if results:
             self._read_tracker.record(results[0].entry)
 
+    @property
+    def last_reuse_value(self) -> dict[str, Any] | None:
+        """What the server credited for the most recent read, or None.
+
+        Read through to the adapter rather than snapshotted on the way past, so
+        every path that reaches a read inherits it — server-side retrieve, the
+        local scoring fallback, and plain search — without each having to
+        remember to capture it. The adapter overwrites the value on every read,
+        including a read that credited nothing, so the answer always describes
+        the last read rather than the last read that happened to credit.
+
+        None on the local adapters, and correctly so: they could compute a
+        number, but the credit belongs where ``recall_count`` is incremented, and
+        a second implementation here is exactly the duplication this replaced.
+        """
+        return getattr(self._adapter, "_last_reuse_value", None)
+
     def stats(self) -> MemoryStats:
         """Aggregate statistics about current memory state."""
         return self._adapter.stats()

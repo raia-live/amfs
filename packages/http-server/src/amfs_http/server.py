@@ -27,7 +27,7 @@ from datetime import UTC, datetime, timezone
 from typing import Any
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
@@ -36,7 +36,8 @@ from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
 from amfs.memory import validate_session_attributes
 from pydantic import BaseModel, Field
-from amfs_core.aggregates import REUSE_CREDIT_K
+from amfs_core.aggregates import REUSE_CREDIT_K, entry_content_chars
+from amfs_core.reuse_value import reuse_value_block
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
 from amfs_core.engine import read_tracker_scope
 from amfs_core.models import (
@@ -1390,10 +1391,63 @@ async def aggregate_entries_endpoint(
 # ──────────────────────────────────────────────────────────────────────
 
 
+#: Header carrying the reuse block. A header rather than the body because both
+#: read endpoints answer with a bare JSON array — there is no envelope to add a
+#: key to, and wrapping the list would break every existing client for the sake
+#: of a diagnostic. Clients that do not know the header simply ignore it, which
+#: is the whole reason this can ship without a coordinated release.
+REUSE_VALUE_HEADER = "X-SenseLab-Value"
+
+
+def _attach_reuse_value(
+    response: Response | None,
+    request: Request,
+    *,
+    credited: MemoryEntry | None,
+    hits: int,
+) -> None:
+    """Compute the reuse block for a credited read and put it on the response.
+
+    Called at the point ``recall_count`` is bumped, which is the only place that
+    already knows which entry the reuse is being credited to. Everything the
+    block needs is in hand there: the entry's own content size, its stored
+    recall count before this reuse, who wrote it, and — from the header the
+    gateway has always sent — who is reading it now.
+
+    Best-effort in the same sense the recall bump above it is: this is reporting,
+    and a defect in it must never change the answer the caller came for.
+    """
+    if response is None or credited is None or hits <= 0:
+        return
+    try:
+        written_by = getattr(getattr(credited, "provenance", None), "agent_id", None)
+        block = reuse_value_block(
+            hits=hits,
+            content_chars=entry_content_chars(credited),
+            reused_before=getattr(credited, "recall_count", 0) or 0,
+            written_by=written_by,
+            reused_by=request.headers.get("x-amfs-agent-id"),
+        )
+        if block:
+            # Separators without spaces: a header value is not read by a human and
+            # the default ", " padding is wasted bytes on every read response.
+            response.headers[REUSE_VALUE_HEADER] = json.dumps(
+                block, separators=(",", ":"), default=str
+            )
+    except Exception:  # noqa: BLE001 - reporting must not break the read
+        logger.debug("reuse value block failed", exc_info=True)
+
+
 @app.post("/api/v1/search")
 async def search_entries(
     request: Request,
     req: SearchRequest,
+    # Injected by FastAPI on the type despite the default, which is what keeps
+    # this callable directly with no knowledge of it: the reuse header is
+    # reporting, and a caller invoking the handler in-process — the retrieval
+    # tests, and anything Pro composes — should not have to supply a response
+    # object to ask a question.
+    response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> list[dict[str, Any]]:
     branch = getattr(req, "branch", "main") or "main"
@@ -1451,6 +1505,7 @@ async def search_entries(
     # failure affect the response.
     if req.query and req.query.strip():
         credited = 0
+        credited_entry = None
         for entry in results:
             if credited >= REUSE_CREDIT_K:
                 break
@@ -1459,6 +1514,8 @@ async def search_entries(
             if entry.entity_path.startswith(("_system/", "bench/", "bench-")):
                 continue
             credited += 1
+            if credited_entry is None:
+                credited_entry = entry
             try:
                 if _async_adapter is not None:
                     await _async_adapter.increment_recall_count(
@@ -1470,6 +1527,9 @@ async def search_entries(
                     )
             except Exception:  # noqa: BLE001 - reuse accounting is best-effort
                 logger.debug("search recall bump failed", exc_info=True)
+        _attach_reuse_value(
+            response, request, credited=credited_entry, hits=credited
+        )
 
     return [_entry_to_response(e) for e in results]
 
@@ -1478,6 +1538,9 @@ async def search_entries(
 async def retrieve_entries(
     request: Request,
     req: RetrieveRequest,
+    # See search_entries: injected on the type, defaulted so the handler stays
+    # callable in-process without one.
+    response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> list[dict[str, Any]]:
     """Semantic (meaning-based) retrieval.
@@ -1694,7 +1757,12 @@ async def retrieve_entries(
     #     happened (a real session: 4 lookups, 16 credited reuses, 1 that
     #     changed the agent's behavior). Best-effort: never let accounting
     #     failure affect the response.
+    credited_entry = None
+    credited_hits = 0
     for entry, _score, _bd in scored[:REUSE_CREDIT_K]:
+        credited_hits += 1
+        if credited_entry is None:
+            credited_entry = entry
         try:
             if _async_adapter is not None:
                 await _async_adapter.increment_recall_count(
@@ -1706,6 +1774,9 @@ async def retrieve_entries(
                 )
         except Exception:  # noqa: BLE001 - reuse accounting is best-effort
             logger.debug("retrieve recall bump failed", exc_info=True)
+    _attach_reuse_value(
+        response, request, credited=credited_entry, hits=credited_hits
+    )
 
     out: list[dict[str, Any]] = []
     for entry, score, breakdown in scored[: req.limit]:
