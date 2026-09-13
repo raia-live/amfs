@@ -73,7 +73,13 @@ class _Response:
 
 
 class _Recorder:
-    """Stands in for the async adapter, keeping what it was asked to write."""
+    """Stands in for the async adapter, keeping what it was asked to write.
+
+    Applies the same ``int()`` the real adapter method does. The first version of
+    this double did not, which is exactly why it failed to catch the block's
+    ``est_tokens_saved`` being a display string: a mock that accepts anything
+    proves the caller passed something, not that the database could store it.
+    """
 
     def __init__(self, *, fail: bool = False) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -82,6 +88,7 @@ class _Recorder:
     async def record_reuse_event(self, entity_path: str, key: str, **kw: Any) -> None:
         if self._fail:
             raise RuntimeError("database is having a day")
+        kw["est_tokens_saved"] = max(int(kw.get("est_tokens_saved") or 0), 0)
         self.calls.append({"entity_path": entity_path, "key": key, **kw})
 
 
@@ -126,13 +133,20 @@ async def test_the_row_names_the_author_the_reader_and_the_version():
 
 
 @pytest.mark.asyncio
-async def test_the_stored_estimate_is_the_one_the_caller_was_shown():
-    """One number, not two that drift.
+async def test_the_stored_estimate_is_an_integer_the_database_can_hold():
+    """The bug that would have made the whole feature inert, in silence.
 
-    The row's estimate is read out of the block rather than computed again from
-    the entry. If a digest and a chat line can each derive their own figure, they
-    will eventually disagree, and the user has no way to tell which is wrong.
+    ``est_tokens_saved`` in the block is a *display* string from
+    ``format_tokens`` — "~1.2K". Storing that field directly meant the adapter's
+    ``int()`` raised ValueError, and because the write swallows its errors to
+    protect the read, every credited reuse was dropped without a trace. The panel
+    and the digest would have shipped permanently empty with nothing in the logs.
+
+    So the row takes the raw integer from ``recall_tokens_for_chars``, which is
+    the same function the block formats for display: one source for the number,
+    and a value the column can actually hold.
     """
+    from amfs_core.aggregates import recall_tokens_for_chars
     from amfs_http import server
 
     entry = _entry()
@@ -148,8 +162,46 @@ async def test_the_stored_estimate_is_the_one_the_caller_was_shown():
     finally:
         server._async_adapter = monkey
 
-    shown = json.loads(resp.headers["X-SenseLab-Value"])
-    assert rec.calls[0]["est_tokens_saved"] == shown["est_tokens_saved"]
+    stored = rec.calls[0]["est_tokens_saved"]
+    assert isinstance(stored, int) and stored > 0
+
+    # The same figure the caller was shown, before formatting.
+    shown = json.loads(resp.headers["X-SenseLab-Value"])["est_tokens_saved"]
+    assert isinstance(shown, str), "the block's field is for display"
+    expected = recall_tokens_for_chars(len(json.dumps(entry.value, default=str)), hits=1)
+    assert stored == expected
+
+
+@pytest.mark.asyncio
+async def test_an_empty_agent_header_is_not_a_second_agent():
+    """A present-but-empty header must read as unknown, not as another agent.
+
+    ``request.headers.get`` returns "" for ``x-amfs-agent-id:`` with no value, and
+    "" is not NULL, so it satisfies ``reused_by IS NOT NULL`` in the summary and
+    would be counted as a *different* agent reusing the memory. The block already
+    treats it as unknown, so leaving it would make the stored row and the line the
+    user saw disagree about the one claim that matters most.
+    """
+    from amfs_http import server
+
+    rec = _Recorder()
+    monkey = server._async_adapter
+    server._async_adapter = rec
+    try:
+        server._attach_reuse_value(
+            None,
+            _Request("   "),  # present, whitespace only
+            credited=_entry(agent_id="cursor-agent"),
+            hits=1,
+            surface="read",
+        )
+        await asyncio.sleep(0)
+    finally:
+        server._async_adapter = monkey
+
+    assert rec.calls[0]["reused_by"] is None, (
+        "an empty header stored as a string counts as a cross-surface reuse"
+    )
 
 
 @pytest.mark.asyncio
@@ -370,6 +422,106 @@ def test_the_summary_reads_rows_by_name_not_position():
     assert out["by_agent"][0]["agent_id"] == "claude-agent"
     assert out["recent_cross_surface"][0]["written_by"] == "cursor-agent"
     assert out["recent_cross_surface"][0]["at"], "the timestamp is the 'on Tuesday' half"
+
+
+def test_a_caller_scoped_to_no_agents_is_told_about_no_reuse():
+    """The degenerate case must short-circuit, not build ``= ANY('{}')``.
+
+    A user who may see no agents may see no reuse. Returning early also avoids a
+    query whose scan can never match, and — more importantly — makes the
+    restricted case impossible to get wrong in SQL.
+    """
+    from amfs_postgres.adapter import PostgresAdapter
+
+    class _Exploding:
+        def connection(self) -> Any:
+            raise AssertionError("a caller scoped to nothing must not query at all")
+
+    adapter = object.__new__(PostgresAdapter)
+    adapter._pool = _Exploding()
+    adapter._namespace = "rt"
+
+    out = adapter.reuse_summary(since=datetime.now(UTC) - timedelta(days=7), visible_agents=set())
+    assert out["reuses"] == 0
+    assert out["recent_cross_surface"] == []
+
+
+def test_scoping_filters_on_the_reader_in_every_query():
+    """Each of the four statements must carry the scope, not just the first.
+
+    The rows name entity paths, keys and agent ids, and ``top`` and
+    ``recent_cross_surface`` are the parts that name them outright. RLS separates
+    accounts; this is the within-account restriction, and a scope applied to the
+    totals alone would leave the detail lists leaking.
+
+    Filtered on ``reused_by`` because a row means "this agent read this memory",
+    so it is the caller's to see exactly when that agent is.
+    """
+    from amfs_postgres.adapter import PostgresAdapter
+
+    seen: list[tuple[str, tuple]] = []
+
+    class _Cur:
+        def execute(self, sql: str, params: Any = None) -> None:
+            seen.append((sql, params))
+
+        def fetchone(self) -> dict[str, Any]:
+            return {}
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return []
+
+        def __enter__(self) -> _Cur:
+            return self
+
+        def __exit__(self, *a: Any) -> None:
+            return None
+
+    class _Conn:
+        def cursor(self, *a: Any, **kw: Any) -> _Cur:
+            return _Cur()
+
+        def __enter__(self) -> _Conn:
+            return self
+
+        def __exit__(self, *a: Any) -> None:
+            return None
+
+    class _Pool:
+        def connection(self) -> _Conn:
+            return _Conn()
+
+    adapter = object.__new__(PostgresAdapter)
+    adapter._pool = _Pool()
+    adapter._namespace = "rt"
+    adapter.reuse_summary(
+        since=datetime.now(UTC) - timedelta(days=7), visible_agents={"mine"}
+    )
+
+    assert len(seen) == 4, "totals, top, by_agent and recent_cross_surface"
+    for sql, params in seen:
+        assert "reused_by = ANY(%s)" in sql, f"unscoped query would leak: {sql[:80]}"
+        assert ["mine"] in params, "the scope must actually be bound"
+
+
+def test_an_empty_string_reader_is_excluded_from_every_claim():
+    """Defence in depth for rows an older writer may already have stored.
+
+    The header is normalised before the row is written, so this should never
+    happen — but the summary is what makes the claim, and an empty string is the
+    one value that is neither NULL nor a real agent.
+    """
+    import inspect
+
+    from amfs_postgres.adapter import PostgresAdapter
+
+    src = inspect.getsource(PostgresAdapter.reuse_summary)
+    cross_surface_clauses = [
+        line for line in src.splitlines() if "written_by <> reused_by" in line
+    ]
+    assert cross_surface_clauses, "the cross-surface predicate moved"
+    assert src.count("reused_by <> ''") >= 2, "empty readers can still be counted"
+    assert src.count("written_by <> ''") >= 2, "empty authors can still be counted"
 
 
 def test_the_summary_window_is_bounded():

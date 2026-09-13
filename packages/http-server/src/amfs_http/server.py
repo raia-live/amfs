@@ -36,7 +36,11 @@ from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
 from amfs.memory import validate_session_attributes
 from pydantic import BaseModel, Field
-from amfs_core.aggregates import REUSE_CREDIT_K, entry_content_chars
+from amfs_core.aggregates import (
+    REUSE_CREDIT_K,
+    entry_content_chars,
+    recall_tokens_for_chars,
+)
 from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
 from amfs_core.engine import read_tracker_scope
@@ -1435,11 +1439,14 @@ def _attach_reuse_value(
     if credited is None or hits <= 0:
         return
     try:
-        written_by = getattr(getattr(credited, "provenance", None), "agent_id", None)
-        reused_by = request.headers.get("x-amfs-agent-id")
+        written_by = _known_agent_id(
+            getattr(getattr(credited, "provenance", None), "agent_id", None)
+        )
+        reused_by = _known_agent_id(request.headers.get("x-amfs-agent-id"))
+        content_chars = entry_content_chars(credited)
         block = reuse_value_block(
             hits=hits,
-            content_chars=entry_content_chars(credited),
+            content_chars=content_chars,
             reused_before=getattr(credited, "recall_count", 0) or 0,
             written_by=written_by,
             reused_by=reused_by,
@@ -1465,7 +1472,13 @@ def _attach_reuse_value(
             )
         _persist_reuse_event(
             credited,
-            block,
+            # The row stores the raw integer, and the block carries the same
+            # figure formatted for display ("~1.2K"). Both come from
+            # recall_tokens_for_chars with the same inputs, so there is still one
+            # source for the number — passing the block's own field instead would
+            # store a string that int() rejects, and since the write swallows its
+            # errors, that dropped every row in silence.
+            est_tokens_saved=recall_tokens_for_chars(content_chars, hits=hits),
             written_by=written_by,
             reused_by=reused_by,
             surface=surface,
@@ -1475,10 +1488,25 @@ def _attach_reuse_value(
         logger.debug("reuse value block failed", exc_info=True)
 
 
+def _known_agent_id(value: str | None) -> str | None:
+    """An agent id only when one was actually supplied.
+
+    ``request.headers.get`` yields ``""`` for a header that is present and empty,
+    and an empty string is not NULL, so it would satisfy ``reused_by IS NOT NULL``
+    in the summary and be counted as a *different* agent reusing the memory. The
+    block already treats it as unknown, so without this the stored row and the
+    line the user was shown disagree about the strongest claim either can make.
+    """
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
 def _persist_reuse_event(
     credited: MemoryEntry,
-    block: dict[str, Any],
     *,
+    est_tokens_saved: int,
     written_by: str | None,
     reused_by: str | None,
     surface: str | None,
@@ -1507,7 +1535,7 @@ def _persist_reuse_event(
             entry_version=getattr(credited, "version", None),
             written_by=written_by,
             reused_by=reused_by,
-            est_tokens_saved=block.get("est_tokens_saved") or 0,
+            est_tokens_saved=est_tokens_saved,
             surface=surface,
         )
     )
@@ -3579,6 +3607,10 @@ async def reuse_summary(
 
     Defaults to a week because that is the digest's window; ``days`` is clamped so
     a hand-written URL cannot ask for an unbounded scan.
+
+    Scoped to the agents the caller may see, like ``/stats`` and ``/agents``. RLS
+    keeps accounts apart, but within one account a non-admin user sees only some
+    agents, and these rows name entity paths, keys and agent ids.
     """
     days = max(1, min(int(days or 7), 365))
     limit = max(1, min(int(limit or 10), 100))
@@ -3595,7 +3627,9 @@ async def reuse_summary(
             "available": False,
             "reason": "reuse events need the Postgres adapter",
         }
-    summary = summarise(since=since, limit=limit)
+    summary = summarise(
+        since=since, limit=limit, visible_agents=_visible_agent_ids(request)
+    )
     return {"since": since.isoformat(), "days": days, "available": True, **summary}
 
 

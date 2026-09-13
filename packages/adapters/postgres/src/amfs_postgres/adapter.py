@@ -10,7 +10,7 @@ import os
 import re
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -2170,6 +2170,7 @@ class PostgresAdapter(AdapterABC):
         *,
         since: datetime,
         limit: int = 10,
+        visible_agents: Collection[str] | None = None,
     ) -> dict[str, Any]:
         """What memory has been reused since a point in time, and by whom.
 
@@ -2178,9 +2179,18 @@ class PostgresAdapter(AdapterABC):
         reuse rather than a model of it — with the single exception of
         ``est_tokens_saved``, which is the sum of an estimate and is named so.
 
-        ``cross_surface`` requires both agent ids to be known. An anonymous
-        reader is not evidence that a *different* agent reused the memory, and
-        this number is the one making that claim, so it will not count a guess.
+        ``cross_surface`` requires both agent ids to be known and non-empty. An
+        anonymous reader is not evidence that a *different* agent reused the
+        memory, and this number is the one making that claim, so it will not
+        count a guess.
+
+        ``visible_agents`` scopes the answer for a caller who may not see the
+        whole account. RLS keeps accounts apart; within one account a
+        non-admin user sees only some agents, and these rows name entity paths,
+        keys and agent ids. The filter is on ``reused_by``: a row means "this
+        agent read this memory", so the caller may see it exactly when that agent
+        is theirs to see. Rows with no reader are excluded under scoping, because
+        an unattributed read cannot be shown to belong to this caller.
         """
         empty: dict[str, Any] = {
             "reuses": 0,
@@ -2191,6 +2201,15 @@ class PostgresAdapter(AdapterABC):
             "by_agent": [],
             "recent_cross_surface": [],
         }
+        # A caller restricted to no agents at all can see no reuse. Building the
+        # SQL for an empty ANY() would be a scan that always matches nothing.
+        if visible_agents is not None and not visible_agents:
+            return empty
+        scope, scope_params = "", ()
+        if visible_agents is not None:
+            scope = " AND reused_by = ANY(%s)"
+            scope_params = (list(visible_agents),)
+
         try:
             # Every column is aliased and read by name: the pool's row factory is
             # dict_row, so positional access raises KeyError rather than
@@ -2198,17 +2217,17 @@ class PostgresAdapter(AdapterABC):
             # page it serves — which would turn that into a silent "no reuse".
             with self._pool.connection() as conn, conn.cursor() as cur:
                 cur.execute(
-                    """SELECT COUNT(*) AS reuses,
+                    f"""SELECT COUNT(*) AS reuses,
                               COUNT(DISTINCT (entity_path, key)) AS memories_reused,
                               COALESCE(SUM(est_tokens_saved), 0) AS est_tokens_saved,
                               COUNT(*) FILTER (
-                                  WHERE written_by IS NOT NULL
-                                    AND reused_by IS NOT NULL
+                                  WHERE written_by IS NOT NULL AND written_by <> ''
+                                    AND reused_by IS NOT NULL AND reused_by <> ''
                                     AND written_by <> reused_by
                               ) AS cross_surface
                        FROM amfs_reuse_events
-                       WHERE namespace = %s AND created_at >= %s""",
-                    (self._namespace, since),
+                       WHERE namespace = %s AND created_at >= %s{scope}""",
+                    (self._namespace, since, *scope_params),
                 )
                 row = cur.fetchone() or {}
                 out: dict[str, Any] = {
@@ -2219,14 +2238,14 @@ class PostgresAdapter(AdapterABC):
                 }
 
                 cur.execute(
-                    """SELECT entity_path, key, COUNT(*) AS reuses,
+                    f"""SELECT entity_path, key, COUNT(*) AS reuses,
                               COALESCE(SUM(est_tokens_saved), 0) AS est_tokens_saved
                        FROM amfs_reuse_events
-                       WHERE namespace = %s AND created_at >= %s
+                       WHERE namespace = %s AND created_at >= %s{scope}
                        GROUP BY entity_path, key
                        ORDER BY reuses DESC, est_tokens_saved DESC
                        LIMIT %s""",
-                    (self._namespace, since, limit),
+                    (self._namespace, since, *scope_params, limit),
                 )
                 out["top"] = [
                     {
@@ -2239,14 +2258,14 @@ class PostgresAdapter(AdapterABC):
                 ]
 
                 cur.execute(
-                    """SELECT reused_by, COUNT(*) AS reuses
+                    f"""SELECT reused_by, COUNT(*) AS reuses
                        FROM amfs_reuse_events
                        WHERE namespace = %s AND created_at >= %s
-                         AND reused_by IS NOT NULL
+                         AND reused_by IS NOT NULL AND reused_by <> ''{scope}
                        GROUP BY reused_by
                        ORDER BY reuses DESC
                        LIMIT %s""",
-                    (self._namespace, since, limit),
+                    (self._namespace, since, *scope_params, limit),
                 )
                 out["by_agent"] = [
                     {"agent_id": r.get("reused_by"), "reuses": int(r.get("reuses") or 0)}
@@ -2257,14 +2276,15 @@ class PostgresAdapter(AdapterABC):
                 # worked out. Carries created_at because "on Tuesday" is the half
                 # of it that a counter could never supply.
                 cur.execute(
-                    """SELECT entity_path, key, written_by, reused_by, created_at
+                    f"""SELECT entity_path, key, written_by, reused_by, created_at
                        FROM amfs_reuse_events
                        WHERE namespace = %s AND created_at >= %s
-                         AND written_by IS NOT NULL AND reused_by IS NOT NULL
-                         AND written_by <> reused_by
+                         AND written_by IS NOT NULL AND written_by <> ''
+                         AND reused_by IS NOT NULL AND reused_by <> ''
+                         AND written_by <> reused_by{scope}
                        ORDER BY created_at DESC
                        LIMIT %s""",
-                    (self._namespace, since, limit),
+                    (self._namespace, since, *scope_params, limit),
                 )
                 out["recent_cross_surface"] = [
                     {
