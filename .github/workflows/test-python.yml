@@ -78,3 +78,60 @@ jobs:
         run: |
           source .venv/bin/activate
           pytest tests/integration/test_postgres_adapter.py -v
+
+  # The hosted product builds these packages from this git tree, so a change here
+  # reaches production whether or not it is ever published. Everything else reads
+  # PyPI: amfs-mcp-server-pro pins published versions and is not in the hosted
+  # image, and self-hosted and uvx users install from there too. So a merge that
+  # edits package source without bumping the version ships to production and
+  # silently skips every one of them, at the same version number.
+  #
+  # Four packages were in that state at once when this was added — core,
+  # adapters/http, http-server and sdk-python — which is why this is a check
+  # rather than a note to remember. amfs-internal has had the equivalent for
+  # mcp-server-pro for a while; its absence here is the whole reason.
+  version-bump:
+    name: Changed packages need a version bump
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: A changed package needs a changed version
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # The set auto-publish.yml actually publishes. A package absent from
+          # that loop is absent here too, or this would demand a bump that no
+          # workflow acts on.
+          PKGS="packages/core packages/adapters/filesystem packages/adapters/postgres
+                packages/adapters/s3 packages/adapters/http packages/http-server
+                packages/sdk-python packages/cli packages/mcp-server
+                packages/integrations/strands"
+          stale=""
+          for PKG in $PKGS; do
+            if git diff --quiet "$BASE" "$HEAD" -- "$PKG/src"; then
+              continue
+            fi
+            before=$(git show "$BASE:$PKG/pyproject.toml" \
+              | sed -n 's/^version *= *"\(.*\)"/\1/p' | head -1)
+            after=$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$PKG/pyproject.toml" | head -1)
+            if [ "$before" = "$after" ]; then
+              echo "::error file=$PKG/pyproject.toml::$PKG/src changed but the \
+          version is still $after. auto-publish.yml only fires when a \
+          pyproject.toml changes on main, so this would merge unpublished and \
+          every PyPI consumer would keep running $after without this change."
+              stale="$stale $PKG"
+            else
+              echo "$PKG: $before -> $after"
+            fi
+          done
+          if [ -n "$stale" ]; then
+            echo "Packages needing a bump:$stale"
+            exit 1
+          fi
+          echo "Every changed package carries a new version."
