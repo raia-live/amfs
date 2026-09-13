@@ -27,7 +27,7 @@ from datetime import UTC, datetime, timezone
 from typing import Any
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
@@ -36,7 +36,8 @@ from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
 from amfs.memory import validate_session_attributes
 from pydantic import BaseModel, Field
-from amfs_core.aggregates import REUSE_CREDIT_K
+from amfs_core.aggregates import REUSE_CREDIT_K, entry_content_chars
+from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
 from amfs_core.engine import read_tracker_scope
 from amfs_core.models import (
@@ -886,6 +887,7 @@ async def read_entry_by_query(
     entity_path: str = Query(...),
     key: str = Query(...),
     branch: str = Query("main"),
+    response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """The same read, with the coordinates where they cannot be confused.
@@ -908,7 +910,7 @@ async def read_entry_by_query(
     has no slash, which is most of the time, and rewriting every caller to gain
     nothing is a worse trade than leaving them alone.
     """
-    return await _read_entry(request, entity_path, key, branch)
+    return await _read_entry(request, entity_path, key, branch, response)
 
 
 @app.get("/api/v1/entries/{entity_path:path}/{key}")
@@ -917,9 +919,10 @@ async def read_entry(
     entity_path: str,
     key: str,
     branch: str = Query("main"),
+    response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    return await _read_entry(request, entity_path, key, branch)
+    return await _read_entry(request, entity_path, key, branch, response)
 
 
 async def _read_entry(
@@ -927,8 +930,10 @@ async def _read_entry(
     entity_path: str,
     key: str,
     branch: str,
+    response: Response | None = None,
 ) -> dict[str, Any]:
     mem = _get_memory()
+    credited = False
     if _async_adapter is not None:
         try:
             entry = await _async_adapter.read(entity_path, key, branch=branch)
@@ -944,6 +949,7 @@ async def _read_entry(
                 )
         if entry is not None:
             asyncio.create_task(_async_adapter.increment_recall_count(entity_path, key, branch=branch))
+            credited = True
     else:
         entry = mem.read(entity_path, key, branch=branch)
     if entry is None:
@@ -953,6 +959,14 @@ async def _read_entry(
     if vis is not None and vis.should_filter() and not vis.is_entry_visible(entry):
         return {"status": "not_found", "entity_path": entity_path, "key": key}
 
+    # After the visibility check, never before it. The recall bump above is
+    # issued on the entry as fetched, but the block carries the author's agent id
+    # for the cross-surface claim — attached earlier, a read of an entry this
+    # caller may not see would answer "not found" while the header named who
+    # wrote it. The bump is the only thing that legitimately precedes the check,
+    # because it records that the row was touched and reveals nothing.
+    if credited:
+        _attach_reuse_value(response, request, credited=entry, hits=1)
     return _entry_to_response(entry)
 
 
@@ -1390,10 +1404,55 @@ async def aggregate_entries_endpoint(
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _attach_reuse_value(
+    response: Response | None,
+    request: Request,
+    *,
+    credited: MemoryEntry | None,
+    hits: int,
+) -> None:
+    """Compute the reuse block for a credited read and put it on the response.
+
+    Called at the point ``recall_count`` is bumped, which is the only place that
+    already knows which entry the reuse is being credited to. Everything the
+    block needs is in hand there: the entry's own content size, its stored
+    recall count before this reuse, who wrote it, and — from the header the
+    gateway has always sent — who is reading it now.
+
+    Best-effort in the same sense the recall bump above it is: this is reporting,
+    and a defect in it must never change the answer the caller came for.
+    """
+    if response is None or credited is None or hits <= 0:
+        return
+    try:
+        written_by = getattr(getattr(credited, "provenance", None), "agent_id", None)
+        block = reuse_value_block(
+            hits=hits,
+            content_chars=entry_content_chars(credited),
+            reused_before=getattr(credited, "recall_count", 0) or 0,
+            written_by=written_by,
+            reused_by=request.headers.get("x-amfs-agent-id"),
+        )
+        if block:
+            # Separators without spaces: a header value is not read by a human and
+            # the default ", " padding is wasted bytes on every read response.
+            response.headers[REUSE_VALUE_HEADER] = json.dumps(
+                block, separators=(",", ":"), default=str
+            )
+    except Exception:  # noqa: BLE001 - reporting must not break the read
+        logger.debug("reuse value block failed", exc_info=True)
+
+
 @app.post("/api/v1/search")
 async def search_entries(
     request: Request,
     req: SearchRequest,
+    # Injected by FastAPI on the type despite the default, which is what keeps
+    # this callable directly with no knowledge of it: the reuse header is
+    # reporting, and a caller invoking the handler in-process — the retrieval
+    # tests, and anything Pro composes — should not have to supply a response
+    # object to ask a question.
+    response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> list[dict[str, Any]]:
     branch = getattr(req, "branch", "main") or "main"
@@ -1451,6 +1510,7 @@ async def search_entries(
     # failure affect the response.
     if req.query and req.query.strip():
         credited = 0
+        credited_entry = None
         for entry in results:
             if credited >= REUSE_CREDIT_K:
                 break
@@ -1459,6 +1519,8 @@ async def search_entries(
             if entry.entity_path.startswith(("_system/", "bench/", "bench-")):
                 continue
             credited += 1
+            if credited_entry is None:
+                credited_entry = entry
             try:
                 if _async_adapter is not None:
                     await _async_adapter.increment_recall_count(
@@ -1470,6 +1532,9 @@ async def search_entries(
                     )
             except Exception:  # noqa: BLE001 - reuse accounting is best-effort
                 logger.debug("search recall bump failed", exc_info=True)
+        _attach_reuse_value(
+            response, request, credited=credited_entry, hits=credited
+        )
 
     return [_entry_to_response(e) for e in results]
 
@@ -1478,6 +1543,9 @@ async def search_entries(
 async def retrieve_entries(
     request: Request,
     req: RetrieveRequest,
+    # See search_entries: injected on the type, defaulted so the handler stays
+    # callable in-process without one.
+    response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> list[dict[str, Any]]:
     """Semantic (meaning-based) retrieval.
@@ -1694,7 +1762,12 @@ async def retrieve_entries(
     #     happened (a real session: 4 lookups, 16 credited reuses, 1 that
     #     changed the agent's behavior). Best-effort: never let accounting
     #     failure affect the response.
+    credited_entry = None
+    credited_hits = 0
     for entry, _score, _bd in scored[:REUSE_CREDIT_K]:
+        credited_hits += 1
+        if credited_entry is None:
+            credited_entry = entry
         try:
             if _async_adapter is not None:
                 await _async_adapter.increment_recall_count(
@@ -1706,6 +1779,9 @@ async def retrieve_entries(
                 )
         except Exception:  # noqa: BLE001 - reuse accounting is best-effort
             logger.debug("retrieve recall bump failed", exc_info=True)
+    _attach_reuse_value(
+        response, request, credited=credited_entry, hits=credited_hits
+    )
 
     out: list[dict[str, Any]] = []
     for entry, score, breakdown in scored[: req.limit]:

@@ -8,8 +8,10 @@ synchronous.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
+from contextvars import ContextVar
 from datetime import datetime
 from typing import Any, Callable
 
@@ -29,10 +31,39 @@ from amfs_core.models import (
     OutcomeRecord,
     SearchQuery,
 )
+from amfs_core.reuse_value import REUSE_VALUE_HEADER
 
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
+# Things the server computed that the ABC's return types have nowhere to put: the
+# reuse block a read earns, and the gap report a commit earns. Both have to cross
+# from the response to the caller somehow, and both used to do it as attributes on
+# the adapter.
+#
+# Context variables rather than attributes because one adapter serves many calls.
+# The gateway builds a separate adapter per session, so this was never a
+# cross-tenant hazard, but a client may perfectly well have two reads in flight on
+# one session — and the sequence "A responds, B responds, A reads the value" then
+# hands A the block describing B's lookup. That is the staleness bug the adapter
+# already guards against between sequential reads, in its concurrent form, and a
+# block whose only job is to be believed cannot describe a different call.
+#
+# A ContextVar is the fix rather than a lock: it scopes the value to the logical
+# call, which is the thing it actually belongs to. asyncio copies the context per
+# task and anyio's to_thread copies it per worker, so both ways the gateway and
+# the stdio servers reach a sync adapter land in the right place, and no caller
+# has to hold anything.
+_LAST_REUSE_HEADER: ContextVar[str | None] = ContextVar(
+    "amfs_last_reuse_header", default=None
+)
+_LAST_REUSE_VALUE: ContextVar[dict[str, Any] | None] = ContextVar(
+    "amfs_last_reuse_value", default=None
+)
+_LAST_MEMORY_GAP: ContextVar[dict[str, Any] | None] = ContextVar(
+    "amfs_last_memory_gap", default=None
+)
 
 
 def _parse_entry(data: dict[str, Any]) -> MemoryEntry:
@@ -107,6 +138,13 @@ class HttpAdapter(AdapterABC):
                 time.sleep(wait)
                 continue
             _raise_with_detail(resp)
+            # The reuse block travels as a header because /search and /retrieve
+            # answer with a bare JSON array: there is no envelope to add a key to,
+            # and wrapping the array would break every existing client to carry a
+            # diagnostic. Taken off here and left in the calling context, so the
+            # read methods below can pick it up without every one of them having
+            # to touch the response object.
+            _LAST_REUSE_HEADER.set(resp.headers.get(REUSE_VALUE_HEADER))
             return resp.json()
 
     def _get(self, path: str, **params: Any) -> Any:
@@ -145,6 +183,7 @@ class HttpAdapter(AdapterABC):
             )
         else:
             data = self._get(f"/api/v1/entries/{entity_path}/{key}", **params)
+        self._capture_reuse_value()
         if data.get("status") == "not_found":
             return None
         entry = _parse_entry(data)
@@ -234,8 +273,38 @@ class HttpAdapter(AdapterABC):
         # ``AgentMemory.commit_outcome``: widening the ABC would oblige every
         # adapter, including the filesystem one that has no retrieval, to carry a
         # concept only the server can produce.
-        self._last_memory_gap = data.get("memory_gap")
+        _LAST_MEMORY_GAP.set(data.get("memory_gap"))
         return [_parse_entry(e) for e in data.get("entries", [])]
+
+    @property
+    def _last_reuse_value(self) -> dict[str, Any] | None:
+        """Reuse block from the read most recently made *in this context*."""
+        return _LAST_REUSE_VALUE.get()
+
+    @property
+    def _last_memory_gap(self) -> dict[str, Any] | None:
+        """Gap report from the commit most recently made in this context."""
+        return _LAST_MEMORY_GAP.get()
+
+    def _capture_reuse_value(self) -> None:
+        """Take the reuse block off the last response, or clear it.
+
+        Always assigns, so a read that credited no reuse — a miss, or a
+        filter-only search — leaves None behind rather than the previous read's
+        block. A server too old to send the header is the same case as a read
+        that credited nothing, and correctly reports nothing.
+        """
+        raw = _LAST_REUSE_HEADER.get()
+        if not raw:
+            _LAST_REUSE_VALUE.set(None)
+            return
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            logger.debug("Unparseable reuse value header", exc_info=True)
+            _LAST_REUSE_VALUE.set(None)
+            return
+        _LAST_REUSE_VALUE.set(parsed if isinstance(parsed, dict) else None)
 
     # ── optional overrides ────────────────────────────────────────────
 
@@ -266,6 +335,7 @@ class HttpAdapter(AdapterABC):
         if branch:
             body["branch"] = branch
         data = self._post("/api/v1/search", body)
+        self._capture_reuse_value()
         if isinstance(data, list):
             return [_parse_entry(e) for e in data]
         return [_parse_entry(e) for e in data.get("entries", data if isinstance(data, list) else [])]
@@ -304,6 +374,7 @@ class HttpAdapter(AdapterABC):
         if entity_path:
             body["entity_path"] = entity_path
         data = self._post("/api/v1/retrieve", body)
+        self._capture_reuse_value()
         rows = data if isinstance(data, list) else data.get("entries", [])
         out: list[tuple[MemoryEntry, float, dict[str, float]]] = []
         for e in rows:
