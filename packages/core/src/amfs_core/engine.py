@@ -106,6 +106,36 @@ def read_tracker_scope() -> Iterator[_TrackerState]:
         _TRACKER_SCOPE.reset(token)
 
 
+@contextmanager
+def own_read_tracker_state() -> Iterator[None]:
+    """Give the enclosed block back the tracker's *own* session.
+
+    The complement of :func:`read_tracker_scope`, for a caller inside a scope
+    that should not be in one. The scope is right when a process serves every
+    caller from one shared ``AgentMemory``, because then a request is the only
+    honest boundary. It is wrong when a process keeps one ``AgentMemory`` *per
+    caller* on purpose and means its session to outlive a single request: there
+    the scope silently empties the tracker between requests, so a read recorded
+    by one and an outcome committed by the next never meet, and the outcome
+    reinforces nothing.
+
+    That is not hypothetical. A server can host both at once — REST handlers on
+    the shared handle, and a session-per-caller surface mounted alongside them —
+    and one ``@app.middleware("http")`` covers every path either serves. The
+    surface that manages its own sessions is the one that knows it does, so it
+    is the one that says so, here, rather than the middleware carrying a list of
+    paths to skip.
+
+    Nests: entering restores whatever scope was in force on exit, so a REST
+    request that happens to run through such a surface keeps its own session.
+    """
+    token = _TRACKER_SCOPE.set(None)
+    try:
+        yield
+    finally:
+        _TRACKER_SCOPE.reset(token)
+
+
 class ReadTracker:
     """Automatically records every read within a session for causal linking
     and conflict detection.
