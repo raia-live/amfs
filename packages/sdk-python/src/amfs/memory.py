@@ -857,6 +857,20 @@ class AgentMemory:
         """
         return getattr(self._adapter, "_last_reuse_value", None)
 
+    @property
+    def last_scope(self) -> dict[str, Any] | None:
+        """What the server reported was already stored beside the last write.
+
+        Carries ``existing_entries``, ``never_read`` and a bounded ``keys``
+        sample. Read through to the adapter for the same reason as
+        ``last_reuse_value`` above: ``write()`` returns a MemoryEntry, so a
+        second answer from the same call has to travel beside it.
+
+        None on the local adapters and on a write to a fresh scope, which are
+        the same case as far as a caller is concerned — there is nothing to say.
+        """
+        return getattr(self._adapter, "_last_scope", None)
+
     def stats(self) -> MemoryStats:
         """Aggregate statistics about current memory state."""
         return self._adapter.stats()

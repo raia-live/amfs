@@ -12,7 +12,13 @@ dependencies = [
     # the SDK for it. The floor rises only because a floor below the version in
     # this tree is what test_dependency_floors forbids.
     "amfs>=0.5.13",
-    "amfs-core>=0.3.22",
+    # 0.3.23 is real in the silent way: the write path calls
+    # adapter.scope_counts(), which is a default on AdapterABC from 0.3.23. On an
+    # older core the adapters that do not override it — filesystem, S3 — have no
+    # such method, and _scope_block swallows the AttributeError and returns None.
+    # Nothing raises; the scope block just never appears, which is the same
+    # invisible failure as an unset feature flag and the thing this ships to fix.
+    "amfs-core>=0.3.23",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "sse-starlette>=2.0",
