@@ -1,13 +1,17 @@
 [project]
 name = "amfs-http-server"
-version = "0.3.24"
+version = "0.3.25"
 description = "AMFS HTTP/REST API server with SSE support"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
     # The trace endpoints call amfs_core.capture and read/write task_input, and
     # 0.3.14 / 0.5.7 add the action half: scan_captured_arguments and ToolCall.
-    "amfs>=0.5.12",
+    # 0.5.13 is bookkeeping: the SDK's briefing() grew a credit_reuse keyword,
+    # and this server does its own crediting in the endpoint rather than asking
+    # the SDK for it. The floor rises only because a floor below the version in
+    # this tree is what test_dependency_floors forbids.
+    "amfs>=0.5.13",
     "amfs-core>=0.3.22",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",

@@ -1983,10 +1983,22 @@ def amfs_briefing(
         entity_path=entity_path,
         agent_id=agent_id,
         limit=limit,
+        # A tool call is an agent about to act on what it is handed, so this is
+        # a real read and books reuse of the knowledge surfaced. The HTTP
+        # endpoint cannot assume that for itself — it also serves the dashboard
+        # panel — so the assertion has to come from here.
+        credit_reuse=True,
     )
     if digests:
+        # Wrapped in an object rather than returned as a bare list, because the
+        # reuse block has to travel somewhere and a list has no room for it. The
+        # synthesized fallback below already answers with an object, so a caller
+        # has always had to handle both shapes.
         return json.dumps(
-            [d.model_dump(mode="json") for d in digests],
+            _with_reuse_value(mem, {
+                "count": len(digests),
+                "digests": [d.model_dump(mode="json") for d in digests],
+            }),
             default=str,
         )
 

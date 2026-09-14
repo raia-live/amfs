@@ -6423,15 +6423,113 @@ def _filter_briefing_digests(vis: Any, digests: list) -> list:
     return filtered
 
 
+async def _credit_briefing_reuse(
+    response: Response | None,
+    request: Request,
+    digests: list[Any],
+    *,
+    branch: str = "main",
+) -> None:
+    """Book reuse for the memories a briefing hands over verbatim.
+
+    A briefing reported ``recall_count`` without ever incrementing it, and the
+    agent that follows the documented workflow — brief first, then work — was
+    the one penalised for it: every entry it was briefed on stayed at zero
+    forever, it saw no value line for a memory that had just done its job, and
+    the write-only ratio counted briefed knowledge as never read.
+
+    Only ``hot_context`` is credited, because that is the part of a digest whose
+    entry text is passed through as-is. The compiled narrative and key facts are
+    a synthesis *about* entries; the agent reads those, not them.
+
+    Capped at ``REUSE_CREDIT_K``, the same cap retrieve uses, for the same
+    reason and with a sharper precedent behind it: crediting every entry on a
+    read path once inflated a nine-entry topic to 395 recalls, because a
+    dashboard page view counted as reuse of everything on it. So this credits
+    what the agent most likely acted on rather than everything it was shown, and
+    is deliberately conservative — an entry surfaced further down a briefing
+    still books nothing.
+    """
+    surfaced: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for d in digests:
+        summary = getattr(d, "summary", None) or {}
+        if not isinstance(summary, dict):
+            continue
+        for item in summary.get("hot_context") or []:
+            if not isinstance(item, dict):
+                continue
+            ref = (item.get("entity_path"), item.get("key"))
+            if ref[0] and ref[1] and ref not in seen:
+                seen.add(ref)
+                surfaced.append((str(ref[0]), str(ref[1])))
+
+    credited_entry: MemoryEntry | None = None
+    credited_hits = 0
+    for entity_path, key in surfaced[:REUSE_CREDIT_K]:
+        # Read before the bump, and at the adapter rather than through the
+        # engine. Before, so the block reports the recall count as it stood
+        # *prior* to this reuse, the way every other credited read does. At the
+        # adapter, because engine.read would itself count as a recall and the
+        # lookup that reports a read must not be one — the distinction amfs#257
+        # was opened to fix.
+        entry = None
+        try:
+            if _async_adapter is not None:
+                entry = await _async_adapter.read(entity_path, key, branch=branch)
+            else:
+                entry = _get_memory()._adapter.read(entity_path, key, branch=branch)
+        except Exception:  # noqa: BLE001 - the value block is reporting, not the answer
+            logger.debug("briefing reuse lookup failed", exc_info=True)
+
+        try:
+            if _async_adapter is not None:
+                await _async_adapter.increment_recall_count(entity_path, key, branch=branch)
+            else:
+                _get_memory()._adapter.increment_recall_count(entity_path, key, branch=branch)
+        except Exception:  # noqa: BLE001 - reuse accounting is best-effort
+            logger.debug("briefing recall bump failed", exc_info=True)
+            continue
+
+        credited_hits += 1
+        if credited_entry is None:
+            credited_entry = entry
+
+    # Same call, same place, as every other credited read: bumping recall_count
+    # without this wrote the count but no amfs_reuse_events row and no
+    # X-SenseLab-Value header, so the agent that briefed first still saw no
+    # value line and the event table drifted out of step with the counter.
+    _attach_reuse_value(
+        response,
+        request,
+        credited=credited_entry,
+        hits=credited_hits,
+        surface="briefing",
+        branch=branch,
+    )
+
+
 @app.get("/api/v1/briefing")
 async def get_briefing(
     request: Request,
     entity_path: str | None = Query(None),
     agent_id: str | None = Query(None),
     limit: int = Query(10, ge=1, le=100),
+    credit_reuse: bool = Query(False),
+    # See retrieve_entries: injected on the type, defaulted so the handler stays
+    # callable in-process without one.
+    response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    """Get a ranked briefing of compiled knowledge digests."""
+    """Get a ranked briefing of compiled knowledge digests.
+
+    *credit_reuse* books the briefing as a real read of the knowledge it
+    surfaces. It is off by default and has to be asked for, because the same
+    endpoint serves an agent about to act on a briefing and a dashboard panel
+    rendering one for a human to look at — and only the caller can tell those
+    apart. Defaulting it on would make every page view count as reuse, which is
+    the shape of a bug this codebase has already had.
+    """
     mem = _get_memory()
     digests = mem.briefing(
         entity_path=entity_path,
@@ -6442,6 +6540,11 @@ async def get_briefing(
     vis = _get_visibility_filter(request)
     if vis is not None and vis.should_filter():
         digests = _filter_briefing_digests(vis, digests)
+
+    # After visibility filtering, never before: an entry the caller may not see
+    # must not be credited to them either.
+    if credit_reuse:
+        await _credit_briefing_reuse(response, request, digests)
 
     return {
         "digests": [d.model_dump(mode="json") for d in digests],

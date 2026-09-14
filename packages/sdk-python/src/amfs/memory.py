@@ -2032,6 +2032,7 @@ class AgentMemory:
         agent_id: str | None = None,
         limit: int = 10,
         branch: str | None = None,
+        credit_reuse: bool = False,
     ) -> list:
         """Get a ranked briefing of compiled knowledge digests.
 
@@ -2049,6 +2050,10 @@ class AgentMemory:
             agent_id: Focus on digests relevant to this agent.
             limit: Maximum number of digests to return.
             branch: Branch to read digests from (defaults to active branch).
+            credit_reuse: Book the briefing as a real read of the knowledge it
+                surfaces. Off by default: true for an agent about to act on a
+                briefing, false for a panel rendering one for a human, and only
+                the caller knows which it is.
 
         Returns:
             List of Digest objects ranked by relevance.
@@ -2057,11 +2062,21 @@ class AgentMemory:
         # proxies to the server which has full Cortex + Postgres access).
         adapter_briefing = getattr(self._adapter, "briefing", None)
         if callable(adapter_briefing):
-            return adapter_briefing(
-                entity_path=entity_path,
-                agent_id=agent_id or self.agent_id,
-                limit=limit,
-            )
+            kwargs: dict = {
+                "entity_path": entity_path,
+                "agent_id": agent_id or self.agent_id,
+                "limit": limit,
+            }
+            # Passed only when asked for, and only to an adapter that knows the
+            # argument: adapters are pluggable and versioned separately, so an
+            # older one would raise TypeError on an unconditional keyword.
+            if credit_reuse:
+                kwargs["credit_reuse"] = True
+            try:
+                return adapter_briefing(**kwargs)
+            except TypeError:
+                kwargs.pop("credit_reuse", None)
+                return adapter_briefing(**kwargs)
 
         resolved_agent = agent_id or self.agent_id
         resolved_branch = branch or self._branch
