@@ -2136,6 +2136,7 @@ class PostgresAdapter(AdapterABC):
         exclude_key: str | None = None,
         branch: str = "main",
         key_limit: int = 8,
+        agent_id: str | None = None,
     ) -> dict[str, Any]:
         """One aggregate instead of loading every sibling to count it.
 
@@ -2146,6 +2147,13 @@ class PostgresAdapter(AdapterABC):
         Columns are aliased and read by name because this pool's row factory is
         ``dict_row`` — the same rule, and the same reason, as ``reuse_summary``
         below.
+
+        ``shared OR agent_id = %s`` is the visibility rule, and it is here for a
+        specific reason: skipping ``list()`` also skips the filter ``list()``
+        applied, so the aggregate has to carry it itself or a private entry
+        belonging to another agent turns up in ``keys``. A NULL *agent_id*
+        compares as unknown rather than true, so passing nothing counts shared
+        entries only — the safe direction.
         """
         with self._pool.connection() as conn:
             row = conn.execute(
@@ -2155,8 +2163,10 @@ class PostgresAdapter(AdapterABC):
                      FROM amfs_memory_entries
                     WHERE namespace = %s AND branch = %s AND entity_path = %s
                       AND superseded_at IS NULL
-                      AND (%s::text IS NULL OR key <> %s)""",
-                (self._namespace, branch, entity_path, exclude_key, exclude_key),
+                      AND (%s::text IS NULL OR key <> %s)
+                      AND (shared OR agent_id = %s::text)""",
+                (self._namespace, branch, entity_path, exclude_key, exclude_key,
+                 agent_id),
             ).fetchone()
             keys = [
                 r["key"] for r in conn.execute(
@@ -2164,9 +2174,10 @@ class PostgresAdapter(AdapterABC):
                         WHERE namespace = %s AND branch = %s AND entity_path = %s
                           AND superseded_at IS NULL
                           AND (%s::text IS NULL OR key <> %s)
+                          AND (shared OR agent_id = %s::text)
                         ORDER BY key LIMIT %s""",
                     (self._namespace, branch, entity_path, exclude_key,
-                     exclude_key, key_limit),
+                     exclude_key, agent_id, key_limit),
                 ).fetchall()
             ]
 

@@ -24,15 +24,25 @@ from amfs_core.abc import AdapterABC
 from amfs_core.models import MemoryEntry, Provenance
 
 
-def _entry(key: str, *, recall_count: int = 0, entity_path: str = "repo/topic") -> MemoryEntry:
+def _entry(
+    key: str,
+    *,
+    recall_count: int = 0,
+    entity_path: str = "repo/topic",
+    agent_id: str = "a",
+    shared: bool = True,
+) -> MemoryEntry:
     return MemoryEntry(
         entity_path=entity_path,
         key=key,
         version=1,
         value=f"value of {key}",
-        provenance=Provenance(agent_id="a", session_id="s", written_at=datetime.now(UTC)),
+        provenance=Provenance(
+            agent_id=agent_id, session_id="s", written_at=datetime.now(UTC)
+        ),
         confidence=1.0,
         recall_count=recall_count,
+        shared=shared,
     )
 
 
@@ -97,6 +107,61 @@ class TestScopeCounts:
         assert a.scope_counts("repo/topic")["existing_entries"] == 1
 
 
+class TestAnotherAgentsPrivateEntriesStayPrivate:
+    """The rule ``AgentMemory.list`` applies, which an aggregate has to repeat.
+
+    ``list`` returns an entry only if it is shared or the caller wrote it, so the
+    write tool's own ``list``-based scope sample was protected. Counting in SQL
+    skips ``list`` and therefore skips its filter, which would put another
+    agent's private key into a tool result — a leak, and one nothing else in the
+    block's design would catch, since the per-user visibility filter is inactive
+    on most deployments and only ever narrowed the sample, never the counts.
+    """
+
+    def test_a_private_entry_of_another_agent_is_neither_named_nor_counted(self):
+        a = _ListOnlyAdapter([
+            _entry("mine-shared"),
+            _entry("theirs-private", agent_id="other", shared=False),
+        ])
+        got = a.scope_counts("repo/topic", agent_id="a")
+        assert got["keys"] == ["mine-shared"]
+        assert got["existing_entries"] == 1
+
+    def test_my_own_private_entry_is_still_mine_to_see(self):
+        a = _ListOnlyAdapter([
+            _entry("mine-private", agent_id="a", shared=False),
+            _entry("theirs-private", agent_id="other", shared=False),
+        ])
+        got = a.scope_counts("repo/topic", agent_id="a")
+        assert got["keys"] == ["mine-private"]
+        assert got["existing_entries"] == 1
+
+    def test_a_shared_entry_of_another_agent_is_fine(self):
+        a = _ListOnlyAdapter([_entry("theirs-shared", agent_id="other")])
+        assert a.scope_counts("repo/topic", agent_id="a")["keys"] == ["theirs-shared"]
+
+    def test_naming_no_agent_counts_only_shared(self):
+        """The safe direction: an under-count is a quieter footnote, an
+        over-count discloses. A caller that cannot say who it is gets the
+        shared view."""
+        a = _ListOnlyAdapter([
+            _entry("shared-one"),
+            _entry("private-one", agent_id="a", shared=False),
+        ])
+        got = a.scope_counts("repo/topic")
+        assert got["keys"] == ["shared-one"]
+        assert got["existing_entries"] == 1
+
+    def test_never_read_counts_only_what_may_be_counted(self):
+        """The leak was in the numbers too, not only the key sample."""
+        a = _ListOnlyAdapter([
+            _entry("shared-unread", recall_count=0),
+            _entry("theirs-private-unread", agent_id="other", shared=False),
+        ])
+        got = a.scope_counts("repo/topic", agent_id="a")
+        assert got["never_read"] == 1
+
+
 class _DictCursor:
     """A cursor that returns mappings, which is what ``dict_row`` produces."""
 
@@ -148,8 +213,10 @@ class _AsyncDictCursor:
 class _AsyncDictConn:
     def __init__(self, responses: list[list[dict]]) -> None:
         self._responses = list(responses)
+        self.queries: list[tuple] = []
 
     async def execute(self, sql, params=None):
+        self.queries.append((sql, params))
         return _AsyncDictCursor(self._responses.pop(0) if self._responses else [])
 
     async def __aenter__(self):
@@ -228,6 +295,37 @@ class TestPostgresReadsItsColumnsByName:
         assert any("LIMIT" in sql.upper() for sql, _ in conn.queries)
         assert any(8 in (p or ()) for _, p in conn.queries)
 
+    def test_both_sql_forms_carry_the_visibility_predicate(self):
+        """Every query, not just the one naming keys.
+
+        The counts leak as surely as the sample does: "six entries are already
+        here" is wrong, and quietly discloses, if two of the six are another
+        agent's private notes. So the predicate belongs on the aggregate and on
+        the key query alike, with the asking agent bound to both.
+        """
+        pg = pytest.importorskip("amfs_postgres.adapter")
+        conn = _DictConn([self._AGG, self._KEYS])
+        a = object.__new__(pg.PostgresAdapter)
+        a._pool = _DictPool(conn)
+        a._namespace = "default"
+        a.scope_counts("repo/topic", agent_id="asking-agent")
+        assert len(conn.queries) == 2
+        for sql, params in conn.queries:
+            assert "shared" in sql
+            assert "asking-agent" in params
+
+    def test_the_async_form_carries_it_too(self):
+        pg = pytest.importorskip("amfs_postgres.async_adapter")
+        conn = _AsyncDictConn([self._AGG, self._KEYS])
+        a = object.__new__(pg.AsyncPostgresAdapter)
+        a._pool = _AsyncDictPool(conn)
+        a._namespace = "default"
+        asyncio.run(a.scope_counts("repo/topic", agent_id="asking-agent"))
+        assert len(conn.queries) == 2
+        for sql, params in conn.queries:
+            assert "shared" in sql
+            assert "asking-agent" in params
+
 
 server = pytest.importorskip("amfs_http.server")
 
@@ -237,8 +335,9 @@ class _Adapter:
         self._counts = counts
         self.calls: list[tuple] = []
 
-    def scope_counts(self, entity_path, *, exclude_key=None, branch="main", key_limit=8):
-        self.calls.append((entity_path, exclude_key, branch))
+    def scope_counts(self, entity_path, *, exclude_key=None, branch="main",
+                     key_limit=8, agent_id=None):
+        self.calls.append((entity_path, exclude_key, branch, agent_id))
         return self._counts
 
     def list(self, entity_path=None, *, branch="main", **k):
@@ -267,9 +366,29 @@ class TestScopeBlockOnTheWritePath:
         })
         assert out["existing_entries"] == 6
         assert out["never_read"] == 4
-        assert adapter.calls == [("repo/topic", "just-written", "main")], (
+        assert adapter.calls == [("repo/topic", "just-written", "main", None)], (
             "the entry just written must be excluded from its own neighbours"
         )
+
+    def test_the_asking_agent_reaches_the_adapter(self, monkeypatch):
+        """Otherwise the visibility rule is enforced against nobody.
+
+        The adapter decides what may be counted from this argument, so a caller
+        that never passes it gets the shared-only view and the private entries
+        the writing agent legitimately owns go unmentioned — while a caller that
+        passes it wrongly would disclose. Worth pinning at the call boundary.
+        """
+        adapter = _Adapter({
+            "entity_path": "repo/topic", "existing_entries": 1,
+            "never_read": 1, "keys": ["a"],
+        })
+        monkeypatch.setattr(server, "_async_adapter", None, raising=False)
+        monkeypatch.setattr(
+            server, "_get_memory",
+            lambda: types.SimpleNamespace(_adapter=adapter, namespace="default"),
+        )
+        asyncio.run(server._scope_block("repo/topic", "k", agent_id="writer-1"))
+        assert adapter.calls == [("repo/topic", "k", "main", "writer-1")]
 
     def test_says_nothing_when_the_scope_is_empty(self, monkeypatch):
         """An empty block would read as a finding; absence is the honest answer."""
@@ -295,7 +414,7 @@ class TestScopeBlockOnTheWritePath:
         """The hosted path is async; the same helper has to serve both."""
         class _Async:
             async def scope_counts(self, entity_path, *, exclude_key=None,
-                                   branch="main", key_limit=8):
+                                   branch="main", key_limit=8, agent_id=None):
                 return {"entity_path": entity_path, "existing_entries": 2,
                         "never_read": 1, "keys": ["x"]}
 

@@ -632,6 +632,7 @@ class AdapterABC(ABC):
         exclude_key: str | None = None,
         branch: str = "main",
         key_limit: int = 8,
+        agent_id: str | None = None,
     ) -> "dict[str, Any]":
         """How much is stored beside a given entry, and how much of it is unread.
 
@@ -640,6 +641,16 @@ class AdapterABC(ABC):
         can hand back to give an agent a reason to retrieve without telling it
         to. *exclude_key* leaves out the entry the caller just wrote, since it is
         not one of its own neighbours.
+
+        *agent_id* is the agent asking, and it decides what may be counted:
+        an entry is visible if it is shared, or if this agent wrote it. That is
+        the same rule ``AgentMemory.list`` applies, and it has to be repeated
+        here rather than inherited, because an aggregate does not go through
+        ``list``. Without it a private entry belonging to another agent would be
+        named in ``keys`` — a leak into a tool result, where the previous
+        ``list``-based caller had been protected. Passing nothing counts only
+        shared entries, which is the safe direction to fail: an under-count
+        costs a slightly quieter footnote, an over-count discloses.
 
         The Python form, over :meth:`list`. Adapters with a query language
         override this with a single aggregate: counting is all this needs, and
@@ -650,6 +661,10 @@ class AdapterABC(ABC):
         entries = [
             e for e in self.list(entity_path, branch=branch)
             if e.key != exclude_key
+            and (
+                getattr(e, "shared", True)
+                or (agent_id is not None and e.provenance.agent_id == agent_id)
+            )
         ]
         return {
             "entity_path": entity_path,

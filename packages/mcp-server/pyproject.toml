@@ -1,6 +1,6 @@
 [project]
 name = "amfs-mcp-server"
-version = "0.7.22"
+version = "0.7.23"
 description = "AMFS MCP Server — expose Agent Memory as MCP tools for Cursor and Claude Code"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -14,7 +14,12 @@ dependencies = [
     # amfs_briefing now passes credit_reuse=True, and AgentMemory.briefing only
     # accepts that keyword from 0.5.13. Below it, the call agents are told to
     # make FIRST in every session raises TypeError.
-    "amfs>=0.5.13",
+    # 0.5.14 adds AgentMemory.last_scope, which amfs_write reads to reuse the key
+    # sample the server already computed instead of spending its own list() call.
+    # Read through getattr, so an older pairing degrades to that extra list()
+    # rather than breaking the write — which makes this floor the same shape as
+    # the adapter one below: nothing raises, the scope block is just never there.
+    "amfs>=0.5.14",
     # Direct floor at the import site. amfs_export and amfs_aggregate do
     # `from amfs_core.aggregates import coerce_value, iter_rows, aggregate_entries`.
     # Those were added in amfs-core 0.3.15 — but 0.3.14 was already published
@@ -36,7 +41,7 @@ dependencies = [
     # 0.3.22 likewise: SearchQuery grew include_descendants, and nothing here
     # sets it. The floor rises only because a floor below the version in this
     # tree is what test_dependency_floors forbids.
-    "amfs-core>=0.3.23",
+    "amfs-core>=0.3.24",
     # 0.1.10 for the same reason, one layer down: this adapter builds the
     # /outcomes body field by field, and anything earlier does not copy
     # tool_calls into it. The floor was 0.1.2, which a cached 0.1.9 satisfies —
@@ -57,7 +62,14 @@ dependencies = [
     # silently books no reuse. Nothing fails; briefed entries simply stay at
     # recall_count 0 for ever, which is the exact bug this release closes and is
     # invisible from the outside. Floored so a resolver cannot reintroduce it.
-    "amfs-adapter-http>=0.1.16",
+    # 0.1.17 fails the same way, and is floored for the same reason. It is the
+    # first adapter that asks the server for the scope block and keeps what comes
+    # back; AgentMemory.last_scope reads it off the adapter with a getattr
+    # default, so an older one yields None rather than raising, and amfs_write
+    # falls back to its own list() call. The write still succeeds and still
+    # returns a quality report — the scope block is simply never there, which is
+    # indistinguishable from a scope that genuinely has no neighbours.
+    "amfs-adapter-http>=0.1.17",
     "fastmcp>=2.0",
 ]
 

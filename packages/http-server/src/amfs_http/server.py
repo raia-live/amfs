@@ -1058,6 +1058,7 @@ async def _scope_block(
     *,
     branch: str = "main",
     request: Request | None = None,
+    agent_id: str | None = None,
 ) -> dict[str, Any] | None:
     """What is already stored beside a write, for handing back to the agent.
 
@@ -1077,10 +1078,20 @@ async def _scope_block(
 
     ``None`` when there are no neighbours: a scope containing only the entry just
     written has nothing to report, and an empty block would read as a finding.
+
+    Two filters apply, and they answer different questions. *agent_id* goes to
+    the adapter, which counts an entry only if it is shared or this agent wrote
+    it — the rule ``AgentMemory.list`` enforces, which an aggregate that skips
+    ``list`` would otherwise drop. The per-user visibility filter below then
+    narrows the key sample further where an account separates its users. The
+    first cannot be replaced by the second: it is inactive on most deployments,
+    and only ever touched the sample, never the counts.
     """
     try:
         adapter = _async_adapter if _async_adapter is not None else _get_memory()._adapter
-        counts = adapter.scope_counts(entity_path, exclude_key=key, branch=branch)
+        counts = adapter.scope_counts(
+            entity_path, exclude_key=key, branch=branch, agent_id=agent_id
+        )
         if inspect.isawaitable(counts):
             counts = await counts
     except Exception:  # noqa: BLE001 - a write must not fail on its own footnote
@@ -1335,8 +1346,17 @@ async def write_entry(
 
     out = _entry_to_response(entry)
     if req.include_scope:
+        # Taken from the entry just written rather than the request or the
+        # tagger: the tagger is restored to its previous identity by this point,
+        # and req.agent_id is optional, while provenance records who the write
+        # was actually attributed to. That is the identity whose private
+        # neighbours may be counted.
         scope = await _scope_block(
-            req.entity_path, req.key, branch=_branch, request=request
+            req.entity_path,
+            req.key,
+            branch=_branch,
+            request=request,
+            agent_id=getattr(getattr(entry, "provenance", None), "agent_id", None),
         )
         if scope is not None:
             out["scope"] = scope

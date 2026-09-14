@@ -958,7 +958,12 @@ def amfs_write(
     # it when it is there and skip the extra list() — a second round trip that
     # over HTTP is another request, and on the hosted surface another billed op,
     # for something the write already answered.
-    scope = mem.last_scope
+    # getattr rather than attribute access: the floor in pyproject keeps these
+    # versions together, but this package's own history records a release that
+    # went out without a dependency's feature, and amfs_write is too central to
+    # break over a footnote. Same rule the server applies to the block it
+    # computes — a failure costs the scope line, never the write.
+    scope = getattr(mem, "last_scope", None)
     if scope:
         existing_keys = list(scope.get("keys") or [])
     else:

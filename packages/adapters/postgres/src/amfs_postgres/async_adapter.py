@@ -949,6 +949,7 @@ class AsyncPostgresAdapter:
         exclude_key: str | None = None,
         branch: str = "main",
         key_limit: int = 8,
+        agent_id: str | None = None,
     ) -> dict[str, Any]:
         """One aggregate instead of loading every sibling to count it.
 
@@ -966,6 +967,12 @@ class AsyncPostgresAdapter:
         ``dict_row``, so positional access raises ``KeyError``, and the caller
         swallows exceptions to protect the write it decorates — which would turn
         the mistake into a scope block that silently never appears.
+
+        ``shared OR agent_id = %s`` is the visibility rule, carried here for the
+        reason given on the sync twin: bypassing ``list()`` bypasses the filter
+        ``list()`` applied, and this block's ``keys`` land in a tool result. A
+        NULL *agent_id* compares as unknown, so passing nothing counts shared
+        entries only.
         """
         async with self._pool.connection() as conn:
             cur = await conn.execute(
@@ -975,8 +982,10 @@ class AsyncPostgresAdapter:
                      FROM amfs_memory_entries
                     WHERE namespace = %s AND branch = %s AND entity_path = %s
                       AND superseded_at IS NULL
-                      AND (%s::text IS NULL OR key <> %s)""",
-                (self._namespace, branch, entity_path, exclude_key, exclude_key),
+                      AND (%s::text IS NULL OR key <> %s)
+                      AND (shared OR agent_id = %s::text)""",
+                (self._namespace, branch, entity_path, exclude_key, exclude_key,
+                 agent_id),
             )
             row = await cur.fetchone()
             cur = await conn.execute(
@@ -984,9 +993,10 @@ class AsyncPostgresAdapter:
                     WHERE namespace = %s AND branch = %s AND entity_path = %s
                       AND superseded_at IS NULL
                       AND (%s::text IS NULL OR key <> %s)
+                      AND (shared OR agent_id = %s::text)
                     ORDER BY key LIMIT %s""",
                 (self._namespace, branch, entity_path, exclude_key, exclude_key,
-                 key_limit),
+                 agent_id, key_limit),
             )
             keys = [r["key"] for r in await cur.fetchall()]
 
