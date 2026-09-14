@@ -2187,7 +2187,17 @@ class AgentMemory:
                         # link to the wrong version still names the right entry,
                         # and dropping it would silently reopen the loop.
                         version=int(item.get("version") or 1),
-                        value=str(item.get("value") or ""),
+                        # Passed through as it stands, because ``record`` stores
+                        # ``entry.value`` unchanged and a briefing-sourced causal
+                        # entry has to be indistinguishable from a directly-read
+                        # one. ``MemoryEntry.value`` is ``Any``, so coercing it
+                        # with ``str(... or "")`` had two effects: a structured
+                        # value became its Python repr, and a legitimately falsy
+                        # one — ``0``, ``False``, ``[]``, ``{}`` — collapsed to an
+                        # empty string. Both put a value on the trace that the
+                        # entry never held, which is the half of the record a
+                        # tuned model learns from.
+                        value=item.get("value"),
                         confidence=float(item.get("confidence") or 0.0),
                         memory_type=item.get("memory_type"),
                         written_by=item.get("agent"),
