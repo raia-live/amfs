@@ -286,6 +286,124 @@ class TestHybridUnion:
         out = _run(_request(), RetrieveRequest(query="migrations before deploy", limit=10))
         assert [d["key"] for d in out][0] == "zzz-note"
 
+    def test_a_confident_reranker_is_not_flattened_by_where_its_logits_sit(
+        self, monkeypatch
+    ):
+        """The saturation regression, measured on dev after the first fix.
+
+        A logistic is steep only near zero. Where the whole batch sits far out on
+        one tail — the cross-encoder confident about every candidate — a large
+        genuine difference arrived as almost nothing: raw spreads of 3.04 and
+        6.04 survived as 0.0002 and 0.0047. Confidence then decided a comparison
+        relevance had already settled, and a tangential entry outranked one the
+        reranker preferred by 2.73 logits which also carried twelve validated
+        outcomes.
+
+        Both logits here are past +6, so on the uncentred form they map to 0.9999
+        and 0.9989 and the 0.3 confidence gap wins. Centred on the batch median
+        the same spread is worth 0.59, and relevance decides — which is the whole
+        point of handing the reranker the relevance term.
+        """
+        direct = _entry("looptest/deploy", "direct-answer",
+                        "Roll back by pinning the previous revision and shifting traffic.",
+                        confidence=0.7)
+        tangential = _entry("looptest/saturation", "tangential-high-confidence",
+                            "Deployment involves several coordinated services.",
+                            confidence=1.0)
+        fake = _FakeAdapter(semantic_hits=[(direct, 0.82), (tangential, 0.82)],
+                            lexical_hits=[])
+        monkeypatch.setattr(server, "_async_adapter", fake)
+
+        class _RR:
+            available = True
+
+            def rerank(self, query, docs):
+                return [9.5 if "pinning" in d else 6.8 for d in docs]
+
+        monkeypatch.setattr(server, "_retrieval_reranker", _RR())
+        out = _run(_request(), RetrieveRequest(query="how do I roll back a deploy",
+                                               limit=10))
+        keys = [d["key"] for d in out]
+        assert keys[0] == "direct-answer", (
+            "a 2.7-logit relevance gap must survive normalisation even when both "
+            f"logits sit deep in the tail, got {keys}"
+        )
+
+    def test_the_same_failure_on_the_negative_tail(self, monkeypatch):
+        """Saturation is symmetric, so the fix has to be position-independent.
+
+        Two candidates the cross-encoder dislikes, one much less than the other.
+        Uncentred these map to 0.0025 and 0.0001, a difference of nothing.
+        """
+        better = _entry("looptest/deploy", "less-bad", "Traffic shifting notes.",
+                        confidence=0.6)
+        worse = _entry("looptest/deploy", "more-bad", "Unrelated billing notes.",
+                       confidence=1.0)
+        fake = _FakeAdapter(semantic_hits=[(better, 0.5), (worse, 0.5)], lexical_hits=[])
+        monkeypatch.setattr(server, "_async_adapter", fake)
+
+        class _RR:
+            available = True
+
+            def rerank(self, query, docs):
+                return [-6.0 if "Traffic" in d else -9.0 for d in docs]
+
+        monkeypatch.setattr(server, "_retrieval_reranker", _RR())
+        out = _run(_request(), RetrieveRequest(query="traffic shifting", limit=10))
+        assert [d["key"] for d in out][0] == "less-bad"
+
+
+class TestRerankNormalisation:
+    """Properties of the normaliser itself, independent of the ranking around it.
+
+    Pinned here because the function has now been wrong in two opposite
+    directions — min-max amplified noise, an absolute logistic discarded real
+    differences in the tails — and the two constraints pull against each other,
+    so a future change that satisfies one can silently break the other.
+    """
+
+    def test_a_spread_is_worth_the_same_wherever_the_batch_sits(self):
+        """The defect in one line: position must not change what a gap is worth."""
+        near_zero = server._normalise_rerank([1.0, -1.0])
+        far_out = server._normalise_rerank([21.0, 19.0])
+        assert abs(near_zero[0] - near_zero[1]) == pytest.approx(
+            abs(far_out[0] - far_out[1]), abs=1e-9
+        )
+
+    def test_a_small_spread_stays_small(self):
+        """The anti-min-max constraint, which the fix must not trade away.
+
+        The observed jitter pair. Min-max would send these to 1.0 and 0.0 and
+        make cross-encoder noise the most decisive signal in the blend.
+        """
+        norms = server._normalise_rerank([7.2307, 7.2206])
+        assert abs(norms[0] - norms[1]) < 0.01
+
+    def test_a_real_difference_survives(self):
+        """The other side of the same constraint: 2.7 logits is not noise."""
+        norms = server._normalise_rerank([9.5, 6.8])
+        assert abs(norms[0] - norms[1]) > 0.5
+
+    def test_order_is_never_changed_by_normalising(self):
+        raw = [3.1, -8.0, 7.25, 7.24, 0.0]
+        norms = server._normalise_rerank(raw)
+        assert [n for _, n in sorted(zip(raw, norms), key=lambda p: p[0])] == sorted(norms)
+
+    def test_scores_already_calibrated_are_left_alone(self):
+        """A reranker returning probabilities is taken at its word."""
+        assert server._normalise_rerank([0.99, 0.01]) == [0.99, 0.01]
+
+    def test_degenerate_batches(self):
+        assert server._normalise_rerank([]) == []
+        assert server._normalise_rerank([12.0]) == [pytest.approx(0.5)]
+        assert server._normalise_rerank([4.0, 4.0]) == [
+            pytest.approx(0.5), pytest.approx(0.5)
+        ]
+
+    def test_extreme_logits_do_not_overflow(self):
+        out = server._normalise_rerank([-2000.0, 2000.0])
+        assert out[0] == pytest.approx(0.0) and out[1] == pytest.approx(1.0)
+
     def test_query_rewriter_expands(self, monkeypatch):
         calls = {}
 

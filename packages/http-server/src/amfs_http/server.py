@@ -335,21 +335,45 @@ def _normalise_rerank(scores: list[float]) -> list[float]:
     is taken as calibrated, otherwise the batch is squashed with a logistic,
     which is the function the model's training objective implies.
 
-    Deliberately absolute rather than min-max over the batch. Min-max would
-    stretch whatever spread happens to be present to fill 0..1, so the top
-    result always scores 1.0 and the bottom 0.0 no matter how close together
-    they really are — amplifying cross-encoder noise into a confident-looking
-    ordering. That is the failure this whole change is about: on dev the top two
-    scored 7.2307 and 7.2206, a distinction the model plainly does not intend to
-    draw, and min-max would have turned it into the largest gap in the set. A
-    logistic maps both to ~0.9993, leaving confidence to break the tie.
+    Not min-max over the batch. Min-max stretches whatever spread happens to be
+    present to fill 0..1, so the top result scores 1.0 and the bottom 0.0 no
+    matter how close together they really are — amplifying cross-encoder noise
+    into a confident-looking ordering. On dev the top two scored 7.2307 and
+    7.2206, a distinction the model plainly does not intend to draw, and min-max
+    would have turned it into the largest gap in the set.
+
+    Centred on the batch's median, then squashed. The centring is the part that
+    matters, and it is here because the plain logistic was measured getting this
+    wrong. A logistic is steep only near zero; away from zero it flattens. So
+    where the whole batch sat far out on one tail — the cross-encoder confident
+    about *every* candidate — a large genuine difference arrived as almost
+    nothing: on dev, raw spreads of 3.04 and 6.04 survived as 0.0002 and 0.0047,
+    under 0.3% of themselves, and the confidence term then decided a comparison
+    relevance had already settled. In one measured case that put a tangential
+    entry above one the reranker preferred by 2.73 logits which also carried 12
+    validated outcomes, which is the opposite of the intent.
+
+    Subtracting the median moves the batch to where the logistic can still
+    discriminate, without rescaling by the spread — so unlike min-max, a small
+    spread stays small. The two behaviours the ranking needs both survive:
+    7.2307 against 7.2206 centres to ±0.005 and maps to a 0.0025 difference, a
+    tie that reinforcement decides, while a 2.7 spread centres to ±1.35 and maps
+    to 0.59, which no confidence gap can overturn. The crossover sits near half
+    a logit. The median rather than the mean because one far-outlying candidate
+    should not drag the centre off the cluster that is actually being compared.
     """
     if not scores:
         return []
     if all(0.0 <= s <= 1.0 for s in scores):
         return list(scores)
+    ordered = sorted(scores)
+    mid, odd = divmod(len(ordered), 2)
+    centre = ordered[mid] if odd else (ordered[mid - 1] + ordered[mid]) / 2.0
     # Guard the exponential: math.exp overflows around -745.
-    return [1.0 / (1.0 + math.exp(-max(-700.0, min(700.0, s)))) for s in scores]
+    return [
+        1.0 / (1.0 + math.exp(-max(-700.0, min(700.0, s - centre))))
+        for s in scores
+    ]
 
 
 _immutable_trace_store = None
