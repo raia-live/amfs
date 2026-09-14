@@ -19,6 +19,7 @@ import hashlib
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -322,6 +323,33 @@ def _doc_text_for_rerank(entry: MemoryEntry) -> str:
             val = str(val)
     text = f"{entry.key}: {val}"
     return text[:2000]
+
+
+def _normalise_rerank(scores: list[float]) -> list[float]:
+    """Map cross-encoder output onto the 0..1 range the relevance term expects.
+
+    The reranker is injected, so its output range is a matter of observation
+    rather than contract. The serving model emits logits — dev returns values
+    from about -11 to +7.2 — while some implementations return a probability
+    already. Both are accepted: if every score in the batch is inside 0..1 it
+    is taken as calibrated, otherwise the batch is squashed with a logistic,
+    which is the function the model's training objective implies.
+
+    Deliberately absolute rather than min-max over the batch. Min-max would
+    stretch whatever spread happens to be present to fill 0..1, so the top
+    result always scores 1.0 and the bottom 0.0 no matter how close together
+    they really are — amplifying cross-encoder noise into a confident-looking
+    ordering. That is the failure this whole change is about: on dev the top two
+    scored 7.2307 and 7.2206, a distinction the model plainly does not intend to
+    draw, and min-max would have turned it into the largest gap in the set. A
+    logistic maps both to ~0.9993, leaving confidence to break the tie.
+    """
+    if not scores:
+        return []
+    if all(0.0 <= s <= 1.0 for s in scores):
+        return list(scores)
+    # Guard the exponential: math.exp overflows around -745.
+    return [1.0 / (1.0 + math.exp(-max(-700.0, min(700.0, s)))) for s in scores]
 
 
 _immutable_trace_store = None
@@ -1794,6 +1822,26 @@ async def retrieve_entries(
     now = _dt.now(_tz.utc)
     half_life = 30.0
     keyword_weight = 0.15
+
+    def _composite(
+        relevance: float, recency: float, conf: float, keyword: float, artifact: bool
+    ) -> float:
+        """The composite score, in one place because step 8 recomputes it.
+
+        *relevance* is whichever estimate of "does this answer the query" we
+        currently trust: the bi-encoder similarity here, the normalised
+        cross-encoder score once the reranker has spoken. Everything else is
+        held constant between the two, which is the point — the reranker is a
+        better relevance term, not a licence to discard confidence.
+        """
+        score = (
+            req.semantic_weight * relevance
+            + recency_weight * recency
+            + req.confidence_weight * conf
+            + keyword_weight * keyword
+        )
+        return score * ARTIFACT_PENALTY if artifact else score
+
     scored: list[tuple[MemoryEntry, float, dict[str, Any]]] = []
     for slot in candidates.values():
         entry = slot["entry"]
@@ -1808,27 +1856,33 @@ async def retrieve_entries(
         else:
             recency = 0.0
         conf = float(entry.confidence)
-        score = (
-            req.semantic_weight * sim
-            + recency_weight * recency
-            + req.confidence_weight * conf
-            + keyword_weight * keyword
-        )
         artifact = _is_artifact(entry)
-        if artifact:
-            score *= ARTIFACT_PENALTY
-        scored.append((entry, score, {
-            "semantic": round(sim, 4),
-            "recency": round(recency, 4),
-            "confidence": round(conf, 4),
-            "keyword": round(keyword, 4),
+        # Components are kept unrounded so step 8 can rebuild the score
+        # exactly; rounding happens once, on the way out.
+        scored.append((entry, _composite(sim, recency, conf, keyword, artifact), {
+            "semantic": sim,
+            "recency": recency,
+            "confidence": conf,
+            "keyword": keyword,
             "is_artifact": artifact,
         }))
 
     scored.sort(key=lambda t: t[1], reverse=True)
 
-    # 8. Cross-encoder rerank (Pro-injected) over the top-N, then reorder them
-    #    ahead of the untouched tail.
+    # 8. Cross-encoder rerank (Pro-injected) over the top-N: the cross-encoder
+    #    replaces the *relevance term* of the composite, not the composite.
+    #
+    #    It used to replace the whole score, and that silently switched off
+    #    continual learning. Every hosted read goes through here and real
+    #    result sets are far smaller than rerank_top_n, so in practice ranking
+    #    was cross-encoder relevance and nothing else: confidence, recency and
+    #    the reinforcement behind them counted for zero. Measured on dev before
+    #    this change — an entry discredited by eight critical_failure outcomes,
+    #    confidence collapsed 0.9834 -> 0.268, still ranked first, ahead of a
+    #    near-identical entry validated twelve times at confidence 1.0. Two
+    #    entries with identical text, one at confidence 0.5 and one at 1.0,
+    #    ranked with the 0.5 one first. Outcomes were recorded faithfully and
+    #    then ignored at the only point where they could change behaviour.
     reranker = _retrieval_reranker
     rerank_top_n = 30
     if reranker is not None and getattr(reranker, "available", False) and scored:
@@ -1839,12 +1893,24 @@ async def retrieve_entries(
             logger.debug("rerank failed", exc_info=True)
             rr_scores = None
         if rr_scores and len(rr_scores) == len(head):
+            raw = [float(rs) for rs in rr_scores]
+            normalised = _normalise_rerank(raw)
             reranked = [
-                (entry, float(rs), {**bd, "rerank": round(float(rs), 4)})
-                for (entry, _, bd), rs in zip(head, rr_scores)
+                (
+                    entry,
+                    _composite(
+                        norm, bd["recency"], bd["confidence"], bd["keyword"],
+                        bd["is_artifact"],
+                    ),
+                    {**bd, "rerank": rs, "rerank_normalised": norm},
+                )
+                for (entry, _, bd), rs, norm in zip(head, raw, normalised)
             ]
-            reranked.sort(key=lambda t: t[1], reverse=True)
+            # The whole list, not head-then-tail: re-scoring the head can move a
+            # member of it below an entry the reranker never saw, and stitching
+            # the two halves back together in order would pin it above anyway.
             scored = reranked + scored[rerank_top_n:]
+            scored.sort(key=lambda t: t[1], reverse=True)
 
     # 9. Abstain floor: trim clearly-irrelevant tail (low semantic AND no
     #    keyword match), but never drop the single best result.
@@ -1897,7 +1963,10 @@ async def retrieve_entries(
     for entry, score, breakdown in scored[: req.limit]:
         data = _entry_to_response(entry)
         data["_score"] = round(score, 4)
-        data["_breakdown"] = breakdown
+        data["_breakdown"] = {
+            k: round(v, 4) if isinstance(v, float) else v
+            for k, v in breakdown.items()
+        }
         out.append(data)
     return out
 
