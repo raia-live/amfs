@@ -31,6 +31,7 @@ from amfs_core.models import (
     SemanticQuery,
     Tag,
 )
+from amfs_core.scope import covers
 
 
 class WatchHandle:
@@ -343,7 +344,13 @@ class AdapterABC(ABC):
         Adapters may override with optimised implementations (e.g. SQL WHERE
         with tsvector FTS).
         """
-        entries = self.list(query.entity_path)
+        if query.include_descendants and query.entity_path:
+            # list() matches a path exactly, so descendants have to be gathered
+            # by listing the namespace and filtering. Adapters with a query
+            # language push this down instead; see amfs_core.scope.
+            entries = [e for e in self.list(None) if covers(query.entity_path, e.entity_path)]
+        else:
+            entries = self.list(query.entity_path)
         use_text_filter = query.query and query.recall_config is None
         query_lower = query.query.lower() if use_text_filter else None
         results: list[MemoryEntry] = []

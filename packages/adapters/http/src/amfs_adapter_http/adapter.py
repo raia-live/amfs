@@ -331,6 +331,11 @@ class HttpAdapter(AdapterABC):
         # back carrying whole source files.
         if getattr(query, "include_artifacts", True) is False:
             body["include_artifacts"] = False
+        # Same reasoning as include_artifacts above: unsent, the server matches
+        # the path exactly and a caller asking about a scope silently gets only
+        # the entries written at the root of it, which is usually none of them.
+        if getattr(query, "include_descendants", False):
+            body["include_descendants"] = True
         branch = kwargs.get("branch")
         if branch:
             body["branch"] = branch

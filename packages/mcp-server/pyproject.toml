@@ -29,7 +29,10 @@ dependencies = [
     # because a floor below the version in this tree is what
     # test_dependency_floors forbids, not because anything here would break.
     # 0.3.19 is the same: nothing here reads the new core surface.
-    "amfs-core>=0.3.21",
+    # 0.3.22 likewise: SearchQuery grew include_descendants, and nothing here
+    # sets it. The floor rises only because a floor below the version in this
+    # tree is what test_dependency_floors forbids.
+    "amfs-core>=0.3.22",
     # 0.1.10 for the same reason, one layer down: this adapter builds the
     # /outcomes body field by field, and anything earlier does not copy
     # tool_calls into it. The floor was 0.1.2, which a cached 0.1.9 satisfies —
@@ -42,7 +45,9 @@ dependencies = [
     # discards it. Paired with amfs>=0.5.11, which carries it from the adapter
     # to AgentMemory. Below either, amfs_commit_outcome reports no gap and looks
     # exactly like a session that had nothing to report.
-    "amfs-adapter-http>=0.1.14",
+    # 0.1.15 is bookkeeping in the same sense: the adapter learned to forward
+    # include_descendants, which this server never asks for.
+    "amfs-adapter-http>=0.1.15",
     "fastmcp>=2.0",
 ]
 

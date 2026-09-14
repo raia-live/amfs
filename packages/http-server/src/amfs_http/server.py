@@ -1567,6 +1567,7 @@ async def search_entries(
         limit=req.limit,
         depth=req.depth,
         include_artifacts=req.include_artifacts,
+        include_descendants=req.include_descendants,
     )
     mem = _get_memory()
     if _async_adapter is not None:

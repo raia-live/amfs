@@ -465,6 +465,12 @@ class SearchQuery(BaseModel):
     query: str | None = None
     entity_path: str | None = None
     entity_paths: list[str] | None = None
+    # Widens *entity_path* from an exact match to that path and everything
+    # beneath it, per amfs_core.scope.covers: "a/b" then reaches "a/b/c" but
+    # never "a/bc". Off by default because a caller naming an exact key means
+    # it; the callers that want this are the ones deriving a scope rather than
+    # being handed one, such as a session-opening briefing on a repo root.
+    include_descendants: bool = False
     min_confidence: float = 0.0
     max_confidence: float | None = None
     agent_id: str | None = None

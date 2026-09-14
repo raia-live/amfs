@@ -77,16 +77,52 @@ class PathLayout:
             result.append(f)
         return result
 
+    def is_key_dir(self, directory: Path) -> bool:
+        """Whether *directory* holds an entry's versions rather than more path.
+
+        A key directory is the one that directly contains ``v001_current.json``
+        and its siblings. That is the only structural marker separating the two
+        kinds of directory, since both are just names on disk.
+        """
+        if not directory.is_dir():
+            return False
+        return any(_VERSION_ANY_RE.match(f.name) for f in directory.iterdir() if f.is_file())
+
     def all_entity_paths(self) -> list[str]:
-        """Return all entity paths in the namespace."""
+        """Return all entity paths in the namespace, at any depth.
+
+        Entity paths are hierarchical and ``entity_dir`` maps them straight onto
+        nested directories, so ``a/b`` is stored at ``<ns>/a/b``. A single level
+        of ``iterdir`` therefore reported ``a`` and never ``a/b``, and since the
+        callers that enumerate the store all start here, an entry written to a
+        nested path was invisible to every one of them — to ``list(None)``, and
+        so to the base ``search`` built on it, while a direct ``list("a/b")``
+        found it perfectly well. Writes were fine; only enumeration was blind.
+
+        A directory can be both at once: with entity ``a`` holding key ``b`` and
+        entity ``a/b`` holding key ``c``, ``<ns>/a/b`` is a key directory of
+        ``a`` and an entity directory of ``a/b``. So the walk descends into key
+        directories too rather than treating them as leaves.
+        """
         ns = self.namespace_dir
         if not ns.exists():
             return []
+
         paths: list[str] = []
-        for entity_dir in sorted(ns.iterdir()):
-            if entity_dir.is_dir():
-                paths.append(entity_dir.name)
-        return paths
+
+        def walk(directory: Path, prefix: str) -> None:
+            holds_keys = False
+            for child in sorted(directory.iterdir()):
+                if not child.is_dir():
+                    continue
+                if self.is_key_dir(child):
+                    holds_keys = True
+                walk(child, f"{prefix}/{child.name}" if prefix else child.name)
+            if holds_keys and prefix:
+                paths.append(prefix)
+
+        walk(ns, "")
+        return sorted(paths)
 
     def all_keys(self, entity_path: str) -> list[str]:
         """Return all key names for an entity."""
