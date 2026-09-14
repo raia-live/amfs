@@ -64,6 +64,12 @@ _LAST_REUSE_VALUE: ContextVar[dict[str, Any] | None] = ContextVar(
 _LAST_MEMORY_GAP: ContextVar[dict[str, Any] | None] = ContextVar(
     "amfs_last_memory_gap", default=None
 )
+#: The scope facts the last write came back with, for the same reason as the two
+#: above: ``write()`` has to return a MemoryEntry, so anything else the server
+#: said travels beside it rather than in it.
+_LAST_SCOPE: ContextVar[dict[str, Any] | None] = ContextVar(
+    "amfs_last_scope", default=None
+)
 
 
 def _parse_entry(data: dict[str, Any]) -> MemoryEntry:
@@ -191,6 +197,18 @@ class HttpAdapter(AdapterABC):
             return None
         return entry
 
+    #: Whether writes ask the server for the scope block. On by default, unlike
+    #: the server-side flag: it costs the caller nothing extra now that it rides
+    #: on the write request instead of a second one, and a client that never
+    #: shows it loses only an aggregate. Set AMFS_WRITE_SCOPE=0 to opt out.
+    @property
+    def _want_scope(self) -> bool:
+        import os
+
+        return os.environ.get("AMFS_WRITE_SCOPE", "1").lower() not in (
+            "0", "false", "off", "no",
+        )
+
     def write(self, entry: MemoryEntry) -> MemoryEntry:
         body = {
             "entity_path": entry.entity_path,
@@ -207,8 +225,21 @@ class HttpAdapter(AdapterABC):
             # match the decision trace that recorded the write.
             "session_id": entry.provenance.session_id,
         }
+        if self._want_scope:
+            body["include_scope"] = True
         data = self._post("/api/v1/entries", body)
+        # Always assign, so a write to a fresh scope — or one served by a server
+        # too old to compute it — clears the previous write's block instead of
+        # leaving it to be reported against this one. Same rule as the reuse
+        # block; the failure it avoids is reporting neighbours that belong to a
+        # different entity path.
+        _LAST_SCOPE.set(data.get("scope") if isinstance(data, dict) else None)
         return _parse_entry(data)
+
+    @property
+    def _last_scope(self) -> dict[str, Any] | None:
+        """Scope facts from the write most recently made *in this context*."""
+        return _LAST_SCOPE.get()
 
     def list(
         self,

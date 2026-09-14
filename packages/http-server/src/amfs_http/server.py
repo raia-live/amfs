@@ -1052,6 +1052,71 @@ async def entry_quality(
     }
 
 
+async def _scope_block(
+    entity_path: str,
+    key: str,
+    *,
+    branch: str = "main",
+    request: Request | None = None,
+    agent_id: str | None = None,
+) -> dict[str, Any] | None:
+    """What is already stored beside a write, for handing back to the agent.
+
+    The factual half of the read gap. An agent writes far more than it reads, and
+    the cheapest thing that changes that is telling it, at the moment it writes,
+    that "six entries are already here and four have never been read back" — a
+    statement about its own store, carrying no instruction. Returned as data in a
+    tool result, so it reaches every client rather than only the ones that
+    support hooks.
+
+    Computed here rather than by the caller, and that is the whole design. The
+    gateway used to ask separately, which is a second ``GET /api/v1/entries`` and
+    therefore a third billed op on every write — enough of a cost that the
+    feature shipped switched off and stayed off. Inline it is one aggregate in a
+    request that was already happening, so nothing new is metered and the block
+    can simply be on.
+
+    ``None`` when there are no neighbours: a scope containing only the entry just
+    written has nothing to report, and an empty block would read as a finding.
+
+    Two filters apply, and they answer different questions. *agent_id* goes to
+    the adapter, which counts an entry only if it is shared or this agent wrote
+    it — the rule ``AgentMemory.list`` enforces, which an aggregate that skips
+    ``list`` would otherwise drop. The per-user visibility filter below then
+    narrows the key sample further where an account separates its users. The
+    first cannot be replaced by the second: it is inactive on most deployments,
+    and only ever touched the sample, never the counts.
+    """
+    try:
+        adapter = _async_adapter if _async_adapter is not None else _get_memory()._adapter
+        counts = adapter.scope_counts(
+            entity_path, exclude_key=key, branch=branch, agent_id=agent_id
+        )
+        if inspect.isawaitable(counts):
+            counts = await counts
+    except Exception:  # noqa: BLE001 - a write must not fail on its own footnote
+        logger.debug("scope block failed for %s", entity_path, exc_info=True)
+        return None
+
+    if not counts or not counts.get("existing_entries"):
+        return None
+
+    # Visibility is applied to the key sample, which is the only part that names
+    # anything. The counts describe the namespace the caller just wrote into.
+    vis = _get_visibility_filter(request) if request is not None else None
+    if vis is not None and vis.should_filter():
+        try:
+            visible = {
+                e.key for e in vis.filter_entries(
+                    _get_memory()._adapter.list(entity_path, branch=branch)
+                )
+            }
+            counts = {**counts, "keys": [k for k in counts.get("keys", []) if k in visible]}
+        except Exception:  # noqa: BLE001 - drop the sample rather than leak it
+            counts = {**counts, "keys": []}
+    return counts
+
+
 @app.post("/api/v1/entries")
 async def write_entry(
     req: WriteRequest,
@@ -1279,7 +1344,23 @@ async def write_entry(
 
         _bg_executor.submit(_bg_write_side_effects)
 
-    return _entry_to_response(entry)
+    out = _entry_to_response(entry)
+    if req.include_scope:
+        # Taken from the entry just written rather than the request or the
+        # tagger: the tagger is restored to its previous identity by this point,
+        # and req.agent_id is optional, while provenance records who the write
+        # was actually attributed to. That is the identity whose private
+        # neighbours may be counted.
+        scope = await _scope_block(
+            req.entity_path,
+            req.key,
+            branch=_branch,
+            request=request,
+            agent_id=getattr(getattr(entry, "provenance", None), "agent_id", None),
+        )
+        if scope is not None:
+            out["scope"] = scope
+    return out
 
 
 @app.get("/api/v1/entries")

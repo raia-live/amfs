@@ -953,11 +953,25 @@ def amfs_write(
 
     evaluator = _get_quality_evaluator()
     quality_report = None
-    try:
-        existing_entries = mem.list(entity_path)
-        existing_keys = [e.key for e in existing_entries if e.key != key]
-    except Exception:
-        existing_keys = []
+    # The server now returns the scope facts with the write itself, and its key
+    # sample is the same thing the evaluator wants for missing_pattern_refs. Use
+    # it when it is there and skip the extra list() — a second round trip that
+    # over HTTP is another request, and on the hosted surface another billed op,
+    # for something the write already answered.
+    # getattr rather than attribute access: the floor in pyproject keeps these
+    # versions together, but this package's own history records a release that
+    # went out without a dependency's feature, and amfs_write is too central to
+    # break over a footnote. Same rule the server applies to the block it
+    # computes — a failure costs the scope line, never the write.
+    scope = getattr(mem, "last_scope", None)
+    if scope:
+        existing_keys = list(scope.get("keys") or [])
+    else:
+        try:
+            existing_entries = mem.list(entity_path)
+            existing_keys = [e.key for e in existing_entries if e.key != key]
+        except Exception:
+            existing_keys = []
     try:
         quality_report = evaluator.evaluate(
             parsed_value,
@@ -974,6 +988,14 @@ def amfs_write(
     result: dict[str, Any] = {"entry": _serialize_entry(entry)}
     if quality_report is not None:
         result["quality"] = quality_report.model_dump(mode="json")
+    # Stated as counts and keys, with nothing said about what to do with them.
+    # An agent acts on relevance, and "four of these have never been read" is a
+    # fact about its own store; an instruction to go and read them would be
+    # server text directing the host, which is the one thing the connector
+    # directories object to. This is why the block is data in a tool result
+    # rather than an instruction, and why it reaches every client.
+    if scope:
+        result["scope"] = scope
     result["next"] = (
         "Saved. You — or your agents in any other tool on this account — can recall this "
         "later just by asking in plain language; call amfs_retrieve(query=\"...\") "

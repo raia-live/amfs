@@ -2129,6 +2129,65 @@ class PostgresAdapter(AdapterABC):
                 (self._namespace, branch, entity_path, key),
             )
 
+    def scope_counts(
+        self,
+        entity_path: str,
+        *,
+        exclude_key: str | None = None,
+        branch: str = "main",
+        key_limit: int = 8,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """One aggregate instead of loading every sibling to count it.
+
+        The sync twin of the async adapter's override, and the same reasoning:
+        see :meth:`AdapterABC.scope_counts` for what this answers, and that
+        override for why counting in SQL rather than in Python over ``list()``.
+
+        Columns are aliased and read by name because this pool's row factory is
+        ``dict_row`` — the same rule, and the same reason, as ``reuse_summary``
+        below.
+
+        ``shared OR agent_id = %s`` is the visibility rule, and it is here for a
+        specific reason: skipping ``list()`` also skips the filter ``list()``
+        applied, so the aggregate has to carry it itself or a private entry
+        belonging to another agent turns up in ``keys``. A NULL *agent_id*
+        compares as unknown rather than true, so passing nothing counts shared
+        entries only — the safe direction.
+        """
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """SELECT count(*) AS total,
+                          count(*) FILTER (WHERE coalesce(recall_count, 0) = 0)
+                              AS never_read
+                     FROM amfs_memory_entries
+                    WHERE namespace = %s AND branch = %s AND entity_path = %s
+                      AND superseded_at IS NULL
+                      AND (%s::text IS NULL OR key <> %s)
+                      AND (shared OR agent_id = %s::text)""",
+                (self._namespace, branch, entity_path, exclude_key, exclude_key,
+                 agent_id),
+            ).fetchone()
+            keys = [
+                r["key"] for r in conn.execute(
+                    """SELECT key FROM amfs_memory_entries
+                        WHERE namespace = %s AND branch = %s AND entity_path = %s
+                          AND superseded_at IS NULL
+                          AND (%s::text IS NULL OR key <> %s)
+                          AND (shared OR agent_id = %s::text)
+                        ORDER BY key LIMIT %s""",
+                    (self._namespace, branch, entity_path, exclude_key,
+                     exclude_key, agent_id, key_limit),
+                ).fetchall()
+            ]
+
+        return {
+            "entity_path": entity_path,
+            "existing_entries": int(row["total"]) if row else 0,
+            "never_read": int(row["never_read"]) if row else 0,
+            "keys": keys,
+        }
+
     def record_reuse_event(
         self,
         entity_path: str,
