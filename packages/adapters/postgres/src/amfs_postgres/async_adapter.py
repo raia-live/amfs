@@ -38,6 +38,7 @@ from amfs_core.models import (
 
 from amfs_postgres.adapter import (
     _EXCLUDE_SHARED_PATHS,
+    _REUSE_EVENT_INSERT_SQL,
     PostgresAdapter,
     pool_bounds,
     connection_options,
@@ -934,3 +935,45 @@ class AsyncPostgresAdapter:
                      AND superseded_at IS NULL""",
                 (self._namespace, branch, entity_path, key),
             )
+
+    async def record_reuse_event(
+        self,
+        entity_path: str,
+        key: str,
+        *,
+        branch: str = "main",
+        entry_version: int | None = None,
+        written_by: str | None = None,
+        reused_by: str | None = None,
+        est_tokens_saved: int = 0,
+        surface: str | None = None,
+    ) -> None:
+        """Record that one memory was credited as reused, with when and by whom.
+
+        The companion to ``increment_recall_count``, which keeps the running
+        total. A total cannot say when reuse happened, which agent did it, or
+        whether the reader is the author, and those are what every user-facing
+        claim about reuse rests on. See ``amfs_reuse_events`` in schema.sql.
+
+        Swallows its own failures. This is diagnostic bookkeeping attached to a
+        read that has already answered correctly, so it must never be the reason
+        that read fails.
+        """
+        try:
+            async with self._pool.connection() as conn:
+                await conn.execute(
+                    _REUSE_EVENT_INSERT_SQL,
+                    (
+                        self._namespace,
+                        branch,
+                        entity_path,
+                        key,
+                        entry_version,
+                        written_by,
+                        reused_by,
+                        max(int(est_tokens_saved or 0), 0),
+                        surface,
+                    ),
+                )
+        except Exception:
+            logger.debug("reuse event not recorded for %s/%s", entity_path, key, exc_info=True)
