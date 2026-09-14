@@ -184,6 +184,42 @@ class ReadTracker:
             "written_by": entry.provenance.agent_id,
         }
 
+    def record_surfaced(
+        self,
+        entity_path: str,
+        key: str,
+        *,
+        version: int,
+        value: str,
+        confidence: float,
+        memory_type: str | None = None,
+        written_by: str | None = None,
+    ) -> None:
+        """Record a read of an entry that arrived already-materialised.
+
+        ``record`` needs a ``MemoryEntry``, which a briefing does not return: it
+        returns digests whose ``hot_context`` carries the entry's text and
+        confidence but is not the entry object. Re-reading to get one would
+        itself book a recall, and the lookup that reports a read must not be one
+        — the distinction amfs#257 was opened over.
+
+        Same fields as ``record`` writes, so a briefing-sourced causal entry is
+        indistinguishable downstream from a directly-read one. Confidence is
+        snapshotted here rather than resolved at commit time, because what a
+        later reader needs to know is how sure the entry looked *when it was
+        acted on*.
+        """
+        ek = f"{entity_path}/{key}"
+        self._reads[ek] = datetime.now(timezone.utc)
+        self._versions[ek] = version
+        self._entries[ek] = {
+            "value": value,
+            "confidence": confidence,
+            "version": version,
+            "memory_type": memory_type or "fact",
+            "written_by": written_by,
+        }
+
     def record_context(
         self,
         label: str,

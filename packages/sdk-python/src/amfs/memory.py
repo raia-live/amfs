@@ -2087,10 +2087,11 @@ class AgentMemory:
             if credit_reuse:
                 kwargs["credit_reuse"] = True
             try:
-                return adapter_briefing(**kwargs)
+                digests = adapter_briefing(**kwargs)
             except TypeError:
                 kwargs.pop("credit_reuse", None)
-                return adapter_briefing(**kwargs)
+                digests = adapter_briefing(**kwargs)
+            return self._book_briefing_lineage(digests, credit_reuse)
 
         resolved_agent = agent_id or self.agent_id
         resolved_branch = branch or self._branch
@@ -2104,11 +2105,14 @@ class AgentMemory:
                 adapter=self._adapter,
                 namespace=self.namespace,
             )
-            return service.briefing(
-                entity_path=entity_path,
-                agent_id=resolved_agent,
-                limit=limit,
-                branch=resolved_branch,
+            return self._book_briefing_lineage(
+                service.briefing(
+                    entity_path=entity_path,
+                    agent_id=resolved_agent,
+                    limit=limit,
+                    branch=resolved_branch,
+                ),
+                credit_reuse,
             )
 
         # Fallback: amfs_cortex not installed but adapter supports list_digests
@@ -2118,12 +2122,80 @@ class AgentMemory:
         if not callable(list_digests_fn):
             return []
 
-        return _score_digests(
-            list_digests_fn(namespace=self.namespace, branch=resolved_branch),
-            entity_path=entity_path,
-            agent_id=resolved_agent,
-            limit=limit,
+        return self._book_briefing_lineage(
+            _score_digests(
+                list_digests_fn(namespace=self.namespace, branch=resolved_branch),
+                entity_path=entity_path,
+                agent_id=resolved_agent,
+                limit=limit,
+            ),
+            credit_reuse,
         )
+
+    def _book_briefing_lineage(self, digests: list, credit_reuse: bool) -> list:
+        """Book the briefing's surfaced knowledge as a read, for lineage.
+
+        Closes an asymmetry that left the loop open for the workflow the docs
+        actually prescribe. ``retrieve`` records its top hit as a causal read, so
+        a later ``commit_outcome`` reinforces the entry that informed the work.
+        A briefing did not: amfs#400 gave it a server-side ``recall_count`` bump,
+        which is *usage*, but nothing entered the session's causal chain, which is
+        what *reinforcement* runs on. An agent that got briefed, worked, and
+        committed an outcome therefore reinforced nothing it had used — and being
+        briefed first is the documented workflow, so the agents following it were
+        exactly the ones whose memory never improved.
+
+        Off unless asked, on the same reasoning as the ``recall_count`` credit it
+        mirrors: only the caller knows whether this briefing is an agent about to
+        act or a dashboard panel rendering for a human.
+
+        Capped at ``REUSE_CREDIT_K`` over the de-duplicated ``hot_context`` in
+        digest order, which is deliberately the same rule and the same order the
+        server credits, so lineage names the entry whose recall count moved
+        rather than a different one. Only ``hot_context`` counts: the narrative
+        is a synthesis *about* entries, and crediting it would attribute an
+        outcome to text the agent never read.
+        """
+        if not credit_reuse or not digests:
+            return digests
+
+        from amfs_core.aggregates import REUSE_CREDIT_K
+
+        seen: set[tuple[str, str]] = set()
+        booked = 0
+        for digest in digests:
+            if booked >= REUSE_CREDIT_K:
+                break
+            summary = getattr(digest, "summary", None) or {}
+            if not isinstance(summary, dict):
+                continue
+            for item in summary.get("hot_context") or []:
+                if booked >= REUSE_CREDIT_K:
+                    break
+                if not isinstance(item, dict):
+                    continue
+                entity_path, key = item.get("entity_path"), item.get("key")
+                if not entity_path or not key or (entity_path, key) in seen:
+                    continue
+                seen.add((entity_path, key))
+                try:
+                    self._read_tracker.record_surfaced(
+                        str(entity_path),
+                        str(key),
+                        # A digest compiled before the version field was carried
+                        # has none. Default to 1 rather than skipping: a causal
+                        # link to the wrong version still names the right entry,
+                        # and dropping it would silently reopen the loop.
+                        version=int(item.get("version") or 1),
+                        value=str(item.get("value") or ""),
+                        confidence=float(item.get("confidence") or 0.0),
+                        memory_type=item.get("memory_type"),
+                        written_by=item.get("agent"),
+                    )
+                except Exception:  # noqa: BLE001 - lineage must never fail a briefing
+                    continue
+                booked += 1
+        return digests
 
     # ------------------------------------------------------------------
     # Scoped access
