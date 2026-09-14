@@ -960,6 +960,12 @@ class AsyncPostgresAdapter:
 
         The key sample is bounded in SQL rather than after the fact, so a large
         scope costs the same as a small one.
+
+        Every column is aliased and read by name, for the reason spelled out on
+        the sync adapter's reuse aggregate: this pool's row factory is
+        ``dict_row``, so positional access raises ``KeyError``, and the caller
+        swallows exceptions to protect the write it decorates — which would turn
+        the mistake into a scope block that silently never appears.
         """
         async with self._pool.connection() as conn:
             cur = await conn.execute(
@@ -982,14 +988,12 @@ class AsyncPostgresAdapter:
                 (self._namespace, branch, entity_path, exclude_key, exclude_key,
                  key_limit),
             )
-            keys = [r[0] for r in await cur.fetchall()]
+            keys = [r["key"] for r in await cur.fetchall()]
 
-        total = int(row[0]) if row else 0
-        never_read = int(row[1]) if row else 0
         return {
             "entity_path": entity_path,
-            "existing_entries": total,
-            "never_read": never_read,
+            "existing_entries": int(row["total"]) if row else 0,
+            "never_read": int(row["never_read"]) if row else 0,
             "keys": keys,
         }
 
