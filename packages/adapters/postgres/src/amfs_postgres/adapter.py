@@ -70,6 +70,7 @@ from amfs_core.models import (
     ToolCall,
     TraceEntry,
 )
+from amfs_core.scope import descendants_sql
 
 try:
     from psycopg_pool import ConnectionPool as _ConnectionPool
@@ -1951,8 +1952,13 @@ class PostgresAdapter(AdapterABC):
             conditions.append("is_artifact IS NOT TRUE")
 
         if query.entity_path is not None:
-            conditions.append("entity_path = %s")
-            params.append(query.entity_path)
+            if query.include_descendants:
+                clause, clause_params = descendants_sql("entity_path", query.entity_path)
+                conditions.append(clause)
+                params.extend(clause_params)
+            else:
+                conditions.append("entity_path = %s")
+                params.append(query.entity_path)
         else:
             conditions.append(_EXCLUDE_SHARED_PATHS)
         if query.min_confidence > 0:
@@ -2794,12 +2800,11 @@ class PostgresAdapter(AdapterABC):
             conditions.append("agent_id = ANY(%s)")
             params.append(list(agent_ids))
         if entity_path:
-            # Descendants included: a/b covers a/b/c but never a/bc, which is
-            # why this is an equality OR a prefix-with-separator rather than a
-            # bare LIKE 'a/b%'.
-            prefix = entity_path.rstrip("/")
-            conditions.append("(entity_path = %s OR entity_path LIKE %s)")
-            params.extend([prefix, prefix + "/%"])
+            # Descendants included: a/b covers a/b/c but never a/bc. The rule
+            # and its LIKE escaping live in amfs_core.scope.
+            clause, clause_params = descendants_sql("entity_path", entity_path)
+            conditions.append(clause)
+            params.extend(clause_params)
         else:
             # Same reasoning as entity_summaries: unscoped, this groups by
             # entity_path, so a shared namespace's topics would be listed as

@@ -70,6 +70,10 @@ class SearchRequest(BaseModel):
     # When True (default) artifacts are demoted to the bottom of results; when
     # False they are excluded entirely.
     include_artifacts: bool = True
+    # Widens entity_path to that path and everything beneath it. Off by default
+    # so an existing caller's exact-match query keeps returning exactly what it
+    # did; see amfs_core.scope for the covering rule.
+    include_descendants: bool = False
 
 
 class AggregateRequest(BaseModel):
