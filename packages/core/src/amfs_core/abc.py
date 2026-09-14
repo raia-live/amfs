@@ -625,6 +625,41 @@ class AdapterABC(ABC):
         leave the default no-op.
         """
 
+    def scope_counts(
+        self,
+        entity_path: str,
+        *,
+        exclude_key: str | None = None,
+        branch: str = "main",
+        key_limit: int = 8,
+    ) -> "dict[str, Any]":
+        """How much is stored beside a given entry, and how much of it is unread.
+
+        Answers "six entries are already here, and four of them have never been
+        read back" — a fact about the caller's own store, which is what a write
+        can hand back to give an agent a reason to retrieve without telling it
+        to. *exclude_key* leaves out the entry the caller just wrote, since it is
+        not one of its own neighbours.
+
+        The Python form, over :meth:`list`. Adapters with a query language
+        override this with a single aggregate: counting is all this needs, and
+        loading every sibling's full value to count them is wasteful on a scope
+        with three hundred entries. Both forms are held to the same answer by a
+        test that runs one fixture through each.
+        """
+        entries = [
+            e for e in self.list(entity_path, branch=branch)
+            if e.key != exclude_key
+        ]
+        return {
+            "entity_path": entity_path,
+            "existing_entries": len(entries),
+            # A stored recall_count of 0 is the signal: written, never read back.
+            "never_read": sum(1 for e in entries if not getattr(e, "recall_count", 0)),
+            # Bounded so a large scope cannot dominate the reply it rides in.
+            "keys": [e.key for e in entries][:key_limit],
+        }
+
     # ── Tiered memory ─────────────────────────────────────────────────
 
     def update_tiers(
