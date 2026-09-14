@@ -2171,6 +2171,7 @@ class PostgresAdapter(AdapterABC):
         since: datetime,
         limit: int = 10,
         visible_agents: Collection[str] | None = None,
+        agent: str | None = None,
     ) -> dict[str, Any]:
         """What memory has been reused since a point in time, and by whom.
 
@@ -2191,6 +2192,17 @@ class PostgresAdapter(AdapterABC):
         agent read this memory", so the caller may see it exactly when that agent
         is theirs to see. Rows with no reader are excluded under scoping, because
         an unattributed read cannot be shown to belong to this caller.
+
+        ``agent`` narrows the whole window to one agent AS READER, for a page about
+        that agent. It is a filter on top of ``visible_agents``, never instead of
+        it: asking about an agent the caller may not see must answer nothing rather
+        than answer freely, so both predicates apply.
+
+        Filtering here rather than in the caller is the point of the parameter. A
+        page that asked for the whole account and kept the rows naming its agent
+        would be filtering a list already cut to ``limit`` by reuse volume, so a
+        quiet agent's handoffs would be missing — and indistinguishable from that
+        agent having none.
         """
         empty: dict[str, Any] = {
             "reuses": 0,
@@ -2209,6 +2221,13 @@ class PostgresAdapter(AdapterABC):
         if visible_agents is not None:
             scope = " AND reused_by = ANY(%s)"
             scope_params = (list(visible_agents),)
+        if agent:
+            # Composed with the visibility scope above, not substituted for it, so
+            # naming an agent can only ever narrow what a caller may see.
+            if visible_agents is not None and agent not in visible_agents:
+                return empty
+            scope += " AND reused_by = %s"
+            scope_params = (*scope_params, agent)
 
         try:
             # Every column is aliased and read by name: the pool's row factory is

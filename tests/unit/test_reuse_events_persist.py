@@ -504,6 +504,144 @@ def test_scoping_filters_on_the_reader_in_every_query():
         assert ["mine"] in params, "the scope must actually be bound"
 
 
+def test_an_adapter_predating_the_agent_filter_degrades_instead_of_failing():
+    """The pairing this guards is real, not hypothetical.
+
+    ``http-server`` declares no dependency on the adapter package — it duck-types
+    whatever backend it is handed — so a self-hosted install can upgrade one and
+    not the other. Passing an unknown keyword would raise ``TypeError`` and take
+    out the endpoint entirely, including the account-wide answer that still works
+    perfectly. Only the narrowed question is refused.
+    """
+    import asyncio
+
+    from amfs_http import server as srv
+
+    class _OldAdapter:
+        def reuse_summary(
+            self, *, since: Any, limit: int = 10, visible_agents: Any = None
+        ) -> dict[str, Any]:
+            return {"reuses": 3, "memories_reused": 1}
+
+    class _Memory:
+        _adapter = _OldAdapter()
+
+    class _State:
+        visibility_filter = None
+
+    class _EndpointRequest(_Request):
+        state = _State()
+
+    original = srv._get_memory
+    srv._get_memory = lambda: _Memory()  # type: ignore[assignment]
+    try:
+        narrowed = asyncio.run(srv.reuse_summary(_EndpointRequest(), agent="some-agent"))
+        account_wide = asyncio.run(srv.reuse_summary(_EndpointRequest()))
+    finally:
+        srv._get_memory = original  # type: ignore[assignment]
+
+    assert narrowed["available"] is False
+    assert narrowed["agent"] == "some-agent"
+    assert "one agent" in narrowed["reason"]
+
+    # The half that still works is untouched.
+    assert account_wide["available"] is True
+    assert account_wide["reuses"] == 3
+
+
+def _sql_capturing_adapter() -> tuple[Any, list[tuple[str, tuple]]]:
+    """An adapter whose every query is captured instead of executed."""
+    from amfs_postgres.adapter import PostgresAdapter
+
+    seen: list[tuple[str, tuple]] = []
+
+    class _Cur:
+        def execute(self, sql: str, params: Any = None) -> None:
+            seen.append((sql, params))
+
+        def fetchone(self) -> dict[str, Any]:
+            return {}
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return []
+
+        def __enter__(self) -> _Cur:
+            return self
+
+        def __exit__(self, *a: Any) -> None:
+            return None
+
+    class _Conn:
+        def cursor(self, *a: Any, **kw: Any) -> _Cur:
+            return _Cur()
+
+        def __enter__(self) -> _Conn:
+            return self
+
+        def __exit__(self, *a: Any) -> None:
+            return None
+
+    class _Pool:
+        def connection(self) -> _Conn:
+            return _Conn()
+
+    adapter = object.__new__(PostgresAdapter)
+    adapter._pool = _Pool()
+    adapter._namespace = "rt"
+    return adapter, seen
+
+
+def test_naming_an_agent_filters_every_query_on_the_reader():
+    """A page about one agent must be answered by the database, not the caller.
+
+    Each list is cut to ``limit`` by reuse volume before it is returned, so a
+    caller that asked for the account and kept the rows naming its agent would
+    lose a quiet agent's reuse entirely — and could not tell that apart from the
+    agent having none.
+    """
+    adapter, seen = _sql_capturing_adapter()
+    adapter.reuse_summary(since=datetime.now(UTC) - timedelta(days=7), agent="one-agent")
+
+    assert len(seen) == 4, "totals, top, by_agent and recent_cross_surface"
+    for sql, params in seen:
+        assert "reused_by = %s" in sql, f"unfiltered query answers about everyone: {sql[:80]}"
+        assert "one-agent" in params, "the agent must actually be bound"
+
+
+def test_naming_an_agent_narrows_the_visible_scope_and_never_replaces_it():
+    """Both predicates apply, so naming an agent cannot widen what a caller sees."""
+    adapter, seen = _sql_capturing_adapter()
+    adapter.reuse_summary(
+        since=datetime.now(UTC) - timedelta(days=7),
+        visible_agents={"mine"},
+        agent="mine",
+    )
+
+    for sql, params in seen:
+        assert "reused_by = ANY(%s)" in sql, "the visibility scope must survive"
+        assert "reused_by = %s" in sql, "the agent filter must apply too"
+        assert ["mine"] in params and "mine" in params
+
+
+def test_asking_about_an_agent_the_caller_cannot_see_answers_nothing():
+    """The case that would otherwise be a within-account read of another user's agent.
+
+    Without this, the two predicates would contradict each other and the SQL would
+    match nothing anyway — but relying on that is relying on a coincidence of
+    clause order. Refusing up front is the guarantee.
+    """
+    adapter, seen = _sql_capturing_adapter()
+    summary = adapter.reuse_summary(
+        since=datetime.now(UTC) - timedelta(days=7),
+        visible_agents={"mine"},
+        agent="someone-elses",
+    )
+
+    assert seen == [], "no query should be issued at all"
+    assert summary["reuses"] == 0
+    assert summary["recent_cross_surface"] == []
+
+
 def test_an_empty_string_reader_is_excluded_from_every_claim():
     """Defence in depth for rows an older writer may already have stored.
 
