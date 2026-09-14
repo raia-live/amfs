@@ -2129,6 +2129,50 @@ class PostgresAdapter(AdapterABC):
                 (self._namespace, branch, entity_path, key),
             )
 
+    def scope_counts(
+        self,
+        entity_path: str,
+        *,
+        exclude_key: str | None = None,
+        branch: str = "main",
+        key_limit: int = 8,
+    ) -> dict[str, Any]:
+        """One aggregate instead of loading every sibling to count it.
+
+        The sync twin of the async adapter's override, and the same reasoning:
+        see :meth:`AdapterABC.scope_counts` for what this answers, and that
+        override for why counting in SQL rather than in Python over ``list()``.
+        """
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """SELECT count(*) AS total,
+                          count(*) FILTER (WHERE coalesce(recall_count, 0) = 0)
+                              AS never_read
+                     FROM amfs_memory_entries
+                    WHERE namespace = %s AND branch = %s AND entity_path = %s
+                      AND superseded_at IS NULL
+                      AND (%s::text IS NULL OR key <> %s)""",
+                (self._namespace, branch, entity_path, exclude_key, exclude_key),
+            ).fetchone()
+            keys = [
+                r[0] for r in conn.execute(
+                    """SELECT key FROM amfs_memory_entries
+                        WHERE namespace = %s AND branch = %s AND entity_path = %s
+                          AND superseded_at IS NULL
+                          AND (%s::text IS NULL OR key <> %s)
+                        ORDER BY key LIMIT %s""",
+                    (self._namespace, branch, entity_path, exclude_key,
+                     exclude_key, key_limit),
+                ).fetchall()
+            ]
+
+        return {
+            "entity_path": entity_path,
+            "existing_entries": int(row[0]) if row else 0,
+            "never_read": int(row[1]) if row else 0,
+            "keys": keys,
+        }
+
     def record_reuse_event(
         self,
         entity_path: str,

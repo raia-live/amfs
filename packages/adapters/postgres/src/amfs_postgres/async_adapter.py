@@ -942,6 +942,57 @@ class AsyncPostgresAdapter:
                 (self._namespace, branch, entity_path, key),
             )
 
+    async def scope_counts(
+        self,
+        entity_path: str,
+        *,
+        exclude_key: str | None = None,
+        branch: str = "main",
+        key_limit: int = 8,
+    ) -> dict[str, Any]:
+        """One aggregate instead of loading every sibling to count it.
+
+        See :meth:`AdapterABC.scope_counts` for what this answers and why. The
+        base class does it in Python over ``list()``, which means fetching every
+        sibling's full value in order to count rows and ignore the values — fine
+        for a handful, wasteful on a scope with hundreds, and this runs inline on
+        the write path where the latency is charged to the caller.
+
+        The key sample is bounded in SQL rather than after the fact, so a large
+        scope costs the same as a small one.
+        """
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT count(*) AS total,
+                          count(*) FILTER (WHERE coalesce(recall_count, 0) = 0)
+                              AS never_read
+                     FROM amfs_memory_entries
+                    WHERE namespace = %s AND branch = %s AND entity_path = %s
+                      AND superseded_at IS NULL
+                      AND (%s::text IS NULL OR key <> %s)""",
+                (self._namespace, branch, entity_path, exclude_key, exclude_key),
+            )
+            row = await cur.fetchone()
+            cur = await conn.execute(
+                """SELECT key FROM amfs_memory_entries
+                    WHERE namespace = %s AND branch = %s AND entity_path = %s
+                      AND superseded_at IS NULL
+                      AND (%s::text IS NULL OR key <> %s)
+                    ORDER BY key LIMIT %s""",
+                (self._namespace, branch, entity_path, exclude_key, exclude_key,
+                 key_limit),
+            )
+            keys = [r[0] for r in await cur.fetchall()]
+
+        total = int(row[0]) if row else 0
+        never_read = int(row[1]) if row else 0
+        return {
+            "entity_path": entity_path,
+            "existing_entries": total,
+            "never_read": never_read,
+            "keys": keys,
+        }
+
     async def record_reuse_event(
         self,
         entity_path: str,
