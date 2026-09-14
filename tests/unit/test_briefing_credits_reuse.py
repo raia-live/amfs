@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import types
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -33,7 +33,7 @@ def _digest(scope: str, hot: list[dict]) -> Digest:
         summary={"narrative": f"about {scope}", "hot_context": hot},
         entry_count=len(hot),
         source_agents=["a"],
-        compiled_at=datetime.now(timezone.utc),
+        compiled_at=datetime.now(UTC),
         namespace="default",
         branch="main",
     )
@@ -42,11 +42,17 @@ def _digest(scope: str, hot: list[dict]) -> Digest:
 class _RecordingAdapter:
     """Counts increments without needing a database."""
 
-    def __init__(self) -> None:
+    def __init__(self, entry=None) -> None:
         self.credited: list[tuple[str, str]] = []
+        self.reads: list[tuple[str, str]] = []
+        self._entry = entry
 
     def increment_recall_count(self, entity_path: str, key: str, **_kw) -> None:
         self.credited.append((entity_path, key))
+
+    def read(self, entity_path: str, key: str, **_kw):
+        self.reads.append((entity_path, key))
+        return self._entry
 
 
 class _FakeMemory:
@@ -111,7 +117,7 @@ class TestBriefingCreditsReuse:
             summary={"narrative": "no hot context here", "key_facts": ["a fact"]},
             entry_count=3,
             source_agents=["a"],
-            compiled_at=datetime.now(timezone.utc),
+            compiled_at=datetime.now(UTC),
             namespace="default",
             branch="main",
         )
@@ -157,6 +163,65 @@ class TestBriefingCreditsReuse:
                             lambda: _FakeMemory(digests, _Exploding()))
         out = _call(True)
         assert out["total"] == 1
+
+    def test_bumping_the_count_also_reports_the_reuse(self, monkeypatch):
+        """A credited briefing must produce the reuse block, not just the counter.
+
+        Bugbot caught this on the first cut: recall_count was incremented and
+        _attach_reuse_value was never called, so no amfs_reuse_events row was
+        written and no X-SenseLab-Value header was set. The counter moved, the
+        agent that briefed first still saw no value line, and the event table
+        drifted out of step with the count it is supposed to explain — which
+        undoes the reason for the change.
+        """
+        seen: dict = {}
+
+        def _spy(response, request, *, credited, hits, surface=None, branch="main"):
+            seen.update(credited=credited, hits=hits, surface=surface)
+
+        adapter = _RecordingAdapter(entry="the-entry-object")
+        digests = [_digest("looptest/deploy", [
+            {"entity_path": "looptest/deploy", "key": "top", "value": "v"},
+        ])]
+        monkeypatch.setattr(server, "_async_adapter", None, raising=False)
+        monkeypatch.setattr(server, "_get_memory", lambda: _FakeMemory(digests, adapter))
+        monkeypatch.setattr(server, "_attach_reuse_value", _spy)
+        _call(True)
+        assert seen.get("hits") == 1, "the credited read must be reported"
+        assert seen.get("surface") == "briefing"
+        assert seen.get("credited") == "the-entry-object", (
+            "the block describes an entry, so the entry has to be passed"
+        )
+
+    def test_reads_the_entry_without_crediting_that_read(self, monkeypatch):
+        """The lookup that reports a read must not itself count as one.
+
+        It goes through the adapter, never engine.read, and happens before the
+        bump so the block reports the count as it stood before this reuse.
+        """
+        adapter = _RecordingAdapter(entry="e")
+        digests = [_digest("looptest/deploy", [
+            {"entity_path": "looptest/deploy", "key": "top", "value": "v"},
+        ])]
+        monkeypatch.setattr(server, "_async_adapter", None, raising=False)
+        monkeypatch.setattr(server, "_get_memory", lambda: _FakeMemory(digests, adapter))
+        _call(True)
+        assert adapter.reads == [("looptest/deploy", "top")]
+        # One credit only: the read did not add a second.
+        assert adapter.credited == [("looptest/deploy", "top")]
+
+    def test_reports_nothing_when_there_was_nothing_to_credit(self, monkeypatch):
+        """No hot context, no bump, and so no reuse claimed either."""
+        called: list = []
+        monkeypatch.setattr(server, "_async_adapter", None, raising=False)
+        monkeypatch.setattr(server, "_get_memory",
+                            lambda: _FakeMemory([], _RecordingAdapter()))
+        monkeypatch.setattr(
+            server, "_attach_reuse_value",
+            lambda *a, **k: called.append(k.get("hits")),
+        )
+        _call(True)
+        assert called == [0], "hits must be 0 so no reuse is reported"
 
     def test_deduplicates_an_entry_surfaced_by_two_digests(self, monkeypatch):
         adapter = _RecordingAdapter()

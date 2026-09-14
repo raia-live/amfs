@@ -1990,8 +1990,15 @@ def amfs_briefing(
         credit_reuse=True,
     )
     if digests:
+        # Wrapped in an object rather than returned as a bare list, because the
+        # reuse block has to travel somewhere and a list has no room for it. The
+        # synthesized fallback below already answers with an object, so a caller
+        # has always had to handle both shapes.
         return json.dumps(
-            [d.model_dump(mode="json") for d in digests],
+            _with_reuse_value(mem, {
+                "count": len(digests),
+                "digests": [d.model_dump(mode="json") for d in digests],
+            }),
             default=str,
         )
 

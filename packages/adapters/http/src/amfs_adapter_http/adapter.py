@@ -858,4 +858,9 @@ class HttpAdapter(AdapterABC):
         if credit_reuse:
             params["credit_reuse"] = "true"
         data = self._get("/api/v1/briefing", **params)
+        # A credited briefing is a credited read, so it carries the reuse header
+        # like any other. Unconditional: _capture_reuse_value always assigns, so
+        # an uncredited briefing correctly clears any earlier read's block rather
+        # than leaving it to be reported against this one.
+        self._capture_reuse_value()
         return [Digest.model_validate(d) for d in data.get("digests", [])]
