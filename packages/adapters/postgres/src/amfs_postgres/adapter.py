@@ -2142,6 +2142,10 @@ class PostgresAdapter(AdapterABC):
         The sync twin of the async adapter's override, and the same reasoning:
         see :meth:`AdapterABC.scope_counts` for what this answers, and that
         override for why counting in SQL rather than in Python over ``list()``.
+
+        Columns are aliased and read by name because this pool's row factory is
+        ``dict_row`` — the same rule, and the same reason, as ``reuse_summary``
+        below.
         """
         with self._pool.connection() as conn:
             row = conn.execute(
@@ -2155,7 +2159,7 @@ class PostgresAdapter(AdapterABC):
                 (self._namespace, branch, entity_path, exclude_key, exclude_key),
             ).fetchone()
             keys = [
-                r[0] for r in conn.execute(
+                r["key"] for r in conn.execute(
                     """SELECT key FROM amfs_memory_entries
                         WHERE namespace = %s AND branch = %s AND entity_path = %s
                           AND superseded_at IS NULL
@@ -2168,8 +2172,8 @@ class PostgresAdapter(AdapterABC):
 
         return {
             "entity_path": entity_path,
-            "existing_entries": int(row[0]) if row else 0,
-            "never_read": int(row[1]) if row else 0,
+            "existing_entries": int(row["total"]) if row else 0,
+            "never_read": int(row["never_read"]) if row else 0,
             "keys": keys,
         }
 

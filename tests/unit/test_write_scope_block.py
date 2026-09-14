@@ -97,6 +97,138 @@ class TestScopeCounts:
         assert a.scope_counts("repo/topic")["existing_entries"] == 1
 
 
+class _DictCursor:
+    """A cursor that returns mappings, which is what ``dict_row`` produces."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _DictConn:
+    def __init__(self, responses: list[list[dict]]) -> None:
+        self._responses = list(responses)
+        self.queries: list[tuple] = []
+
+    def execute(self, sql, params=None):
+        self.queries.append((sql, params))
+        return _DictCursor(self._responses.pop(0) if self._responses else [])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _DictPool:
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def connection(self):
+        return self._conn
+
+
+class _AsyncDictCursor:
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+
+    async def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    async def fetchall(self):
+        return list(self._rows)
+
+
+class _AsyncDictConn:
+    def __init__(self, responses: list[list[dict]]) -> None:
+        self._responses = list(responses)
+
+    async def execute(self, sql, params=None):
+        return _AsyncDictCursor(self._responses.pop(0) if self._responses else [])
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _AsyncDictPool:
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def connection(self):
+        return self._conn
+
+
+class TestPostgresReadsItsColumnsByName:
+    """The SQL forms must read rows as mappings, not by position.
+
+    Both pools set ``row_factory=dict_row``, so ``row[0]`` raises KeyError — and
+    the caller swallows exceptions to protect the write it decorates, which turns
+    that mistake into a scope block that silently never appears. Exactly the
+    invisible failure this feature exists to end, so it is worth a test that
+    drives the real method rather than a stand-in adapter. The first cut of this
+    change had the bug, and the fakes above are the reason it was not caught:
+    they never went near the SQL.
+
+    The precedent is in the same file as the code — ``reuse_summary`` carries a
+    comment about this having happened before.
+    """
+
+    _AGG = [{"total": 6, "never_read": 4}]
+    _KEYS = [{"key": "alpha"}, {"key": "beta"}]
+
+    def test_sync_adapter(self):
+        pg = pytest.importorskip("amfs_postgres.adapter")
+        a = object.__new__(pg.PostgresAdapter)
+        a._pool = _DictPool(_DictConn([self._AGG, self._KEYS]))
+        a._namespace = "default"
+        got = a.scope_counts("repo/topic", exclude_key="just-written")
+        assert got == {
+            "entity_path": "repo/topic", "existing_entries": 6,
+            "never_read": 4, "keys": ["alpha", "beta"],
+        }
+
+    def test_async_adapter(self):
+        pg = pytest.importorskip("amfs_postgres.async_adapter")
+        a = object.__new__(pg.AsyncPostgresAdapter)
+        a._pool = _AsyncDictPool(_AsyncDictConn([self._AGG, self._KEYS]))
+        a._namespace = "default"
+        got = asyncio.run(a.scope_counts("repo/topic", exclude_key="just-written"))
+        assert got["existing_entries"] == 6
+        assert got["never_read"] == 4
+        assert got["keys"] == ["alpha", "beta"]
+
+    def test_sql_excludes_the_entry_just_written(self):
+        """The exclusion has to be in the query, not applied afterwards."""
+        pg = pytest.importorskip("amfs_postgres.adapter")
+        conn = _DictConn([self._AGG, self._KEYS])
+        a = object.__new__(pg.PostgresAdapter)
+        a._pool = _DictPool(conn)
+        a._namespace = "default"
+        a.scope_counts("repo/topic", exclude_key="just-written")
+        for _sql, params in conn.queries:
+            assert "just-written" in params
+
+    def test_the_key_sample_is_bounded_in_sql(self):
+        """A LIMIT, so a three-hundred-entry scope costs what a small one does."""
+        pg = pytest.importorskip("amfs_postgres.adapter")
+        conn = _DictConn([self._AGG, self._KEYS])
+        a = object.__new__(pg.PostgresAdapter)
+        a._pool = _DictPool(conn)
+        a._namespace = "default"
+        a.scope_counts("repo/topic", key_limit=8)
+        assert any("LIMIT" in sql.upper() for sql, _ in conn.queries)
+        assert any(8 in (p or ()) for _, p in conn.queries)
+
+
 server = pytest.importorskip("amfs_http.server")
 
 
