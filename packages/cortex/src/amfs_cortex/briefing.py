@@ -279,6 +279,10 @@ class BriefingService:
                 # share a key under different topics, and "which of these is
                 # about deploys" is unanswerable from the key alone.
                 "entity_path": e.entity_path,
+                # Carried so a briefing can be booked as a real read: causal
+                # lineage pins the version that was actually surfaced, and
+                # without it the caller would have to re-read to find out.
+                "version": e.version,
                 "value": e.value,
                 "confidence": round(e.confidence, 3),
                 "agent": e.provenance.agent_id,
@@ -333,6 +337,10 @@ class BriefingService:
                 # share a key under different topics, and "which of these is
                 # about deploys" is unanswerable from the key alone.
                 "entity_path": e.entity_path,
+                # Carried so a briefing can be booked as a real read: causal
+                # lineage pins the version that was actually surfaced, and
+                # without it the caller would have to re-read to find out.
+                "version": e.version,
                 "value": e.value,
                 "confidence": round(e.confidence, 3),
                 "agent": e.provenance.agent_id,
