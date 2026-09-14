@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -3596,6 +3597,7 @@ async def reuse_summary(
     request: Request,
     days: int = 7,
     limit: int = 10,
+    agent: str | None = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Reuse over a window: how much, of what, by which agents, and across which.
@@ -3611,6 +3613,13 @@ async def reuse_summary(
     Scoped to the agents the caller may see, like ``/stats`` and ``/agents``. RLS
     keeps accounts apart, but within one account a non-admin user sees only some
     agents, and these rows name entity paths, keys and agent ids.
+
+    ``agent`` narrows the window to one agent as READER, for a page about that
+    agent. It narrows on top of the visibility scope and never widens it. Doing it
+    here rather than letting the caller filter matters: the lists below are cut to
+    ``limit`` by reuse volume first, so a caller keeping the rows that name its
+    agent would silently lose a quiet agent's reuse and could not tell that apart
+    from the agent having none.
     """
     days = max(1, min(int(days or 7), 365))
     limit = max(1, min(int(limit or 10), 100))
@@ -3627,10 +3636,37 @@ async def reuse_summary(
             "available": False,
             "reason": "reuse events need the Postgres adapter",
         }
-    summary = summarise(
-        since=since, limit=limit, visible_agents=_visible_agent_ids(request)
-    )
-    return {"since": since.isoformat(), "days": days, "available": True, **summary}
+    agent = agent or None
+    kwargs: dict[str, Any] = {
+        "since": since,
+        "limit": limit,
+        "visible_agents": _visible_agent_ids(request),
+    }
+    if agent is not None:
+        # This server carries no dependency on the adapter package — it duck-types
+        # whatever backend it was handed — so an adapter predating the parameter is
+        # a real deployment, not a hypothetical. Passing the keyword blindly would
+        # raise TypeError and take out the whole endpoint, including the
+        # account-wide answer that still works. Refusing just the narrowed question
+        # keeps a stale pairing degraded rather than broken.
+        if "agent" not in inspect.signature(summarise).parameters:
+            return {
+                "since": since.isoformat(),
+                "days": days,
+                "available": False,
+                "agent": agent,
+                "reason": "this backend cannot scope reuse to one agent",
+            }
+        kwargs["agent"] = agent
+
+    summary = summarise(**kwargs)
+    return {
+        "since": since.isoformat(),
+        "days": days,
+        "available": True,
+        "agent": agent,
+        **summary,
+    }
 
 
 @app.get("/api/v1/agents/{agent_id:path}/memory-graph")
