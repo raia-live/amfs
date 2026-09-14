@@ -178,6 +178,62 @@ class TestRecordSurfacedMatchesRecord:
         assert direct._entries["myapp/auth/decision-x"] == surfaced._entries["myapp/auth/decision-x"]
         assert direct._versions == surfaced._versions
 
+
+class TestTheSnapshotIsTheValueTheEntryHeld:
+    """``MemoryEntry.value`` is ``Any``, and coercing it rewrote the record.
+
+    The snapshot is what a trace carries and what a tuned model learns from, so a
+    value that differs from the one the entry held is a wrong training example
+    rather than a cosmetic difference.
+    """
+
+    @pytest.mark.parametrize("value", [
+        {"threshold": 0.8, "region": "us-east"},   # structured: str() gave a repr
+        ["step-one", "step-two"],
+        0,        # falsy: `or ""` collapsed each of these
+        False,
+        [],
+        {},
+        "",
+    ])
+    def test_a_briefing_books_the_value_unchanged(self, value):
+        mem = _memory([_digest([{
+            "entity_path": "myapp/auth", "key": "decision-x",
+            "version": 2, "value": value, "confidence": 0.7,
+        }])])
+
+        mem.briefing(entity_path="myapp/auth", credit_reuse=True)
+
+        snapshot = mem._read_tracker.entry_snapshot("myapp/auth/decision-x")
+        assert snapshot["value"] == value
+        assert type(snapshot["value"]) is type(value)
+
+    def test_a_structured_value_matches_what_a_direct_read_stores(self):
+        from datetime import UTC, datetime
+
+        from amfs_core.engine import ReadTracker
+        from amfs_core.models import MemoryEntry, MemoryType, Provenance
+
+        value = {"runbook": ["drain", "deploy"], "auto": False}
+
+        direct = ReadTracker()
+        direct.record(MemoryEntry(
+            entity_path="myapp/auth", key="decision-x", value=value, version=2,
+            confidence=0.7, memory_type=MemoryType.FACT,
+            provenance=Provenance(agent_id="peer", session_id="s",
+                                  written_at=datetime.now(UTC)),
+        ))
+
+        mem = _memory([_digest([{
+            "entity_path": "myapp/auth", "key": "decision-x",
+            "version": 2, "value": value, "confidence": 0.7,
+            "memory_type": "fact", "agent": "peer",
+        }])])
+        mem.briefing(entity_path="myapp/auth", credit_reuse=True)
+
+        key = "myapp/auth/decision-x"
+        assert mem._read_tracker.entry_snapshot(key) == direct.entry_snapshot(key)
+
     def test_memory_type_defaults_rather_than_crashing(self):
         from amfs_core.engine import ReadTracker
 

@@ -190,7 +190,11 @@ class ReadTracker:
         key: str,
         *,
         version: int,
-        value: str,
+        #: ``Any``, matching ``MemoryEntry.value`` and what ``record`` stores. It
+        #: was annotated ``str``, and a caller coercing to satisfy that turned a
+        #: structured value into its repr — the snapshot has to be the value the
+        #: entry held, whatever type that is.
+        value: Any,
         confidence: float,
         memory_type: str | None = None,
         written_by: str | None = None,
