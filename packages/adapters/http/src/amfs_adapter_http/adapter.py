@@ -844,6 +844,7 @@ class HttpAdapter(AdapterABC):
         entity_path: str | None = None,
         agent_id: str | None = None,
         limit: int = 10,
+        credit_reuse: bool = False,
     ) -> list[Digest]:
         """Proxy briefing to the HTTP server which has full Cortex access."""
         params: dict[str, Any] = {"limit": limit}
@@ -851,5 +852,10 @@ class HttpAdapter(AdapterABC):
             params["entity_path"] = entity_path
         if agent_id:
             params["agent_id"] = agent_id
+        # Sent only when asked for. The server treats a briefing as a real read
+        # of what it surfaces, and that is true for an agent about to act on it
+        # and false for a panel rendering it for a human, so the caller decides.
+        if credit_reuse:
+            params["credit_reuse"] = "true"
         data = self._get("/api/v1/briefing", **params)
         return [Digest.model_validate(d) for d in data.get("digests", [])]

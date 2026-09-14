@@ -1,6 +1,6 @@
 [project]
 name = "amfs-mcp-server"
-version = "0.7.21"
+version = "0.7.22"
 description = "AMFS MCP Server — expose Agent Memory as MCP tools for Cursor and Claude Code"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -10,7 +10,11 @@ dependencies = [
     # TypeError on the one call agents are told to make at the end of every task.
     # An unbounded dependency is how the equivalent skew reached Pro users.
     # 0.5.7 adds AgentMemory.record_action, which amfs_record_action calls.
-    "amfs>=0.5.12",
+    # 0.5.13 is a real floor of exactly the kind the first paragraph describes:
+    # amfs_briefing now passes credit_reuse=True, and AgentMemory.briefing only
+    # accepts that keyword from 0.5.13. Below it, the call agents are told to
+    # make FIRST in every session raises TypeError.
+    "amfs>=0.5.13",
     # Direct floor at the import site. amfs_export and amfs_aggregate do
     # `from amfs_core.aggregates import coerce_value, iter_rows, aggregate_entries`.
     # Those were added in amfs-core 0.3.15 — but 0.3.14 was already published
@@ -47,7 +51,13 @@ dependencies = [
     # exactly like a session that had nothing to report.
     # 0.1.15 is bookkeeping in the same sense: the adapter learned to forward
     # include_descendants, which this server never asks for.
-    "amfs-adapter-http>=0.1.15",
+    # 0.1.16 sits between the two categories. It is the first adapter that
+    # forwards credit_reuse, and AgentMemory retries without the keyword when
+    # the adapter does not know it — so an older pairing does not raise, it just
+    # silently books no reuse. Nothing fails; briefed entries simply stay at
+    # recall_count 0 for ever, which is the exact bug this release closes and is
+    # invisible from the outside. Floored so a resolver cannot reintroduce it.
+    "amfs-adapter-http>=0.1.16",
     "fastmcp>=2.0",
 ]
 

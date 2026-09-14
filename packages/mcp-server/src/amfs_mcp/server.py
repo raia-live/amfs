@@ -1983,6 +1983,11 @@ def amfs_briefing(
         entity_path=entity_path,
         agent_id=agent_id,
         limit=limit,
+        # A tool call is an agent about to act on what it is handed, so this is
+        # a real read and books reuse of the knowledge surfaced. The HTTP
+        # endpoint cannot assume that for itself — it also serves the dashboard
+        # panel — so the assertion has to come from here.
+        credit_reuse=True,
     )
     if digests:
         return json.dumps(
