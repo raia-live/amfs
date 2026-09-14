@@ -353,27 +353,60 @@ def _normalise_rerank(scores: list[float]) -> list[float]:
     entry above one the reranker preferred by 2.73 logits which also carried 12
     validated outcomes, which is the opposite of the intent.
 
-    Subtracting the median moves the batch to where the logistic can still
-    discriminate, without rescaling by the spread — so unlike min-max, a small
-    spread stays small. The two behaviours the ranking needs both survive:
-    7.2307 against 7.2206 centres to ±0.005 and maps to a 0.0025 difference, a
-    tie that reinforcement decides, while a 2.7 spread centres to ±1.35 and maps
-    to 0.59, which no confidence gap can overturn. The crossover sits near half
-    a logit. The median rather than the mean because one far-outlying candidate
-    should not drag the centre off the cluster that is actually being compared.
+    So the result carries two things, because it has to answer two questions at
+    once. ``anchor`` is the plain logistic of the batch's median — *how good is
+    this batch at all* — and the centred term is each member's standing among its
+    peers, measured where the logistic can still discriminate. Added together and
+    clamped, they give a relevance term that keeps an absolutely strong batch high
+    while still separating its members.
+
+    Both halves are load-bearing, and dropping either has been tried. Without the
+    centred term, differences vanish in the tails, as above. Without the anchor,
+    the median maps to exactly 0.5 whatever the batch is worth — and the reranker
+    only scores the top ``rerank_top_n``, after which step 8 re-sorts the head
+    together with a tail still carrying raw bi-encoder similarity. A uniformly
+    strong head would then sit around 0.5 while an unjudged tail entry kept 0.9,
+    so the reranker's own favourites would lose to candidates it never saw. The
+    anchor is what keeps the two groups on one scale.
+
+    Peer standing is scaled into the room the anchor leaves rather than added and
+    clamped, so nothing is thrown away at the edges: a candidate above its median
+    moves into the space between the anchor and 1, one below it into the space
+    between the anchor and 0. Clamping instead would have cost half of a measured
+    2.7-logit gap, and worse, would have flattened the best few of a strong batch
+    into an exact tie — the one place the reranker's judgement matters most.
+
+    The median, not the mean, so one far-outlying candidate cannot drag the
+    centre off the cluster being compared. Every step is monotone in the score,
+    so this can compress differences but never reorder them.
+
+    Worked through: 7.2307 against 7.2206 is worth 0.002, a tie confidence
+    settles; 9.5 against 6.8 — measured live, where the flat logistic gave
+    0.0015 — is worth 0.59, which no confidence gap overturns; a batch at 9.0
+    stays above 0.94 so an unjudged tail at 0.9 does not displace it; and a batch
+    at -9 stays below 0.06, correctly losing to a tail the reranker never rejected.
     """
     if not scores:
         return []
     if all(0.0 <= s <= 1.0 for s in scores):
         return list(scores)
+
+    def _logistic(x: float) -> float:
+        # Guard the exponential: math.exp overflows around -745.
+        return 1.0 / (1.0 + math.exp(-max(-700.0, min(700.0, x))))
+
     ordered = sorted(scores)
     mid, odd = divmod(len(ordered), 2)
     centre = ordered[mid] if odd else (ordered[mid - 1] + ordered[mid]) / 2.0
-    # Guard the exponential: math.exp overflows around -745.
-    return [
-        1.0 / (1.0 + math.exp(-max(-700.0, min(700.0, s - centre))))
-        for s in scores
-    ]
+    anchor = _logistic(centre)
+    out: list[float] = []
+    for s in scores:
+        # Signed standing among peers, in (-0.5, 0.5) and undistorted by where
+        # the batch sits, because the logistic sees only the deviation.
+        deviation = _logistic(s - centre) - 0.5
+        headroom = (1.0 - anchor) if deviation > 0 else anchor
+        out.append(anchor + 2.0 * deviation * headroom)
+    return out
 
 
 _immutable_trace_store = None

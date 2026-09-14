@@ -15,6 +15,7 @@ exercise the exact serving-path logic.
 from __future__ import annotations
 
 import asyncio
+import math
 import types
 from datetime import datetime, timedelta, timezone
 
@@ -362,13 +363,40 @@ class TestRerankNormalisation:
     so a future change that satisfies one can silently break the other.
     """
 
-    def test_a_spread_is_worth_the_same_wherever_the_batch_sits(self):
-        """The defect in one line: position must not change what a gap is worth."""
+    def test_a_gap_still_counts_for_something_wherever_the_batch_sits(self):
+        """The original defect: position all but erased what a gap was worth.
+
+        Not equality. Clamping takes some of the difference back when the batch
+        is already extreme, which is unavoidable in a bounded range and lands in
+        the region where compressing toward a tie is the right answer anyway.
+        The claim is that a real gap stays decisive rather than becoming noise:
+        the flat logistic gave 0.0015 here, against a 0.06 confidence gap.
+        """
         near_zero = server._normalise_rerank([1.0, -1.0])
         far_out = server._normalise_rerank([21.0, 19.0])
-        assert abs(near_zero[0] - near_zero[1]) == pytest.approx(
-            abs(far_out[0] - far_out[1]), abs=1e-9
-        )
+        assert abs(near_zero[0] - near_zero[1]) > 0.4
+        assert abs(far_out[0] - far_out[1]) > 0.4
+
+    def test_a_strong_batch_stays_high_for_the_tail_to_be_compared_against(self):
+        """The reranker only scores the top N, and the rest keep raw similarity.
+
+        Step 8 re-sorts the reranked head together with that tail, so the two
+        have to share a scale. Centring alone put the median of any batch at
+        exactly 0.5 however good it was, which would drop the reranker's own
+        favourites below entries it never judged.
+        """
+        strong = server._normalise_rerank([9.1, 9.0, 8.9])
+        assert min(strong) > 0.5, strong
+        assert max(strong) > 0.95, strong
+
+    def test_a_weak_batch_stays_low_so_the_tail_can_win(self):
+        """The same property in the direction that should lose.
+
+        If the cross-encoder rejects everything it was given, an unjudged tail
+        candidate outranking them is correct, not a bug.
+        """
+        weak = server._normalise_rerank([-9.1, -9.0, -8.9])
+        assert max(weak) < 0.5, weak
 
     def test_a_small_spread_stays_small(self):
         """The anti-min-max constraint, which the fix must not trade away.
@@ -394,10 +422,21 @@ class TestRerankNormalisation:
         assert server._normalise_rerank([0.99, 0.01]) == [0.99, 0.01]
 
     def test_degenerate_batches(self):
+        """With nothing to compare against, a score is worth its absolute value.
+
+        One candidate, or several identical ones, means the centred term is
+        exactly 0.5 and the anchor is all that remains — which is the plain
+        logistic, and the right answer: there is no peer comparison to make, so
+        only "how good is this at all" is left to say.
+        """
         assert server._normalise_rerank([]) == []
-        assert server._normalise_rerank([12.0]) == [pytest.approx(0.5)]
-        assert server._normalise_rerank([4.0, 4.0]) == [
-            pytest.approx(0.5), pytest.approx(0.5)
+        assert server._normalise_rerank([12.0]) == [pytest.approx(1.0, abs=1e-5)]
+        # Not [0.0, 0.0], which is inside 0..1 and so read as calibrated
+        # probabilities and returned untouched by the branch above.
+        same = server._normalise_rerank([4.0, 4.0])
+        assert same[0] == same[1] == pytest.approx(1 / (1 + math.exp(-4.0)))
+        assert server._normalise_rerank([-3.0, -3.0]) == [
+            pytest.approx(1 / (1 + math.exp(3.0))), pytest.approx(1 / (1 + math.exp(3.0)))
         ]
 
     def test_extreme_logits_do_not_overflow(self):
