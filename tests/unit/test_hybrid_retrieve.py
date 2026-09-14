@@ -219,6 +219,73 @@ class TestHybridUnion:
         assert out[0]["entity_path"] + "/" + out[0]["key"] == low.entry_key
         assert "rerank" in out[0]["_breakdown"]
 
+    def test_rerank_does_not_discard_confidence_on_a_near_tie(self, monkeypatch):
+        """The reranker supplies the relevance term; it does not overrule the rest.
+
+        Measured on dev before this was fixed: the cross-encoder replaced the
+        whole composite, so a memory discredited by eight critical_failure
+        outcomes (confidence 0.9834 -> 0.268) still came back first, ahead of a
+        near-identical memory validated twelve times at confidence 1.0. The
+        logits behind that were 7.2307 and 7.2206 — a distinction the model does
+        not mean to draw, and the only thing deciding the order.
+        """
+        discredited = _entry("looptest/deploy", "migration-order",
+                             "Run schema migrations before the deploy, never after.",
+                             confidence=0.268)
+        validated = _entry("looptest/deploy", "migration-sequence",
+                           "Schema migrations must run ahead of the deploy, not after it.",
+                           confidence=1.0)
+        fake = _FakeAdapter(semantic_hits=[(discredited, 0.807), (validated, 0.847)],
+                            lexical_hits=[])
+        monkeypatch.setattr(server, "_async_adapter", fake)
+
+        class _RR:
+            available = True
+
+            def rerank(self, query, docs):
+                # The real logits, in the order the docs are handed over.
+                return [7.2307 if "never after" in d else 7.2206 for d in docs]
+
+        monkeypatch.setattr(server, "_retrieval_reranker", _RR())
+        out = _run(_request(), RetrieveRequest(query="run migrations before or after deploy",
+                                               limit=10))
+        keys = [d["key"] for d in out]
+        assert keys[0] == "migration-sequence", (
+            "a memory validated by outcomes must outrank one the outcomes "
+            f"discredited when the cross-encoder is all but indifferent, got {keys}"
+        )
+        # Logits are squashed, not min-maxed: two near-identical scores must stay
+        # near-identical rather than being stretched to the ends of the range.
+        norms = [d["_breakdown"]["rerank_normalised"] for d in out]
+        assert abs(norms[0] - norms[1]) < 0.01, norms
+
+    def test_rerank_keeps_confidence_decisive_for_identical_text(self, monkeypatch):
+        """Same text, different confidence: the better-validated one wins.
+
+        The cleanest form of the dev finding — two entries whose text was
+        byte-identical, at confidence 0.5 and 1.0, came back with the 0.5 one
+        ranked higher, on logits of 5.4855 against 5.3320. Identical text cannot
+        differ in relevance, so that ordering was pure cross-encoder jitter
+        deciding a question confidence had already answered.
+        """
+        text = "Migrations belong before the deploy, not after it."
+        weak = _entry("looptest/deploy", "aaa-note", text, confidence=0.5)
+        strong = _entry("looptest/deploy", "zzz-note", text, confidence=1.0)
+        fake = _FakeAdapter(semantic_hits=[(weak, 0.8192), (strong, 0.8192)],
+                            lexical_hits=[])
+        monkeypatch.setattr(server, "_async_adapter", fake)
+
+        class _RR:
+            available = True
+
+            def rerank(self, query, docs):
+                # The observed logits: jitter favouring the weaker entry.
+                return [5.4855 if "aaa-note" in d else 5.3320 for d in docs]
+
+        monkeypatch.setattr(server, "_retrieval_reranker", _RR())
+        out = _run(_request(), RetrieveRequest(query="migrations before deploy", limit=10))
+        assert [d["key"] for d in out][0] == "zzz-note"
+
     def test_query_rewriter_expands(self, monkeypatch):
         calls = {}
 
