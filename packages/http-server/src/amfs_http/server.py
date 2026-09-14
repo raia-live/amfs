@@ -325,66 +325,61 @@ def _doc_text_for_rerank(entry: MemoryEntry) -> str:
     return text[:2000]
 
 
-def _normalise_rerank(scores: list[float]) -> list[float]:
-    """Map cross-encoder output onto the 0..1 range the relevance term expects.
+def _rerank_relevance(scores: list[float], sims: list[float]) -> list[float]:
+    """Turn cross-encoder output into the relevance term the composite expects.
 
     The reranker is injected, so its output range is a matter of observation
     rather than contract. The serving model emits logits — dev returns values
     from about -11 to +7.2 — while some implementations return a probability
-    already. Both are accepted: if every score in the batch is inside 0..1 it
-    is taken as calibrated, otherwise the batch is squashed with a logistic,
-    which is the function the model's training objective implies.
+    already. A batch entirely inside 0..1 is taken as calibrated and passed
+    through; anything else is treated as logits and handled below.
 
-    Not min-max over the batch. Min-max stretches whatever spread happens to be
-    present to fill 0..1, so the top result scores 1.0 and the bottom 0.0 no
-    matter how close together they really are — amplifying cross-encoder noise
-    into a confident-looking ordering. On dev the top two scored 7.2307 and
-    7.2206, a distinction the model plainly does not intend to draw, and min-max
-    would have turned it into the largest gap in the set.
+    This function has been wrong three times, in three different ways, and the
+    reason is that its output is sorted against candidates it never sees. Step 8
+    reranks only the top ``rerank_top_n`` and then sorts that head together with
+    a tail still scored by bi-encoder similarity. So the relevance term has to be
+    (a) sensitive to differences the cross-encoder draws, (b) insensitive to
+    where those scores happen to sit on the logit scale, and (c) commensurable
+    with a cosine similarity. The three failures were each one of those:
 
-    Centred on the batch's median, then squashed. The centring is the part that
-    matters, and it is here because the plain logistic was measured getting this
-    wrong. A logistic is steep only near zero; away from zero it flattens. So
-    where the whole batch sat far out on one tail — the cross-encoder confident
-    about *every* candidate — a large genuine difference arrived as almost
-    nothing: on dev, raw spreads of 3.04 and 6.04 survived as 0.0002 and 0.0047,
-    under 0.3% of themselves, and the confidence term then decided a comparison
-    relevance had already settled. In one measured case that put a tangential
-    entry above one the reranker preferred by 2.73 logits which also carried 12
-    validated outcomes, which is the opposite of the intent.
+    - **min-max** breaks (a) by inverting it — it stretches whatever spread is
+      present to fill 0..1, so 7.2307 against 7.2206, which the model does not
+      mean to distinguish, becomes the largest gap in the set.
+    - **a plain logistic** breaks (b). A logistic is steep only near zero, so
+      when the reranker liked everything the batch sat far out on one tail and
+      real differences vanished: measured live, raw spreads of 3.04 and 6.04
+      arrived as 0.0002 and 0.0047. A tangential entry outranked one the reranker
+      preferred by 2.73 logits that also carried twelve validated outcomes.
+    - **anchoring to the median's logistic** broke (a) again, and worse for being
+      subtle. Scaling peer standing into the room left above the anchor means
+      that when the median is a large positive logit there is no room: the
+      reranker's best candidates flattened into a tie and confidence ordered
+      them, which is the failure the previous change existed to stop.
 
-    So the result carries two things, because it has to answer two questions at
-    once. ``anchor`` is the plain logistic of the batch's median — *how good is
-    this batch at all* — and the centred term is each member's standing among its
-    peers, measured where the logistic can still discriminate. Added together and
-    clamped, they give a relevance term that keeps an absolutely strong batch high
-    while still separating its members.
+    What all three shared was an attempt to satisfy (c) by mapping a logit onto
+    0..1 and hoping the result was comparable with a cosine similarity. It is
+    not — they are different quantities, and the plain logistic only ever looked
+    comparable because saturation pinned everything near 1.0.
 
-    Both halves are load-bearing, and dropping either has been tried. Without the
-    centred term, differences vanish in the tails, as above. Without the anchor,
-    the median maps to exactly 0.5 whatever the batch is worth — and the reranker
-    only scores the top ``rerank_top_n``, after which step 8 re-sorts the head
-    together with a tail still carrying raw bi-encoder similarity. A uniformly
-    strong head would then sit around 0.5 while an unjudged tail entry kept 0.9,
-    so the reranker's own favourites would lose to candidates it never saw. The
-    anchor is what keeps the two groups on one scale.
+    So relevance stays in the bi-encoder's units and the cross-encoder *adjusts*
+    it: each candidate keeps its own similarity, shifted by its standing among
+    its peers, which is the median-centred logistic mapped to ±0.5. Head and
+    tail are then the same kind of number by construction rather than by
+    coincidence, and (a) and (b) come for free — the adjustment depends only on
+    the distance from the median, so it is identical wherever the batch sits, and
+    symmetric above and below it.
 
-    Peer standing is scaled into the room the anchor leaves rather than added and
-    clamped, so nothing is thrown away at the edges: a candidate above its median
-    moves into the space between the anchor and 1, one below it into the space
-    between the anchor and 0. Clamping instead would have cost half of a measured
-    2.7-logit gap, and worse, would have flattened the best few of a strong batch
-    into an exact tie — the one place the reranker's judgement matters most.
+    What this gives up is the idea that a high absolute logit alone should lift a
+    candidate over an unjudged one. It should not: a cross-encoder saying "all
+    thirty of these are good" has drawn no distinction to act on, and if the
+    bi-encoder prefers a thirty-first, that preference is the only evidence in
+    play. The reranker's *favourites* still clear a strong tail comfortably,
+    because ±0.5 of adjustment is far more authority than any confidence gap.
 
-    The median, not the mean, so one far-outlying candidate cannot drag the
-    centre off the cluster being compared. Every step is monotone in the score,
-    so this can compress differences but never reorder them.
-
-    Worked through: 7.2307 against 7.2206 is worth 0.002, a tie confidence
-    settles; 9.5 against 6.8 — measured live, where the flat logistic gave
-    0.0015 — is worth 0.59, which no confidence gap overturns; a batch at 9.0
-    stays above 0.94 so an unjudged tail at 0.9 does not displace it; and a batch
-    at -9 stays below 0.06, correctly losing to a tail the reranker never rejected.
+    Worked through, all at sim 0.85: 7.2307 against 7.2206 is worth 0.0025, a tie
+    confidence settles; 9.5 against 6.8 is worth 0.47, which no confidence gap
+    overturns; and in a batch of [10, 9.5, 9, 8.5, 8] the best sits 0.23 above the
+    median instead of the 0.0001 the anchored form gave it.
     """
     if not scores:
         return []
@@ -397,15 +392,12 @@ def _normalise_rerank(scores: list[float]) -> list[float]:
 
     ordered = sorted(scores)
     mid, odd = divmod(len(ordered), 2)
+    # The median, not the mean, so one far-outlying candidate cannot drag the
+    # centre off the cluster actually being compared.
     centre = ordered[mid] if odd else (ordered[mid - 1] + ordered[mid]) / 2.0
-    anchor = _logistic(centre)
     out: list[float] = []
-    for s in scores:
-        # Signed standing among peers, in (-0.5, 0.5) and undistorted by where
-        # the batch sits, because the logistic sees only the deviation.
-        deviation = _logistic(s - centre) - 0.5
-        headroom = (1.0 - anchor) if deviation > 0 else anchor
-        out.append(anchor + 2.0 * deviation * headroom)
+    for s, sim in zip(scores, sims):
+        out.append(min(1.0, max(0.0, sim + _logistic(s - centre) - 0.5)))
     return out
 
 
@@ -2032,7 +2024,11 @@ async def retrieve_entries(
             rr_scores = None
         if rr_scores and len(rr_scores) == len(head):
             raw = [float(rs) for rs in rr_scores]
-            normalised = _normalise_rerank(raw)
+            # The bi-encoder score goes in too, because what comes back is the
+            # same quantity adjusted rather than a replacement for it — which is
+            # what makes the reranked head comparable with the tail below, still
+            # carrying raw similarity, that the sort at the end mixes it into.
+            normalised = _rerank_relevance(raw, [bd["semantic"] for _, _, bd in head])
             reranked = [
                 (
                     entry,

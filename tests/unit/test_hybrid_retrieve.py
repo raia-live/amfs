@@ -257,7 +257,14 @@ class TestHybridUnion:
         )
         # Logits are squashed, not min-maxed: two near-identical scores must stay
         # near-identical rather than being stretched to the ends of the range.
-        norms = [d["_breakdown"]["rerank_normalised"] for d in out]
+        # What must be near-zero is the reranker's ADJUSTMENT, not the relevance
+        # term itself: that now starts from each entry's own bi-encoder score, and
+        # these two legitimately differ there (0.847 against 0.807). Min-max would
+        # have driven the adjustment to the ends of the range instead.
+        norms = [
+            d["_breakdown"]["rerank_normalised"] - d["_breakdown"]["semantic"]
+            for d in out
+        ]
         assert abs(norms[0] - norms[1]) < 0.01, norms
 
     def test_rerank_keeps_confidence_decisive_for_identical_text(self, monkeypatch):
@@ -363,84 +370,130 @@ class TestRerankNormalisation:
     so a future change that satisfies one can silently break the other.
     """
 
-    def test_a_gap_still_counts_for_something_wherever_the_batch_sits(self):
-        """The original defect: position all but erased what a gap was worth.
+    SIM = 0.85  # a middling bi-encoder score, so nothing clamps by accident
 
-        Not equality. Clamping takes some of the difference back when the batch
-        is already extreme, which is unavoidable in a bounded range and lands in
-        the region where compressing toward a tie is the right answer anyway.
-        The claim is that a real gap stays decisive rather than becoming noise:
-        the flat logistic gave 0.0015 here, against a 0.06 confidence gap.
+    def _rel(self, logits, sim=None):
+        sim = self.SIM if sim is None else sim
+        return server._rerank_relevance(logits, [sim] * len(logits))
+
+    def test_a_gap_is_worth_exactly_the_same_wherever_the_batch_sits(self):
+        """The defect in one line: position must not change what a gap buys.
+
+        Exact equality, which the previous two forms could not offer — the flat
+        logistic collapsed the far-out pair to 0.0010, and anchoring reduced it
+        by whatever room the anchor had left. The adjustment now depends only on
+        the distance from the median, so the batch's absolute position is
+        irrelevant by construction.
         """
-        near_zero = server._normalise_rerank([1.0, -1.0])
-        far_out = server._normalise_rerank([21.0, 19.0])
-        assert abs(near_zero[0] - near_zero[1]) > 0.4
+        near_zero = self._rel([1.0, -1.0], sim=0.5)
+        far_out = self._rel([21.0, 19.0], sim=0.5)
+        assert abs(near_zero[0] - near_zero[1]) == pytest.approx(
+            abs(far_out[0] - far_out[1]), abs=1e-9
+        )
         assert abs(far_out[0] - far_out[1]) > 0.4
 
-    def test_a_strong_batch_stays_high_for_the_tail_to_be_compared_against(self):
-        """The reranker only scores the top N, and the rest keep raw similarity.
+    def test_the_best_of_a_strong_batch_separates_from_its_median(self):
+        """The high-severity regression in the anchored form.
 
-        Step 8 re-sorts the reranked head together with that tail, so the two
-        have to share a scale. Centring alone put the median of any batch at
-        exactly 0.5 however good it was, which would drop the reranker's own
-        favourites below entries it never judged.
+        Scaling peer standing into the room above the anchor leaves no room at
+        all when the median is a large positive logit, so the reranker's best
+        candidates flattened into a tie and confidence ordered them — the exact
+        failure the change was made to stop. It survived review because every
+        test then had TWO elements, where the lower one sits below the median and
+        the gap still has somewhere to go. It needs three or more above a high
+        median to show up, which is what this pins.
         """
-        strong = server._normalise_rerank([9.1, 9.0, 8.9])
-        assert min(strong) > 0.5, strong
-        assert max(strong) > 0.95, strong
+        rel = self._rel([10.0, 9.5, 9.0, 8.5, 8.0])
+        best, median_member = rel[0], rel[2]
+        # A 1-logit lead must be worth more than a 0.3 confidence gap, which is
+        # 0.3 * 0.2 = 0.06 of score, i.e. 0.12 of relevance at semantic_weight.
+        assert best - median_member > 0.12, rel
 
-    def test_a_weak_batch_stays_low_so_the_tail_can_win(self):
+    def test_the_reranker_s_favourite_clears_an_unjudged_tail(self):
+        """Comparability with the tail, in the form that actually matters.
+
+        Only the top N are reranked; the rest keep raw similarity, and one sort
+        mixes them. So the reranker's preferred candidate has to be able to beat
+        a tail entry the reranker never saw — here one at 0.9, above the head's
+        own 0.85 similarity.
+        """
+        rel = self._rel([10.0, 9.5, 9.0, 8.5, 8.0])
+        assert max(rel) > 0.9, rel
+
+    def test_a_batch_the_reranker_rejects_stays_below_that_tail(self):
         """The same property in the direction that should lose.
 
-        If the cross-encoder rejects everything it was given, an unjudged tail
-        candidate outranking them is correct, not a bug.
+        If the cross-encoder dislikes everything it was given, an unjudged tail
+        candidate outranking them is correct rather than a bug.
         """
-        weak = server._normalise_rerank([-9.1, -9.0, -8.9])
-        assert max(weak) < 0.5, weak
+        rel = self._rel([-9.1, -9.0, -8.9], sim=0.5)
+        assert max(rel) < 0.9, rel
+
+    def test_a_uniformly_strong_batch_draws_no_distinction(self):
+        """And that is the honest answer, not a failure to preserve.
+
+        A cross-encoder scoring thirty candidates within 0.2 logits of each other
+        has said they are equivalent. There is nothing there for the ranking to
+        act on, so similarity and reinforcement decide — which is the same
+        principle as the jitter pair below, at batch scale.
+        """
+        rel = self._rel([9.1, 9.0, 8.9])
+        assert max(rel) - min(rel) < 0.06, rel
 
     def test_a_small_spread_stays_small(self):
-        """The anti-min-max constraint, which the fix must not trade away.
+        """The anti-min-max constraint, which no fix may trade away.
 
         The observed jitter pair. Min-max would send these to 1.0 and 0.0 and
         make cross-encoder noise the most decisive signal in the blend.
         """
-        norms = server._normalise_rerank([7.2307, 7.2206])
-        assert abs(norms[0] - norms[1]) < 0.01
+        rel = self._rel([7.2307, 7.2206])
+        assert abs(rel[0] - rel[1]) < 0.01
 
     def test_a_real_difference_survives(self):
-        """The other side of the same constraint: 2.7 logits is not noise."""
-        norms = server._normalise_rerank([9.5, 6.8])
-        assert abs(norms[0] - norms[1]) > 0.5
+        """The other side of that constraint: 2.7 logits is not noise."""
+        rel = self._rel([9.5, 6.8], sim=0.5)
+        assert abs(rel[0] - rel[1]) > 0.4
 
-    def test_order_is_never_changed_by_normalising(self):
+    def test_order_is_never_changed(self):
         raw = [3.1, -8.0, 7.25, 7.24, 0.0]
-        norms = server._normalise_rerank(raw)
-        assert [n for _, n in sorted(zip(raw, norms), key=lambda p: p[0])] == sorted(norms)
+        rel = self._rel(raw, sim=0.5)
+        assert [r for _, r in sorted(zip(raw, rel), key=lambda p: p[0])] == sorted(rel)
 
     def test_scores_already_calibrated_are_left_alone(self):
-        """A reranker returning probabilities is taken at its word."""
-        assert server._normalise_rerank([0.99, 0.01]) == [0.99, 0.01]
+        """A reranker returning probabilities is taken at its word.
+
+        Deliberately not adjusted against similarity: a calibrated probability is
+        already a claim on the same 0..1 footing, and this branch predates all of
+        the above.
+        """
+        assert server._rerank_relevance([0.99, 0.01], [0.5, 0.5]) == [0.99, 0.01]
 
     def test_degenerate_batches(self):
-        """With nothing to compare against, a score is worth its absolute value.
+        """With no peers, there is no standing to add, so similarity stands.
 
-        One candidate, or several identical ones, means the centred term is
-        exactly 0.5 and the anchor is all that remains — which is the plain
-        logistic, and the right answer: there is no peer comparison to make, so
-        only "how good is this at all" is left to say.
+        One candidate, or several identical ones, puts every score exactly at the
+        median, where the adjustment is zero — so each keeps its own bi-encoder
+        score. That is the right answer: the reranker has drawn no distinction,
+        so it contributes none.
         """
-        assert server._normalise_rerank([]) == []
-        assert server._normalise_rerank([12.0]) == [pytest.approx(1.0, abs=1e-5)]
-        # Not [0.0, 0.0], which is inside 0..1 and so read as calibrated
-        # probabilities and returned untouched by the branch above.
-        same = server._normalise_rerank([4.0, 4.0])
-        assert same[0] == same[1] == pytest.approx(1 / (1 + math.exp(-4.0)))
-        assert server._normalise_rerank([-3.0, -3.0]) == [
-            pytest.approx(1 / (1 + math.exp(3.0))), pytest.approx(1 / (1 + math.exp(3.0)))
+        assert server._rerank_relevance([], []) == []
+        assert server._rerank_relevance([12.0], [0.7]) == [pytest.approx(0.7)]
+        assert server._rerank_relevance([4.0, 4.0], [0.7, 0.3]) == [
+            pytest.approx(0.7), pytest.approx(0.3)
+        ]
+
+    def test_the_adjustment_cannot_leave_the_range(self):
+        """Similarity near a bound plus a large adjustment still has to land."""
+        assert server._rerank_relevance([20.0, -20.0], [0.99, 0.99]) == [
+            pytest.approx(1.0), pytest.approx(0.49)
+        ]
+        assert server._rerank_relevance([20.0, -20.0], [0.01, 0.01]) == [
+            pytest.approx(0.51), pytest.approx(0.0)
         ]
 
     def test_extreme_logits_do_not_overflow(self):
-        out = server._normalise_rerank([-2000.0, 2000.0])
+        """math.exp overflows around -745, so the exponent is bounded."""
+        out = server._rerank_relevance([-2000.0, 2000.0], [0.5, 0.5])
         assert out[0] == pytest.approx(0.0) and out[1] == pytest.approx(1.0)
 
     def test_query_rewriter_expands(self, monkeypatch):
