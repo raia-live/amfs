@@ -325,6 +325,50 @@ def _doc_text_for_rerank(entry: MemoryEntry) -> str:
     return text[:2000]
 
 
+def _logistic(x: float) -> float:
+    """Guarded: math.exp overflows around -745."""
+    return 1.0 / (1.0 + math.exp(-max(-700.0, min(700.0, x))))
+
+
+def _rerank_is_calibrated(scores: list[float]) -> bool:
+    """Whether this reranker returns probabilities rather than logits.
+
+    The reranker is injected, so its output range is observed rather than
+    contracted. Asked in one place because two callers now depend on the answer
+    and they must not disagree: a probability read as a logit, or the reverse,
+    inverts both of them.
+    """
+    return all(0.0 <= s <= 1.0 for s in scores)
+
+
+#: The cross-encoder's own decision boundary. A candidate it scores above this is
+#: one the model puts at better-than-even odds of being relevant, which is the
+#: only claim strong enough to overrule the bi-encoder's abstain floor.
+RERANK_ENDORSED = 0.5
+
+
+def _rerank_absolute(scores: list[float]) -> list[float]:
+    """The cross-encoder's opinion of each candidate on its own, 0..1.
+
+    The complement of :func:`_normalise_rerank`, and needed because that function
+    deliberately answers a different question. Normalisation reports standing
+    *within the batch*, so its top member scores high however poor the batch is:
+    measured, a candidate at logit -3.0 — the model giving it a 4.7% chance of
+    being relevant — normalises to 0.978 when its peers sit at -9, which is the
+    highest value in that set. Correct for ranking, where only order matters, and
+    useless for "is this relevant at all", where it is off by everything.
+
+    This is the plain logistic, which is the function the model's training
+    objective implies, so the result is the probability the model is asserting.
+    Batch-independent by construction: no median, no peers.
+    """
+    if not scores:
+        return []
+    if _rerank_is_calibrated(scores):
+        return list(scores)
+    return [_logistic(s) for s in scores]
+
+
 def _normalise_rerank(scores: list[float]) -> list[float]:
     """Map cross-encoder output onto the 0..1 range the relevance term expects.
 
@@ -388,13 +432,8 @@ def _normalise_rerank(scores: list[float]) -> list[float]:
     """
     if not scores:
         return []
-    if all(0.0 <= s <= 1.0 for s in scores):
+    if _rerank_is_calibrated(scores):
         return list(scores)
-
-    def _logistic(x: float) -> float:
-        # Guard the exponential: math.exp overflows around -745.
-        return 1.0 / (1.0 + math.exp(-max(-700.0, min(700.0, x))))
-
     ordered = sorted(scores)
     mid, odd = divmod(len(ordered), 2)
     centre = ordered[mid] if odd else (ordered[mid - 1] + ordered[mid]) / 2.0
@@ -2033,6 +2072,10 @@ async def retrieve_entries(
         if rr_scores and len(rr_scores) == len(head):
             raw = [float(rs) for rs in rr_scores]
             normalised = _normalise_rerank(raw)
+            # Standing within the batch decides the ranking; the model's own
+            # opinion of the candidate decides whether step 9 may discard it. Two
+            # questions, two numbers, computed here where the batch is in hand.
+            absolute = _rerank_absolute(raw)
             reranked = [
                 (
                     entry,
@@ -2040,9 +2083,12 @@ async def retrieve_entries(
                         norm, bd["recency"], bd["confidence"], bd["keyword"],
                         bd["is_artifact"],
                     ),
-                    {**bd, "rerank": rs, "rerank_normalised": norm},
+                    {**bd, "rerank": rs, "rerank_normalised": norm,
+                     "rerank_absolute": absolute_score},
                 )
-                for (entry, _, bd), rs, norm in zip(head, raw, normalised)
+                for (entry, _, bd), rs, norm, absolute_score in zip(
+                    head, raw, normalised, absolute
+                )
             ]
             # The whole list, not head-then-tail: re-scoring the head can move a
             # member of it below an entry the reranker never saw, and stitching
@@ -2053,31 +2099,34 @@ async def retrieve_entries(
     # 9. Abstain floor: trim clearly-irrelevant tail (low relevance AND no
     #    keyword match), but never drop the single best result.
     #
-    #    Relevance is the best evidence held about the entry, not the bi-encoder
-    #    alone. While step 8 *replaced* the score with the rerank, the
-    #    cross-encoder's favourite was pinned at rank one by construction and so
-    #    was always the entry this loop keeps unconditionally. Now that the
-    #    rerank only sets the relevance term, confidence and recency can put that
-    #    favourite second — and an entry the reranker rescued is precisely the
-    #    one whose bi-encoder score is low, since rescuing those is what a
-    #    reranker is for. Trimming on ``semantic`` alone would delete the
-    #    reranker's best judgement whenever it did not also win the composite,
-    #    undoing the ranking step 8 had just applied.
+    #    An entry the cross-encoder positively endorses is exempt, because this
+    #    step was otherwise undoing step 8. While step 8 *replaced* the score with
+    #    the rerank, the cross-encoder's favourite was rank one by construction,
+    #    and rank one is kept unconditionally. Now that the rerank only sets the
+    #    relevance term, confidence and recency can put that favourite second —
+    #    and an entry the reranker rescued is precisely the one whose bi-encoder
+    #    score is low, since rescuing those is what a reranker is for. So judging
+    #    on ``semantic`` alone deletes the judgement the reranker was added to
+    #    make, and can delete an entry reinforcement had promoted.
     #
-    #    The max can only keep more than the bi-encoder test alone, never less,
-    #    so abstention is unchanged wherever it was already right: a batch the
-    #    cross-encoder dislikes throughout normalises low, because the anchor in
-    #    ``_normalise_rerank`` is the logistic of the batch median, so a wholly
-    #    irrelevant candidate set still falls through the floor.
+    #    Endorsement is the *absolute* score and not the normalised one, which is
+    #    the distinction that earns the two fields. The normalised value reports
+    #    standing within the batch, so its best member scores high however poor
+    #    the batch is: measured, a candidate at logit -3.0 — a 4.7% chance of
+    #    relevance by the model's own reckoning — normalises to 0.978 against
+    #    peers at -9. Exempting on that would keep junk this floor exists to trim,
+    #    and would do it hardest in the case abstention is for, where nothing in
+    #    the batch is any good.
     floor = _retrieve_min_semantic()
     if floor > 0 and len(scored) > 1:
         kept = [scored[0]]
         for entry, score, bd in scored[1:]:
-            relevance = max(
-                float(bd.get("semantic") or 0.0),
-                float(bd.get("rerank_normalised") or 0.0),
-            )
-            if relevance < floor and not bd.get("keyword"):
+            endorsed = float(bd.get("rerank_absolute") or 0.0) >= RERANK_ENDORSED
+            if (
+                float(bd.get("semantic") or 0.0) < floor
+                and not bd.get("keyword")
+                and not endorsed
+            ):
                 continue
             kept.append((entry, score, bd))
         scored = kept
