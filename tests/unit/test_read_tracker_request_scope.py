@@ -219,3 +219,100 @@ def test_the_session_window_belongs_to_the_request(tmp_path) -> None:
     assert tracker.session_started_at == process_start, (
         "the scope's window escaped into the tracker's own state"
     )
+
+
+class TestASurfaceThatKeepsItsOwnSessionCanSaySo:
+    """``own_read_tracker_state`` is what a session-per-caller surface needs.
+
+    One ``@app.middleware("http")`` covers every path a server serves, so a
+    surface that deliberately keeps one ``AgentMemory`` per caller — and means
+    its session to outlive a single request — was silently having that session
+    emptied between requests. A read recorded by one request and an outcome
+    committed by the next never met, so the outcome reinforced nothing.
+    """
+
+    def test_a_read_survives_from_one_request_to_the_next(self) -> None:
+        from amfs_core.engine import (
+            ReadTracker,
+            own_read_tracker_state,
+            read_tracker_scope,
+        )
+
+        tracker = ReadTracker()
+
+        # Request one: a read, recorded inside the surface's own session.
+        with read_tracker_scope():
+            with own_read_tracker_state():
+                tracker.record_surfaced(
+                    "myapp/auth", "decision-x", version=1, value="v", confidence=0.7
+                )
+
+        # Request two, a fresh scope: the commit has to still see it.
+        with read_tracker_scope():
+            with own_read_tracker_state():
+                assert tracker.causal_keys == ["myapp/auth/decision-x"]
+
+    def test_without_it_the_read_is_gone_by_the_next_request(self) -> None:
+        """Pins the bug, so a regression fails here rather than in production."""
+        from amfs_core.engine import ReadTracker, read_tracker_scope
+
+        tracker = ReadTracker()
+        with read_tracker_scope():
+            tracker.record_surfaced(
+                "myapp/auth", "decision-x", version=1, value="v", confidence=0.7
+            )
+        with read_tracker_scope():
+            assert tracker.causal_keys == []
+
+    def test_the_scope_it_interrupted_comes_back(self) -> None:
+        """Nesting restores, so a shared-handle request keeps its own session."""
+        from amfs_core.engine import (
+            ReadTracker,
+            own_read_tracker_state,
+            read_tracker_scope,
+        )
+
+        shared = ReadTracker()
+        with read_tracker_scope():
+            shared.record_surfaced(
+                "myapp/auth", "request-scoped", version=1, value="v", confidence=0.7
+            )
+            with own_read_tracker_state():
+                shared.record_surfaced(
+                    "myapp/auth", "session-scoped", version=1, value="v", confidence=0.7
+                )
+                assert shared.causal_keys == ["myapp/auth/session-scoped"]
+            assert shared.causal_keys == ["myapp/auth/request-scoped"]
+
+    def test_two_callers_still_do_not_see_each_other(self) -> None:
+        """The isolation the scope provides is not what is being given up.
+
+        A session-per-caller surface holds a tracker *per caller*, so detaching
+        to each tracker's own state keeps them apart on the instance boundary
+        rather than the request one.
+        """
+        from amfs_core.engine import (
+            ReadTracker,
+            own_read_tracker_state,
+            read_tracker_scope,
+        )
+
+        alice, bob = ReadTracker(), ReadTracker()
+        with read_tracker_scope(), own_read_tracker_state():
+            alice.record_surfaced(
+                "myapp/auth", "alice-read", version=1, value="v", confidence=0.7
+            )
+        with read_tracker_scope(), own_read_tracker_state():
+            assert bob.causal_keys == []
+            assert alice.causal_keys == ["myapp/auth/alice-read"]
+
+    def test_outside_a_scope_it_changes_nothing(self) -> None:
+        """A single-agent process is already on its own state."""
+        from amfs_core.engine import ReadTracker, own_read_tracker_state
+
+        tracker = ReadTracker()
+        with own_read_tracker_state():
+            tracker.record_surfaced(
+                "myapp/auth", "decision-x", version=1, value="v", confidence=0.7
+            )
+        assert tracker.causal_keys == ["myapp/auth/decision-x"]

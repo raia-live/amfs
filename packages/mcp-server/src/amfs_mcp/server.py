@@ -36,6 +36,7 @@ from amfs import AgentMemory, MemoryType, OutcomeType, SessionMetadata
 from amfs.config import load_config_or_default
 from amfs_core.abc import AdapterABC
 from amfs_core.models import AMFSConfig, LayerConfig
+from amfs_core.reuse_value import describes_entry
 from amfs_core.quality import (
     HeuristicQualityEvaluator,
     MemoryQualityEvaluator,
@@ -527,6 +528,41 @@ def _serialize_entry(entry: Any) -> dict[str, Any]:
 LIST_VALUE_CHAR_LIMIT = 2000
 
 
+def _with_reuse_value(
+    mem: Any, payload: dict[str, Any], *, entry: Any = None
+) -> dict[str, Any]:
+    """Lead a read's answer with what the server credited for it, if anything.
+
+    Pass ``entry`` when the answer is a single memory, and the block is attached
+    only if it describes that memory. ``recall`` and ``read_from`` read the
+    current version — the read the server credits — then walk history for a
+    version by the agent in question and answer with that instead. Unchecked, the
+    block would describe the current row while the body held a different memory,
+    and a cross-surface claim would name the current row's author as someone whose
+    work you had just reused. Silence is correct there: what the server credited
+    is genuinely not what the caller was handed.
+
+    The stdio server had no value shaper at all, so a self-hoster or anyone on
+    the SDK saw nothing while the hosted surfaces showed a reuse line. That was
+    not a decision, it was the cost of the block being built client-side in two
+    copies that this server had no third copy of. Computed server-side now, so
+    forwarding it is the whole implementation.
+
+    ``None`` on the filesystem and Postgres adapters, which never reach the route
+    that credits reuse — so the key stays absent rather than reporting a zero
+    that would read as "your memory did nothing".
+
+    First key rather than last, for the same reason the gap block leads: appended
+    after a list of entries it is the first thing a client truncates.
+    """
+    block = getattr(mem, "last_reuse_value", None)
+    if not isinstance(block, dict) or not block:
+        return payload
+    if entry is not None and not describes_entry(block, entry):
+        return payload
+    return {"senselab_value": block, **payload}
+
+
 def _serialize_entries(entries: Iterable[Any]) -> list[dict[str, Any]]:
     """Serialize entries for a multi-result response, previewing long values."""
     out: list[dict[str, Any]] = []
@@ -841,7 +877,7 @@ def amfs_read(entity_path: str, key: str) -> str:
                                    "coordinates, call amfs_retrieve(query=\"<the user's words>\") to "
                                    "search by meaning instead — do NOT tell the user nothing is stored "
                                    "until you've tried amfs_retrieve."})
-    return json.dumps(_serialize_entry(entry), default=str)
+    return json.dumps(_with_reuse_value(mem, _serialize_entry(entry), entry=entry), default=str)
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
@@ -917,11 +953,25 @@ def amfs_write(
 
     evaluator = _get_quality_evaluator()
     quality_report = None
-    try:
-        existing_entries = mem.list(entity_path)
-        existing_keys = [e.key for e in existing_entries if e.key != key]
-    except Exception:
-        existing_keys = []
+    # The server now returns the scope facts with the write itself, and its key
+    # sample is the same thing the evaluator wants for missing_pattern_refs. Use
+    # it when it is there and skip the extra list() — a second round trip that
+    # over HTTP is another request, and on the hosted surface another billed op,
+    # for something the write already answered.
+    # getattr rather than attribute access: the floor in pyproject keeps these
+    # versions together, but this package's own history records a release that
+    # went out without a dependency's feature, and amfs_write is too central to
+    # break over a footnote. Same rule the server applies to the block it
+    # computes — a failure costs the scope line, never the write.
+    scope = getattr(mem, "last_scope", None)
+    if scope:
+        existing_keys = list(scope.get("keys") or [])
+    else:
+        try:
+            existing_entries = mem.list(entity_path)
+            existing_keys = [e.key for e in existing_entries if e.key != key]
+        except Exception:
+            existing_keys = []
     try:
         quality_report = evaluator.evaluate(
             parsed_value,
@@ -938,6 +988,14 @@ def amfs_write(
     result: dict[str, Any] = {"entry": _serialize_entry(entry)}
     if quality_report is not None:
         result["quality"] = quality_report.model_dump(mode="json")
+    # Stated as counts and keys, with nothing said about what to do with them.
+    # An agent acts on relevance, and "four of these have never been read" is a
+    # fact about its own store; an instruction to go and read them would be
+    # server text directing the host, which is the one thing the connector
+    # directories object to. This is why the block is data in a tool result
+    # rather than an instruction, and why it reaches every client.
+    if scope:
+        result["scope"] = scope
     result["next"] = (
         "Saved. You — or your agents in any other tool on this account — can recall this "
         "later just by asking in plain language; call amfs_retrieve(query=\"...\") "
@@ -1027,10 +1085,10 @@ def amfs_search(
                 "min_confidence": min_confidence,
             },
         })
-    return json.dumps({
+    return json.dumps(_with_reuse_value(mem, {
         "count": len(results),
         "entries": _serialize_entries(results),
-    }, default=str)
+    }), default=str)
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
@@ -1111,10 +1169,10 @@ def amfs_retrieve(
             "query": query,
             "entity_path": entity_path,
         })
-    return json.dumps({
+    return json.dumps(_with_reuse_value(mem, {
         "count": len(serialized),
         "entries": serialized,
-    }, default=str)
+    }), default=str)
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
@@ -1740,7 +1798,7 @@ def amfs_recall(entity_path: str, key: str) -> str:
                            "hint": "No entry at that exact key. Do NOT conclude nothing is stored — "
                                    "call amfs_retrieve(query=\"<the user's words>\") to search by meaning "
                                    "across everything you can see (no path/key needed)."})
-    return json.dumps(_serialize_entry(entry), default=str)
+    return json.dumps(_with_reuse_value(mem, _serialize_entry(entry), entry=entry), default=str)
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
@@ -1783,7 +1841,7 @@ def amfs_read_from(agent_id: str, entity_path: str, key: str) -> str:
     if entry is None:
         return json.dumps({"status": "not_found", "agent_id": agent_id,
                            "entity_path": entity_path, "key": key})
-    return json.dumps(_serialize_entry(entry), default=str)
+    return json.dumps(_with_reuse_value(mem, _serialize_entry(entry), entry=entry), default=str)
 
 
 @mcp.tool(tags={"extended"}, annotations={"readOnlyHint": True})
@@ -1947,10 +2005,22 @@ def amfs_briefing(
         entity_path=entity_path,
         agent_id=agent_id,
         limit=limit,
+        # A tool call is an agent about to act on what it is handed, so this is
+        # a real read and books reuse of the knowledge surfaced. The HTTP
+        # endpoint cannot assume that for itself — it also serves the dashboard
+        # panel — so the assertion has to come from here.
+        credit_reuse=True,
     )
     if digests:
+        # Wrapped in an object rather than returned as a bare list, because the
+        # reuse block has to travel somewhere and a list has no room for it. The
+        # synthesized fallback below already answers with an object, so a caller
+        # has always had to handle both shapes.
         return json.dumps(
-            [d.model_dump(mode="json") for d in digests],
+            _with_reuse_value(mem, {
+                "count": len(digests),
+                "digests": [d.model_dump(mode="json") for d in digests],
+            }),
             default=str,
         )
 

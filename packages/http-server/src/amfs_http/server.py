@@ -16,18 +16,20 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
+import math
 import os
 import re
 import secrets
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
@@ -36,7 +38,12 @@ from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
 from amfs.memory import validate_session_attributes
 from pydantic import BaseModel, Field
-from amfs_core.aggregates import REUSE_CREDIT_K
+from amfs_core.aggregates import (
+    REUSE_CREDIT_K,
+    entry_content_chars,
+    recall_tokens_for_chars,
+)
+from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
 from amfs_core.engine import read_tracker_scope
 from amfs_core.models import (
@@ -316,6 +323,90 @@ def _doc_text_for_rerank(entry: MemoryEntry) -> str:
             val = str(val)
     text = f"{entry.key}: {val}"
     return text[:2000]
+
+
+def _normalise_rerank(scores: list[float]) -> list[float]:
+    """Map cross-encoder output onto the 0..1 range the relevance term expects.
+
+    The reranker is injected, so its output range is a matter of observation
+    rather than contract. The serving model emits logits — dev returns values
+    from about -11 to +7.2 — while some implementations return a probability
+    already. Both are accepted: if every score in the batch is inside 0..1 it
+    is taken as calibrated, otherwise the batch is squashed with a logistic,
+    which is the function the model's training objective implies.
+
+    Not min-max over the batch. Min-max stretches whatever spread happens to be
+    present to fill 0..1, so the top result scores 1.0 and the bottom 0.0 no
+    matter how close together they really are — amplifying cross-encoder noise
+    into a confident-looking ordering. On dev the top two scored 7.2307 and
+    7.2206, a distinction the model plainly does not intend to draw, and min-max
+    would have turned it into the largest gap in the set.
+
+    Centred on the batch's median, then squashed. The centring is the part that
+    matters, and it is here because the plain logistic was measured getting this
+    wrong. A logistic is steep only near zero; away from zero it flattens. So
+    where the whole batch sat far out on one tail — the cross-encoder confident
+    about *every* candidate — a large genuine difference arrived as almost
+    nothing: on dev, raw spreads of 3.04 and 6.04 survived as 0.0002 and 0.0047,
+    under 0.3% of themselves, and the confidence term then decided a comparison
+    relevance had already settled. In one measured case that put a tangential
+    entry above one the reranker preferred by 2.73 logits which also carried 12
+    validated outcomes, which is the opposite of the intent.
+
+    So the result carries two things, because it has to answer two questions at
+    once. ``anchor`` is the plain logistic of the batch's median — *how good is
+    this batch at all* — and the centred term is each member's standing among its
+    peers, measured where the logistic can still discriminate. Added together and
+    clamped, they give a relevance term that keeps an absolutely strong batch high
+    while still separating its members.
+
+    Both halves are load-bearing, and dropping either has been tried. Without the
+    centred term, differences vanish in the tails, as above. Without the anchor,
+    the median maps to exactly 0.5 whatever the batch is worth — and the reranker
+    only scores the top ``rerank_top_n``, after which step 8 re-sorts the head
+    together with a tail still carrying raw bi-encoder similarity. A uniformly
+    strong head would then sit around 0.5 while an unjudged tail entry kept 0.9,
+    so the reranker's own favourites would lose to candidates it never saw. The
+    anchor is what keeps the two groups on one scale.
+
+    Peer standing is scaled into the room the anchor leaves rather than added and
+    clamped, so nothing is thrown away at the edges: a candidate above its median
+    moves into the space between the anchor and 1, one below it into the space
+    between the anchor and 0. Clamping instead would have cost half of a measured
+    2.7-logit gap, and worse, would have flattened the best few of a strong batch
+    into an exact tie — the one place the reranker's judgement matters most.
+
+    The median, not the mean, so one far-outlying candidate cannot drag the
+    centre off the cluster being compared. Every step is monotone in the score,
+    so this can compress differences but never reorder them.
+
+    Worked through: 7.2307 against 7.2206 is worth 0.002, a tie confidence
+    settles; 9.5 against 6.8 — measured live, where the flat logistic gave
+    0.0015 — is worth 0.59, which no confidence gap overturns; a batch at 9.0
+    stays above 0.94 so an unjudged tail at 0.9 does not displace it; and a batch
+    at -9 stays below 0.06, correctly losing to a tail the reranker never rejected.
+    """
+    if not scores:
+        return []
+    if all(0.0 <= s <= 1.0 for s in scores):
+        return list(scores)
+
+    def _logistic(x: float) -> float:
+        # Guard the exponential: math.exp overflows around -745.
+        return 1.0 / (1.0 + math.exp(-max(-700.0, min(700.0, x))))
+
+    ordered = sorted(scores)
+    mid, odd = divmod(len(ordered), 2)
+    centre = ordered[mid] if odd else (ordered[mid - 1] + ordered[mid]) / 2.0
+    anchor = _logistic(centre)
+    out: list[float] = []
+    for s in scores:
+        # Signed standing among peers, in (-0.5, 0.5) and undistorted by where
+        # the batch sits, because the logistic sees only the deviation.
+        deviation = _logistic(s - centre) - 0.5
+        headroom = (1.0 - anchor) if deviation > 0 else anchor
+        out.append(anchor + 2.0 * deviation * headroom)
+    return out
 
 
 _immutable_trace_store = None
@@ -886,6 +977,7 @@ async def read_entry_by_query(
     entity_path: str = Query(...),
     key: str = Query(...),
     branch: str = Query("main"),
+    response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """The same read, with the coordinates where they cannot be confused.
@@ -908,7 +1000,7 @@ async def read_entry_by_query(
     has no slash, which is most of the time, and rewriting every caller to gain
     nothing is a worse trade than leaving them alone.
     """
-    return await _read_entry(request, entity_path, key, branch)
+    return await _read_entry(request, entity_path, key, branch, response)
 
 
 @app.get("/api/v1/entries/{entity_path:path}/{key}")
@@ -917,9 +1009,10 @@ async def read_entry(
     entity_path: str,
     key: str,
     branch: str = Query("main"),
+    response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    return await _read_entry(request, entity_path, key, branch)
+    return await _read_entry(request, entity_path, key, branch, response)
 
 
 async def _read_entry(
@@ -927,8 +1020,10 @@ async def _read_entry(
     entity_path: str,
     key: str,
     branch: str,
+    response: Response | None = None,
 ) -> dict[str, Any]:
     mem = _get_memory()
+    credited = False
     if _async_adapter is not None:
         try:
             entry = await _async_adapter.read(entity_path, key, branch=branch)
@@ -944,6 +1039,7 @@ async def _read_entry(
                 )
         if entry is not None:
             asyncio.create_task(_async_adapter.increment_recall_count(entity_path, key, branch=branch))
+            credited = True
     else:
         entry = mem.read(entity_path, key, branch=branch)
     if entry is None:
@@ -953,6 +1049,16 @@ async def _read_entry(
     if vis is not None and vis.should_filter() and not vis.is_entry_visible(entry):
         return {"status": "not_found", "entity_path": entity_path, "key": key}
 
+    # After the visibility check, never before it. The recall bump above is
+    # issued on the entry as fetched, but the block carries the author's agent id
+    # for the cross-surface claim — attached earlier, a read of an entry this
+    # caller may not see would answer "not found" while the header named who
+    # wrote it. The bump is the only thing that legitimately precedes the check,
+    # because it records that the row was touched and reveals nothing.
+    if credited:
+        _attach_reuse_value(
+            response, request, credited=entry, hits=1, surface="read", branch=branch
+        )
     return _entry_to_response(entry)
 
 
@@ -1001,6 +1107,71 @@ async def entry_quality(
         "key": key,
         "quality": report.model_dump(mode="json"),
     }
+
+
+async def _scope_block(
+    entity_path: str,
+    key: str,
+    *,
+    branch: str = "main",
+    request: Request | None = None,
+    agent_id: str | None = None,
+) -> dict[str, Any] | None:
+    """What is already stored beside a write, for handing back to the agent.
+
+    The factual half of the read gap. An agent writes far more than it reads, and
+    the cheapest thing that changes that is telling it, at the moment it writes,
+    that "six entries are already here and four have never been read back" — a
+    statement about its own store, carrying no instruction. Returned as data in a
+    tool result, so it reaches every client rather than only the ones that
+    support hooks.
+
+    Computed here rather than by the caller, and that is the whole design. The
+    gateway used to ask separately, which is a second ``GET /api/v1/entries`` and
+    therefore a third billed op on every write — enough of a cost that the
+    feature shipped switched off and stayed off. Inline it is one aggregate in a
+    request that was already happening, so nothing new is metered and the block
+    can simply be on.
+
+    ``None`` when there are no neighbours: a scope containing only the entry just
+    written has nothing to report, and an empty block would read as a finding.
+
+    Two filters apply, and they answer different questions. *agent_id* goes to
+    the adapter, which counts an entry only if it is shared or this agent wrote
+    it — the rule ``AgentMemory.list`` enforces, which an aggregate that skips
+    ``list`` would otherwise drop. The per-user visibility filter below then
+    narrows the key sample further where an account separates its users. The
+    first cannot be replaced by the second: it is inactive on most deployments,
+    and only ever touched the sample, never the counts.
+    """
+    try:
+        adapter = _async_adapter if _async_adapter is not None else _get_memory()._adapter
+        counts = adapter.scope_counts(
+            entity_path, exclude_key=key, branch=branch, agent_id=agent_id
+        )
+        if inspect.isawaitable(counts):
+            counts = await counts
+    except Exception:  # noqa: BLE001 - a write must not fail on its own footnote
+        logger.debug("scope block failed for %s", entity_path, exc_info=True)
+        return None
+
+    if not counts or not counts.get("existing_entries"):
+        return None
+
+    # Visibility is applied to the key sample, which is the only part that names
+    # anything. The counts describe the namespace the caller just wrote into.
+    vis = _get_visibility_filter(request) if request is not None else None
+    if vis is not None and vis.should_filter():
+        try:
+            visible = {
+                e.key for e in vis.filter_entries(
+                    _get_memory()._adapter.list(entity_path, branch=branch)
+                )
+            }
+            counts = {**counts, "keys": [k for k in counts.get("keys", []) if k in visible]}
+        except Exception:  # noqa: BLE001 - drop the sample rather than leak it
+            counts = {**counts, "keys": []}
+    return counts
 
 
 @app.post("/api/v1/entries")
@@ -1230,7 +1401,23 @@ async def write_entry(
 
         _bg_executor.submit(_bg_write_side_effects)
 
-    return _entry_to_response(entry)
+    out = _entry_to_response(entry)
+    if req.include_scope:
+        # Taken from the entry just written rather than the request or the
+        # tagger: the tagger is restored to its previous identity by this point,
+        # and req.agent_id is optional, while provenance records who the write
+        # was actually attributed to. That is the identity whose private
+        # neighbours may be counted.
+        scope = await _scope_block(
+            req.entity_path,
+            req.key,
+            branch=_branch,
+            request=request,
+            agent_id=getattr(getattr(entry, "provenance", None), "agent_id", None),
+        )
+        if scope is not None:
+            out["scope"] = scope
+    return out
 
 
 @app.get("/api/v1/entries")
@@ -1390,10 +1577,147 @@ async def aggregate_entries_endpoint(
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _attach_reuse_value(
+    response: Response | None,
+    request: Request,
+    *,
+    credited: MemoryEntry | None,
+    hits: int,
+    surface: str | None = None,
+    branch: str = "main",
+) -> None:
+    """Compute the reuse block for a credited read, return it and persist it.
+
+    Called at the point ``recall_count`` is bumped, which is the only place that
+    already knows which entry the reuse is being credited to. Everything the
+    block needs is in hand there: the entry's own content size, its stored
+    recall count before this reuse, who wrote it, and — from the header the
+    gateway has always sent — who is reading it now.
+
+    The row written to ``amfs_reuse_events`` carries the same estimate as the
+    block, taken from the block rather than recomputed, so a figure in a weekly
+    digest cannot disagree with the figure the user was shown in chat. The block
+    answers "what did memory just do for you"; the row is what lets anyone ask
+    that later, when the session it happened in is long gone.
+
+    Best-effort in the same sense the recall bump above it is: this is reporting,
+    and a defect in it must never change the answer the caller came for.
+    """
+    if credited is None or hits <= 0:
+        return
+    try:
+        written_by = _known_agent_id(
+            getattr(getattr(credited, "provenance", None), "agent_id", None)
+        )
+        reused_by = _known_agent_id(request.headers.get("x-amfs-agent-id"))
+        content_chars = entry_content_chars(credited)
+        block = reuse_value_block(
+            hits=hits,
+            content_chars=content_chars,
+            reused_before=getattr(credited, "recall_count", 0) or 0,
+            written_by=written_by,
+            reused_by=reused_by,
+            # Which row the credit landed on, so a caller answering with one
+            # memory can check the block is about that memory. recall and
+            # read_from credit the current version and may then answer with an
+            # older one from history.
+            credited={
+                "entity_path": credited.entity_path,
+                "key": credited.key,
+                "version": getattr(credited, "version", None),
+            },
+        )
+        if not block:
+            return
+        # A caller invoking the handler in-process has no response to decorate,
+        # and the reuse still happened, so the row is written either way.
+        if response is not None:
+            # Separators without spaces: a header value is not read by a human and
+            # the default ", " padding is wasted bytes on every read response.
+            response.headers[REUSE_VALUE_HEADER] = json.dumps(
+                block, separators=(",", ":"), default=str
+            )
+        _persist_reuse_event(
+            credited,
+            # The row stores the raw integer, and the block carries the same
+            # figure formatted for display ("~1.2K"). Both come from
+            # recall_tokens_for_chars with the same inputs, so there is still one
+            # source for the number — passing the block's own field instead would
+            # store a string that int() rejects, and since the write swallows its
+            # errors, that dropped every row in silence.
+            est_tokens_saved=recall_tokens_for_chars(content_chars, hits=hits),
+            written_by=written_by,
+            reused_by=reused_by,
+            surface=surface,
+            branch=branch,
+        )
+    except Exception:  # noqa: BLE001 - reporting must not break the read
+        logger.debug("reuse value block failed", exc_info=True)
+
+
+def _known_agent_id(value: str | None) -> str | None:
+    """An agent id only when one was actually supplied.
+
+    ``request.headers.get`` yields ``""`` for a header that is present and empty,
+    and an empty string is not NULL, so it would satisfy ``reused_by IS NOT NULL``
+    in the summary and be counted as a *different* agent reusing the memory. The
+    block already treats it as unknown, so without this the stored row and the
+    line the user was shown disagree about the strongest claim either can make.
+    """
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _persist_reuse_event(
+    credited: MemoryEntry,
+    *,
+    est_tokens_saved: int,
+    written_by: str | None,
+    reused_by: str | None,
+    surface: str | None,
+    branch: str,
+) -> None:
+    """Keep the reuse the block just described, so it outlives the session.
+
+    Scheduled rather than awaited, like the recall bump it accompanies: the read
+    has already been answered and nothing about it should wait on bookkeeping.
+    Silent when there is no async adapter (an in-process caller, or a filesystem
+    backend) and when there is no running loop, because both mean there is
+    nowhere to write and neither is an error.
+    """
+    recorder = getattr(_async_adapter, "record_reuse_event", None)
+    if recorder is None:
+        return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    asyncio.create_task(
+        recorder(
+            credited.entity_path,
+            credited.key,
+            branch=branch,
+            entry_version=getattr(credited, "version", None),
+            written_by=written_by,
+            reused_by=reused_by,
+            est_tokens_saved=est_tokens_saved,
+            surface=surface,
+        )
+    )
+
+
 @app.post("/api/v1/search")
 async def search_entries(
     request: Request,
     req: SearchRequest,
+    # Injected by FastAPI on the type despite the default, which is what keeps
+    # this callable directly with no knowledge of it: the reuse header is
+    # reporting, and a caller invoking the handler in-process — the retrieval
+    # tests, and anything Pro composes — should not have to supply a response
+    # object to ask a question.
+    response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> list[dict[str, Any]]:
     branch = getattr(req, "branch", "main") or "main"
@@ -1409,6 +1733,7 @@ async def search_entries(
         limit=req.limit,
         depth=req.depth,
         include_artifacts=req.include_artifacts,
+        include_descendants=req.include_descendants,
     )
     mem = _get_memory()
     if _async_adapter is not None:
@@ -1451,6 +1776,7 @@ async def search_entries(
     # failure affect the response.
     if req.query and req.query.strip():
         credited = 0
+        credited_entry = None
         for entry in results:
             if credited >= REUSE_CREDIT_K:
                 break
@@ -1459,6 +1785,8 @@ async def search_entries(
             if entry.entity_path.startswith(("_system/", "bench/", "bench-")):
                 continue
             credited += 1
+            if credited_entry is None:
+                credited_entry = entry
             try:
                 if _async_adapter is not None:
                     await _async_adapter.increment_recall_count(
@@ -1470,6 +1798,14 @@ async def search_entries(
                     )
             except Exception:  # noqa: BLE001 - reuse accounting is best-effort
                 logger.debug("search recall bump failed", exc_info=True)
+        _attach_reuse_value(
+            response,
+            request,
+            credited=credited_entry,
+            hits=credited,
+            surface="search",
+            branch=branch,
+        )
 
     return [_entry_to_response(e) for e in results]
 
@@ -1478,6 +1814,9 @@ async def search_entries(
 async def retrieve_entries(
     request: Request,
     req: RetrieveRequest,
+    # See search_entries: injected on the type, defaulted so the handler stays
+    # callable in-process without one.
+    response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> list[dict[str, Any]]:
     """Semantic (meaning-based) retrieval.
@@ -1621,6 +1960,26 @@ async def retrieve_entries(
     now = _dt.now(_tz.utc)
     half_life = 30.0
     keyword_weight = 0.15
+
+    def _composite(
+        relevance: float, recency: float, conf: float, keyword: float, artifact: bool
+    ) -> float:
+        """The composite score, in one place because step 8 recomputes it.
+
+        *relevance* is whichever estimate of "does this answer the query" we
+        currently trust: the bi-encoder similarity here, the normalised
+        cross-encoder score once the reranker has spoken. Everything else is
+        held constant between the two, which is the point — the reranker is a
+        better relevance term, not a licence to discard confidence.
+        """
+        score = (
+            req.semantic_weight * relevance
+            + recency_weight * recency
+            + req.confidence_weight * conf
+            + keyword_weight * keyword
+        )
+        return score * ARTIFACT_PENALTY if artifact else score
+
     scored: list[tuple[MemoryEntry, float, dict[str, Any]]] = []
     for slot in candidates.values():
         entry = slot["entry"]
@@ -1635,27 +1994,33 @@ async def retrieve_entries(
         else:
             recency = 0.0
         conf = float(entry.confidence)
-        score = (
-            req.semantic_weight * sim
-            + recency_weight * recency
-            + req.confidence_weight * conf
-            + keyword_weight * keyword
-        )
         artifact = _is_artifact(entry)
-        if artifact:
-            score *= ARTIFACT_PENALTY
-        scored.append((entry, score, {
-            "semantic": round(sim, 4),
-            "recency": round(recency, 4),
-            "confidence": round(conf, 4),
-            "keyword": round(keyword, 4),
+        # Components are kept unrounded so step 8 can rebuild the score
+        # exactly; rounding happens once, on the way out.
+        scored.append((entry, _composite(sim, recency, conf, keyword, artifact), {
+            "semantic": sim,
+            "recency": recency,
+            "confidence": conf,
+            "keyword": keyword,
             "is_artifact": artifact,
         }))
 
     scored.sort(key=lambda t: t[1], reverse=True)
 
-    # 8. Cross-encoder rerank (Pro-injected) over the top-N, then reorder them
-    #    ahead of the untouched tail.
+    # 8. Cross-encoder rerank (Pro-injected) over the top-N: the cross-encoder
+    #    replaces the *relevance term* of the composite, not the composite.
+    #
+    #    It used to replace the whole score, and that silently switched off
+    #    continual learning. Every hosted read goes through here and real
+    #    result sets are far smaller than rerank_top_n, so in practice ranking
+    #    was cross-encoder relevance and nothing else: confidence, recency and
+    #    the reinforcement behind them counted for zero. Measured on dev before
+    #    this change — an entry discredited by eight critical_failure outcomes,
+    #    confidence collapsed 0.9834 -> 0.268, still ranked first, ahead of a
+    #    near-identical entry validated twelve times at confidence 1.0. Two
+    #    entries with identical text, one at confidence 0.5 and one at 1.0,
+    #    ranked with the 0.5 one first. Outcomes were recorded faithfully and
+    #    then ignored at the only point where they could change behaviour.
     reranker = _retrieval_reranker
     rerank_top_n = 30
     if reranker is not None and getattr(reranker, "available", False) and scored:
@@ -1666,12 +2031,24 @@ async def retrieve_entries(
             logger.debug("rerank failed", exc_info=True)
             rr_scores = None
         if rr_scores and len(rr_scores) == len(head):
+            raw = [float(rs) for rs in rr_scores]
+            normalised = _normalise_rerank(raw)
             reranked = [
-                (entry, float(rs), {**bd, "rerank": round(float(rs), 4)})
-                for (entry, _, bd), rs in zip(head, rr_scores)
+                (
+                    entry,
+                    _composite(
+                        norm, bd["recency"], bd["confidence"], bd["keyword"],
+                        bd["is_artifact"],
+                    ),
+                    {**bd, "rerank": rs, "rerank_normalised": norm},
+                )
+                for (entry, _, bd), rs, norm in zip(head, raw, normalised)
             ]
-            reranked.sort(key=lambda t: t[1], reverse=True)
+            # The whole list, not head-then-tail: re-scoring the head can move a
+            # member of it below an entry the reranker never saw, and stitching
+            # the two halves back together in order would pin it above anyway.
             scored = reranked + scored[rerank_top_n:]
+            scored.sort(key=lambda t: t[1], reverse=True)
 
     # 9. Abstain floor: trim clearly-irrelevant tail (low semantic AND no
     #    keyword match), but never drop the single best result.
@@ -1694,7 +2071,12 @@ async def retrieve_entries(
     #     happened (a real session: 4 lookups, 16 credited reuses, 1 that
     #     changed the agent's behavior). Best-effort: never let accounting
     #     failure affect the response.
+    credited_entry = None
+    credited_hits = 0
     for entry, _score, _bd in scored[:REUSE_CREDIT_K]:
+        credited_hits += 1
+        if credited_entry is None:
+            credited_entry = entry
         try:
             if _async_adapter is not None:
                 await _async_adapter.increment_recall_count(
@@ -1706,12 +2088,23 @@ async def retrieve_entries(
                 )
         except Exception:  # noqa: BLE001 - reuse accounting is best-effort
             logger.debug("retrieve recall bump failed", exc_info=True)
+    _attach_reuse_value(
+        response,
+        request,
+        credited=credited_entry,
+        hits=credited_hits,
+        surface="retrieve",
+        branch=branch,
+    )
 
     out: list[dict[str, Any]] = []
     for entry, score, breakdown in scored[: req.limit]:
         data = _entry_to_response(entry)
         data["_score"] = round(score, 4)
-        data["_breakdown"] = breakdown
+        data["_breakdown"] = {
+            k: round(v, 4) if isinstance(v, float) else v
+            for k, v in breakdown.items()
+        }
         out.append(data)
     return out
 
@@ -3407,6 +3800,83 @@ async def list_agents(
     return {"agents": agents}
 
 
+@app.get("/api/v1/reuse")
+async def reuse_summary(
+    request: Request,
+    days: int = 7,
+    limit: int = 10,
+    agent: str | None = None,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Reuse over a window: how much, of what, by which agents, and across which.
+
+    The read side of ``amfs_reuse_events``. It exists so that seeing what memory
+    did for you does not depend on an agent choosing to mention it in chat — the
+    same failure mode as an always-applied rule being ignored. A dashboard panel
+    and a weekly digest can both answer from here, days after the session ended.
+
+    Defaults to a week because that is the digest's window; ``days`` is clamped so
+    a hand-written URL cannot ask for an unbounded scan.
+
+    Scoped to the agents the caller may see, like ``/stats`` and ``/agents``. RLS
+    keeps accounts apart, but within one account a non-admin user sees only some
+    agents, and these rows name entity paths, keys and agent ids.
+
+    ``agent`` narrows the window to one agent as READER, for a page about that
+    agent. It narrows on top of the visibility scope and never widens it. Doing it
+    here rather than letting the caller filter matters: the lists below are cut to
+    ``limit`` by reuse volume first, so a caller keeping the rows that name its
+    agent would silently lose a quiet agent's reuse and could not tell that apart
+    from the agent having none.
+    """
+    days = max(1, min(int(days or 7), 365))
+    limit = max(1, min(int(limit or 10), 100))
+    since = datetime.now(UTC) - timedelta(days=days)
+
+    adapter = _get_memory()._adapter
+    summarise = getattr(adapter, "reuse_summary", None)
+    if summarise is None:
+        # A filesystem backend keeps no events. Saying so beats a 500 and beats
+        # an empty body that reads as "no reuse happened".
+        return {
+            "since": since.isoformat(),
+            "days": days,
+            "available": False,
+            "reason": "reuse events need the Postgres adapter",
+        }
+    agent = agent or None
+    kwargs: dict[str, Any] = {
+        "since": since,
+        "limit": limit,
+        "visible_agents": _visible_agent_ids(request),
+    }
+    if agent is not None:
+        # This server carries no dependency on the adapter package — it duck-types
+        # whatever backend it was handed — so an adapter predating the parameter is
+        # a real deployment, not a hypothetical. Passing the keyword blindly would
+        # raise TypeError and take out the whole endpoint, including the
+        # account-wide answer that still works. Refusing just the narrowed question
+        # keeps a stale pairing degraded rather than broken.
+        if "agent" not in inspect.signature(summarise).parameters:
+            return {
+                "since": since.isoformat(),
+                "days": days,
+                "available": False,
+                "agent": agent,
+                "reason": "this backend cannot scope reuse to one agent",
+            }
+        kwargs["agent"] = agent
+
+    summary = summarise(**kwargs)
+    return {
+        "since": since.isoformat(),
+        "days": days,
+        "available": True,
+        "agent": agent,
+        **summary,
+    }
+
+
 @app.get("/api/v1/agents/{agent_id:path}/memory-graph")
 async def agent_memory_graph(
     request: Request,
@@ -3419,7 +3889,18 @@ async def agent_memory_graph(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     mem = _get_memory()
-    entries = mem.list()
+    # Listed AS this agent, not as the server. ``list`` keeps an entry only if
+    # it is shared or the listing identity's own, so asking the server's handle
+    # produced a page that could not see the agent's PRIVATE entries at all: an
+    # agent whose every entry was private showed 0 memories and 0 topics while
+    # its card, counted by SQL with no such filter, correctly said 4 and 1.
+    entries = mem.as_agent(agent_id).list()
+    if vis is not None and vis.should_filter():
+        # The same per-user filter every other entry-returning route applies,
+        # and this one did not: agent ids are matched as bare strings within an
+        # account, so where two people share an account and their agents share a
+        # default name, each was shown the other's entries.
+        entries = vis.filter_entries(entries)
     # Read counts and the trace count are aggregated by the adapter; this
     # used to pull up to 10,000 full traces to tally causal_entries here.
     trace_count = mem._adapter.count_traces(agent_id=agent_id)
@@ -6091,15 +6572,113 @@ def _filter_briefing_digests(vis: Any, digests: list) -> list:
     return filtered
 
 
+async def _credit_briefing_reuse(
+    response: Response | None,
+    request: Request,
+    digests: list[Any],
+    *,
+    branch: str = "main",
+) -> None:
+    """Book reuse for the memories a briefing hands over verbatim.
+
+    A briefing reported ``recall_count`` without ever incrementing it, and the
+    agent that follows the documented workflow — brief first, then work — was
+    the one penalised for it: every entry it was briefed on stayed at zero
+    forever, it saw no value line for a memory that had just done its job, and
+    the write-only ratio counted briefed knowledge as never read.
+
+    Only ``hot_context`` is credited, because that is the part of a digest whose
+    entry text is passed through as-is. The compiled narrative and key facts are
+    a synthesis *about* entries; the agent reads those, not them.
+
+    Capped at ``REUSE_CREDIT_K``, the same cap retrieve uses, for the same
+    reason and with a sharper precedent behind it: crediting every entry on a
+    read path once inflated a nine-entry topic to 395 recalls, because a
+    dashboard page view counted as reuse of everything on it. So this credits
+    what the agent most likely acted on rather than everything it was shown, and
+    is deliberately conservative — an entry surfaced further down a briefing
+    still books nothing.
+    """
+    surfaced: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for d in digests:
+        summary = getattr(d, "summary", None) or {}
+        if not isinstance(summary, dict):
+            continue
+        for item in summary.get("hot_context") or []:
+            if not isinstance(item, dict):
+                continue
+            ref = (item.get("entity_path"), item.get("key"))
+            if ref[0] and ref[1] and ref not in seen:
+                seen.add(ref)
+                surfaced.append((str(ref[0]), str(ref[1])))
+
+    credited_entry: MemoryEntry | None = None
+    credited_hits = 0
+    for entity_path, key in surfaced[:REUSE_CREDIT_K]:
+        # Read before the bump, and at the adapter rather than through the
+        # engine. Before, so the block reports the recall count as it stood
+        # *prior* to this reuse, the way every other credited read does. At the
+        # adapter, because engine.read would itself count as a recall and the
+        # lookup that reports a read must not be one — the distinction amfs#257
+        # was opened to fix.
+        entry = None
+        try:
+            if _async_adapter is not None:
+                entry = await _async_adapter.read(entity_path, key, branch=branch)
+            else:
+                entry = _get_memory()._adapter.read(entity_path, key, branch=branch)
+        except Exception:  # noqa: BLE001 - the value block is reporting, not the answer
+            logger.debug("briefing reuse lookup failed", exc_info=True)
+
+        try:
+            if _async_adapter is not None:
+                await _async_adapter.increment_recall_count(entity_path, key, branch=branch)
+            else:
+                _get_memory()._adapter.increment_recall_count(entity_path, key, branch=branch)
+        except Exception:  # noqa: BLE001 - reuse accounting is best-effort
+            logger.debug("briefing recall bump failed", exc_info=True)
+            continue
+
+        credited_hits += 1
+        if credited_entry is None:
+            credited_entry = entry
+
+    # Same call, same place, as every other credited read: bumping recall_count
+    # without this wrote the count but no amfs_reuse_events row and no
+    # X-SenseLab-Value header, so the agent that briefed first still saw no
+    # value line and the event table drifted out of step with the counter.
+    _attach_reuse_value(
+        response,
+        request,
+        credited=credited_entry,
+        hits=credited_hits,
+        surface="briefing",
+        branch=branch,
+    )
+
+
 @app.get("/api/v1/briefing")
 async def get_briefing(
     request: Request,
     entity_path: str | None = Query(None),
     agent_id: str | None = Query(None),
     limit: int = Query(10, ge=1, le=100),
+    credit_reuse: bool = Query(False),
+    # See retrieve_entries: injected on the type, defaulted so the handler stays
+    # callable in-process without one.
+    response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    """Get a ranked briefing of compiled knowledge digests."""
+    """Get a ranked briefing of compiled knowledge digests.
+
+    *credit_reuse* books the briefing as a real read of the knowledge it
+    surfaces. It is off by default and has to be asked for, because the same
+    endpoint serves an agent about to act on a briefing and a dashboard panel
+    rendering one for a human to look at — and only the caller can tell those
+    apart. Defaulting it on would make every page view count as reuse, which is
+    the shape of a bug this codebase has already had.
+    """
     mem = _get_memory()
     digests = mem.briefing(
         entity_path=entity_path,
@@ -6110,6 +6689,11 @@ async def get_briefing(
     vis = _get_visibility_filter(request)
     if vis is not None and vis.should_filter():
         digests = _filter_briefing_digests(vis, digests)
+
+    # After visibility filtering, never before: an entry the caller may not see
+    # must not be credited to them either.
+    if credit_reuse:
+        await _credit_briefing_reuse(response, request, digests)
 
     return {
         "digests": [d.model_dump(mode="json") for d in digests],

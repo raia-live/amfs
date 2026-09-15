@@ -257,6 +257,11 @@ class BriefingService:
                     # Working files shouldn't dominate the "what you know" context
                     # an agent reads at task start.
                     include_artifacts=False,
+                    # Knowledge is written at "<repo>/deploy", never at "<repo>",
+                    # so an exact match on a scope a caller derived rather than
+                    # was handed reaches none of it. This is the same widening
+                    # _inject_who_to_ask already does via rank_authors.
+                    include_descendants=True,
                 ),
                 branch=branch,
             )
@@ -270,6 +275,14 @@ class BriefingService:
         hot_entries = [
             {
                 "key": e.key,
+                # Named because hot context now spans the scope: two entries can
+                # share a key under different topics, and "which of these is
+                # about deploys" is unanswerable from the key alone.
+                "entity_path": e.entity_path,
+                # Carried so a briefing can be booked as a real read: causal
+                # lineage pins the version that was actually surfaced, and
+                # without it the caller would have to re-read to find out.
+                "version": e.version,
                 "value": e.value,
                 "confidence": round(e.confidence, 3),
                 "agent": e.provenance.agent_id,
@@ -304,6 +317,10 @@ class BriefingService:
                     # Working files shouldn't dominate the "what you know" context
                     # an agent reads at task start.
                     include_artifacts=False,
+                    # As in _inject_hot_context: the scope is a prefix, and an
+                    # uncompiled entity is exactly the case where the caller
+                    # named a repo root rather than a topic under it.
+                    include_descendants=True,
                 ),
                 branch=branch,
             )
@@ -316,6 +333,14 @@ class BriefingService:
         hot_entries = [
             {
                 "key": e.key,
+                # Named because hot context now spans the scope: two entries can
+                # share a key under different topics, and "which of these is
+                # about deploys" is unanswerable from the key alone.
+                "entity_path": e.entity_path,
+                # Carried so a briefing can be booked as a real read: causal
+                # lineage pins the version that was actually surfaced, and
+                # without it the caller would have to re-read to find out.
+                "version": e.version,
                 "value": e.value,
                 "confidence": round(e.confidence, 3),
                 "agent": e.provenance.agent_id,

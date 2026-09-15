@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import math
 import threading
@@ -361,6 +362,47 @@ class AgentMemory:
     def read_log(self) -> list[str]:
         """Entry keys read during this session (for inspection/debugging)."""
         return self._read_tracker.causal_keys
+
+    def as_agent(self, agent_id: str) -> "AgentMemory":
+        """A handle onto the same store that acts as *agent_id*.
+
+        For a server that holds one process-wide handle and must sometimes act
+        for one of its callers: write a room's join briefing as the agent being
+        briefed, or list an agent's own entries to render its page. Both need an
+        identity other than the server's, and the way it was being done was to
+        assign ``mem._tagger.agent_id`` and restore it in a ``finally``. That
+        mutates state shared by every concurrent request, so a write racing an
+        impersonation is stamped with whichever identity is installed at that
+        instant — measured in production as 1,994 join briefings attributed to
+        an agent that was not the one being briefed, 14 of them to real agents
+        whose pages then listed a stranger's memories.
+
+        Identity matters for reading too, not just provenance: ``list`` and
+        ``search`` keep an entry only if it is shared or ours, so asking the
+        server's handle for an agent's entries silently drops that agent's
+        private ones. That is one bug in two places, and one honest identity
+        fixes both.
+
+        Shares the adapter, config and embedder, so this is cheap enough to call
+        per request — no config reload, and deliberately no ``ensure_agent``,
+        because acting *as* an existing agent should not create one.
+
+        Gets its own :class:`ReadTracker`: work done on behalf of another agent
+        must not enter this session's causal chain, or the caller's next
+        ``commit_outcome`` would reinforce entries it never read.
+        """
+        clone = copy.copy(self)
+        clone._tagger = CausalTagger(agent_id, self._tagger.session_id)
+        clone._read_tracker = ReadTracker()
+        clone._engine = CoWEngine(self._adapter, clone._tagger, clone._read_tracker)
+        # Session state belongs to the session that built it, and a trace is
+        # sealed per handle: sharing these would let an impersonated write show
+        # up in the caller's trace, which is the confusion this method exists to
+        # end.
+        clone._session_metadata = None
+        clone._session_attributes = {}
+        clone._session_llm_calls = []
+        return clone
 
     # ------------------------------------------------------------------
     # Core operations
@@ -839,6 +881,37 @@ class AgentMemory:
         )
         if results:
             self._read_tracker.record(results[0].entry)
+
+    @property
+    def last_reuse_value(self) -> dict[str, Any] | None:
+        """What the server credited for the most recent read, or None.
+
+        Read through to the adapter rather than snapshotted on the way past, so
+        every path that reaches a read inherits it — server-side retrieve, the
+        local scoring fallback, and plain search — without each having to
+        remember to capture it. The adapter overwrites the value on every read,
+        including a read that credited nothing, so the answer always describes
+        the last read rather than the last read that happened to credit.
+
+        None on the local adapters, and correctly so: they could compute a
+        number, but the credit belongs where ``recall_count`` is incremented, and
+        a second implementation here is exactly the duplication this replaced.
+        """
+        return getattr(self._adapter, "_last_reuse_value", None)
+
+    @property
+    def last_scope(self) -> dict[str, Any] | None:
+        """What the server reported was already stored beside the last write.
+
+        Carries ``existing_entries``, ``never_read`` and a bounded ``keys``
+        sample. Read through to the adapter for the same reason as
+        ``last_reuse_value`` above: ``write()`` returns a MemoryEntry, so a
+        second answer from the same call has to travel beside it.
+
+        None on the local adapters and on a write to a fresh scope, which are
+        the same case as far as a caller is concerned — there is nothing to say.
+        """
+        return getattr(self._adapter, "_last_scope", None)
 
     def stats(self) -> MemoryStats:
         """Aggregate statistics about current memory state."""
@@ -2015,6 +2088,7 @@ class AgentMemory:
         agent_id: str | None = None,
         limit: int = 10,
         branch: str | None = None,
+        credit_reuse: bool = False,
     ) -> list:
         """Get a ranked briefing of compiled knowledge digests.
 
@@ -2032,6 +2106,10 @@ class AgentMemory:
             agent_id: Focus on digests relevant to this agent.
             limit: Maximum number of digests to return.
             branch: Branch to read digests from (defaults to active branch).
+            credit_reuse: Book the briefing as a real read of the knowledge it
+                surfaces. Off by default: true for an agent about to act on a
+                briefing, false for a panel rendering one for a human, and only
+                the caller knows which it is.
 
         Returns:
             List of Digest objects ranked by relevance.
@@ -2040,11 +2118,22 @@ class AgentMemory:
         # proxies to the server which has full Cortex + Postgres access).
         adapter_briefing = getattr(self._adapter, "briefing", None)
         if callable(adapter_briefing):
-            return adapter_briefing(
-                entity_path=entity_path,
-                agent_id=agent_id or self.agent_id,
-                limit=limit,
-            )
+            kwargs: dict = {
+                "entity_path": entity_path,
+                "agent_id": agent_id or self.agent_id,
+                "limit": limit,
+            }
+            # Passed only when asked for, and only to an adapter that knows the
+            # argument: adapters are pluggable and versioned separately, so an
+            # older one would raise TypeError on an unconditional keyword.
+            if credit_reuse:
+                kwargs["credit_reuse"] = True
+            try:
+                digests = adapter_briefing(**kwargs)
+            except TypeError:
+                kwargs.pop("credit_reuse", None)
+                digests = adapter_briefing(**kwargs)
+            return self._book_briefing_lineage(digests, credit_reuse)
 
         resolved_agent = agent_id or self.agent_id
         resolved_branch = branch or self._branch
@@ -2058,11 +2147,14 @@ class AgentMemory:
                 adapter=self._adapter,
                 namespace=self.namespace,
             )
-            return service.briefing(
-                entity_path=entity_path,
-                agent_id=resolved_agent,
-                limit=limit,
-                branch=resolved_branch,
+            return self._book_briefing_lineage(
+                service.briefing(
+                    entity_path=entity_path,
+                    agent_id=resolved_agent,
+                    limit=limit,
+                    branch=resolved_branch,
+                ),
+                credit_reuse,
             )
 
         # Fallback: amfs_cortex not installed but adapter supports list_digests
@@ -2072,12 +2164,90 @@ class AgentMemory:
         if not callable(list_digests_fn):
             return []
 
-        return _score_digests(
-            list_digests_fn(namespace=self.namespace, branch=resolved_branch),
-            entity_path=entity_path,
-            agent_id=resolved_agent,
-            limit=limit,
+        return self._book_briefing_lineage(
+            _score_digests(
+                list_digests_fn(namespace=self.namespace, branch=resolved_branch),
+                entity_path=entity_path,
+                agent_id=resolved_agent,
+                limit=limit,
+            ),
+            credit_reuse,
         )
+
+    def _book_briefing_lineage(self, digests: list, credit_reuse: bool) -> list:
+        """Book the briefing's surfaced knowledge as a read, for lineage.
+
+        Closes an asymmetry that left the loop open for the workflow the docs
+        actually prescribe. ``retrieve`` records its top hit as a causal read, so
+        a later ``commit_outcome`` reinforces the entry that informed the work.
+        A briefing did not: amfs#400 gave it a server-side ``recall_count`` bump,
+        which is *usage*, but nothing entered the session's causal chain, which is
+        what *reinforcement* runs on. An agent that got briefed, worked, and
+        committed an outcome therefore reinforced nothing it had used — and being
+        briefed first is the documented workflow, so the agents following it were
+        exactly the ones whose memory never improved.
+
+        Off unless asked, on the same reasoning as the ``recall_count`` credit it
+        mirrors: only the caller knows whether this briefing is an agent about to
+        act or a dashboard panel rendering for a human.
+
+        Capped at ``REUSE_CREDIT_K`` over the de-duplicated ``hot_context`` in
+        digest order, which is deliberately the same rule and the same order the
+        server credits, so lineage names the entry whose recall count moved
+        rather than a different one. Only ``hot_context`` counts: the narrative
+        is a synthesis *about* entries, and crediting it would attribute an
+        outcome to text the agent never read.
+        """
+        if not credit_reuse or not digests:
+            return digests
+
+        from amfs_core.aggregates import REUSE_CREDIT_K
+
+        seen: set[tuple[str, str]] = set()
+        booked = 0
+        for digest in digests:
+            if booked >= REUSE_CREDIT_K:
+                break
+            summary = getattr(digest, "summary", None) or {}
+            if not isinstance(summary, dict):
+                continue
+            for item in summary.get("hot_context") or []:
+                if booked >= REUSE_CREDIT_K:
+                    break
+                if not isinstance(item, dict):
+                    continue
+                entity_path, key = item.get("entity_path"), item.get("key")
+                if not entity_path or not key or (entity_path, key) in seen:
+                    continue
+                seen.add((entity_path, key))
+                try:
+                    self._read_tracker.record_surfaced(
+                        str(entity_path),
+                        str(key),
+                        # A digest compiled before the version field was carried
+                        # has none. Default to 1 rather than skipping: a causal
+                        # link to the wrong version still names the right entry,
+                        # and dropping it would silently reopen the loop.
+                        version=int(item.get("version") or 1),
+                        # Passed through as it stands, because ``record`` stores
+                        # ``entry.value`` unchanged and a briefing-sourced causal
+                        # entry has to be indistinguishable from a directly-read
+                        # one. ``MemoryEntry.value`` is ``Any``, so coercing it
+                        # with ``str(... or "")`` had two effects: a structured
+                        # value became its Python repr, and a legitimately falsy
+                        # one — ``0``, ``False``, ``[]``, ``{}`` — collapsed to an
+                        # empty string. Both put a value on the trace that the
+                        # entry never held, which is the half of the record a
+                        # tuned model learns from.
+                        value=item.get("value"),
+                        confidence=float(item.get("confidence") or 0.0),
+                        memory_type=item.get("memory_type"),
+                        written_by=item.get("agent"),
+                    )
+                except Exception:  # noqa: BLE001 - lineage must never fail a briefing
+                    continue
+                booked += 1
+        return digests
 
     # ------------------------------------------------------------------
     # Scoped access

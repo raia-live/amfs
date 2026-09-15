@@ -8,8 +8,10 @@ synchronous.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
+from contextvars import ContextVar
 from datetime import datetime
 from typing import Any, Callable
 
@@ -29,10 +31,45 @@ from amfs_core.models import (
     OutcomeRecord,
     SearchQuery,
 )
+from amfs_core.reuse_value import REUSE_VALUE_HEADER
 
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
+# Things the server computed that the ABC's return types have nowhere to put: the
+# reuse block a read earns, and the gap report a commit earns. Both have to cross
+# from the response to the caller somehow, and both used to do it as attributes on
+# the adapter.
+#
+# Context variables rather than attributes because one adapter serves many calls.
+# The gateway builds a separate adapter per session, so this was never a
+# cross-tenant hazard, but a client may perfectly well have two reads in flight on
+# one session — and the sequence "A responds, B responds, A reads the value" then
+# hands A the block describing B's lookup. That is the staleness bug the adapter
+# already guards against between sequential reads, in its concurrent form, and a
+# block whose only job is to be believed cannot describe a different call.
+#
+# A ContextVar is the fix rather than a lock: it scopes the value to the logical
+# call, which is the thing it actually belongs to. asyncio copies the context per
+# task and anyio's to_thread copies it per worker, so both ways the gateway and
+# the stdio servers reach a sync adapter land in the right place, and no caller
+# has to hold anything.
+_LAST_REUSE_HEADER: ContextVar[str | None] = ContextVar(
+    "amfs_last_reuse_header", default=None
+)
+_LAST_REUSE_VALUE: ContextVar[dict[str, Any] | None] = ContextVar(
+    "amfs_last_reuse_value", default=None
+)
+_LAST_MEMORY_GAP: ContextVar[dict[str, Any] | None] = ContextVar(
+    "amfs_last_memory_gap", default=None
+)
+#: The scope facts the last write came back with, for the same reason as the two
+#: above: ``write()`` has to return a MemoryEntry, so anything else the server
+#: said travels beside it rather than in it.
+_LAST_SCOPE: ContextVar[dict[str, Any] | None] = ContextVar(
+    "amfs_last_scope", default=None
+)
 
 
 def _parse_entry(data: dict[str, Any]) -> MemoryEntry:
@@ -107,6 +144,13 @@ class HttpAdapter(AdapterABC):
                 time.sleep(wait)
                 continue
             _raise_with_detail(resp)
+            # The reuse block travels as a header because /search and /retrieve
+            # answer with a bare JSON array: there is no envelope to add a key to,
+            # and wrapping the array would break every existing client to carry a
+            # diagnostic. Taken off here and left in the calling context, so the
+            # read methods below can pick it up without every one of them having
+            # to touch the response object.
+            _LAST_REUSE_HEADER.set(resp.headers.get(REUSE_VALUE_HEADER))
             return resp.json()
 
     def _get(self, path: str, **params: Any) -> Any:
@@ -145,12 +189,25 @@ class HttpAdapter(AdapterABC):
             )
         else:
             data = self._get(f"/api/v1/entries/{entity_path}/{key}", **params)
+        self._capture_reuse_value()
         if data.get("status") == "not_found":
             return None
         entry = _parse_entry(data)
         if entry.confidence < min_confidence:
             return None
         return entry
+
+    #: Whether writes ask the server for the scope block. On by default, unlike
+    #: the server-side flag: it costs the caller nothing extra now that it rides
+    #: on the write request instead of a second one, and a client that never
+    #: shows it loses only an aggregate. Set AMFS_WRITE_SCOPE=0 to opt out.
+    @property
+    def _want_scope(self) -> bool:
+        import os
+
+        return os.environ.get("AMFS_WRITE_SCOPE", "1").lower() not in (
+            "0", "false", "off", "no",
+        )
 
     def write(self, entry: MemoryEntry) -> MemoryEntry:
         body = {
@@ -168,8 +225,21 @@ class HttpAdapter(AdapterABC):
             # match the decision trace that recorded the write.
             "session_id": entry.provenance.session_id,
         }
+        if self._want_scope:
+            body["include_scope"] = True
         data = self._post("/api/v1/entries", body)
+        # Always assign, so a write to a fresh scope — or one served by a server
+        # too old to compute it — clears the previous write's block instead of
+        # leaving it to be reported against this one. Same rule as the reuse
+        # block; the failure it avoids is reporting neighbours that belong to a
+        # different entity path.
+        _LAST_SCOPE.set(data.get("scope") if isinstance(data, dict) else None)
         return _parse_entry(data)
+
+    @property
+    def _last_scope(self) -> dict[str, Any] | None:
+        """Scope facts from the write most recently made *in this context*."""
+        return _LAST_SCOPE.get()
 
     def list(
         self,
@@ -234,8 +304,38 @@ class HttpAdapter(AdapterABC):
         # ``AgentMemory.commit_outcome``: widening the ABC would oblige every
         # adapter, including the filesystem one that has no retrieval, to carry a
         # concept only the server can produce.
-        self._last_memory_gap = data.get("memory_gap")
+        _LAST_MEMORY_GAP.set(data.get("memory_gap"))
         return [_parse_entry(e) for e in data.get("entries", [])]
+
+    @property
+    def _last_reuse_value(self) -> dict[str, Any] | None:
+        """Reuse block from the read most recently made *in this context*."""
+        return _LAST_REUSE_VALUE.get()
+
+    @property
+    def _last_memory_gap(self) -> dict[str, Any] | None:
+        """Gap report from the commit most recently made in this context."""
+        return _LAST_MEMORY_GAP.get()
+
+    def _capture_reuse_value(self) -> None:
+        """Take the reuse block off the last response, or clear it.
+
+        Always assigns, so a read that credited no reuse — a miss, or a
+        filter-only search — leaves None behind rather than the previous read's
+        block. A server too old to send the header is the same case as a read
+        that credited nothing, and correctly reports nothing.
+        """
+        raw = _LAST_REUSE_HEADER.get()
+        if not raw:
+            _LAST_REUSE_VALUE.set(None)
+            return
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            logger.debug("Unparseable reuse value header", exc_info=True)
+            _LAST_REUSE_VALUE.set(None)
+            return
+        _LAST_REUSE_VALUE.set(parsed if isinstance(parsed, dict) else None)
 
     # ── optional overrides ────────────────────────────────────────────
 
@@ -262,10 +362,16 @@ class HttpAdapter(AdapterABC):
         # back carrying whole source files.
         if getattr(query, "include_artifacts", True) is False:
             body["include_artifacts"] = False
+        # Same reasoning as include_artifacts above: unsent, the server matches
+        # the path exactly and a caller asking about a scope silently gets only
+        # the entries written at the root of it, which is usually none of them.
+        if getattr(query, "include_descendants", False):
+            body["include_descendants"] = True
         branch = kwargs.get("branch")
         if branch:
             body["branch"] = branch
         data = self._post("/api/v1/search", body)
+        self._capture_reuse_value()
         if isinstance(data, list):
             return [_parse_entry(e) for e in data]
         return [_parse_entry(e) for e in data.get("entries", data if isinstance(data, list) else [])]
@@ -304,6 +410,7 @@ class HttpAdapter(AdapterABC):
         if entity_path:
             body["entity_path"] = entity_path
         data = self._post("/api/v1/retrieve", body)
+        self._capture_reuse_value()
         rows = data if isinstance(data, list) else data.get("entries", [])
         out: list[tuple[MemoryEntry, float, dict[str, float]]] = []
         for e in rows:
@@ -768,6 +875,7 @@ class HttpAdapter(AdapterABC):
         entity_path: str | None = None,
         agent_id: str | None = None,
         limit: int = 10,
+        credit_reuse: bool = False,
     ) -> list[Digest]:
         """Proxy briefing to the HTTP server which has full Cortex access."""
         params: dict[str, Any] = {"limit": limit}
@@ -775,5 +883,15 @@ class HttpAdapter(AdapterABC):
             params["entity_path"] = entity_path
         if agent_id:
             params["agent_id"] = agent_id
+        # Sent only when asked for. The server treats a briefing as a real read
+        # of what it surfaces, and that is true for an agent about to act on it
+        # and false for a panel rendering it for a human, so the caller decides.
+        if credit_reuse:
+            params["credit_reuse"] = "true"
         data = self._get("/api/v1/briefing", **params)
+        # A credited briefing is a credited read, so it carries the reuse header
+        # like any other. Unconditional: _capture_reuse_value always assigns, so
+        # an uncredited briefing correctly clears any earlier read's block rather
+        # than leaving it to be reported against this one.
+        self._capture_reuse_value()
         return [Digest.model_validate(d) for d in data.get("digests", [])]
