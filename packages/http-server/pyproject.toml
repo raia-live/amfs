@@ -1,14 +1,33 @@
 [project]
 name = "amfs-http-server"
-version = "0.3.18"
+version = "0.3.31"
 description = "AMFS HTTP/REST API server with SSE support"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
     # The trace endpoints call amfs_core.capture and read/write task_input, and
     # 0.3.14 / 0.5.7 add the action half: scan_captured_arguments and ToolCall.
-    "amfs>=0.5.11",
-    "amfs-core>=0.3.19",
+    # 0.5.13 is bookkeeping: the SDK's briefing() grew a credit_reuse keyword,
+    # and this server does its own crediting in the endpoint rather than asking
+    # the SDK for it. The floor rises only because a floor below the version in
+    # this tree is what test_dependency_floors forbids.
+    # 0.5.18 for AgentMemory.as_agent, which the agent detail page calls to list
+    # an agent's entries as that agent rather than as the server.
+    "amfs>=0.5.18",
+    # 0.3.23 is real in the silent way: the write path calls
+    # adapter.scope_counts(), which is a default on AdapterABC from 0.3.23. On an
+    # older core the adapters that do not override it — filesystem, S3 — have no
+    # such method, and _scope_block swallows the AttributeError and returns None.
+    # Nothing raises; the scope block just never appears, which is the same
+    # invisible failure as an unset feature flag and the thing this ships to fix.
+    # 0.3.24 fails the same silent way and matters more, because what it adds is
+    # the visibility rule: scope_counts takes the asking agent's id, and counts a
+    # neighbour only if it is shared or that agent wrote it. The server passes
+    # agent_id unconditionally, so against 0.3.23 the call raises TypeError on an
+    # unexpected keyword, _scope_block swallows it, and the block disappears —
+    # while an adapter that ignored the argument instead would name another
+    # agent's private keys. Either way the floor is what makes the rule real.
+    "amfs-core>=0.3.27",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "sse-starlette>=2.0",

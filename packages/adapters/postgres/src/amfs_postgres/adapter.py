@@ -10,7 +10,7 @@ import os
 import re
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -70,6 +70,7 @@ from amfs_core.models import (
     ToolCall,
     TraceEntry,
 )
+from amfs_core.scope import descendants_sql
 
 try:
     from psycopg_pool import ConnectionPool as _ConnectionPool
@@ -114,6 +115,16 @@ _EXCLUDE_SYSTEM_ROWS = (
 )
 
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
+
+# Shared by the sync and async adapters so the two cannot drift apart. account_id
+# is omitted on purpose: the hosted product gives the column a default in a tenant
+# migration, and a self-hosted database does not have the column at all.
+_REUSE_EVENT_INSERT_SQL = """
+    INSERT INTO amfs_reuse_events
+        (namespace, branch, entity_path, key, entry_version,
+         written_by, reused_by, est_tokens_saved, surface)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+"""
 
 _DEFAULT_POOL_MIN = 2
 _DEFAULT_POOL_MAX = 10
@@ -1941,8 +1952,13 @@ class PostgresAdapter(AdapterABC):
             conditions.append("is_artifact IS NOT TRUE")
 
         if query.entity_path is not None:
-            conditions.append("entity_path = %s")
-            params.append(query.entity_path)
+            if query.include_descendants:
+                clause, clause_params = descendants_sql("entity_path", query.entity_path)
+                conditions.append(clause)
+                params.extend(clause_params)
+            else:
+                conditions.append("entity_path = %s")
+                params.append(query.entity_path)
         else:
             conditions.append(_EXCLUDE_SHARED_PATHS)
         if query.min_confidence > 0:
@@ -2112,6 +2128,264 @@ class PostgresAdapter(AdapterABC):
                      AND superseded_at IS NULL""",
                 (self._namespace, branch, entity_path, key),
             )
+
+    def scope_counts(
+        self,
+        entity_path: str,
+        *,
+        exclude_key: str | None = None,
+        branch: str = "main",
+        key_limit: int = 8,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """One aggregate instead of loading every sibling to count it.
+
+        The sync twin of the async adapter's override, and the same reasoning:
+        see :meth:`AdapterABC.scope_counts` for what this answers, and that
+        override for why counting in SQL rather than in Python over ``list()``.
+
+        Columns are aliased and read by name because this pool's row factory is
+        ``dict_row`` — the same rule, and the same reason, as ``reuse_summary``
+        below.
+
+        ``shared OR agent_id = %s`` is the visibility rule, and it is here for a
+        specific reason: skipping ``list()`` also skips the filter ``list()``
+        applied, so the aggregate has to carry it itself or a private entry
+        belonging to another agent turns up in ``keys``. A NULL *agent_id*
+        compares as unknown rather than true, so passing nothing counts shared
+        entries only — the safe direction.
+        """
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                """SELECT count(*) AS total,
+                          count(*) FILTER (WHERE coalesce(recall_count, 0) = 0)
+                              AS never_read
+                     FROM amfs_memory_entries
+                    WHERE namespace = %s AND branch = %s AND entity_path = %s
+                      AND superseded_at IS NULL
+                      AND (%s::text IS NULL OR key <> %s)
+                      AND (shared OR agent_id = %s::text)""",
+                (self._namespace, branch, entity_path, exclude_key, exclude_key,
+                 agent_id),
+            ).fetchone()
+            keys = [
+                r["key"] for r in conn.execute(
+                    """SELECT key FROM amfs_memory_entries
+                        WHERE namespace = %s AND branch = %s AND entity_path = %s
+                          AND superseded_at IS NULL
+                          AND (%s::text IS NULL OR key <> %s)
+                          AND (shared OR agent_id = %s::text)
+                        ORDER BY key LIMIT %s""",
+                    (self._namespace, branch, entity_path, exclude_key,
+                     exclude_key, agent_id, key_limit),
+                ).fetchall()
+            ]
+
+        return {
+            "entity_path": entity_path,
+            "existing_entries": int(row["total"]) if row else 0,
+            "never_read": int(row["never_read"]) if row else 0,
+            "keys": keys,
+        }
+
+    def record_reuse_event(
+        self,
+        entity_path: str,
+        key: str,
+        *,
+        branch: str = "main",
+        entry_version: int | None = None,
+        written_by: str | None = None,
+        reused_by: str | None = None,
+        est_tokens_saved: int = 0,
+        surface: str | None = None,
+    ) -> None:
+        """Record that one memory was credited as reused, with when and by whom.
+
+        The companion to ``increment_recall_count``, which keeps the running
+        total. A total cannot say when reuse happened, which agent did it, or
+        whether the reader is the author, and those are what every user-facing
+        claim about reuse rests on. See ``amfs_reuse_events`` in schema.sql.
+
+        Swallows its own failures. This is diagnostic bookkeeping attached to a
+        read that has already answered correctly, so it must never be the reason
+        that read fails.
+        """
+        try:
+            with self._pool.connection() as conn:
+                conn.execute(
+                    _REUSE_EVENT_INSERT_SQL,
+                    (
+                        self._namespace,
+                        branch,
+                        entity_path,
+                        key,
+                        entry_version,
+                        written_by,
+                        reused_by,
+                        max(int(est_tokens_saved or 0), 0),
+                        surface,
+                    ),
+                )
+        except Exception:
+            logger.debug("reuse event not recorded for %s/%s", entity_path, key, exc_info=True)
+
+    def reuse_summary(
+        self,
+        *,
+        since: datetime,
+        limit: int = 10,
+        visible_agents: Collection[str] | None = None,
+        agent: str | None = None,
+    ) -> dict[str, Any]:
+        """What memory has been reused since a point in time, and by whom.
+
+        Reads ``amfs_reuse_events``. Everything here is a count of rows that were
+        written when a read was actually credited, so the figures are facts about
+        reuse rather than a model of it — with the single exception of
+        ``est_tokens_saved``, which is the sum of an estimate and is named so.
+
+        ``cross_surface`` requires both agent ids to be known and non-empty. An
+        anonymous reader is not evidence that a *different* agent reused the
+        memory, and this number is the one making that claim, so it will not
+        count a guess.
+
+        ``visible_agents`` scopes the answer for a caller who may not see the
+        whole account. RLS keeps accounts apart; within one account a
+        non-admin user sees only some agents, and these rows name entity paths,
+        keys and agent ids. The filter is on ``reused_by``: a row means "this
+        agent read this memory", so the caller may see it exactly when that agent
+        is theirs to see. Rows with no reader are excluded under scoping, because
+        an unattributed read cannot be shown to belong to this caller.
+
+        ``agent`` narrows the whole window to one agent AS READER, for a page about
+        that agent. It is a filter on top of ``visible_agents``, never instead of
+        it: asking about an agent the caller may not see must answer nothing rather
+        than answer freely, so both predicates apply.
+
+        Filtering here rather than in the caller is the point of the parameter. A
+        page that asked for the whole account and kept the rows naming its agent
+        would be filtering a list already cut to ``limit`` by reuse volume, so a
+        quiet agent's handoffs would be missing — and indistinguishable from that
+        agent having none.
+        """
+        empty: dict[str, Any] = {
+            "reuses": 0,
+            "memories_reused": 0,
+            "est_tokens_saved": 0,
+            "cross_surface": 0,
+            "top": [],
+            "by_agent": [],
+            "recent_cross_surface": [],
+        }
+        # A caller restricted to no agents at all can see no reuse. Building the
+        # SQL for an empty ANY() would be a scan that always matches nothing.
+        if visible_agents is not None and not visible_agents:
+            return empty
+        scope, scope_params = "", ()
+        if visible_agents is not None:
+            scope = " AND reused_by = ANY(%s)"
+            scope_params = (list(visible_agents),)
+        if agent:
+            # Composed with the visibility scope above, not substituted for it, so
+            # naming an agent can only ever narrow what a caller may see.
+            if visible_agents is not None and agent not in visible_agents:
+                return empty
+            scope += " AND reused_by = %s"
+            scope_params = (*scope_params, agent)
+
+        try:
+            # Every column is aliased and read by name: the pool's row factory is
+            # dict_row, so positional access raises KeyError rather than
+            # returning the wrong column, and this method swallows to protect the
+            # page it serves — which would turn that into a silent "no reuse".
+            with self._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    f"""SELECT COUNT(*) AS reuses,
+                              COUNT(DISTINCT (entity_path, key)) AS memories_reused,
+                              COALESCE(SUM(est_tokens_saved), 0) AS est_tokens_saved,
+                              COUNT(*) FILTER (
+                                  WHERE written_by IS NOT NULL AND written_by <> ''
+                                    AND reused_by IS NOT NULL AND reused_by <> ''
+                                    AND written_by <> reused_by
+                              ) AS cross_surface
+                       FROM amfs_reuse_events
+                       WHERE namespace = %s AND created_at >= %s{scope}""",
+                    (self._namespace, since, *scope_params),
+                )
+                row = cur.fetchone() or {}
+                out: dict[str, Any] = {
+                    "reuses": int(row.get("reuses") or 0),
+                    "memories_reused": int(row.get("memories_reused") or 0),
+                    "est_tokens_saved": int(row.get("est_tokens_saved") or 0),
+                    "cross_surface": int(row.get("cross_surface") or 0),
+                }
+
+                cur.execute(
+                    f"""SELECT entity_path, key, COUNT(*) AS reuses,
+                              COALESCE(SUM(est_tokens_saved), 0) AS est_tokens_saved
+                       FROM amfs_reuse_events
+                       WHERE namespace = %s AND created_at >= %s{scope}
+                       GROUP BY entity_path, key
+                       ORDER BY reuses DESC, est_tokens_saved DESC
+                       LIMIT %s""",
+                    (self._namespace, since, *scope_params, limit),
+                )
+                out["top"] = [
+                    {
+                        "entity_path": r.get("entity_path"),
+                        "key": r.get("key"),
+                        "reuses": int(r.get("reuses") or 0),
+                        "est_tokens_saved": int(r.get("est_tokens_saved") or 0),
+                    }
+                    for r in cur.fetchall()
+                ]
+
+                cur.execute(
+                    f"""SELECT reused_by, COUNT(*) AS reuses
+                       FROM amfs_reuse_events
+                       WHERE namespace = %s AND created_at >= %s
+                         AND reused_by IS NOT NULL AND reused_by <> ''{scope}
+                       GROUP BY reused_by
+                       ORDER BY reuses DESC
+                       LIMIT %s""",
+                    (self._namespace, since, *scope_params, limit),
+                )
+                out["by_agent"] = [
+                    {"agent_id": r.get("reused_by"), "reuses": int(r.get("reuses") or 0)}
+                    for r in cur.fetchall()
+                ]
+
+                # The headline claim, newest first: one agent using what another
+                # worked out. Carries created_at because "on Tuesday" is the half
+                # of it that a counter could never supply.
+                cur.execute(
+                    f"""SELECT entity_path, key, written_by, reused_by, created_at
+                       FROM amfs_reuse_events
+                       WHERE namespace = %s AND created_at >= %s
+                         AND written_by IS NOT NULL AND written_by <> ''
+                         AND reused_by IS NOT NULL AND reused_by <> ''
+                         AND written_by <> reused_by{scope}
+                       ORDER BY created_at DESC
+                       LIMIT %s""",
+                    (self._namespace, since, *scope_params, limit),
+                )
+                out["recent_cross_surface"] = [
+                    {
+                        "entity_path": r.get("entity_path"),
+                        "key": r.get("key"),
+                        "written_by": r.get("written_by"),
+                        "reused_by": r.get("reused_by"),
+                        "at": at.isoformat() if (at := r.get("created_at")) else None,
+                    }
+                    for r in cur.fetchall()
+                ]
+                return out
+        except Exception:
+            # A database without the table yet reports no reuse, which is true of
+            # it, rather than failing the page that asked.
+            logger.debug("reuse summary unavailable", exc_info=True)
+            return empty
 
     def update_tiers(
         self,
@@ -2585,12 +2859,11 @@ class PostgresAdapter(AdapterABC):
             conditions.append("agent_id = ANY(%s)")
             params.append(list(agent_ids))
         if entity_path:
-            # Descendants included: a/b covers a/b/c but never a/bc, which is
-            # why this is an equality OR a prefix-with-separator rather than a
-            # bare LIKE 'a/b%'.
-            prefix = entity_path.rstrip("/")
-            conditions.append("(entity_path = %s OR entity_path LIKE %s)")
-            params.extend([prefix, prefix + "/%"])
+            # Descendants included: a/b covers a/b/c but never a/bc. The rule
+            # and its LIKE escaping live in amfs_core.scope.
+            clause, clause_params = descendants_sql("entity_path", entity_path)
+            conditions.append(clause)
+            params.extend(clause_params)
         else:
             # Same reasoning as entity_summaries: unscoped, this groups by
             # entity_path, so a shared namespace's topics would be listed as

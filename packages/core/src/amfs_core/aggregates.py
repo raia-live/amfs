@@ -42,17 +42,41 @@ CHARS_PER_TOKEN = 4
 REUSE_CREDIT_K = 1
 
 
+def recall_tokens_for_chars(content_chars: int, *, hits: int = 1) -> int:
+    """Tokens of re-research credited for *hits* reuses of content this size.
+
+    The one implementation of the clamp. It was previously written out in four
+    places — here, the Postgres adapter SQL, the dashboard's value-metrics.ts and
+    the MCP servers' value_ledger.py — with a comment in each asking the next
+    person to keep them in sync. Two of those are Python and can simply call
+    this; the value the user is shown then cannot drift from the value the
+    dashboard computes, which is the only reason the duplication mattered.
+
+    ``content_chars`` must measure the credited entry's own content and not the
+    enclosing payload. A response carrying five entries plus scores and metadata
+    is not what one credited memory saved, and measuring the payload pinned every
+    reuse to the ceiling.
+    """
+    per_recall = min(
+        max(content_chars // CHARS_PER_TOKEN, RECALL_TOKENS_FLOOR), RECALL_TOKENS_CEIL
+    )
+    return max(hits, 0) * per_recall
+
+
+def entry_content_chars(entry: "MemoryEntry") -> int:
+    """Size of an entry's own stored value, for the reuse credit above."""
+    try:
+        return len(json.dumps(entry.value, default=str))
+    except (TypeError, ValueError):
+        return len(str(entry.value))
+
+
 def recall_tokens_saved(entry: "MemoryEntry") -> int:
     """Estimated tokens of re-research avoided by this entry's recalls."""
     recalls = entry.recall_count or 0
     if recalls <= 0:
         return 0
-    try:
-        chars = len(json.dumps(entry.value, default=str))
-    except (TypeError, ValueError):
-        chars = len(str(entry.value))
-    per_recall = min(max(chars // CHARS_PER_TOKEN, RECALL_TOKENS_FLOOR), RECALL_TOKENS_CEIL)
-    return recalls * per_recall
+    return recall_tokens_for_chars(entry_content_chars(entry), hits=recalls)
 
 
 def entity_summaries_from_entries(entries: "list[MemoryEntry]") -> list[dict]:

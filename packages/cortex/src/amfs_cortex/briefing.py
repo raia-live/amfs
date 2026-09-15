@@ -257,6 +257,11 @@ class BriefingService:
                     # Working files shouldn't dominate the "what you know" context
                     # an agent reads at task start.
                     include_artifacts=False,
+                    # Knowledge is written at "<repo>/deploy", never at "<repo>",
+                    # so an exact match on a scope a caller derived rather than
+                    # was handed reaches none of it. This is the same widening
+                    # _inject_who_to_ask already does via rank_authors.
+                    include_descendants=True,
                 ),
                 branch=branch,
             )
@@ -270,8 +275,24 @@ class BriefingService:
         hot_entries = [
             {
                 "key": e.key,
+                # Named because hot context now spans the scope: two entries can
+                # share a key under different topics, and "which of these is
+                # about deploys" is unanswerable from the key alone.
+                "entity_path": e.entity_path,
+                # Carried so a briefing can be booked as a real read: causal
+                # lineage pins the version that was actually surfaced, and
+                # without it the caller would have to re-read to find out.
+                "version": e.version,
                 "value": e.value,
                 "confidence": round(e.confidence, 3),
+                # Carried for the same reason as ``version``: the causal snapshot
+                # a booked briefing writes has to be the one a direct read would
+                # have written. Absent, ``record_surfaced`` falls back to "fact",
+                # so every belief and experience surfaced by a briefing entered
+                # the trace as a fact — a claim the entry never made, on the half
+                # of the record a tuned model learns from. ``.value`` because
+                # this dict is serialised into a digest summary.
+                "memory_type": e.memory_type.value,
                 "agent": e.provenance.agent_id,
                 "outcome_count": e.outcome_count,
                 "recall_count": e.recall_count,
@@ -304,6 +325,10 @@ class BriefingService:
                     # Working files shouldn't dominate the "what you know" context
                     # an agent reads at task start.
                     include_artifacts=False,
+                    # As in _inject_hot_context: the scope is a prefix, and an
+                    # uncompiled entity is exactly the case where the caller
+                    # named a repo root rather than a topic under it.
+                    include_descendants=True,
                 ),
                 branch=branch,
             )
@@ -316,8 +341,24 @@ class BriefingService:
         hot_entries = [
             {
                 "key": e.key,
+                # Named because hot context now spans the scope: two entries can
+                # share a key under different topics, and "which of these is
+                # about deploys" is unanswerable from the key alone.
+                "entity_path": e.entity_path,
+                # Carried so a briefing can be booked as a real read: causal
+                # lineage pins the version that was actually surfaced, and
+                # without it the caller would have to re-read to find out.
+                "version": e.version,
                 "value": e.value,
                 "confidence": round(e.confidence, 3),
+                # Carried for the same reason as ``version``: the causal snapshot
+                # a booked briefing writes has to be the one a direct read would
+                # have written. Absent, ``record_surfaced`` falls back to "fact",
+                # so every belief and experience surfaced by a briefing entered
+                # the trace as a fact — a claim the entry never made, on the half
+                # of the record a tuned model learns from. ``.value`` because
+                # this dict is serialised into a digest summary.
+                "memory_type": e.memory_type.value,
                 "agent": e.provenance.agent_id,
                 "outcome_count": e.outcome_count,
                 "recall_count": e.recall_count,

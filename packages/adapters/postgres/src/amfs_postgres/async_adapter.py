@@ -35,9 +35,11 @@ from amfs_core.models import (
     SearchQuery,
     SemanticQuery,
 )
+from amfs_core.scope import descendants_sql
 
 from amfs_postgres.adapter import (
     _EXCLUDE_SHARED_PATHS,
+    _REUSE_EVENT_INSERT_SQL,
     PostgresAdapter,
     pool_bounds,
     connection_options,
@@ -467,8 +469,13 @@ class AsyncPostgresAdapter:
             conditions.append("is_artifact IS NOT TRUE")
 
         if query.entity_path is not None:
-            conditions.append("entity_path = %s")
-            params.append(query.entity_path)
+            if query.include_descendants:
+                clause, clause_params = descendants_sql("entity_path", query.entity_path)
+                conditions.append(clause)
+                params.extend(clause_params)
+            else:
+                conditions.append("entity_path = %s")
+                params.append(query.entity_path)
         else:
             conditions.append(_EXCLUDE_SHARED_PATHS)
         if query.min_confidence > 0:
@@ -934,3 +941,110 @@ class AsyncPostgresAdapter:
                      AND superseded_at IS NULL""",
                 (self._namespace, branch, entity_path, key),
             )
+
+    async def scope_counts(
+        self,
+        entity_path: str,
+        *,
+        exclude_key: str | None = None,
+        branch: str = "main",
+        key_limit: int = 8,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """One aggregate instead of loading every sibling to count it.
+
+        See :meth:`AdapterABC.scope_counts` for what this answers and why. The
+        base class does it in Python over ``list()``, which means fetching every
+        sibling's full value in order to count rows and ignore the values — fine
+        for a handful, wasteful on a scope with hundreds, and this runs inline on
+        the write path where the latency is charged to the caller.
+
+        The key sample is bounded in SQL rather than after the fact, so a large
+        scope costs the same as a small one.
+
+        Every column is aliased and read by name, for the reason spelled out on
+        the sync adapter's reuse aggregate: this pool's row factory is
+        ``dict_row``, so positional access raises ``KeyError``, and the caller
+        swallows exceptions to protect the write it decorates — which would turn
+        the mistake into a scope block that silently never appears.
+
+        ``shared OR agent_id = %s`` is the visibility rule, carried here for the
+        reason given on the sync twin: bypassing ``list()`` bypasses the filter
+        ``list()`` applied, and this block's ``keys`` land in a tool result. A
+        NULL *agent_id* compares as unknown, so passing nothing counts shared
+        entries only.
+        """
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT count(*) AS total,
+                          count(*) FILTER (WHERE coalesce(recall_count, 0) = 0)
+                              AS never_read
+                     FROM amfs_memory_entries
+                    WHERE namespace = %s AND branch = %s AND entity_path = %s
+                      AND superseded_at IS NULL
+                      AND (%s::text IS NULL OR key <> %s)
+                      AND (shared OR agent_id = %s::text)""",
+                (self._namespace, branch, entity_path, exclude_key, exclude_key,
+                 agent_id),
+            )
+            row = await cur.fetchone()
+            cur = await conn.execute(
+                """SELECT key FROM amfs_memory_entries
+                    WHERE namespace = %s AND branch = %s AND entity_path = %s
+                      AND superseded_at IS NULL
+                      AND (%s::text IS NULL OR key <> %s)
+                      AND (shared OR agent_id = %s::text)
+                    ORDER BY key LIMIT %s""",
+                (self._namespace, branch, entity_path, exclude_key, exclude_key,
+                 agent_id, key_limit),
+            )
+            keys = [r["key"] for r in await cur.fetchall()]
+
+        return {
+            "entity_path": entity_path,
+            "existing_entries": int(row["total"]) if row else 0,
+            "never_read": int(row["never_read"]) if row else 0,
+            "keys": keys,
+        }
+
+    async def record_reuse_event(
+        self,
+        entity_path: str,
+        key: str,
+        *,
+        branch: str = "main",
+        entry_version: int | None = None,
+        written_by: str | None = None,
+        reused_by: str | None = None,
+        est_tokens_saved: int = 0,
+        surface: str | None = None,
+    ) -> None:
+        """Record that one memory was credited as reused, with when and by whom.
+
+        The companion to ``increment_recall_count``, which keeps the running
+        total. A total cannot say when reuse happened, which agent did it, or
+        whether the reader is the author, and those are what every user-facing
+        claim about reuse rests on. See ``amfs_reuse_events`` in schema.sql.
+
+        Swallows its own failures. This is diagnostic bookkeeping attached to a
+        read that has already answered correctly, so it must never be the reason
+        that read fails.
+        """
+        try:
+            async with self._pool.connection() as conn:
+                await conn.execute(
+                    _REUSE_EVENT_INSERT_SQL,
+                    (
+                        self._namespace,
+                        branch,
+                        entity_path,
+                        key,
+                        entry_version,
+                        written_by,
+                        reused_by,
+                        max(int(est_tokens_saved or 0), 0),
+                        surface,
+                    ),
+                )
+        except Exception:
+            logger.debug("reuse event not recorded for %s/%s", entity_path, key, exc_info=True)

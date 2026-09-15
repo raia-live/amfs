@@ -22,6 +22,12 @@ class WriteRequest(BaseModel):
     #: traces are keyed on this same id, and without it the two cannot be
     #: joined. Optional: older clients omit it and fall back to the server's.
     session_id: str | None = None
+    #: Return what is already stored beside this entry, and how much of it has
+    #: never been read back. Off by default because it costs an aggregate on the
+    #: write path, and a caller that will not show the block should not pay for
+    #: it. Computing it *here* is the point: a client that asks separately spends
+    #: another round trip, which on the hosted surface is another billed op.
+    include_scope: bool = False
 
 
 class OutcomeRequest(BaseModel):
@@ -70,6 +76,10 @@ class SearchRequest(BaseModel):
     # When True (default) artifacts are demoted to the bottom of results; when
     # False they are excluded entirely.
     include_artifacts: bool = True
+    # Widens entity_path to that path and everything beneath it. Off by default
+    # so an existing caller's exact-match query keeps returning exactly what it
+    # did; see amfs_core.scope for the covering rule.
+    include_descendants: bool = False
 
 
 class AggregateRequest(BaseModel):
