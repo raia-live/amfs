@@ -2050,13 +2050,34 @@ async def retrieve_entries(
             scored = reranked + scored[rerank_top_n:]
             scored.sort(key=lambda t: t[1], reverse=True)
 
-    # 9. Abstain floor: trim clearly-irrelevant tail (low semantic AND no
+    # 9. Abstain floor: trim clearly-irrelevant tail (low relevance AND no
     #    keyword match), but never drop the single best result.
+    #
+    #    Relevance is the best evidence held about the entry, not the bi-encoder
+    #    alone. While step 8 *replaced* the score with the rerank, the
+    #    cross-encoder's favourite was pinned at rank one by construction and so
+    #    was always the entry this loop keeps unconditionally. Now that the
+    #    rerank only sets the relevance term, confidence and recency can put that
+    #    favourite second — and an entry the reranker rescued is precisely the
+    #    one whose bi-encoder score is low, since rescuing those is what a
+    #    reranker is for. Trimming on ``semantic`` alone would delete the
+    #    reranker's best judgement whenever it did not also win the composite,
+    #    undoing the ranking step 8 had just applied.
+    #
+    #    The max can only keep more than the bi-encoder test alone, never less,
+    #    so abstention is unchanged wherever it was already right: a batch the
+    #    cross-encoder dislikes throughout normalises low, because the anchor in
+    #    ``_normalise_rerank`` is the logistic of the batch median, so a wholly
+    #    irrelevant candidate set still falls through the floor.
     floor = _retrieve_min_semantic()
     if floor > 0 and len(scored) > 1:
         kept = [scored[0]]
         for entry, score, bd in scored[1:]:
-            if bd.get("semantic", 0.0) < floor and not bd.get("keyword"):
+            relevance = max(
+                float(bd.get("semantic") or 0.0),
+                float(bd.get("rerank_normalised") or 0.0),
+            )
+            if relevance < floor and not bd.get("keyword"):
                 continue
             kept.append((entry, score, bd))
         scored = kept

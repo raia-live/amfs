@@ -285,6 +285,14 @@ class BriefingService:
                 "version": e.version,
                 "value": e.value,
                 "confidence": round(e.confidence, 3),
+                # Carried for the same reason as ``version``: the causal snapshot
+                # a booked briefing writes has to be the one a direct read would
+                # have written. Absent, ``record_surfaced`` falls back to "fact",
+                # so every belief and experience surfaced by a briefing entered
+                # the trace as a fact — a claim the entry never made, on the half
+                # of the record a tuned model learns from. ``.value`` because
+                # this dict is serialised into a digest summary.
+                "memory_type": e.memory_type.value,
                 "agent": e.provenance.agent_id,
                 "outcome_count": e.outcome_count,
                 "recall_count": e.recall_count,
@@ -343,6 +351,14 @@ class BriefingService:
                 "version": e.version,
                 "value": e.value,
                 "confidence": round(e.confidence, 3),
+                # Carried for the same reason as ``version``: the causal snapshot
+                # a booked briefing writes has to be the one a direct read would
+                # have written. Absent, ``record_surfaced`` falls back to "fact",
+                # so every belief and experience surfaced by a briefing entered
+                # the trace as a fact — a claim the entry never made, on the half
+                # of the record a tuned model learns from. ``.value`` because
+                # this dict is serialised into a digest summary.
+                "memory_type": e.memory_type.value,
                 "agent": e.provenance.agent_id,
                 "outcome_count": e.outcome_count,
                 "recall_count": e.recall_count,
