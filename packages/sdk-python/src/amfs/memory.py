@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import math
 import threading
@@ -361,6 +362,47 @@ class AgentMemory:
     def read_log(self) -> list[str]:
         """Entry keys read during this session (for inspection/debugging)."""
         return self._read_tracker.causal_keys
+
+    def as_agent(self, agent_id: str) -> "AgentMemory":
+        """A handle onto the same store that acts as *agent_id*.
+
+        For a server that holds one process-wide handle and must sometimes act
+        for one of its callers: write a room's join briefing as the agent being
+        briefed, or list an agent's own entries to render its page. Both need an
+        identity other than the server's, and the way it was being done was to
+        assign ``mem._tagger.agent_id`` and restore it in a ``finally``. That
+        mutates state shared by every concurrent request, so a write racing an
+        impersonation is stamped with whichever identity is installed at that
+        instant — measured in production as 1,994 join briefings attributed to
+        an agent that was not the one being briefed, 14 of them to real agents
+        whose pages then listed a stranger's memories.
+
+        Identity matters for reading too, not just provenance: ``list`` and
+        ``search`` keep an entry only if it is shared or ours, so asking the
+        server's handle for an agent's entries silently drops that agent's
+        private ones. That is one bug in two places, and one honest identity
+        fixes both.
+
+        Shares the adapter, config and embedder, so this is cheap enough to call
+        per request — no config reload, and deliberately no ``ensure_agent``,
+        because acting *as* an existing agent should not create one.
+
+        Gets its own :class:`ReadTracker`: work done on behalf of another agent
+        must not enter this session's causal chain, or the caller's next
+        ``commit_outcome`` would reinforce entries it never read.
+        """
+        clone = copy.copy(self)
+        clone._tagger = CausalTagger(agent_id, self._tagger.session_id)
+        clone._read_tracker = ReadTracker()
+        clone._engine = CoWEngine(self._adapter, clone._tagger, clone._read_tracker)
+        # Session state belongs to the session that built it, and a trace is
+        # sealed per handle: sharing these would let an impersonated write show
+        # up in the caller's trace, which is the confusion this method exists to
+        # end.
+        clone._session_metadata = None
+        clone._session_attributes = {}
+        clone._session_llm_calls = []
+        return clone
 
     # ------------------------------------------------------------------
     # Core operations

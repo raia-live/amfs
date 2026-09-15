@@ -1,6 +1,6 @@
 [project]
 name = "amfs-http-server"
-version = "0.3.29"
+version = "0.3.30"
 description = "AMFS HTTP/REST API server with SSE support"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -11,7 +11,9 @@ dependencies = [
     # and this server does its own crediting in the endpoint rather than asking
     # the SDK for it. The floor rises only because a floor below the version in
     # this tree is what test_dependency_floors forbids.
-    "amfs>=0.5.17",
+    # 0.5.18 for AgentMemory.as_agent, which the agent detail page calls to list
+    # an agent's entries as that agent rather than as the server.
+    "amfs>=0.5.18",
     # 0.3.23 is real in the silent way: the write path calls
     # adapter.scope_counts(), which is a default on AdapterABC from 0.3.23. On an
     # older core the adapters that do not override it — filesystem, S3 — have no
