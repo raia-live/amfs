@@ -3889,7 +3889,18 @@ async def agent_memory_graph(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     mem = _get_memory()
-    entries = mem.list()
+    # Listed AS this agent, not as the server. ``list`` keeps an entry only if
+    # it is shared or the listing identity's own, so asking the server's handle
+    # produced a page that could not see the agent's PRIVATE entries at all: an
+    # agent whose every entry was private showed 0 memories and 0 topics while
+    # its card, counted by SQL with no such filter, correctly said 4 and 1.
+    entries = mem.as_agent(agent_id).list()
+    if vis is not None and vis.should_filter():
+        # The same per-user filter every other entry-returning route applies,
+        # and this one did not: agent ids are matched as bare strings within an
+        # account, so where two people share an account and their agents share a
+        # default name, each was shown the other's entries.
+        entries = vis.filter_entries(entries)
     # Read counts and the trace count are aggregated by the adapter; this
     # used to pull up to 10,000 full traces to tally causal_entries here.
     trace_count = mem._adapter.count_traces(agent_id=agent_id)
