@@ -1,0 +1,384 @@
+"""Evidence-based confidence: how an outcome changes what an entry is worth.
+
+The original model multiplied confidence by a constant per outcome type
+(``OUTCOME_MULTIPLIERS``): ``*1.03`` on success, ``*0.90`` on failure. Two
+properties of that model made it nearly invisible in practice:
+
+* A stale entry at 0.9 needs six straight failures to fall under a 0.5 gate,
+  and an agent that retries around the failure commits ``success`` for the
+  episode anyway, so the failures were never even counted.
+* Every entry cited in a successful session gets the full ``*1.03``, so a
+  generic entry read in every session climbs to 1.0 and stays there, and
+  nothing distinguishes "cited a hundred times" from "cited once".
+
+This module replaces the multipliers with a recency-weighted Beta posterior:
+
+    confidence = (PRIOR_STRENGTH * prior + E_s) / (PRIOR_STRENGTH + E_s + E_f)
+
+where ``prior`` is the confidence the author wrote and ``E_s`` / ``E_f`` are
+evidence masses that decay by ``EVIDENCE_DECAY`` on every update, so the last
+few outcomes dominate. Each outcome adds a weight
+
+    w = severity(outcome_type) * causal_confidence / n_causal * (1 + |target - confidence|)
+
+to one of the masses. The last factor is the *surprise*: a failure on an entry
+the agent trusted at 0.95 counts nearly twice as much as one on an entry at
+0.5, and a success on an already-trusted entry counts for little. Dividing by
+``n_causal`` is the *credit split*: an outcome that cited eight entries cannot
+hand each of them a full unit of evidence.
+
+With the defaults below a fresh 0.7 entry drops to ~0.26 on its first failure
+and lifts to ~0.82 on its first success; a long-validated entry survives one
+failure (contested, ~0.57) and is discredited on the second. Those are the
+timescales a regime change in a live system plays out on.
+
+The same arithmetic is implemented in PL/pgSQL in ``amfs_postgres`` migration
+008 and must be kept identical; ``tests/unit/test_evidence.py`` pins the
+numbers both implementations have to produce.
+
+``AMFS_OUTCOME_MODEL=multiplicative`` restores the constant-multiplier model
+for deployments that need the old numbers.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
+
+from amfs_core.models import (
+    OUTCOME_MULTIPLIERS,
+    MemoryEntry,
+    OutcomeRecord,
+    OutcomeType,
+    clamp_confidence,
+)
+
+#: Pseudo-count behind the author's prior. Two units: one confident outcome
+#: moves a fresh entry a lot, and a handful settle it.
+PRIOR_STRENGTH = 2.0
+#: Multiplied into both evidence masses before each update. 0.8 means an
+#: outcome five updates ago carries a third of its original weight.
+EVIDENCE_DECAY = 0.8
+#: Posterior below which a failing entry is marked discredited.
+DISCREDIT_THRESHOLD = 0.5
+#: Failures weigh more than successes: trust is easy to lose, slow to rebuild.
+SEVERITY: dict[str, float] = {
+    OutcomeType.SUCCESS.value: 1.0,
+    OutcomeType.CLEAN_DEPLOY.value: 1.0,
+    OutcomeType.MINOR_FAILURE.value: 1.5,
+    OutcomeType.REGRESSION.value: 1.5,
+    OutcomeType.FAILURE.value: 2.0,
+    OutcomeType.P2_INCIDENT.value: 2.0,
+    OutcomeType.CRITICAL_FAILURE.value: 3.0,
+    OutcomeType.P1_INCIDENT.value: 3.0,
+}
+SUCCESS_TYPES = frozenset({OutcomeType.SUCCESS.value, OutcomeType.CLEAN_DEPLOY.value})
+
+OUTCOME_MODEL_ENV = "AMFS_OUTCOME_MODEL"
+
+
+def outcome_model() -> str:
+    """``"evidence"`` (default) or ``"multiplicative"``, from the environment."""
+    value = os.environ.get(OUTCOME_MODEL_ENV, "evidence").strip().lower()
+    return "multiplicative" if value == "multiplicative" else "evidence"
+
+
+def is_success(outcome_type: OutcomeType | str) -> bool:
+    return _name(outcome_type) in SUCCESS_TYPES
+
+
+def severity(outcome_type: OutcomeType | str) -> float:
+    return SEVERITY.get(_name(outcome_type), 1.0)
+
+
+def _name(outcome_type: OutcomeType | str) -> str:
+    return outcome_type.value if isinstance(outcome_type, OutcomeType) else str(outcome_type)
+
+
+@dataclass(frozen=True)
+class EvidenceUpdate:
+    """The fields a single outcome changes on an entry."""
+
+    confidence: float
+    evidence_success: float
+    evidence_failure: float
+    success_count: int
+    failure_count: int
+    prior_confidence: float
+    last_outcome: str
+    discredited: bool
+    #: How much the outcome moved the posterior, signed. Exposed so callers
+    #: can report "this failure cost the entry 0.31" instead of just the result.
+    delta: float
+
+    def as_entry_update(self, now: datetime) -> dict[str, Any]:
+        return {
+            "confidence": self.confidence,
+            "evidence_success": self.evidence_success,
+            "evidence_failure": self.evidence_failure,
+            "success_count": self.success_count,
+            "failure_count": self.failure_count,
+            "prior_confidence": self.prior_confidence,
+            "last_outcome": self.last_outcome,
+            "last_outcome_at": now,
+            "discredited_at": now if self.discredited else None,
+        }
+
+
+def evidence_weight(
+    outcome_type: OutcomeType | str,
+    *,
+    current_confidence: float,
+    causal_confidence: float = 1.0,
+    n_causal: int = 1,
+) -> float:
+    """The evidence mass one outcome adds to one of its causal entries."""
+    target = 1.0 if is_success(outcome_type) else 0.0
+    surprise = 1.0 + abs(target - clamp_confidence(current_confidence))
+    share = 1.0 / max(1, n_causal)
+    return severity(outcome_type) * max(0.0, causal_confidence) * share * surprise
+
+
+def posterior(prior: float, evidence_success: float, evidence_failure: float) -> float:
+    return clamp_confidence(
+        (PRIOR_STRENGTH * prior + evidence_success)
+        / (PRIOR_STRENGTH + evidence_success + evidence_failure)
+    )
+
+
+def apply_outcome(
+    entry: MemoryEntry,
+    outcome_type: OutcomeType | str,
+    *,
+    causal_confidence: float = 1.0,
+    n_causal: int = 1,
+    was_discredited: bool | None = None,
+) -> EvidenceUpdate:
+    """Compute the evidence update one outcome makes to ``entry``.
+
+    Pure: nothing is written. ``entry.prior_confidence`` is used as the prior
+    when set, otherwise the entry's current confidence becomes the prior (the
+    first outcome an entry ever sees). ``was_discredited`` defaults to
+    ``entry.discredited_at is not None``; an entry stays discredited until
+    evidence lifts the posterior back over the threshold.
+    """
+    prior = entry.prior_confidence if entry.prior_confidence is not None else entry.confidence
+    prior = clamp_confidence(prior)
+    w = evidence_weight(
+        outcome_type,
+        current_confidence=entry.confidence,
+        causal_confidence=causal_confidence,
+        n_causal=n_causal,
+    )
+    success = is_success(outcome_type)
+    e_s = entry.evidence_success * EVIDENCE_DECAY + (w if success else 0.0)
+    e_f = entry.evidence_failure * EVIDENCE_DECAY + (0.0 if success else w)
+    new_conf = posterior(prior, e_s, e_f)
+    discredited_before = (
+        was_discredited if was_discredited is not None else entry.discredited_at is not None
+    )
+    if new_conf < DISCREDIT_THRESHOLD and not success:
+        discredited = True
+    elif new_conf >= DISCREDIT_THRESHOLD:
+        discredited = False
+    else:
+        # A success that did not clear the threshold leaves the flag as it was.
+        discredited = discredited_before
+    return EvidenceUpdate(
+        confidence=new_conf,
+        evidence_success=e_s,
+        evidence_failure=e_f,
+        success_count=entry.success_count + (1 if success else 0),
+        failure_count=entry.failure_count + (0 if success else 1),
+        prior_confidence=prior,
+        last_outcome=_name(outcome_type),
+        discredited=discredited,
+        delta=new_conf - entry.confidence,
+    )
+
+
+def apply_outcome_multiplicative(
+    entry: MemoryEntry,
+    outcome_type: OutcomeType | str,
+    *,
+    causal_confidence: float = 1.0,
+) -> EvidenceUpdate:
+    """The legacy constant-multiplier update, in the same shape.
+
+    Kept for ``AMFS_OUTCOME_MODEL=multiplicative``. Counts and evidence masses
+    are still maintained so the status vocabulary works under either model.
+    """
+    key: OutcomeType | str
+    try:
+        key = OutcomeType(_name(outcome_type))
+    except ValueError:
+        key = _name(outcome_type)
+    multiplier = OUTCOME_MULTIPLIERS.get(key, 1.0)
+    new_conf = clamp_confidence(entry.confidence * multiplier * causal_confidence)
+    success = is_success(outcome_type)
+    prior = entry.prior_confidence if entry.prior_confidence is not None else entry.confidence
+    return EvidenceUpdate(
+        confidence=new_conf,
+        evidence_success=entry.evidence_success + (1.0 if success else 0.0),
+        evidence_failure=entry.evidence_failure + (0.0 if success else 1.0),
+        success_count=entry.success_count + (1 if success else 0),
+        failure_count=entry.failure_count + (0 if success else 1),
+        prior_confidence=clamp_confidence(prior),
+        last_outcome=_name(outcome_type),
+        discredited=new_conf < DISCREDIT_THRESHOLD and not success,
+        delta=new_conf - entry.confidence,
+    )
+
+
+def _split_spec(spec: str) -> tuple[str, str] | None:
+    parts = spec.rsplit("/", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return None
+    return parts[0], parts[1]
+
+
+def outcome_steps(record: OutcomeRecord) -> list[tuple[OutcomeType, list[str]]]:
+    """The ordered ``(outcome_type, causal_entry_keys)`` steps a record applies.
+
+    Failed attempts first, oldest to newest, then the terminal outcome. Each
+    step's keys are deduplicated, and each step is credit-split over its own
+    keys, not over the union — an attempt that read one entry hands it a full
+    unit of failure even if the whole task read twenty.
+    """
+    steps: list[tuple[OutcomeType, list[str]]] = []
+    for attempt in sorted(record.attempts, key=lambda a: a.attempt):
+        keys = list(dict.fromkeys(attempt.causal_entry_keys))
+        if keys:
+            steps.append((attempt.outcome_type, keys))
+    steps.append((record.outcome_type, list(dict.fromkeys(record.causal_entry_keys))))
+    return steps
+
+
+def apply_record_to_entry(
+    entry: MemoryEntry,
+    record: OutcomeRecord,
+    *,
+    now: datetime | None = None,
+    model: str | None = None,
+) -> tuple[MemoryEntry, list[EvidenceUpdate]]:
+    """Apply every step of ``record`` that cites ``entry`` and return the new entry.
+
+    This is what the filesystem and S3 adapters (and the Postgres trigger, in
+    SQL) do per causal entry. ``version`` is left alone: adapters assign it on
+    write.
+    """
+    now = now or datetime.now(timezone.utc)
+    model = model or outcome_model()
+    updates: list[EvidenceUpdate] = []
+    current = entry
+    for outcome_type, keys in outcome_steps(record):
+        if entry.entry_key not in keys:
+            continue
+        if model == "multiplicative":
+            upd = apply_outcome_multiplicative(
+                current, outcome_type, causal_confidence=record.causal_confidence
+            )
+        else:
+            upd = apply_outcome(
+                current,
+                outcome_type,
+                causal_confidence=record.causal_confidence,
+                n_causal=len(keys),
+            )
+        fields = upd.as_entry_update(now)
+        if upd.discredited and current.discredited_at is not None:
+            # Still discredited: keep the moment it happened, not the latest hit.
+            fields["discredited_at"] = current.discredited_at
+        current = current.model_copy(update={**fields, "outcome_count": current.outcome_count + 1})
+        updates.append(upd)
+    return current, updates
+
+
+def cited_entries(record: OutcomeRecord) -> list[tuple[str, str]]:
+    """Every distinct ``(entity_path, key)`` any step of ``record`` cites."""
+    seen: dict[tuple[str, str], None] = {}
+    for _, keys in outcome_steps(record):
+        for spec in keys:
+            split = _split_spec(spec)
+            if split is not None:
+                seen.setdefault(split, None)
+    return list(seen)
+
+
+def contrast_lesson(record: OutcomeRecord) -> dict[str, Any] | None:
+    """The auto-written lesson for a fail-then-succeed record, or ``None``.
+
+    Only when at least one failed attempt cited an entry and the terminal
+    outcome is a success: "these entries led to a failed attempt on this task;
+    the task was resolved without them". Callers write it under the agent's
+    identity with a key that starts with ``SYNTHETIC_KEY_PREFIX`` so training
+    and eval pipelines can exclude it.
+    """
+    if not is_success(record.outcome_type) or not record.attempts:
+        return None
+    failed_keys: list[str] = []
+    summaries: list[str] = []
+    for attempt in sorted(record.attempts, key=lambda a: a.attempt):
+        if is_success(attempt.outcome_type):
+            continue
+        failed_keys.extend(k for k in attempt.causal_entry_keys if k not in failed_keys)
+        if attempt.summary:
+            summaries.append(attempt.summary)
+    resolved_with = [k for k in record.causal_entry_keys if k not in failed_keys]
+    if not failed_keys:
+        return None
+    return {
+        "kind": "contrast",
+        "outcome_ref": record.outcome_ref,
+        "failed_attempts": len([a for a in record.attempts if not is_success(a.outcome_type)]),
+        "avoid": failed_keys,
+        "resolved_with": resolved_with,
+        "attempt_summaries": summaries,
+        "lesson": (
+            f"{len(failed_keys)} remembered entr{'y' if len(failed_keys) == 1 else 'ies'} "
+            f"led to a failed attempt before this task was resolved"
+            + (f" using {len(resolved_with)} other entr{'y' if len(resolved_with) == 1 else 'ies'}" if resolved_with else "")
+            + "."
+        ),
+    }
+
+
+#: Keys with these prefixes are written by the system, not the agent: derived
+#: lessons that should inform retrieval and briefings but never be trained on
+#: or graded as if the agent had authored them.
+SYNTHETIC_KEY_PREFIXES: tuple[str, ...] = ("lesson-contrast-",)
+
+
+def is_synthetic_key(key: str) -> bool:
+    return key.startswith(SYNTHETIC_KEY_PREFIXES)
+
+
+def contrast_lesson_key(outcome_ref: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in outcome_ref)[:80]
+    return f"{SYNTHETIC_KEY_PREFIXES[0]}{safe}"
+
+
+__all__ = [
+    "DISCREDIT_THRESHOLD",
+    "EVIDENCE_DECAY",
+    "PRIOR_STRENGTH",
+    "SEVERITY",
+    "SUCCESS_TYPES",
+    "SYNTHETIC_KEY_PREFIXES",
+    "EvidenceUpdate",
+    "apply_outcome",
+    "apply_outcome_multiplicative",
+    "apply_record_to_entry",
+    "cited_entries",
+    "contrast_lesson",
+    "contrast_lesson_key",
+    "evidence_weight",
+    "is_success",
+    "is_synthetic_key",
+    "outcome_model",
+    "outcome_steps",
+    "posterior",
+    "severity",
+]

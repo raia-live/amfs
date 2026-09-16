@@ -151,6 +151,23 @@ class MemoryEntry(BaseModel):
     provenance: Provenance
     confidence: float = 1.0
     outcome_count: int = 0
+    # ── Outcome evidence ────────────────────────────────────────────────
+    # Raw counts of committed outcomes that cited this entry, split by
+    # direction, plus the recency-weighted evidence mass the evidence model
+    # (``amfs_core.evidence``) turns into ``confidence``. ``prior_confidence``
+    # is the confidence the author wrote; it is the Beta prior the posterior
+    # shrinks toward, and it is what a fresh version resets to.
+    success_count: int = 0
+    failure_count: int = 0
+    evidence_success: float = 0.0
+    evidence_failure: float = 0.0
+    prior_confidence: float | None = None
+    last_outcome: str | None = None
+    last_outcome_at: datetime | None = None
+    # Set when a failure pushed the posterior below the discredit threshold;
+    # cleared when later evidence lifts it back. Read paths exclude discredited
+    # entries by default and render them as anti-patterns in briefings.
+    discredited_at: datetime | None = None
     recall_count: int = 0
     priority_score: float | None = None
     tier: int = 3
@@ -216,6 +233,30 @@ class MemoryEntry(BaseModel):
         return f"{self.entity_path}/{self.key}"
 
     @property
+    def evidence_status(self) -> str:
+        """One of ``untested``, ``validated``, ``contested``, ``discredited``.
+
+        The word an agent sees next to an entry. ``validated`` means every
+        outcome that cited it succeeded; ``contested`` means the record is
+        mixed but the posterior is still above the discredit threshold;
+        ``discredited`` means a failure pushed it below and nothing has lifted
+        it since. ``untested`` entries have never been cited by an outcome, so
+        their confidence is whatever the author claimed.
+        """
+        if self.discredited_at is not None:
+            return "discredited"
+        total = self.success_count + self.failure_count
+        if total == 0:
+            if self.outcome_count == 0:
+                return "untested"
+            # Outcomes committed before the split counts existed: direction
+            # is unknown, so read it off the confidence they left behind.
+            return "validated" if self.confidence >= 0.5 else "contested"
+        if self.failure_count > 0:
+            return "contested"
+        return "validated"
+
+    @property
     def provenance_tier(self) -> ProvenanceTier:
         """Compute quality tier from provenance and outcome history.
 
@@ -240,6 +281,29 @@ class MemoryEntry(BaseModel):
         return ProvenanceTier.DEVELOPMENT
 
 
+class AttemptRecord(BaseModel):
+    """One failed attempt inside a task that was eventually resolved.
+
+    An agent that tries a remembered fix, sees it fail, and then succeeds on a
+    different action has learned two things, and a single ``success`` outcome
+    records only one of them. Recording the boundary between the attempts lets
+    the entries the failed attempt relied on receive the failure, while the
+    entries the final answer relied on receive the success — within one trace,
+    so the task still has exactly one terminal label for training.
+
+    ``causal_entry_keys`` are the ``entity_path/key`` specs read between the
+    previous boundary and this one. ``action_indices`` point into the trace's
+    ``tool_calls`` at the actions this attempt took, so a training exporter can
+    pair them against the final action as a rejected/chosen contrast.
+    """
+
+    attempt: int
+    outcome_type: OutcomeType = OutcomeType.MINOR_FAILURE
+    causal_entry_keys: list[str] = Field(default_factory=list)
+    action_indices: list[int] = Field(default_factory=list)
+    summary: str | None = None
+
+
 class OutcomeRecord(BaseModel):
     """Records an outcome event that back-propagates to memory entries."""
 
@@ -249,6 +313,14 @@ class OutcomeRecord(BaseModel):
     committed_at: datetime
     causal_entry_keys: list[str] = Field(default_factory=list)
     agent_id: str
+    #: Failed attempts that preceded the terminal outcome, oldest first. Each is
+    #: applied to its own causal entries before ``outcome_type`` is applied to
+    #: ``causal_entry_keys``. Empty for the common single-shot task.
+    attempts: list[AttemptRecord] = Field(default_factory=list)
+    #: Index into the trace's ``tool_calls`` of the action that produced the
+    #: terminal outcome, when the agent took more than one. Training pipelines
+    #: use it as the supervised target instead of guessing "the first action".
+    final_action_index: int | None = None
     #: Captured prompt and response, carried alongside the outcome rather than
     #: only on the trace. On the SaaS path the adapter's ``commit_outcome`` is what
     #: reaches the server, and the server seals its immutable trace from that call

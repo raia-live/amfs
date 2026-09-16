@@ -157,8 +157,10 @@ class TestAgentMemory:
             ["svc/key"],
         )
         assert len(updated) == 1
-        # CRITICAL_FAILURE erodes confidence: 1.0 * 0.85 = 0.85
-        assert abs(updated[0].confidence - 0.85) < 1e-6
+        # CRITICAL_FAILURE erodes confidence. Under the evidence model a first
+        # critical failure on a 1.0 entry lands at 2/(2+6) = 0.25 and gates it.
+        assert abs(updated[0].confidence - 0.25) < 1e-6
+        assert updated[0].discredited_at is not None
 
     def test_properties(self, mem: AgentMemory) -> None:
         assert mem.agent_id == "test-agent"
@@ -290,8 +292,9 @@ class TestAutoCausalTracking:
 
         updated = mem.commit_outcome("INC-100", OutcomeType.CRITICAL_FAILURE)
         assert len(updated) == 2
-        # CRITICAL_FAILURE erodes confidence: 1.0 * 0.85 = 0.85
-        assert all(abs(e.confidence - 0.85) < 1e-6 for e in updated)
+        # CRITICAL_FAILURE erodes confidence. Two causal entries split the
+        # credit: w = 3.0 * 2 / 2 = 3 each, so 2/(2+3) = 0.4.
+        assert all(abs(e.confidence - 0.4) < 1e-6 for e in updated)
 
     def test_commit_outcome_explicit_overrides_auto(self, mem: AgentMemory) -> None:
         """Explicit causal keys take precedence over the auto read log."""

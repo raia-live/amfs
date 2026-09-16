@@ -28,6 +28,7 @@ from amfs_core.exclusions import (
     AGENT_ID_NOT_EXCLUDED_SQL,
     ENTITY_PATH_NOT_EXCLUDED_SQL,
 )
+from amfs_core.evidence import cited_entries, outcome_model
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
     Agent,
@@ -53,6 +54,7 @@ from amfs_core.models import (
     MergeConflict,
     MergeResult,
     MergeStrategy,
+    AttemptRecord,
     OutcomeRecord,
     OutcomeType,
     PRReview,
@@ -114,7 +116,36 @@ _EXCLUDE_SYSTEM_ROWS = (
     f"({ENTITY_PATH_NOT_EXCLUDED_SQL} AND {AGENT_ID_NOT_EXCLUDED_SQL})"
 )
 
+def _attempts_from_row(raw: Any) -> list[AttemptRecord]:
+    """``AttemptRecord`` list from the ``attempts`` JSONB column, tolerant of
+    the column being absent, NULL, or a not-yet-decoded JSON string."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    out: list[AttemptRecord] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            out.append(AttemptRecord.model_validate(item))
+        except Exception:  # noqa: BLE001 — a malformed attempt is dropped, not fatal
+            continue
+    return out
+
+
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
+#: Migration 008 — evidence-based outcome propagation. Applied verbatim by
+#: ``_apply_migrations`` so the adapter has no copy of its own to drift; the
+#: file is folded into the schema fingerprint alongside schema.sql.
+_OUTCOME_EVIDENCE_SQL = (
+    Path(__file__).parent / "migrations" / "008_outcome_evidence.sql"
+).read_text(encoding="utf-8")
 
 # Shared by the sync and async adapters so the two cannot drift apart. account_id
 # is omitted on purpose: the hosted product gives the column a default in a tenant
@@ -614,7 +645,7 @@ class PostgresAdapter(AdapterABC):
         if migrations is None:
             return None
         return hashlib.sha256(
-            (_SCHEMA_SQL + migrations).encode("utf-8")
+            (_SCHEMA_SQL + migrations + _OUTCOME_EVIDENCE_SQL).encode("utf-8")
         ).hexdigest()
 
     def _expected_tables(self) -> frozenset[str]:
@@ -956,89 +987,11 @@ class PostgresAdapter(AdapterABC):
             ON amfs_memory_entries (namespace, entity_path)
             WHERE tier <= 2 AND superseded_at IS NULL
         """)
-        cur.execute("""
-            -- Must stay identical to schema.sql and migrations/007. All three
-            -- are CREATE OR REPLACE, so whichever runs last silently becomes
-            -- the function and a stale copy is a regression, not dead code.
-            -- This one runs at container start whenever the schema fingerprint
-            -- changes, which makes it the copy most able to overwrite the
-            -- others after a deploy.
-            CREATE OR REPLACE FUNCTION amfs_propagate_outcome() RETURNS TRIGGER AS $$
-            DECLARE
-                multiplier NUMERIC;
-                entry_key TEXT;
-                ep TEXT;
-                k TEXT;
-                cur RECORD;
-            BEGIN
-                -- SUCCESS reinforces confidence (>1.0), failures erode it (<1.0).
-                -- Result is clamped to [0,1] below.
-                CASE NEW.outcome_type
-                    WHEN 'critical_failure' THEN multiplier := 0.85;
-                    WHEN 'failure' THEN multiplier := 0.90;
-                    WHEN 'minor_failure' THEN multiplier := 0.92;
-                    WHEN 'success' THEN multiplier := 1.03;
-                    WHEN 'p1_incident' THEN multiplier := 0.85;
-                    WHEN 'p2_incident' THEN multiplier := 0.90;
-                    WHEN 'regression' THEN multiplier := 0.92;
-                    WHEN 'clean_deploy' THEN multiplier := 1.03;
-                    ELSE multiplier := 1.0;
-                END CASE;
-
-                FOREACH entry_key IN ARRAY NEW.causal_entry_keys
-                LOOP
-                    IF position('/' in entry_key) = 0 THEN
-                        CONTINUE;
-                    END IF;
-                    k := substring(entry_key from '([^/]+)$');
-                    ep := left(entry_key, length(entry_key) - length(k) - 1);
-
-                    SELECT * INTO cur FROM amfs_memory_entries
-                    WHERE namespace = NEW.namespace
-                      AND entity_path = ep
-                      AND key = k
-                      AND superseded_at IS NULL
-                      AND account_id IS NOT DISTINCT FROM NEW.account_id
-                    ORDER BY version DESC LIMIT 1;
-
-                    IF FOUND THEN
-                        UPDATE amfs_memory_entries
-                        SET superseded_at = NOW()
-                        WHERE id = cur.id;
-
-                        -- Copy the row; override only what a new version
-                        -- changes. The column list this replaces was the live
-                        -- one, and it reset every column added after it was
-                        -- written: recall_count, shared, tier, branch,
-                        -- embedding, and any column a deployment adds. See
-                        -- migrations/007 for the full reasoning.
-                        INSERT INTO amfs_memory_entries
-                        SELECT * FROM jsonb_populate_record(
-                            NULL::amfs_memory_entries,
-                            to_jsonb(cur) || jsonb_build_object(
-                                'id', gen_random_uuid(),
-                                'version', cur.version + 1,
-                                'confidence', LEAST(1.0, GREATEST(0.0,
-                                    cur.confidence * multiplier * NEW.causal_confidence)),
-                                'outcome_count', cur.outcome_count + 1,
-                                'superseded_at', NULL
-                            )
-                        );
-                    END IF;
-                END LOOP;
-
-                PERFORM pg_notify('amfs_outcome', json_build_object(
-                    'namespace', NEW.namespace,
-                    'outcome_ref', NEW.outcome_ref,
-                    'outcome_type', NEW.outcome_type,
-                    'agent_id', NEW.agent_id,
-                    'causal_confidence', NEW.causal_confidence
-                )::TEXT);
-
-                RETURN NEW;
-            END;
-            $$ LANGUAGE plpgsql
-        """)
+        # Outcome propagation (trigger v3): evidence columns on entries,
+        # attempts/final_action_index on outcomes, and the propagate function
+        # with its helpers. Applied from the migration file rather than a copy
+        # here — the copy is what drifted twice before (see 006 and 007).
+        cur.execute(_OUTCOME_EVIDENCE_SQL)
         # Soft-delete for team members (user removal flow)
         cur.execute("""
             ALTER TABLE amfs_team_members
@@ -3164,14 +3117,22 @@ class PostgresAdapter(AdapterABC):
     # ------------------------------------------------------------------
 
     def commit_outcome(self, record: OutcomeRecord) -> list[MemoryEntry]:
-        with self._pool.connection() as conn:
+        with self._pool.connection() as conn, conn.transaction():
             with conn.cursor() as cur:
+                # The trigger reads the outcome model off this session setting.
+                # The pool runs autocommit, so the explicit transaction above is
+                # what keeps the transaction-local setting alive for the insert.
+                cur.execute(
+                    "SELECT set_config('amfs.outcome_model', %s, true)",
+                    (outcome_model(),),
+                )
                 cur.execute(
                     """
                     INSERT INTO amfs_outcomes (
                         namespace, outcome_ref, outcome_type, causal_confidence,
-                        committed_at, causal_entry_keys, agent_id
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        committed_at, causal_entry_keys, agent_id,
+                        attempts, final_action_index
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
                     """,
                     (
                         self._namespace,
@@ -3181,15 +3142,18 @@ class PostgresAdapter(AdapterABC):
                         record.committed_at,
                         record.causal_entry_keys,
                         record.agent_id,
+                        json.dumps(
+                            [a.model_dump(mode="json") for a in record.attempts],
+                            default=str,
+                        ),
+                        record.final_action_index,
                     ),
                 )
 
+        # Every entry any step cited, including the failed attempts' — those
+        # got a new version too and callers want to see where they landed.
         updated: list[MemoryEntry] = []
-        for spec in record.causal_entry_keys:
-            parts = spec.rsplit("/", 1)
-            if len(parts) != 2:
-                continue
-            ep, key = parts
+        for ep, key in cited_entries(record):
             entry = self.read(ep, key)
             if entry:
                 updated.append(entry)
@@ -3252,7 +3216,8 @@ class PostgresAdapter(AdapterABC):
         )
         sql = f"""
             SELECT outcome_ref, outcome_type, causal_confidence,
-                   committed_at, causal_entry_keys, agent_id
+                   committed_at, causal_entry_keys, agent_id,
+                   attempts, final_action_index
             FROM amfs_outcomes
             WHERE {where}
             ORDER BY committed_at DESC
@@ -3279,6 +3244,8 @@ class PostgresAdapter(AdapterABC):
                     committed_at=row["committed_at"],
                     causal_entry_keys=row.get("causal_entry_keys") or [],
                     agent_id=row["agent_id"],
+                    attempts=_attempts_from_row(row.get("attempts")),
+                    final_action_index=row.get("final_action_index"),
                 )
             )
         return results
@@ -3848,6 +3815,16 @@ class PostgresAdapter(AdapterABC):
             ),
             confidence=float(row["confidence"]),
             outcome_count=row["outcome_count"],
+            success_count=int(row.get("success_count") or 0),
+            failure_count=int(row.get("failure_count") or 0),
+            evidence_success=float(row.get("evidence_success") or 0.0),
+            evidence_failure=float(row.get("evidence_failure") or 0.0),
+            prior_confidence=(
+                float(row["prior_confidence"]) if row.get("prior_confidence") is not None else None
+            ),
+            last_outcome=row.get("last_outcome"),
+            last_outcome_at=row.get("last_outcome_at"),
+            discredited_at=row.get("discredited_at"),
             recall_count=row.get("recall_count", 0),
             priority_score=float(row["priority_score"]) if row.get("priority_score") is not None else None,
             tier=row.get("tier", 3),

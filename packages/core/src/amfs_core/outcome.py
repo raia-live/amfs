@@ -70,14 +70,37 @@ class OutcomeBackPropagator:
         current_confidence: float,
         outcome_type: OutcomeType,
         causal_confidence: float = 1.0,
+        *,
+        n_causal: int = 1,
+        evidence_success: float = 0.0,
+        evidence_failure: float = 0.0,
+        prior_confidence: float | None = None,
     ) -> float:
-        """Compute the new confidence value after an outcome.
+        """Preview the confidence an outcome would leave, without writing.
 
-        This is a pure function useful for previewing the effect
-        without actually writing.
+        Under the default evidence model (see ``amfs_core.evidence``) the
+        result depends on the entry's accumulated evidence, so callers that
+        have it should pass it; with none, this is the update a fresh entry at
+        ``current_confidence`` receives. ``AMFS_OUTCOME_MODEL=multiplicative``
+        restores ``current * multiplier * causal_confidence``.
         """
-        multiplier = OUTCOME_MULTIPLIERS[outcome_type]
-        return clamp_confidence(current_confidence * multiplier * causal_confidence)
+        from amfs_core import evidence as ev
+
+        if ev.outcome_model() == "multiplicative":
+            multiplier = OUTCOME_MULTIPLIERS[outcome_type]
+            return clamp_confidence(current_confidence * multiplier * causal_confidence)
+        prior = current_confidence if prior_confidence is None else prior_confidence
+        w = ev.evidence_weight(
+            outcome_type,
+            current_confidence=current_confidence,
+            causal_confidence=causal_confidence,
+            n_causal=n_causal,
+        )
+        if ev.is_success(outcome_type):
+            e_s, e_f = evidence_success * ev.EVIDENCE_DECAY + w, evidence_failure * ev.EVIDENCE_DECAY
+        else:
+            e_s, e_f = evidence_success * ev.EVIDENCE_DECAY, evidence_failure * ev.EVIDENCE_DECAY + w
+        return ev.posterior(prior, e_s, e_f)
 
     @staticmethod
     def make_record(
@@ -93,9 +116,13 @@ class OutcomeBackPropagator:
         tool_calls: list[dict[str, Any]] | None = None,
         session_metadata: dict[str, Any] | None = None,
         trace_follows: bool = False,
+        attempts: list[Any] | None = None,
+        final_action_index: int | None = None,
     ) -> OutcomeRecord:
         """Convenience factory for creating OutcomeRecord instances."""
         return OutcomeRecord(
+            attempts=attempts or [],
+            final_action_index=final_action_index,
             outcome_ref=outcome_ref,
             outcome_type=outcome_type,
             causal_confidence=causal_confidence,
