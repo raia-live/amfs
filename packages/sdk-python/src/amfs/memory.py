@@ -195,6 +195,18 @@ def _normalize_llm_call(call: Any) -> dict[str, Any] | None:
     return normalized
 
 
+def is_avoid(result: ScoredEntry) -> bool:
+    """Whether a retrieval result is an avoid-list row rather than a hit.
+
+    With ``RecallConfig.include_avoid`` the server appends recently discredited
+    entries matching the query, flagged ``_avoid`` in the breakdown and scored
+    0, so the agent is told what not to do instead of merely not being told.
+    They are never booked as causal reads: an outcome must not reinforce or
+    further punish an entry the agent was warned off.
+    """
+    return bool(result.breakdown.get("_avoid"))
+
+
 def _metadata_to_dict(meta: Any) -> dict[str, Any]:
     """``session_metadata`` as a plain dict, extras included, whatever it is held as."""
     if meta is None:
@@ -846,12 +858,16 @@ class AgentMemory:
                     include_artifacts=include_artifacts,
                     evidence_weight=cfg.evidence_weight,
                     include_discredited=cfg.include_discredited,
+                    include_avoid=cfg.include_avoid,
+                    adaptive_k=cfg.adaptive_k,
                 )
                 scored = [
                     ScoredEntry(entry=entry, score=score, breakdown=breakdown or {})
                     for entry, score, breakdown in rows
                 ]
-                self._record_retrieval_reuse(query, entity_path, scored)
+                self._record_retrieval_reuse(
+                    query, entity_path, [r for r in scored if not is_avoid(r)]
+                )
                 return scored
             except Exception:  # noqa: BLE001 - fall back to local scoring
                 logger.debug("Adapter server-side retrieve failed; using local scoring", exc_info=True)

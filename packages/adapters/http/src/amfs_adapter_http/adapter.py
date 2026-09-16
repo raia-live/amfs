@@ -403,7 +403,9 @@ class HttpAdapter(AdapterABC):
         include_artifacts: bool = True,
         evidence_weight: float | None = None,
         include_discredited: bool | None = None,
-    ) -> list[tuple[MemoryEntry, float, dict[str, float]]]:
+        include_avoid: bool | None = None,
+        adaptive_k: bool | None = None,
+    ) -> list[tuple[MemoryEntry, float, dict[str, Any]]]:
         """Server-side semantic retrieval via POST /api/v1/retrieve.
 
         The server does the embedding + pgvector similarity + blend, so this
@@ -430,13 +432,22 @@ class HttpAdapter(AdapterABC):
             body["evidence_weight"] = evidence_weight
         if include_discredited is not None:
             body["include_discredited"] = include_discredited
+        if include_avoid is not None:
+            body["include_avoid"] = include_avoid
+        if adaptive_k is not None:
+            body["adaptive_k"] = adaptive_k
         data = self._post("/api/v1/retrieve", body)
         self._capture_reuse_value()
         rows = data if isinstance(data, list) else data.get("entries", [])
-        out: list[tuple[MemoryEntry, float, dict[str, float]]] = []
+        out: list[tuple[MemoryEntry, float, dict[str, Any]]] = []
         for e in rows:
             score = float(e.get("_score", 0.0)) if isinstance(e, dict) else 0.0
-            breakdown = e.get("_breakdown", {}) if isinstance(e, dict) else {}
+            breakdown = dict(e.get("_breakdown", {}) or {}) if isinstance(e, dict) else {}
+            if isinstance(e, dict) and e.get("_avoid"):
+                # A discredited entry the server appended because the caller
+                # asked what not to do. Carried in the breakdown so ScoredEntry
+                # keeps it and the SDK can hand it back as an avoid list.
+                breakdown["_avoid"] = True
             out.append((_parse_entry(e), score, breakdown))
         return out
 

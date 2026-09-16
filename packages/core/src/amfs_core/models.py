@@ -522,6 +522,13 @@ class RecallConfig(BaseModel):
     #: Discredited entries (a failure left them under the discredit threshold)
     #: are dropped from results unless this is set.
     include_discredited: bool = False
+    #: Append recently discredited entries matching the query as an avoid list
+    #: (flagged ``_avoid`` in the breakdown, scored 0, never booked as reads),
+    #: so the agent is told what not to do instead of merely not being told.
+    include_avoid: bool = False
+    #: When the top hit is validated with no recent failure, return fewer
+    #: results: the answer is known, and the rest is tokens.
+    adaptive_k: bool = False
     recency_half_life_days: float = 30.0
 
 

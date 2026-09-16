@@ -1105,6 +1105,7 @@ def amfs_retrieve(
     confidence_weight: float = 0.2,
     depth: int = 3,
     include_artifacts: bool = True,
+    include_avoid: bool = True,
 ) -> str:
     """Find memories by meaning — the default tool for any recall/lookup.
 
@@ -1130,20 +1131,30 @@ def amfs_retrieve(
         depth: Tier depth (1=hot only, 2=hot+warm, 3=all tiers)
         include_artifacts: When False, exclude stored source files from results
             (they are demoted by default so genuine facts rank above code)
+        include_avoid: When True (default), the response also carries `avoid`:
+            entries matching the query that a failure discredited, with how
+            they failed. Read it before acting — these are the approaches that
+            stopped working here. They are never ranked among the entries.
 
-    Returns ranked results with score breakdowns showing how each
-    signal contributed to the final ranking.
+    Returns ranked results with score breakdowns showing how each signal
+    contributed to the final ranking. Every entry carries `evidence_status`:
+    `validated` (confirmed by outcomes — act on it), `untested`, `contested`
+    (recent failures), or `discredited`. An untested 0.9 and a validated 0.9
+    are different things to act on.
 
     Long values come back as a 2000-character preview with `value_truncated`
     and `full_value` set; call amfs_read for the whole value.
     """
     from amfs_core.models import RecallConfig
 
+    from amfs.memory import is_avoid
+
     mem = _get_memory()
     recall_config = RecallConfig(
         semantic_weight=semantic_weight,
         recency_weight=recency_weight,
         confidence_weight=confidence_weight,
+        include_avoid=include_avoid,
     )
 
     # Prefer server-side semantic retrieval (embedder + pgvector live on the
@@ -1159,7 +1170,21 @@ def amfs_retrieve(
     )
 
     serialized = []
+    avoid: list[dict[str, Any]] = []
     for scored, data in zip(results, _serialize_entries(s.entry for s in results)):
+        if is_avoid(scored):
+            e = scored.entry
+            avoid.append({
+                "entity_path": e.entity_path,
+                "key": e.key,
+                "value": data.get("value"),
+                "confidence": round(e.confidence, 3),
+                "failure_count": e.failure_count,
+                "success_count": e.success_count,
+                "last_outcome": e.last_outcome,
+                "discredited_at": e.discredited_at.isoformat() if e.discredited_at else None,
+            })
+            continue
         data["_score"] = round(scored.score, 4)
         data["_breakdown"] = {
             k: round(v, 4) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
@@ -1168,17 +1193,29 @@ def amfs_retrieve(
         serialized.append(data)
 
     if not serialized:
-        return json.dumps({
+        empty: dict[str, Any] = {
             "status": "empty",
             "count": 0,
             "message": "No entries matched your query.",
             "query": query,
             "entity_path": entity_path,
-        })
-    return json.dumps(_with_reuse_value(mem, {
-        "count": len(serialized),
-        "entries": serialized,
-    }), default=str)
+        }
+        if avoid:
+            empty["avoid"] = avoid
+            empty["avoid_note"] = _AVOID_NOTE
+        return json.dumps(empty, default=str)
+    payload: dict[str, Any] = {"count": len(serialized), "entries": serialized}
+    if avoid:
+        payload["avoid"] = avoid
+        payload["avoid_note"] = _AVOID_NOTE
+    return json.dumps(_with_reuse_value(mem, payload), default=str)
+
+
+_AVOID_NOTE = (
+    "These entries matched your query but a failure discredited them: the approach "
+    "they describe stopped working here. Do not act on them; prefer validated entries, "
+    "and call amfs_record_attempt if you try one anyway and it fails again."
+)
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})

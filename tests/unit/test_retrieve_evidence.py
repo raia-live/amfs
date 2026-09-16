@@ -161,3 +161,90 @@ def test_sdk_local_scoring_honours_evidence(mem: AgentMemory) -> None:
         recall_config=RecallConfig(include_discredited=True),
     )
     assert [s.entry.key for s in with_disc][-1] == "fix-restart"
+
+
+def test_sdk_over_http_gets_the_avoid_list_and_does_not_book_it(mem: AgentMemory) -> None:
+    """The whole rail: RecallConfig.include_avoid -> HttpAdapter -> server ->
+    ``_avoid`` rows -> ScoredEntry.breakdown -> ``is_avoid``. And the avoid row
+    must not enter the causal chain, or the next outcome would touch the very
+    entry the agent was warned off."""
+    import httpx
+    from amfs.memory import is_avoid
+    from amfs_adapter_http.adapter import HttpAdapter
+    from amfs_http import server
+
+    _outcome(mem, "fix-restart", OutcomeType.FAILURE, "t1")
+    _outcome(mem, "fix-rotate", OutcomeType.SUCCESS, "t2")
+
+    from fastapi.testclient import TestClient
+
+    inner = TestClient(server.app)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        resp = inner.request(
+            request.method, request.url.path, content=request.content,
+            headers={"content-type": "application/json"},
+        )
+        return httpx.Response(resp.status_code, json=resp.json())
+
+    adapter = HttpAdapter.__new__(HttpAdapter)
+    adapter._base = "http://test"
+    adapter._api_key = "k"
+    adapter._client = httpx.Client(
+        base_url="http://test",
+        headers={"X-AMFS-API-Key": "k"},
+        transport=httpx.MockTransport(_handler),
+    )
+    client = AgentMemory(agent_id="ops-agent", adapter=adapter)
+
+    results = client.retrieve(
+        "queue stuck", limit=10, recall_config=RecallConfig(include_avoid=True)
+    )
+    hits = [r for r in results if not is_avoid(r)]
+    avoided = [r for r in results if is_avoid(r)]
+    assert [r.entry.key for r in avoided] == ["fix-restart"]
+    assert avoided[0].entry.evidence_status == "discredited"
+    assert hits[0].entry.key == "fix-rotate"
+    # Only the top real hit is booked; the avoid row never is.
+    booked = client._read_tracker.causal_keys
+    assert "acme/support/fix-rotate" in booked
+    assert "acme/support/fix-restart" not in booked
+
+
+def test_mcp_retrieve_reports_avoid_separately(mem: AgentMemory, monkeypatch) -> None:
+    import json
+
+    from amfs_mcp import server as mcp_server
+
+    _outcome(mem, "fix-restart", OutcomeType.FAILURE, "t1")
+    _outcome(mem, "fix-rotate", OutcomeType.SUCCESS, "t2")
+    # Point the MCP tool at a memory whose adapter answers retrieve like the
+    # server does: reuse the server-side handle through a stub adapter.retrieve.
+    from amfs_http import server as http_server
+
+    def _retrieve(query, **kwargs):
+        from fastapi.testclient import TestClient
+
+        body = {"query": query, "limit": kwargs.get("limit", 10),
+                "include_avoid": kwargs.get("include_avoid", False)}
+        rows = TestClient(http_server.app).post("/api/v1/retrieve", json=body).json()
+        from amfs_adapter_http.adapter import _parse_entry
+
+        out = []
+        for e in rows:
+            breakdown = dict(e.get("_breakdown") or {})
+            if e.get("_avoid"):
+                breakdown["_avoid"] = True
+            out.append((_parse_entry(e), float(e.get("_score", 0.0)), breakdown))
+        return out
+
+    monkeypatch.setattr(mem._adapter, "retrieve", _retrieve, raising=False)
+    monkeypatch.setattr(mcp_server, "_get_memory", lambda: mem)
+    payload = json.loads(mcp_server.amfs_retrieve("queue stuck", limit=10))
+    assert [e["key"] for e in payload["entries"]] and all(
+        e["key"] != "fix-restart" for e in payload["entries"]
+    )
+    assert [a["key"] for a in payload["avoid"]] == ["fix-restart"]
+    assert payload["avoid"][0]["failure_count"] == 1
+    assert "avoid_note" in payload
+    assert payload["entries"][0]["evidence_status"] == "validated"
