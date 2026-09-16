@@ -37,7 +37,9 @@ def mem(tmp_amfs_root: Path) -> AgentMemory:
 
 def _fail_then_succeed(mem: AgentMemory) -> list:
     mem.read("acme/support", "fix-restart")
-    mem.record_action("restart_worker", {"service": "ingest"}, result="queue still stuck", success=False)
+    mem.record_action(
+        "restart_worker", {"service": "ingest"}, result="queue still stuck", success=False
+    )
     attempt = mem.record_attempt(summary="restart per runbook did nothing")
     assert attempt.attempt == 1
     assert attempt.causal_entry_keys == ["acme/support/fix-restart"]
@@ -49,7 +51,9 @@ def _fail_then_succeed(mem: AgentMemory) -> list:
 
 
 class TestSdkAttemptBoundaries:
-    def test_failed_attempt_entry_is_discredited_and_final_entry_validated(self, mem: AgentMemory) -> None:
+    def test_failed_attempt_entry_is_discredited_and_final_entry_validated(
+        self, mem: AgentMemory
+    ) -> None:
         updated = {e.key: e for e in _fail_then_succeed(mem)}
         assert set(updated) == {"fix-restart", "fix-rotate-key"}
         stale = updated["fix-restart"]
@@ -111,6 +115,43 @@ class TestSdkAttemptBoundaries:
         assert mem._read_tracker.attempts == []
         assert mem._read_tracker.final_action_index is None
 
+    def test_batched_tool_calls_with_explicit_action_indices(self, mem: AgentMemory) -> None:
+        """The three-round-trip episode: no record_action calls, actions arrive
+        as ``tool_calls`` on the commit and the attempt names its indices."""
+        mem.read("acme/support", "fix-restart")
+        attempt = mem.record_attempt(summary="restart did nothing", action_indices=[0])
+        assert attempt.action_indices == [0]
+        mem.read("acme/support", "fix-rotate-key")
+        updated = {
+            e.key: e
+            for e in mem.commit_outcome(
+                "ticket-5",
+                OutcomeType.SUCCESS,
+                tool_calls=[
+                    {
+                        "tool_name": "restart_worker",
+                        "arguments": {},
+                        "result": "still stuck",
+                        "success": False,
+                    },
+                    {
+                        "tool_name": "rotate_key",
+                        "arguments": {},
+                        "result": "drained",
+                        "success": True,
+                    },
+                ],
+                final_action_index=1,
+            )
+        }
+        assert updated["fix-restart"].evidence_status == "discredited"
+        assert updated["fix-rotate-key"].success_count == 1
+        trace = mem._last_trace
+        meta = trace.session_metadata.model_dump()
+        assert meta[SESSION_ATTEMPTS_KEY][0]["action_indices"] == [0]
+        assert meta["attributes"][FINAL_ACTION_INDEX_ATTRIBUTE] == 1
+        assert [tc.tool_name for tc in trace.tool_calls] == ["restart_worker", "rotate_key"]
+
 
 class TestHttpServerAttempts:
     @pytest.fixture
@@ -148,8 +189,12 @@ class TestHttpServerAttempts:
                 {"tool_name": "rotate_key", "arguments": {}},
             ],
             "attempts": [
-                {"attempt": 1, "outcome_type": "failure",
-                 "causal_entry_keys": ["acme/support/fix-restart"], "action_indices": [0]}
+                {
+                    "attempt": 1,
+                    "outcome_type": "failure",
+                    "causal_entry_keys": ["acme/support/fix-restart"],
+                    "action_indices": [0],
+                }
             ],
             "final_action_index": 1,
             "trace_follows": True,

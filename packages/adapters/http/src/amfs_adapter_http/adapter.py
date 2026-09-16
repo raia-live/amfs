@@ -897,6 +897,7 @@ class HttpAdapter(AdapterABC):
         agent_id: str | None = None,
         limit: int = 10,
         credit_reuse: bool = False,
+        compact: bool = False,
     ) -> list[Digest]:
         """Proxy briefing to the HTTP server which has full Cortex access."""
         params: dict[str, Any] = {"limit": limit}
@@ -909,6 +910,8 @@ class HttpAdapter(AdapterABC):
         # and false for a panel rendering it for a human, so the caller decides.
         if credit_reuse:
             params["credit_reuse"] = "true"
+        if compact:
+            params["compact"] = "true"
         data = self._get("/api/v1/briefing", **params)
         # A credited briefing is a credited read, so it carries the reuse header
         # like any other. Unconditional: _capture_reuse_value always assigns, so

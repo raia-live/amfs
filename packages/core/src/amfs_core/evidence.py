@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from amfs_core.models import (
@@ -288,7 +288,7 @@ def apply_record_to_entry(
     SQL) do per causal entry. ``version`` is left alone: adapters assign it on
     write.
     """
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     model = model or outcome_model()
     updates: list[EvidenceUpdate] = []
     current = entry
@@ -358,7 +358,12 @@ def contrast_lesson(record: OutcomeRecord) -> dict[str, Any] | None:
         "lesson": (
             f"{len(failed_keys)} remembered entr{'y' if len(failed_keys) == 1 else 'ies'} "
             f"led to a failed attempt before this task was resolved"
-            + (f" using {len(resolved_with)} other entr{'y' if len(resolved_with) == 1 else 'ies'}" if resolved_with else "")
+            + (
+                f" using {len(resolved_with)} other "
+                f"entr{'y' if len(resolved_with) == 1 else 'ies'}"
+                if resolved_with
+                else ""
+            )
             + "."
         ),
     }

@@ -12,6 +12,9 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from amfs_core.authority import rank_authors
+from amfs_core.evidence import DISCREDIT_THRESHOLD as _DISCREDIT_THRESHOLD
+from amfs_core.evidence import SYNTHETIC_KEY_PREFIXES as _SYNTHETIC_PREFIXES
+from amfs_core.evidence import is_synthetic_key as _is_synthetic
 from amfs_core.models import Digest, DigestType, MemoryEntry, SearchQuery
 
 if TYPE_CHECKING:
@@ -20,6 +23,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _HOT_CONTEXT_LIMIT = 3
+#: Rows scanned per evidence query; the sections themselves are shorter.
+_EVIDENCE_SCAN_LIMIT = 40
+_EVIDENCE_SECTION_LIMIT = 5
+#: A rule counts toward a regime shift when it was confirmed this many times
+#: before it started failing, and its failure evidence has reached this
+#: fraction of its success evidence.
+_REGIME_MIN_SUCCESSES = 3
+_REGIME_FAILURE_RATIO = 0.5
+_COMPACT_NARRATIVE_CHARS = 400
+
+
+def _preview(value: Any, limit: int = 160) -> str:
+    text = value if isinstance(value, str) else str(value)
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 # Three authors, three keys each. This rides along on the one call every agent
 # is told to make first, so it is paying for itself in context window on every
@@ -69,6 +86,7 @@ class BriefingService:
         agent_id: str | None = None,
         limit: int = 10,
         branch: str = "main",
+        compact: bool = False,
     ) -> list[Digest]:
         """Get a ranked list of relevant digests for the given context.
 
@@ -78,7 +96,20 @@ class BriefingService:
         3. Agent briefs for agents that wrote to the same entity
         4. Recency-weighted
         5. Entry count weighted
+
+        When *entity_path* is given, the lead entity digest also carries what
+        the outcome record says about the scope — ``validated`` (entries every
+        outcome confirmed), ``discredited`` (entries a failure gated, with what
+        replaced them where known) and ``regime_shift`` (long-validated
+        entries that have recently started failing, which is what a changed
+        environment looks like from inside the memory).
+
+        *compact* returns only that lead digest with the evidence sections and
+        hot context, narrative trimmed: the shape an agent needs at the top of
+        every task, at a fraction of the tokens of the full briefing.
         """
+        if compact:
+            limit = 1
         all_digests = self._adapter.list_digests(namespace=self._namespace, branch=branch)
 
         scored: list[tuple[float, Digest]] = []
@@ -96,12 +127,236 @@ class BriefingService:
         if entity_path:
             if digests:
                 self._inject_hot_context(digests, entity_path, branch)
-                self._inject_consolidation_notice(digests, entity_path, branch)
+                if not compact:
+                    self._inject_consolidation_notice(digests, entity_path, branch)
             else:
                 self._inject_standalone_hot_context(digests, entity_path, branch)
-            self._inject_who_to_ask(digests, entity_path, agent_id, branch)
+            self._inject_evidence_sections(digests, entity_path, branch)
+            if not compact:
+                self._inject_who_to_ask(digests, entity_path, agent_id, branch)
+            if compact:
+                digests = self._compact(digests, entity_path)
 
         return digests
+
+    def _search(self, query: SearchQuery, branch: str) -> list[MemoryEntry]:
+        """``adapter.search`` with the branch when the adapter takes one.
+
+        The Postgres adapter is branch-aware; the filesystem and S3 adapters
+        are not and reject the keyword. Falling back keeps the briefing (hot
+        context and evidence sections included) working over every adapter
+        instead of silently producing a digest with no entries.
+        """
+        try:
+            return self._adapter.search(query, branch=branch)
+        except TypeError:
+            return self._adapter.search(query)
+
+    # ── Evidence sections ─────────────────────────────────────────────
+
+    @staticmethod
+    def _entry_brief(e: MemoryEntry) -> dict[str, Any]:
+        """One hot-context row: what an agent needs to decide whether to act on
+        an entry, including what the outcome record says about it."""
+        return {
+            "key": e.key,
+            # Named because hot context now spans the scope: two entries can
+            # share a key under different topics, and "which of these is
+            # about deploys" is unanswerable from the key alone.
+            "entity_path": e.entity_path,
+            # Carried so a briefing can be booked as a real read: causal
+            # lineage pins the version that was actually surfaced, and
+            # without it the caller would have to re-read to find out.
+            "version": e.version,
+            "value": e.value,
+            "confidence": round(e.confidence, 3),
+            # Carried for the same reason as ``version``: the causal snapshot
+            # a booked briefing writes has to be the one a direct read would
+            # have written. Absent, ``record_surfaced`` falls back to "fact",
+            # so every belief and experience surfaced by a briefing entered
+            # the trace as a fact — a claim the entry never made, on the half
+            # of the record a tuned model learns from. ``.value`` because
+            # this dict is serialised into a digest summary.
+            "memory_type": e.memory_type.value,
+            "agent": e.provenance.agent_id,
+            "outcome_count": e.outcome_count,
+            "recall_count": e.recall_count,
+            # The evidence behind the confidence number. ``evidence_status`` is
+            # the word to read first: an untested 0.9 and a validated 0.9 are
+            # different things to act on.
+            "evidence_status": e.evidence_status,
+            "success_count": e.success_count,
+            "failure_count": e.failure_count,
+            "last_outcome": e.last_outcome,
+            "last_outcome_at": e.last_outcome_at.isoformat() if e.last_outcome_at else None,
+        }
+
+    def _lead_digest(self, digests: list[Digest], entity_path: str) -> Digest | None:
+        for d in digests:
+            if d.digest_type == DigestType.ENTITY and d.scope == entity_path:
+                return d
+        return None
+
+    def _inject_evidence_sections(
+        self,
+        digests: list[Digest],
+        entity_path: str,
+        branch: str,
+    ) -> None:
+        """Attach ``validated``, ``discredited`` and ``regime_shift`` to the lead digest.
+
+        Two bounded queries over the scope: the highest-priority entries (for
+        what has been confirmed) and the lowest-confidence ones (for what has
+        been discredited — a discredited entry is under the threshold by
+        construction, so ``max_confidence`` finds them without a new column in
+        the search API). Any failure leaves the digest as it was.
+        """
+        lead = self._lead_digest(digests, entity_path)
+        if lead is None:
+            return
+        try:
+            top = self._search(
+                SearchQuery(
+                    entity_path=entity_path,
+                    sort_by="priority",
+                    limit=_EVIDENCE_SCAN_LIMIT,
+                    include_artifacts=False,
+                    include_descendants=True,
+                ),
+                branch=branch,
+            )
+            low = self._search(
+                SearchQuery(
+                    entity_path=entity_path,
+                    max_confidence=_DISCREDIT_THRESHOLD,
+                    sort_by="recency",
+                    limit=_EVIDENCE_SCAN_LIMIT,
+                    include_artifacts=False,
+                    include_descendants=True,
+                ),
+                branch=branch,
+            )
+        except Exception:
+            logger.debug("Evidence sections failed for %s", entity_path, exc_info=True)
+            return
+
+        seen: dict[str, MemoryEntry] = {}
+        for e in [*top, *low]:
+            seen.setdefault(e.entry_key, e)
+        entries = list(seen.values())
+
+        validated = sorted(
+            (
+                e for e in entries
+                if e.evidence_status == "validated"
+                and e.success_count > 0
+                and not _is_synthetic(e.key)
+            ),
+            key=lambda e: (e.success_count, e.confidence),
+            reverse=True,
+        )[:_EVIDENCE_SECTION_LIMIT]
+        discredited = sorted(
+            (e for e in entries if e.discredited_at is not None),
+            key=lambda e: e.last_outcome_at or e.discredited_at or e.provenance.written_at,
+            reverse=True,
+        )[:_EVIDENCE_SECTION_LIMIT]
+        # Contrast lessons name what resolved a task after a discredited entry
+        # failed it; surface that beside the entry so the agent gets the
+        # replacement, not just the warning.
+        replacements = self._replacements_from_lessons(entries)
+
+        shifted = self._regime_shift(entries)
+
+        lead.summary["validated"] = [
+            {
+                "key": e.key,
+                "entity_path": e.entity_path,
+                "confidence": round(e.confidence, 3),
+                "success_count": e.success_count,
+                "last_outcome_at": e.last_outcome_at.isoformat() if e.last_outcome_at else None,
+            }
+            for e in validated
+        ]
+        lead.summary["discredited"] = [
+            {
+                "key": e.key,
+                "entity_path": e.entity_path,
+                "confidence": round(e.confidence, 3),
+                "failure_count": e.failure_count,
+                "success_count": e.success_count,
+                "last_outcome": e.last_outcome,
+                "discredited_at": e.discredited_at.isoformat() if e.discredited_at else None,
+                "value_preview": _preview(e.value),
+                "replaced_by": replacements.get(e.entry_key, []),
+            }
+            for e in discredited
+        ]
+        if shifted:
+            lead.summary["regime_shift"] = {
+                "suspected": True,
+                "entries": [
+                    {
+                        "key": e.key,
+                        "entity_path": e.entity_path,
+                        "success_count": e.success_count,
+                        "failure_count": e.failure_count,
+                        "confidence": round(e.confidence, 3),
+                    }
+                    for e in shifted
+                ],
+                "message": (
+                    f"{len(shifted)} previously validated "
+                    f"entr{'y' if len(shifted) == 1 else 'ies'} "
+                    "in this scope started failing recently. Something about the "
+                    "environment has likely changed; verify before reusing them and "
+                    "prefer entries validated since."
+                ),
+            }
+
+    @staticmethod
+    def _regime_shift(entries: list[MemoryEntry]) -> list[MemoryEntry]:
+        """Entries that were validated repeatedly and whose latest outcomes are
+        failures: the signature of a rule that used to work."""
+        out = [
+            e for e in entries
+            if e.success_count >= _REGIME_MIN_SUCCESSES
+            and e.failure_count >= 1
+            and e.last_outcome is not None
+            and e.last_outcome not in ("success", "clean_deploy")
+            and e.evidence_failure >= e.evidence_success * _REGIME_FAILURE_RATIO
+        ]
+        out.sort(key=lambda e: (e.failure_count, e.success_count), reverse=True)
+        return out[:_EVIDENCE_SECTION_LIMIT]
+
+    @staticmethod
+    def _replacements_from_lessons(entries: list[MemoryEntry]) -> dict[str, list[str]]:
+        out: dict[str, list[str]] = {}
+        for e in entries:
+            if not e.key.startswith(_SYNTHETIC_PREFIXES) or not isinstance(e.value, dict):
+                continue
+            avoid = e.value.get("avoid") or []
+            resolved = e.value.get("resolved_with") or []
+            if not isinstance(avoid, list) or not isinstance(resolved, list):
+                continue
+            for spec in avoid:
+                bucket = out.setdefault(str(spec), [])
+                for r in resolved:
+                    if r not in bucket:
+                        bucket.append(str(r))
+        return out
+
+    def _compact(self, digests: list[Digest], entity_path: str) -> list[Digest]:
+        """The lead digest only, with the sections an agent acts on."""
+        lead = self._lead_digest(digests, entity_path)
+        if lead is None:
+            return digests[:1]
+        keep = ("narrative", "hot_context", "validated", "discredited", "regime_shift")
+        summary = {k: lead.summary[k] for k in keep if k in lead.summary}
+        narrative = summary.get("narrative")
+        if isinstance(narrative, str) and len(narrative) > _COMPACT_NARRATIVE_CHARS:
+            summary["narrative"] = narrative[:_COMPACT_NARRATIVE_CHARS].rstrip() + "…"
+        lead.summary = summary
+        return [lead]
 
     def _inject_who_to_ask(
         self,
@@ -217,7 +472,7 @@ class BriefingService:
         result: dict[str, list[str]] = {}
         for aid, path in source_paths.items():
             try:
-                entries = self._adapter.search(
+                entries = self._search(
                     SearchQuery(
                         entity_path=path,
                         agent_id=aid,
@@ -249,7 +504,7 @@ class BriefingService:
         mentioned in the compiled digest summary.
         """
         try:
-            entries = self._adapter.search(
+            entries = self._search(
                 SearchQuery(
                     entity_path=entity_path,
                     sort_by="priority",
@@ -272,33 +527,12 @@ class BriefingService:
         if not entries:
             return
 
-        hot_entries = [
-            {
-                "key": e.key,
-                # Named because hot context now spans the scope: two entries can
-                # share a key under different topics, and "which of these is
-                # about deploys" is unanswerable from the key alone.
-                "entity_path": e.entity_path,
-                # Carried so a briefing can be booked as a real read: causal
-                # lineage pins the version that was actually surfaced, and
-                # without it the caller would have to re-read to find out.
-                "version": e.version,
-                "value": e.value,
-                "confidence": round(e.confidence, 3),
-                # Carried for the same reason as ``version``: the causal snapshot
-                # a booked briefing writes has to be the one a direct read would
-                # have written. Absent, ``record_surfaced`` falls back to "fact",
-                # so every belief and experience surfaced by a briefing entered
-                # the trace as a fact — a claim the entry never made, on the half
-                # of the record a tuned model learns from. ``.value`` because
-                # this dict is serialised into a digest summary.
-                "memory_type": e.memory_type.value,
-                "agent": e.provenance.agent_id,
-                "outcome_count": e.outcome_count,
-                "recall_count": e.recall_count,
-            }
-            for e in entries
-        ]
+        # Discredited entries are not "top priority" whatever their score says;
+        # they go in the discredited section with what replaced them. Synthetic
+        # lessons are folded into that section's ``replaced_by`` rather than
+        # shown as knowledge in their own right.
+        entries = [e for e in entries if e.discredited_at is None and not _is_synthetic(e.key)]
+        hot_entries = [self._entry_brief(e) for e in entries]
 
         for d in digests:
             if d.digest_type == DigestType.ENTITY and d.scope == entity_path:
@@ -317,7 +551,7 @@ class BriefingService:
         that haven't been compiled yet.
         """
         try:
-            entries = self._adapter.search(
+            entries = self._search(
                 SearchQuery(
                     entity_path=entity_path,
                     sort_by="priority",
@@ -338,33 +572,12 @@ class BriefingService:
         if not entries:
             return
 
-        hot_entries = [
-            {
-                "key": e.key,
-                # Named because hot context now spans the scope: two entries can
-                # share a key under different topics, and "which of these is
-                # about deploys" is unanswerable from the key alone.
-                "entity_path": e.entity_path,
-                # Carried so a briefing can be booked as a real read: causal
-                # lineage pins the version that was actually surfaced, and
-                # without it the caller would have to re-read to find out.
-                "version": e.version,
-                "value": e.value,
-                "confidence": round(e.confidence, 3),
-                # Carried for the same reason as ``version``: the causal snapshot
-                # a booked briefing writes has to be the one a direct read would
-                # have written. Absent, ``record_surfaced`` falls back to "fact",
-                # so every belief and experience surfaced by a briefing entered
-                # the trace as a fact — a claim the entry never made, on the half
-                # of the record a tuned model learns from. ``.value`` because
-                # this dict is serialised into a digest summary.
-                "memory_type": e.memory_type.value,
-                "agent": e.provenance.agent_id,
-                "outcome_count": e.outcome_count,
-                "recall_count": e.recall_count,
-            }
-            for e in entries
-        ]
+        # Discredited entries are not "top priority" whatever their score says;
+        # they go in the discredited section with what replaced them. Synthetic
+        # lessons are folded into that section's ``replaced_by`` rather than
+        # shown as knowledge in their own right.
+        entries = [e for e in entries if e.discredited_at is None and not _is_synthetic(e.key)]
+        hot_entries = [self._entry_brief(e) for e in entries]
 
         digests.append(Digest(
             digest_type=DigestType.ENTITY,

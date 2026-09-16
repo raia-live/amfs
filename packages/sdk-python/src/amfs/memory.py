@@ -1539,6 +1539,7 @@ class AgentMemory:
         outcome_type: OutcomeType | str = OutcomeType.MINOR_FAILURE,
         summary: str | None = None,
         causal_entry_keys: list[str] | None = None,
+        action_indices: list[int] | None = None,
     ) -> AttemptRecord:
         """Mark the attempt in progress as failed and start the next one.
 
@@ -1551,10 +1552,19 @@ class AgentMemory:
 
         Nothing is sent anywhere: the attempt is buffered on the session and
         leaves with the outcome, inside the same trace.
+
+        Operation economy: an agent that batches its actions as ``tool_calls``
+        on ``commit_outcome`` instead of one ``record_action`` round-trip each
+        passes *action_indices* into that list here, so the attempt still names
+        the actions that failed. A full episode then costs a briefing, a
+        retrieve, and one commit.
         """
         name = outcome_type.value if isinstance(outcome_type, OutcomeType) else str(outcome_type)
         recorded = self._read_tracker.record_attempt(
-            outcome_type=name, summary=summary, causal_entry_keys=causal_entry_keys
+            outcome_type=name,
+            summary=summary,
+            causal_entry_keys=causal_entry_keys,
+            action_indices=action_indices,
         )
         return AttemptRecord.model_validate(
             {k: v for k, v in recorded.items() if k != "recorded_at"}
@@ -2245,8 +2255,14 @@ class AgentMemory:
         limit: int = 10,
         branch: str | None = None,
         credit_reuse: bool = False,
+        compact: bool = False,
     ) -> list:
         """Get a ranked briefing of compiled knowledge digests.
+
+        *compact* returns only the lead entity digest with its hot context and
+        evidence sections (validated / discredited / regime_shift), narrative
+        trimmed — what an agent needs at the top of a task, at a fraction of
+        the tokens.
 
         Returns pre-compiled Digest objects from the Cortex, ranked by
         relevance to the given entity or agent context.
@@ -2284,10 +2300,13 @@ class AgentMemory:
             # older one would raise TypeError on an unconditional keyword.
             if credit_reuse:
                 kwargs["credit_reuse"] = True
+            if compact:
+                kwargs["compact"] = True
             try:
                 digests = adapter_briefing(**kwargs)
             except TypeError:
                 kwargs.pop("credit_reuse", None)
+                kwargs.pop("compact", None)
                 digests = adapter_briefing(**kwargs)
             return self._book_briefing_lineage(digests, credit_reuse)
 
@@ -2309,6 +2328,7 @@ class AgentMemory:
                     agent_id=resolved_agent,
                     limit=limit,
                     branch=resolved_branch,
+                    compact=compact,
                 ),
                 credit_reuse,
             )

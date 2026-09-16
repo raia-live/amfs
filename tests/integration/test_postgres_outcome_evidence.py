@@ -7,10 +7,9 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-
 from amfs_core import evidence as ev
 from amfs_core.models import AttemptRecord, MemoryEntry, OutcomeRecord, OutcomeType, Provenance
 
@@ -35,7 +34,7 @@ def _entry(key: str, conf: float) -> MemoryEntry:
         key=key,
         value={"rule": key},
         confidence=conf,
-        provenance=Provenance(agent_id="a", session_id="s", written_at=datetime.now(timezone.utc)),
+        provenance=Provenance(agent_id="a", session_id="s", written_at=datetime.now(UTC)),
     )
 
 
@@ -44,7 +43,7 @@ def _record(outcome: OutcomeType, keys: list[str], attempts=None, causal=1.0) ->
         outcome_ref=f"task-{uuid.uuid4().hex[:6]}",
         outcome_type=outcome,
         causal_confidence=causal,
-        committed_at=datetime.now(timezone.utc),
+        committed_at=datetime.now(UTC),
         causal_entry_keys=keys,
         agent_id="a",
         attempts=attempts or [],
@@ -81,8 +80,14 @@ def test_attempt_then_success_credits_each_side(adapter, monkeypatch) -> None:
     record = _record(
         OutcomeType.SUCCESS,
         ["svc/mod/good"],
-        attempts=[AttemptRecord(attempt=1, outcome_type=OutcomeType.FAILURE,
-                                causal_entry_keys=["svc/mod/stale"], action_indices=[0])],
+        attempts=[
+            AttemptRecord(
+                attempt=1,
+                outcome_type=OutcomeType.FAILURE,
+                causal_entry_keys=["svc/mod/stale"],
+                action_indices=[0],
+            )
+        ],
     )
     updated = {e.key: e for e in adapter.commit_outcome(record)}
     assert set(updated) == {"stale", "good"}

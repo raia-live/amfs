@@ -342,6 +342,7 @@ class ReadTracker:
         outcome_type: str = "minor_failure",
         summary: str | None = None,
         causal_entry_keys: list[str] | None = None,
+        action_indices: list[int] | None = None,
     ) -> dict:
         """Close the attempt in progress as a failure and start the next one.
 
@@ -355,17 +356,24 @@ class ReadTracker:
 
         Pass *causal_entry_keys* to name the entries explicitly (an agent that
         knows which memory it acted on should say so); otherwise the read window
-        is used. Returns the attempt as recorded.
+        is used. Pass *action_indices* when the actions are not in this
+        tracker's log but will arrive as ``tool_calls`` on the commit — the
+        indices then refer to that list. Returns the attempt as recorded.
         """
         since = self._state.attempt_boundary_at
         keys = list(dict.fromkeys(causal_entry_keys)) if causal_entry_keys is not None else self._keys_since(since)
         n_actions = len(self._actions)
         cursor = self._state.attempt_action_cursor
+        indices = (
+            sorted({int(i) for i in action_indices if int(i) >= 0})
+            if action_indices is not None
+            else list(range(cursor, n_actions))
+        )
         attempt = {
             "attempt": len(self._state.attempts) + 1,
             "outcome_type": outcome_type,
             "causal_entry_keys": keys,
-            "action_indices": list(range(cursor, n_actions)),
+            "action_indices": indices,
             "summary": summary,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         }

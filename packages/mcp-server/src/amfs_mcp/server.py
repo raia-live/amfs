@@ -2045,6 +2045,7 @@ def amfs_briefing(
     entity_path: str | None = None,
     agent_id: str | None = None,
     limit: int = 10,
+    compact: bool = False,
 ) -> str:
     """Get a compiled knowledge briefing — call this at the START of every session after setting identity.
 
@@ -2060,8 +2061,18 @@ def amfs_briefing(
         entity_path: Focus on this entity (e.g. "checkout-service")
         agent_id: Focus on this agent's context (defaults to current agent)
         limit: Max digests to return (default 10)
+        compact: Return only the lead entity digest with its hot context and
+            evidence sections — `validated` (entries every outcome confirmed),
+            `discredited` (entries a failure gated, with `replaced_by` where a
+            later success is known) and `regime_shift` (long-validated entries
+            that recently started failing). A fraction of the tokens; use it at
+            the top of every task.
 
-    Example: amfs_briefing(entity_path="checkout-service")
+    Read the evidence sections first: act on `validated` entries, avoid
+    `discredited` ones, and treat a `regime_shift` warning as "verify before
+    reusing anything here".
+
+    Example: amfs_briefing(entity_path="checkout-service", compact=True)
     """
     # When the host bound this environment to an entity (AMFS_ENTITY_PATH),
     # default to it so a fresh, disposable process hydrates the right memory
@@ -2073,6 +2084,7 @@ def amfs_briefing(
         entity_path=entity_path,
         agent_id=agent_id,
         limit=limit,
+        compact=compact,
         # A tool call is an agent about to act on what it is handed, so this is
         # a real read and books reuse of the knowledge surfaced. The HTTP
         # endpoint cannot assume that for itself — it also serves the dashboard

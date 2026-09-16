@@ -6827,12 +6827,16 @@ async def get_briefing(
     agent_id: str | None = Query(None),
     limit: int = Query(10, ge=1, le=100),
     credit_reuse: bool = Query(False),
+    compact: bool = Query(False),
     # See retrieve_entries: injected on the type, defaulted so the handler stays
     # callable in-process without one.
     response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Get a ranked briefing of compiled knowledge digests.
+
+    *compact* returns only the lead entity digest with its hot context and
+    evidence sections, narrative trimmed.
 
     *credit_reuse* books the briefing as a real read of the knowledge it
     surfaces. It is off by default and has to be asked for, because the same
@@ -6846,6 +6850,7 @@ async def get_briefing(
         entity_path=entity_path,
         agent_id=agent_id,
         limit=limit,
+        compact=compact,
     )
 
     vis = _get_visibility_filter(request)

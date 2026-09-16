@@ -36,9 +36,15 @@ def mem(monkeypatch, tmp_path) -> AgentMemory:
     monkeypatch.setattr(server, "_visible_agent_ids", lambda request: None)
     monkeypatch.setattr(server, "_HAS_PRO_TRACES", False, raising=False)
     # Three fixes for the same symptom, same author confidence.
-    handle.write("acme/support", "fix-restart", "queue stuck: restart the ingest worker", confidence=0.8)
-    handle.write("acme/support", "fix-rotate", "queue stuck: rotate the ingest API key", confidence=0.8)
-    handle.write("acme/support", "fix-scale", "queue stuck: scale the ingest consumers", confidence=0.8)
+    handle.write(
+        "acme/support", "fix-restart", "queue stuck: restart the ingest worker", confidence=0.8
+    )
+    handle.write(
+        "acme/support", "fix-rotate", "queue stuck: rotate the ingest API key", confidence=0.8
+    )
+    handle.write(
+        "acme/support", "fix-scale", "queue stuck: scale the ingest consumers", confidence=0.8
+    )
     handle._read_tracker.clear()
     return handle
 
@@ -78,9 +84,14 @@ def test_discredited_entry_drops_out_and_validated_one_leads(client, mem: AgentM
 
 def test_include_discredited_ranks_it_last(client, mem: AgentMemory) -> None:
     _outcome(mem, "fix-restart", OutcomeType.FAILURE, "t1")
-    resp = client.post("/api/v1/retrieve", json={
-        "query": "queue stuck", "limit": 10, "include_discredited": True,
-    })
+    resp = client.post(
+        "/api/v1/retrieve",
+        json={
+            "query": "queue stuck",
+            "limit": 10,
+            "include_discredited": True,
+        },
+    )
     keys = _keys(resp)
     assert keys[-1] == "fix-restart"
     assert resp.json()[-1]["_breakdown"]["evidence"] == -1.0
@@ -88,9 +99,14 @@ def test_include_discredited_ranks_it_last(client, mem: AgentMemory) -> None:
 
 def test_avoid_list_is_flagged_and_appended(client, mem: AgentMemory) -> None:
     _outcome(mem, "fix-restart", OutcomeType.FAILURE, "t1")
-    resp = client.post("/api/v1/retrieve", json={
-        "query": "queue stuck", "limit": 10, "include_avoid": True,
-    })
+    resp = client.post(
+        "/api/v1/retrieve",
+        json={
+            "query": "queue stuck",
+            "limit": 10,
+            "include_avoid": True,
+        },
+    )
     rows = resp.json()
     avoid = [e for e in rows if e.get("_avoid")]
     assert [e["key"] for e in avoid] == ["fix-restart"]
@@ -106,18 +122,28 @@ def test_adaptive_k_shrinks_behind_a_validated_leader(client, mem: AgentMemory) 
         _outcome(mem, "fix-rotate", OutcomeType.SUCCESS, f"s{i}")
     full = client.post("/api/v1/retrieve", json={"query": "queue stuck", "limit": 10})
     assert len(_keys(full)) == 3
-    shrunk = client.post("/api/v1/retrieve", json={
-        "query": "queue stuck", "limit": 10, "adaptive_k": True,
-    })
+    shrunk = client.post(
+        "/api/v1/retrieve",
+        json={
+            "query": "queue stuck",
+            "limit": 10,
+            "adaptive_k": True,
+        },
+    )
     keys = _keys(shrunk)
     assert keys[0] == "fix-rotate"
     assert len(keys) < 3
 
 
 def test_adaptive_k_leaves_untested_leader_alone(client) -> None:
-    resp = client.post("/api/v1/retrieve", json={
-        "query": "queue stuck", "limit": 10, "adaptive_k": True,
-    })
+    resp = client.post(
+        "/api/v1/retrieve",
+        json={
+            "query": "queue stuck",
+            "limit": 10,
+            "adaptive_k": True,
+        },
+    )
     assert len(_keys(resp)) == 3
 
 
@@ -130,7 +156,8 @@ def test_sdk_local_scoring_honours_evidence(mem: AgentMemory) -> None:
     assert keys[0] == "fix-rotate"
     assert scored[0].breakdown["evidence_status"] == "validated"
     with_disc = mem.search(
-        query="queue", entity_path="acme/support",
+        query="queue",
+        entity_path="acme/support",
         recall_config=RecallConfig(include_discredited=True),
     )
     assert [s.entry.key for s in with_disc][-1] == "fix-restart"

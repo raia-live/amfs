@@ -149,7 +149,9 @@ class TestHotContextInjection:
         svc = BriefingService(adapter)
         svc.briefing(entity_path="svc")
 
-        search_call = adapter.search.call_args
+        # The hot-context query is the first search; the evidence sections
+        # issue their own (priority-sorted and low-confidence) queries after it.
+        search_call = adapter.search.call_args_list[0]
         query = search_call[0][0]
         assert isinstance(query, SearchQuery)
         assert query.sort_by == "priority"
