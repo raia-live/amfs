@@ -22,7 +22,9 @@ from amfs_core.embedder import EmbedderABC
 from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker
 from amfs_core.exceptions import StaleWriteError
 from amfs_core.lifecycle import LifecycleManager
+from amfs_core import evidence as _evidence
 from amfs_core.models import (
+    AttemptRecord,
     Commit,
     ConflictPolicy,
     DecisionTrace,
@@ -36,6 +38,7 @@ from amfs_core.models import (
     MemoryStateDiff,
     MemoryStats,
     MemoryType,
+    OutcomeRecord,
     OutcomeType,
     QueryEvent,
     RecallConfig,
@@ -77,6 +80,11 @@ def _get_sdk_executor() -> ThreadPoolExecutor:
 
 SESSION_ATTRIBUTES_KEY = "attributes"
 SESSION_LLM_CALLS_KEY = "llm_calls"
+#: Where the failed attempts of a task ride on the trace's session metadata.
+SESSION_ATTEMPTS_KEY = "attempts"
+#: Attribute naming the tool call that produced the terminal outcome. Scalar,
+#: so it lives in the attribute bag and is indexed with it.
+FINAL_ACTION_INDEX_ATTRIBUTE = "final_action_index"
 
 #: Attributes are dimensions to filter and group traces by (customer, task
 #: type, ...). They are indexed server-side, so the bag is kept small and flat.
@@ -751,10 +759,14 @@ class AgentMemory:
             if query_vec is not None and entry.embedding is not None:
                 semantic_score = max(0.0, cosine_similarity(query_vec, entry.embedding))
 
+            if entry.discredited_at is not None and not recall_config.include_discredited:
+                continue
+            evidence = _evidence.evidence_signal(entry)
             composite = (
                 recall_config.semantic_weight * semantic_score
                 + recall_config.recency_weight * recency_score
                 + recall_config.confidence_weight * confidence_score
+                + recall_config.evidence_weight * evidence
             )
             scored.append(ScoredEntry(
                 entry=entry,
@@ -763,6 +775,8 @@ class AgentMemory:
                     "semantic": recall_config.semantic_weight * semantic_score,
                     "recency": recall_config.recency_weight * recency_score,
                     "confidence": recall_config.confidence_weight * confidence_score,
+                    "evidence": recall_config.evidence_weight * evidence,
+                    "evidence_status": entry.evidence_status,
                 },
             ))
 
@@ -830,6 +844,8 @@ class AgentMemory:
                     recency_weight=cfg.recency_weight,
                     confidence_weight=cfg.confidence_weight,
                     include_artifacts=include_artifacts,
+                    evidence_weight=cfg.evidence_weight,
+                    include_discredited=cfg.include_discredited,
                 )
                 scored = [
                     ScoredEntry(entry=entry, score=score, breakdown=breakdown or {})
@@ -1234,11 +1250,29 @@ class AgentMemory:
         attributes: dict[str, Any] | None = None,
         llm_calls: list[dict[str, Any]] | None = None,
         persist_trace: bool = True,
+        attempts: list[AttemptRecord | dict[str, Any]] | None = None,
+        final_action_index: int | None = None,
     ) -> list[MemoryEntry]:
         """Record an outcome and back-propagate confidence changes.
 
         If *causal_entry_keys* is ``None``, automatically uses the session's
-        read log — every entry this agent read becomes a causal link.
+        read log — every entry this agent read becomes a causal link. When
+        attempt boundaries were drawn with ``record_attempt``, the default
+        narrows to what was read since the last boundary: the entries a failed
+        attempt relied on receive that attempt's failure, not a share of the
+        eventual success.
+
+        *attempts* are the failed attempts that preceded this outcome, oldest
+        first; they default to the ones recorded with ``record_attempt``. Each is
+        applied to its own causal entries before *outcome_type* is applied to
+        *causal_entry_keys*, all inside this one outcome and one trace, so the
+        task keeps a single terminal label. *final_action_index* names which of
+        the trace's ``tool_calls`` produced the terminal outcome; it defaults to
+        the last action taken after the last boundary. When a success follows
+        failed attempts, a contrast lesson (``lesson-contrast-<ref>``) is written
+        under this agent's identity naming the entries to avoid; it is synthetic
+        (see ``amfs_core.evidence.SYNTHETIC_KEY_PREFIXES``) and excluded from
+        training.
 
         *task_input* is the request that triggered the decision and
         *response_text* the agent's answer. Both are optional and only stored
@@ -1280,8 +1314,21 @@ class AgentMemory:
         # raises before anything is sent.
         session_metadata = self._session_metadata_for_trace(commit_attributes, explicit_calls)
 
+        attempt_records = self._resolve_attempts(attempts)
+        if final_action_index is None:
+            final_action_index = self._read_tracker.final_action_index
         if causal_entry_keys is None:
-            causal_entry_keys = self._read_tracker.causal_keys
+            causal_entry_keys = (
+                self._read_tracker.terminal_causal_keys
+                if attempt_records
+                else self._read_tracker.causal_keys
+            )
+        # The attempts and the final action index travel on the trace's
+        # metadata as well as on the record: the metadata is what the server
+        # seals, and it is what training and export read the trace through.
+        session_metadata = self._metadata_with_attempts(
+            session_metadata, attempt_records, final_action_index
+        )
 
         # Scanned here, before anything leaves the process, and reused for both the
         # outcome record and the trace below. Scanning only at trace construction
@@ -1324,8 +1371,11 @@ class AgentMemory:
             # on every path out of it. An adapter's commit_outcome called
             # directly by a caller of its own promises nothing of the sort.
             trace_follows=True,
+            attempts=attempt_records,
+            final_action_index=final_action_index,
         )
         updated = self._propagator.propagate(record)
+        self._write_contrast_lesson(record)
 
         causal_trace_entries: list[TraceEntry] = []
         for ek in causal_entry_keys:
@@ -1482,6 +1532,112 @@ class AgentMemory:
         self._session_attributes = {}
         self._session_llm_calls = []
         return updated
+
+    def record_attempt(
+        self,
+        *,
+        outcome_type: OutcomeType | str = OutcomeType.MINOR_FAILURE,
+        summary: str | None = None,
+        causal_entry_keys: list[str] | None = None,
+    ) -> AttemptRecord:
+        """Mark the attempt in progress as failed and start the next one.
+
+        Call this when a remembered approach did not work and the agent is
+        about to try something else. The entries read since the previous
+        boundary (or the ones named in *causal_entry_keys*) and the actions
+        recorded since then are attributed to this attempt; the next
+        ``commit_outcome`` applies *outcome_type* to those entries before it
+        applies the terminal outcome to what was read afterwards.
+
+        Nothing is sent anywhere: the attempt is buffered on the session and
+        leaves with the outcome, inside the same trace.
+        """
+        name = outcome_type.value if isinstance(outcome_type, OutcomeType) else str(outcome_type)
+        recorded = self._read_tracker.record_attempt(
+            outcome_type=name, summary=summary, causal_entry_keys=causal_entry_keys
+        )
+        return AttemptRecord.model_validate(
+            {k: v for k, v in recorded.items() if k != "recorded_at"}
+        )
+
+    def _resolve_attempts(
+        self, attempts: list[AttemptRecord | dict[str, Any]] | None
+    ) -> list[AttemptRecord]:
+        source: list[Any] = (
+            list(attempts) if attempts is not None else self._read_tracker.attempts
+        )
+        out: list[AttemptRecord] = []
+        for item in source:
+            if isinstance(item, AttemptRecord):
+                out.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            try:
+                out.append(AttemptRecord.model_validate(
+                    {k: v for k, v in item.items() if k != "recorded_at"}
+                ))
+            except ValidationError:
+                logger.debug("dropping malformed attempt %r", item, exc_info=True)
+        for i, a in enumerate(out, start=1):
+            if a.attempt != i:
+                out[i - 1] = a.model_copy(update={"attempt": i})
+        return out
+
+    @staticmethod
+    def _metadata_with_attempts(
+        session_metadata: SessionMetadata | None,
+        attempts: list[AttemptRecord],
+        final_action_index: int | None,
+    ) -> SessionMetadata | None:
+        """``session_metadata`` with ``attempts`` and ``attributes.final_action_index``
+        merged in, or unchanged when there is nothing to add."""
+        if not attempts and final_action_index is None:
+            return session_metadata
+        data = _metadata_to_dict(session_metadata)
+        if attempts:
+            data[SESSION_ATTEMPTS_KEY] = [a.model_dump(mode="json") for a in attempts]
+        if final_action_index is not None:
+            attrs = data.get(SESSION_ATTRIBUTES_KEY)
+            attrs = dict(attrs) if isinstance(attrs, dict) else {}
+            attrs[FINAL_ACTION_INDEX_ATTRIBUTE] = int(final_action_index)
+            data[SESSION_ATTRIBUTES_KEY] = attrs
+        try:
+            return SessionMetadata(**data)
+        except (TypeError, ValidationError):
+            logger.debug("session metadata could not carry attempts", exc_info=True)
+            return session_metadata
+
+    def _write_contrast_lesson(self, record: OutcomeRecord) -> None:
+        """Write the fail-then-succeed lesson for *record*, when there is one.
+
+        Skipped when the adapter learns remotely (the HTTP adapter): the server
+        commits the same record on its own handle and writes the lesson there,
+        under the caller's identity. Never raises — a lesson is a bonus, and an
+        outcome that propagated must not be reported as failed because of it.
+        """
+        if getattr(self._adapter, "remote_learning", False):
+            return
+        try:
+            lesson = _evidence.contrast_lesson(record)
+            if lesson is None:
+                return
+            first = lesson["avoid"][0].rsplit("/", 1)
+            if len(first) != 2:
+                return
+            entity_path = first[0]
+            refs = [k.rsplit("/", 1)[1] for k in (*lesson["avoid"], *lesson["resolved_with"])
+                    if "/" in k]
+            self.write(
+                entity_path,
+                _evidence.contrast_lesson_key(record.outcome_ref),
+                lesson,
+                confidence=0.8,
+                memory_type=MemoryType.EXPERIENCE,
+                pattern_refs=refs,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("contrast lesson not written for %s", record.outcome_ref, exc_info=True)
 
     def _session_metadata_for_trace(
         self,

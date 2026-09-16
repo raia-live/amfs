@@ -37,7 +37,7 @@ from sse_starlette.sse import EventSourceResponse
 from amfs import AgentMemory, MemoryType, OutcomeType
 from amfs.config import load_config_or_default
 from amfs.memory import validate_session_attributes
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from amfs_core.aggregates import (
     REUSE_CREDIT_K,
     entry_content_chars,
@@ -46,9 +46,11 @@ from amfs_core.aggregates import (
 from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
 from amfs_core.engine import read_tracker_scope
+from amfs_core.evidence import evidence_signal as _evidence_signal
 from amfs_core.models import (
     AgentGroup,
     AMFSConfig,
+    AttemptRecord,
     DecisionTrace,
     Event,
     EventType,
@@ -652,6 +654,9 @@ def _entry_to_response(entry: MemoryEntry) -> dict[str, Any]:
     """Convert a MemoryEntry to a JSON-safe dict, stripping embeddings."""
     data = entry.model_dump(mode="json")
     data.pop("embedding", None)
+    # A property, so not in the dump; the one word an agent needs next to the
+    # confidence number (untested / validated / contested / discredited).
+    data["evidence_status"] = entry.evidence_status
     return data
 
 
@@ -1995,13 +2000,30 @@ async def retrieve_entries(
     if not req.include_artifacts:
         candidates = {k: v for k, v in candidates.items() if not _is_artifact(v["entry"])}
 
-    # 7. Blend semantic + recency + confidence + keyword.
+    # 6b. Discredited entries: a failure left them under the discredit
+    #     threshold and no success has lifted them since. Out of the ranked
+    #     list unless asked for; kept aside so ``include_avoid`` can hand them
+    #     back flagged, because "this is what stopped working" is an answer.
+    avoided: list[MemoryEntry] = []
+    if not req.include_discredited:
+        kept_candidates: dict[str, dict[str, Any]] = {}
+        for k, v in candidates.items():
+            if getattr(v["entry"], "discredited_at", None) is not None:
+                if v["sim"] > 0.0 or v["keyword"] > 0.0:
+                    avoided.append(v["entry"])
+            else:
+                kept_candidates[k] = v
+        candidates = kept_candidates
+
+    # 7. Blend semantic + recency + confidence + evidence + keyword.
     now = _dt.now(_tz.utc)
     half_life = 30.0
     keyword_weight = 0.15
+    evidence_weight = req.evidence_weight
 
     def _composite(
-        relevance: float, recency: float, conf: float, keyword: float, artifact: bool
+        relevance: float, recency: float, conf: float, keyword: float, artifact: bool,
+        evidence: float = 0.0,
     ) -> float:
         """The composite score, in one place because step 8 recomputes it.
 
@@ -2010,12 +2032,19 @@ async def retrieve_entries(
         cross-encoder score once the reranker has spoken. Everything else is
         held constant between the two, which is the point — the reranker is a
         better relevance term, not a licence to discard confidence.
+
+        *evidence* is the outcome record in one signed number
+        (``amfs_core.evidence.evidence_signal``). Confidence already moves with
+        outcomes; this term is what separates an author's untested 0.9 from a
+        0.9 that has been confirmed a dozen times, and what pushes an entry
+        with a mixed record below both.
         """
         score = (
             req.semantic_weight * relevance
             + recency_weight * recency
             + req.confidence_weight * conf
             + keyword_weight * keyword
+            + evidence_weight * evidence
         )
         return score * ARTIFACT_PENALTY if artifact else score
 
@@ -2034,13 +2063,16 @@ async def retrieve_entries(
             recency = 0.0
         conf = float(entry.confidence)
         artifact = _is_artifact(entry)
+        evidence = _evidence_signal(entry)
         # Components are kept unrounded so step 8 can rebuild the score
         # exactly; rounding happens once, on the way out.
-        scored.append((entry, _composite(sim, recency, conf, keyword, artifact), {
+        scored.append((entry, _composite(sim, recency, conf, keyword, artifact, evidence), {
             "semantic": sim,
             "recency": recency,
             "confidence": conf,
             "keyword": keyword,
+            "evidence": evidence,
+            "evidence_status": entry.evidence_status,
             "is_artifact": artifact,
         }))
 
@@ -2081,7 +2113,7 @@ async def retrieve_entries(
                     entry,
                     _composite(
                         norm, bd["recency"], bd["confidence"], bd["keyword"],
-                        bd["is_artifact"],
+                        bd["is_artifact"], bd.get("evidence", 0.0),
                     ),
                     {**bd, "rerank": rs, "rerank_normalised": norm,
                      "rerank_absolute": absolute_score},
@@ -2167,8 +2199,16 @@ async def retrieve_entries(
         branch=branch,
     )
 
+    head = scored[: req.limit]
+    # 11. Evidence-aware k. When the record has confirmed the top hit and it is
+    #     clearly ahead, the alternatives are noise in the prompt: keep the ones
+    #     within reach of it and drop the rest. Never below one result.
+    if req.adaptive_k and head and head[0][0].evidence_status == "validated":
+        top_score = head[0][1]
+        head = [t for t in head if t[1] >= top_score * ADAPTIVE_K_KEEP_RATIO] or head[:1]
+
     out: list[dict[str, Any]] = []
-    for entry, score, breakdown in scored[: req.limit]:
+    for entry, score, breakdown in head:
         data = _entry_to_response(entry)
         data["_score"] = round(score, 4)
         data["_breakdown"] = {
@@ -2176,6 +2216,19 @@ async def retrieve_entries(
             for k, v in breakdown.items()
         }
         out.append(data)
+    if req.include_avoid and avoided:
+        avoided.sort(key=lambda e: (e.last_outcome_at or e.provenance.written_at), reverse=True)
+        for entry in avoided[:AVOID_LIST_MAX]:
+            data = _entry_to_response(entry)
+            data["_score"] = 0.0
+            data["_avoid"] = True
+            data["_breakdown"] = {
+                "evidence": -1.0,
+                "evidence_status": "discredited",
+                "failure_count": entry.failure_count,
+                "last_outcome": entry.last_outcome,
+            }
+            out.append(data)
     return out
 
 
@@ -2978,7 +3031,17 @@ def _auto_seal_trace(
 # capped at MAX_CAPTURED_CHARS (200k), and embedding a novel to count how many
 # entries relate to it would cost more than the commit it rides on. The opening
 # of a request carries what it is about; the rest is detail.
+#: ``adaptive_k``: results scoring below this fraction of a validated top hit
+#: are dropped. 0.85 keeps near-ties (two confirmed approaches) and drops the
+#: long tail of alternatives the record has said nothing about.
+ADAPTIVE_K_KEEP_RATIO = 0.85
+#: Most discredited entries appended for ``include_avoid``.
+AVOID_LIST_MAX = 3
 _GAP_QUERY_CHARS = 2_000
+#: An agent that failed more times than this in one task has a problem this
+#: endpoint cannot label; the cap keeps a runaway loop from posting a megabyte
+#: of attempts into one outcome row.
+_MAX_ATTEMPTS_PER_OUTCOME = 50
 
 # Named rather than inlined because it is the one number a reader will want to
 # argue with: enough keys to act on, few enough that the block stays a summary.
@@ -3192,12 +3255,41 @@ async def commit_outcome(
     client_llm_calls = client_meta.get("llm_calls")
     if not isinstance(client_llm_calls, list):
         client_llm_calls = []
+    # Attempts may arrive on the body or, from an older SDK, only inside the
+    # session metadata; the body wins. Validated so a malformed attempt is a
+    # 422 rather than a trigger error mid-commit.
+    raw_attempts = req.attempts or client_meta.get("attempts") or []
+    if not isinstance(raw_attempts, list):
+        raise HTTPException(status_code=422, detail="attempts must be a list")
+    try:
+        attempts = [AttemptRecord.model_validate(a) for a in raw_attempts]
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=f"attempts: {exc}") from exc
+    if len(attempts) > _MAX_ATTEMPTS_PER_OUTCOME:
+        raise HTTPException(
+            status_code=422,
+            detail=f"attempts: at most {_MAX_ATTEMPTS_PER_OUTCOME} per outcome",
+        )
+    final_action_index = req.final_action_index
+    if final_action_index is None:
+        raw_fai = (client_meta.get("attributes") or {}).get("final_action_index") \
+            if isinstance(client_meta.get("attributes"), dict) else None
+        if isinstance(raw_fai, int) and not isinstance(raw_fai, bool):
+            final_action_index = raw_fai
+    if final_action_index is not None and (
+        final_action_index < 0 or final_action_index >= max(1, len(req.tool_calls))
+    ):
+        raise HTTPException(
+            status_code=422, detail="final_action_index must index into tool_calls"
+        )
     try:
         entries = mem.commit_outcome(
             req.outcome_ref,
             otype,
             causal_entry_keys=req.causal_entry_keys,
             causal_confidence=req.causal_confidence,
+            attempts=attempts,
+            final_action_index=final_action_index,
             # Not scanned here: commit_outcome scans at trace construction, so
             # every caller gets it. Scanning again would be harmless but would
             # imply this endpoint is where the guarantee lives, which is the

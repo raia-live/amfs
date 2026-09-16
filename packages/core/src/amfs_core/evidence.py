@@ -232,6 +232,25 @@ def apply_outcome_multiplicative(
     )
 
 
+def evidence_signal(entry: MemoryEntry) -> float:
+    """A ranking term in ``[-1, 1]`` from the entry's outcome evidence.
+
+    ``0`` for an untested entry; positive when successes outweigh failures,
+    negative otherwise, approaching ±1 as evidence accumulates. Confidence
+    alone cannot tell an author's untested 0.9 from a 0.9 earned over a dozen
+    outcomes; this term can, which is why retrieval blends it in separately.
+    Discredited entries are pinned to ``-1`` so any caller that lets them
+    through ranks them last.
+    """
+    if entry.discredited_at is not None:
+        return -1.0
+    e_s = max(0.0, float(entry.evidence_success))
+    e_f = max(0.0, float(entry.evidence_failure))
+    if e_s == 0.0 and e_f == 0.0:
+        return 0.0
+    return (e_s - e_f) / (1.0 + e_s + e_f)
+
+
 def _split_spec(spec: str) -> tuple[str, str] | None:
     parts = spec.rsplit("/", 1)
     if len(parts) != 2 or not parts[0] or not parts[1]:
@@ -374,6 +393,7 @@ __all__ = [
     "cited_entries",
     "contrast_lesson",
     "contrast_lesson_key",
+    "evidence_signal",
     "evidence_weight",
     "is_success",
     "is_synthetic_key",

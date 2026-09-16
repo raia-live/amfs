@@ -113,6 +113,12 @@ class HttpAdapter(AdapterABC):
         timeout: Optional httpx Timeout override.
     """
 
+    #: Outcome learning happens on the server this adapter talks to: it runs
+    #: the trigger and writes derived entries (contrast lessons) itself, under
+    #: the caller's identity. The SDK checks this to avoid doing the same
+    #: work a second time on the client.
+    remote_learning = True
+
     # The server's write handler (POST /api/v1/entries) records the WRITE
     # timeline event, so the SDK must not log it again (avoids double events).
     server_side_write_events: bool = True
@@ -295,6 +301,13 @@ class HttpAdapter(AdapterABC):
         # coming, say so, and the server seals once from the better of the two.
         if record.trace_follows:
             body["trace_follows"] = True
+        # Failed attempts and the terminal action: the trigger applies each
+        # attempt's outcome to its own entries server-side, so these must
+        # arrive on the outcome, not only on the trace.
+        if record.attempts:
+            body["attempts"] = [a.model_dump(mode="json") for a in record.attempts]
+        if record.final_action_index is not None:
+            body["final_action_index"] = record.final_action_index
         data = self._post("/api/v1/outcomes", body)
         # The ABC returns entries, so anything else the server computed for this
         # commit has nowhere to go in the signature and would be dropped here.
@@ -388,6 +401,8 @@ class HttpAdapter(AdapterABC):
         confidence_weight: float = 0.2,
         branch: str = "main",
         include_artifacts: bool = True,
+        evidence_weight: float | None = None,
+        include_discredited: bool | None = None,
     ) -> list[tuple[MemoryEntry, float, dict[str, float]]]:
         """Server-side semantic retrieval via POST /api/v1/retrieve.
 
@@ -409,6 +424,12 @@ class HttpAdapter(AdapterABC):
         }
         if entity_path:
             body["entity_path"] = entity_path
+        # Sent only when set, so an older server that does not know the fields
+        # is not handed keys it would reject.
+        if evidence_weight is not None:
+            body["evidence_weight"] = evidence_weight
+        if include_discredited is not None:
+            body["include_discredited"] = include_discredited
         data = self._post("/api/v1/retrieve", body)
         self._capture_reuse_value()
         rows = data if isinstance(data, list) else data.get("entries", [])

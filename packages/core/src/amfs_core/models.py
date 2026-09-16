@@ -515,6 +515,13 @@ class RecallConfig(BaseModel):
     semantic_weight: float = 0.5
     recency_weight: float = 0.3
     confidence_weight: float = 0.2
+    #: Weight of the outcome-evidence term (``amfs_core.evidence.evidence_signal``,
+    #: in [-1, 1]). Separate from confidence so a validated 0.9 outranks an
+    #: untested 0.9 and a contested one falls behind both.
+    evidence_weight: float = 0.15
+    #: Discredited entries (a failure left them under the discredit threshold)
+    #: are dropped from results unless this is set.
+    include_discredited: bool = False
     recency_half_life_days: float = 30.0
 
 
@@ -523,7 +530,10 @@ class ScoredEntry(BaseModel):
 
     entry: MemoryEntry
     score: float
-    breakdown: dict[str, float] = Field(default_factory=dict)
+    #: Score components. Floats, plus the odd label the server adds alongside
+    #: them (``evidence_status``, ``is_artifact``) so a caller can see *why* an
+    #: entry ranked where it did without re-deriving it.
+    breakdown: dict[str, Any] = Field(default_factory=dict)
 
 
 class SearchQuery(BaseModel):

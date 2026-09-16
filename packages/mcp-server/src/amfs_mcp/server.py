@@ -519,6 +519,9 @@ def _serialize_entry(entry: Any) -> dict[str, Any]:
     """Convert a MemoryEntry to a JSON-safe dict for MCP responses."""
     data = entry.model_dump(mode="json")
     data.pop("embedding", None)
+    status = getattr(entry, "evidence_status", None)
+    if status is not None:
+        data["evidence_status"] = status
     return data
 
 
@@ -1158,7 +1161,10 @@ def amfs_retrieve(
     serialized = []
     for scored, data in zip(results, _serialize_entries(s.entry for s in results)):
         data["_score"] = round(scored.score, 4)
-        data["_breakdown"] = {k: round(v, 4) for k, v in scored.breakdown.items()}
+        data["_breakdown"] = {
+            k: round(v, 4) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
+            for k, v in scored.breakdown.items()
+        }
         serialized.append(data)
 
     if not serialized:
@@ -1572,6 +1578,17 @@ def amfs_commit_outcome(
         "affected_entries": len(entries),
         "entries": [_serialize_entry(e) for e in entries],
     }
+    # What the outcome did to each entry, in words an agent can act on next
+    # time: which entries were validated, which were discredited.
+    if entries:
+        result["evidence"] = {
+            "validated": [e.entry_key for e in entries if e.evidence_status == "validated"],
+            "contested": [e.entry_key for e in entries if e.evidence_status == "contested"],
+            "discredited": [e.entry_key for e in entries if e.evidence_status == "discredited"],
+        }
+    attempts_recorded = len(getattr(trace.session_metadata, "attempts", []) or []) if trace is not None and trace.session_metadata is not None else 0
+    if attempts_recorded:
+        result["attempts"] = attempts_recorded
     if trace is not None:
         # Only the id is adapter-dependent — the filesystem adapter persists a
         # trace without minting one. Gating the whole block on it dropped the
@@ -1729,6 +1746,57 @@ def amfs_record_context(
     mem = _get_memory()
     mem.record_context(label, summary, source=source or None)
     return json.dumps({"recorded": label, "source": source or None})
+
+
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "destructiveHint": False})
+def amfs_record_attempt(
+    outcome_type: str = "minor_failure",
+    summary: str | None = None,
+    causal_entry_keys: list[str] | None = None,
+) -> str:
+    """Mark the approach you just tried as failed, before trying another one.
+
+    Call this the moment a remembered fix, runbook step or pattern did NOT work
+    and you are about to try something else. Everything you read since the
+    last attempt (or since the session began) and every action you recorded
+    since then is attributed to this attempt. When you later call
+    amfs_commit_outcome, the entries this attempt relied on receive its failure
+    and only what you read afterwards is credited with the eventual success —
+    so a stale memory that sent you down the wrong path loses confidence
+    instead of being reinforced by your recovery.
+
+    Nothing is sent yet; the attempt travels with the outcome, inside the same
+    decision trace. If the task ends in failure anyway, commit that: the
+    attempts still tell the story.
+
+    Args:
+        outcome_type: How badly the attempt failed: "minor_failure" (default,
+            a wrong guess you recovered from), "failure", or "critical_failure"
+            (it caused damage before you noticed).
+        summary: Optional one line on what you tried and what happened.
+        causal_entry_keys: Optional. The exact "entity_path/key" entries this
+            attempt acted on, when you know them. Defaults to everything read
+            since the previous attempt.
+
+    Example: amfs_record_attempt(summary="restarted worker per runbook; queue still stuck")
+    """
+    mem = _get_memory()
+    try:
+        otype = OutcomeType(outcome_type.lower())
+    except ValueError:
+        return json.dumps({
+            "error": f"Invalid outcome_type '{outcome_type}'. Use minor_failure, failure or critical_failure."
+        })
+    attempt = mem.record_attempt(
+        outcome_type=otype, summary=summary, causal_entry_keys=causal_entry_keys
+    )
+    return json.dumps({
+        "recorded_attempt": attempt.attempt,
+        "outcome_type": attempt.outcome_type.value,
+        "causal_entry_keys": attempt.causal_entry_keys,
+        "action_indices": attempt.action_indices,
+        "hint": "Now try a different approach; commit the task's outcome with amfs_commit_outcome when it is resolved.",
+    })
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "destructiveHint": False})
