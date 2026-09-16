@@ -1409,6 +1409,9 @@ class AgentMemory:
                     memory_type=snapshot.get("memory_type"),
                     written_by=snapshot.get("written_by"),
                     read_at=self._read_tracker._reads.get(ek),
+                    evidence_status=snapshot.get("evidence_status"),
+                    success_count=int(snapshot.get("success_count") or 0),
+                    failure_count=int(snapshot.get("failure_count") or 0),
                 ))
             else:
                 entry = self._adapter.read(ep, k)
@@ -1421,6 +1424,9 @@ class AgentMemory:
                         memory_type=entry.memory_type.value if entry.memory_type else None,
                         written_by=entry.provenance.agent_id,
                         read_at=self._read_tracker._reads.get(ek),
+                        evidence_status=entry.evidence_status,
+                        success_count=entry.success_count,
+                        failure_count=entry.failure_count,
                     ))
 
         ext_contexts = [
@@ -1972,6 +1978,7 @@ class AgentMemory:
                     "version": snapshot.get("version"),
                     "memory_type": snapshot.get("memory_type"),
                     "written_by": snapshot.get("written_by"),
+                    "evidence_status": snapshot.get("evidence_status"),
                     "read_version": self._read_tracker.read_version(ek),
                 })
                 continue
@@ -2435,6 +2442,9 @@ class AgentMemory:
                         confidence=float(item.get("confidence") or 0.0),
                         memory_type=item.get("memory_type"),
                         written_by=item.get("agent"),
+                        evidence_status=item.get("evidence_status"),
+                        success_count=int(item.get("success_count") or 0),
+                        failure_count=int(item.get("failure_count") or 0),
                     )
                 except Exception:  # noqa: BLE001 - lineage must never fail a briefing
                     continue

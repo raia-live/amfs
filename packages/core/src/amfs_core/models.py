@@ -365,6 +365,12 @@ class TraceEntry(BaseModel):
     written_by: str | None = None
     read_at: datetime | None = None
     duration_ms: float | None = None
+    #: The outcome record as it stood at read time — untested / validated /
+    #: contested / discredited and the tally behind it. ``None`` on traces
+    #: sealed before the evidence model; readers treat that as untested.
+    evidence_status: str | None = None
+    success_count: int = 0
+    failure_count: int = 0
 
 
 class ExternalContext(BaseModel):

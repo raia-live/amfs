@@ -79,6 +79,23 @@ class TestSdkAttemptBoundaries:
         # The terminal outcome cites only what the resolving attempt read.
         assert [c.key for c in trace.causal_entries] == ["fix-rotate-key"]
 
+    def test_causal_entries_freeze_the_evidence_seen_at_read_time(self, mem: AgentMemory) -> None:
+        # First task validates fix-rotate-key; the second task reads it and the
+        # trace must carry the status it had *then*, not the live record, so a
+        # training prompt rendered from the trace shows what the agent saw.
+        _fail_then_succeed(mem)
+        mem._read_tracker.clear()
+        mem.read("acme/support", "fix-rotate-key")
+        mem.read("acme/support", "fix-restart")
+        mem.record_action("rotate_key", {"service": "ingest"}, result="ok")
+        mem.commit_outcome("ticket-2", OutcomeType.SUCCESS, task_input="ingest queue stuck again")
+
+        by_key = {c.key: c for c in mem._last_trace.causal_entries}
+        assert by_key["fix-rotate-key"].evidence_status == "validated"
+        assert by_key["fix-rotate-key"].success_count == 1
+        assert by_key["fix-restart"].evidence_status in {"contested", "discredited"}
+        assert by_key["fix-restart"].failure_count == 1
+
     def test_contrast_lesson_is_written_as_synthetic_experience(self, mem: AgentMemory) -> None:
         _fail_then_succeed(mem)
         lesson = mem.read("acme/support", ev.contrast_lesson_key("ticket-1"))

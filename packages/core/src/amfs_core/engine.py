@@ -221,6 +221,13 @@ class ReadTracker:
             "version": entry.version,
             "memory_type": entry.memory_type.value if hasattr(entry.memory_type, 'value') else str(entry.memory_type),
             "written_by": entry.provenance.agent_id,
+            # What the outcome record said about the entry *when it was acted
+            # on*. Frozen here for the same reason confidence is: a trace, and
+            # the training prompt rendered from it, must show what the agent
+            # saw, and the live record moves with every later outcome.
+            "evidence_status": entry.evidence_status,
+            "success_count": entry.success_count,
+            "failure_count": entry.failure_count,
         }
 
     def record_surfaced(
@@ -237,6 +244,9 @@ class ReadTracker:
         confidence: float,
         memory_type: str | None = None,
         written_by: str | None = None,
+        evidence_status: str | None = None,
+        success_count: int = 0,
+        failure_count: int = 0,
     ) -> None:
         """Record a read of an entry that arrived already-materialised.
 
@@ -261,6 +271,12 @@ class ReadTracker:
             "version": version,
             "memory_type": memory_type or "fact",
             "written_by": written_by,
+            # A digest compiled before the evidence model carries no status;
+            # that entry had never met an outcome, so "untested" is what a
+            # direct read of it would have recorded.
+            "evidence_status": evidence_status or "untested",
+            "success_count": int(success_count or 0),
+            "failure_count": int(failure_count or 0),
         }
 
     def record_context(
