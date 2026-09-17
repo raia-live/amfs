@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import json
 import threading
+import re
 from pathlib import Path
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -71,8 +72,20 @@ class ArtifactPool:
     an opaque registered key, never a filesystem or cloud storage path.
     """
     def __init__(self, registry: dict, capacity: int):
-        if capacity < 1 or not registry:
-            raise ValueError("artifact pool requires registered artifacts and positive capacity")
+        if type(capacity) is not int or capacity < 1:
+            raise ValueError("artifact pool requires positive integer capacity")
+        if not isinstance(registry, dict):
+            raise ValueError("artifact registry must be an object")
+        for key, entry in registry.items():
+            if (not isinstance(key, str) or not 1 <= len(key) <= 256
+                    or not isinstance(entry, dict)
+                    or not isinstance(entry.get("directory"), str) or not entry["directory"].strip()
+                    or not isinstance(entry.get("version"), str) or not entry["version"].strip()
+                    or not isinstance(entry.get("sha256"), str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", entry["sha256"])):
+                raise ValueError("malformed artifact registry entry")
+        # An empty operator registry supports pool bootstrap before publication.
+        # It grants no scoring capability: every unknown key still returns 404.
         self.registry, self.capacity = registry, capacity
         self.cache = OrderedDict()
         self.lock = threading.Lock()
@@ -119,7 +132,10 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/health")
 def health():
-    return {"ready": hasattr(app.state, "pool")}
+    pool = getattr(app.state, "pool", None)
+    return {"ready": pool is not None,
+            "registered_models": len(pool.registry) if pool is not None else 0,
+            "loaded_models": len(pool.cache) if pool is not None else 0}
 
 
 def score_batch(body: ScoreRequest):
