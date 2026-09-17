@@ -45,7 +45,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Callable
 
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
@@ -266,13 +266,51 @@ def outcome_steps(record: OutcomeRecord) -> list[tuple[OutcomeType, list[str]]]:
     keys, not over the union — an attempt that read one entry hands it a full
     unit of failure even if the whole task read twenty.
     """
-    steps: list[tuple[OutcomeType, list[str]]] = []
+    return [(t, keys) for t, keys, _ in outcome_steps_with_versions(record)]
+
+
+def outcome_steps_with_versions(
+    record: OutcomeRecord,
+) -> list[tuple[OutcomeType, list[str], dict[str, int]]]:
+    """``outcome_steps`` plus, per step, the ``entry_key -> version`` map read."""
+    steps: list[tuple[OutcomeType, list[str], dict[str, int]]] = []
     for attempt in sorted(record.attempts, key=lambda a: a.attempt):
         keys = list(dict.fromkeys(attempt.causal_entry_keys))
         if keys:
-            steps.append((attempt.outcome_type, keys))
-    steps.append((record.outcome_type, list(dict.fromkeys(record.causal_entry_keys))))
+            steps.append((attempt.outcome_type, keys, dict(attempt.causal_entry_versions)))
+    steps.append((
+        record.outcome_type,
+        list(dict.fromkeys(record.causal_entry_keys)),
+        dict(record.causal_entry_versions),
+    ))
     return steps
+
+
+#: ``(entity_path, key, version) -> MemoryEntry | None``: how an adapter finds
+#: the version an agent read, so a step can tell whether the claim changed.
+VersionLookup = Callable[[str, str, int], "MemoryEntry | None"]
+
+
+def claim_still_held(
+    entry: MemoryEntry,
+    read_version: int | None,
+    lookup: VersionLookup | None,
+) -> bool:
+    """Does the live ``entry`` still say what version ``read_version`` said?
+
+    ``True`` when no version was recorded, when the live version *is* the one
+    read, when the read version cannot be found, or when the two values are
+    the same claim (outcome propagation and identical restatements both open
+    new versions without changing the claim). ``False`` only when the key was
+    rewritten with something else in between — then the outcome is about the
+    old claim and must not land on the new one.
+    """
+    if read_version is None or lookup is None or read_version == entry.version:
+        return True
+    was = lookup(entry.entity_path, entry.key, int(read_version))
+    if was is None:
+        return True
+    return same_claim(was.value, entry.value)
 
 
 def apply_record_to_entry(
@@ -281,19 +319,23 @@ def apply_record_to_entry(
     *,
     now: datetime | None = None,
     model: str | None = None,
+    version_lookup: VersionLookup | None = None,
 ) -> tuple[MemoryEntry, list[EvidenceUpdate]]:
     """Apply every step of ``record`` that cites ``entry`` and return the new entry.
 
     This is what the filesystem and S3 adapters (and the Postgres trigger, in
     SQL) do per causal entry. ``version`` is left alone: adapters assign it on
-    write.
+    write. With *version_lookup* a step whose recorded read version no longer
+    matches the live claim is skipped (see ``claim_still_held``).
     """
     now = now or datetime.now(UTC)
     model = model or outcome_model()
     updates: list[EvidenceUpdate] = []
     current = entry
-    for outcome_type, keys in outcome_steps(record):
+    for outcome_type, keys, versions in outcome_steps_with_versions(record):
         if entry.entry_key not in keys:
+            continue
+        if not claim_still_held(entry, versions.get(entry.entry_key), version_lookup):
             continue
         if model == "multiplicative":
             upd = apply_outcome_multiplicative(
@@ -372,6 +414,58 @@ def contrast_lesson(record: OutcomeRecord) -> dict[str, Any] | None:
 #: Keys with these prefixes are written by the system, not the agent: derived
 #: lessons that should inform retrieval and briefings but never be trained on
 #: or graded as if the agent had authored them.
+#: Fields that make up an entry's outcome record. They describe the *claim*, not
+#: the row, so an identical restatement of the claim carries them forward.
+EVIDENCE_FIELDS: tuple[str, ...] = (
+    "outcome_count",
+    "success_count",
+    "failure_count",
+    "evidence_success",
+    "evidence_failure",
+    "last_outcome",
+    "last_outcome_at",
+    "discredited_at",
+    "prior_confidence",
+)
+
+
+def same_claim(a: Any, b: Any) -> bool:
+    """Two values that say the same thing, allowing for the JSON round trip
+    (dict key order, int/float) that a stored value has been through."""
+    if a == b:
+        return True
+    try:
+        import json
+
+        return json.dumps(a, sort_keys=True, default=str) == json.dumps(
+            b, sort_keys=True, default=str
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def inherit_evidence(new: MemoryEntry, current: MemoryEntry | None) -> MemoryEntry:
+    """Carry the outcome record across a rewrite that does not change the claim.
+
+    Agents restate their lessons: the reflection step at the end of every task
+    writes the same key again, usually with the same text and the same
+    declared confidence. Before this rule every such write opened a new
+    version with an empty record, so a lesson validated twelve times looked
+    untested the moment its author repeated it, and a lesson discredited
+    yesterday came back clean today. The record is about what the entry
+    claims; an unchanged claim keeps it, and the evidence-derived posterior
+    outranks the writer's restated prior. A changed claim is a new hypothesis
+    and starts untested, as before.
+    """
+    if current is None or not same_claim(new.value, current.value):
+        return new
+    if not (current.success_count or current.failure_count or current.outcome_count):
+        return new
+    update: dict[str, Any] = {f: getattr(current, f) for f in EVIDENCE_FIELDS}
+    update["confidence"] = current.confidence
+    return new.model_copy(update=update)
+
+
 SYNTHETIC_KEY_PREFIXES: tuple[str, ...] = ("lesson-contrast-",)
 
 

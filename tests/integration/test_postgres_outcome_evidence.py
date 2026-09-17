@@ -142,10 +142,78 @@ def test_fresh_write_resets_evidence(adapter, monkeypatch) -> None:
     adapter.write(_entry("rule", 0.7))
     adapter.commit_outcome(_record(OutcomeType.FAILURE, ["svc/mod/rule"]))
     assert adapter.read("svc/mod", "rule").discredited_at is not None
-    # The author rewrites the rule: a new claim, tested from scratch.
-    adapter.write(_entry("rule", 0.7))
+    # The author rewrites the rule: a new claim, tested from scratch. (Restating
+    # the same claim would keep the record — see inherit_evidence.)
+    e = _entry("rule", 0.7)
+    e.value = {"rule": "something else"}
+    adapter.write(e)
     fresh = adapter.read("svc/mod", "rule")
     assert fresh.version == 3
     assert fresh.discredited_at is None
     assert fresh.failure_count == 0
     assert fresh.evidence_status == "untested"
+
+
+def _versions(adapter, key: str) -> dict[str, int]:
+    return {f"svc/mod/{key}": adapter.read("svc/mod", key).version}
+
+
+def test_a_rewritten_claim_is_not_charged_for_the_old_one(adapter, monkeypatch) -> None:
+    monkeypatch.delenv(ev.OUTCOME_MODEL_ENV, raising=False)
+    adapter.write(_entry("rule", 0.7))
+    read = _versions(adapter, "rule")  # the agent acted on v1
+    # Reflection rewrites the lesson before the commit lands.
+    e = _entry("rule", 0.7)
+    e.value = {"rule": "corrected"}
+    adapter.write(e)
+    rec = _record(OutcomeType.FAILURE, ["svc/mod/rule"])
+    rec.causal_entry_versions = read
+    adapter.commit_outcome(rec)
+
+    live = adapter.read("svc/mod", "rule")
+    assert live.value == {"rule": "corrected"}
+    assert live.failure_count == 0
+    assert live.evidence_status == "untested"
+    assert live.confidence == pytest.approx(0.7)
+
+
+def test_a_restated_claim_takes_the_credit_across_versions(adapter, monkeypatch) -> None:
+    monkeypatch.delenv(ev.OUTCOME_MODEL_ENV, raising=False)
+    adapter.write(_entry("rule", 0.7))
+    read = _versions(adapter, "rule")
+    adapter.write(_entry("rule", 0.7))  # same claim, new version
+    rec = _record(OutcomeType.SUCCESS, ["svc/mod/rule"])
+    rec.causal_entry_versions = read
+    adapter.commit_outcome(rec)
+    live = adapter.read("svc/mod", "rule")
+    assert live.success_count == 1
+    assert live.evidence_status == "validated"
+
+
+def test_an_attempt_charges_the_claim_it_tried_and_the_success_goes_to_the_fix(
+    adapter, monkeypatch
+) -> None:
+    monkeypatch.delenv(ev.OUTCOME_MODEL_ENV, raising=False)
+    adapter.write(_entry("rule", 0.7))
+    tried = _versions(adapter, "rule")
+    e = _entry("rule", 0.7)
+    e.value = {"rule": "corrected"}
+    adapter.write(e)
+    retried = _versions(adapter, "rule")
+    rec = _record(
+        OutcomeType.SUCCESS,
+        ["svc/mod/rule"],
+        attempts=[
+            AttemptRecord(
+                attempt=1,
+                outcome_type=OutcomeType.MINOR_FAILURE,
+                causal_entry_keys=["svc/mod/rule"],
+                causal_entry_versions=tried,
+            )
+        ],
+    )
+    rec.causal_entry_versions = retried
+    adapter.commit_outcome(rec)
+    live = adapter.read("svc/mod", "rule")
+    assert live.value == {"rule": "corrected"}
+    assert (live.success_count, live.failure_count) == (1, 0)

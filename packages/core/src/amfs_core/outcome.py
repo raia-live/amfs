@@ -118,11 +118,13 @@ class OutcomeBackPropagator:
         trace_follows: bool = False,
         attempts: list[Any] | None = None,
         final_action_index: int | None = None,
+        causal_entry_versions: dict[str, int] | None = None,
     ) -> OutcomeRecord:
         """Convenience factory for creating OutcomeRecord instances."""
         return OutcomeRecord(
             attempts=attempts or [],
             final_action_index=final_action_index,
+            causal_entry_versions=dict(causal_entry_versions or {}),
             outcome_ref=outcome_ref,
             outcome_type=outcome_type,
             causal_confidence=causal_confidence,

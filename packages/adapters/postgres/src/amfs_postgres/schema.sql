@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS amfs_outcomes (
     agent_id TEXT NOT NULL,
     account_id UUID,
     attempts JSONB NOT NULL DEFAULT '[]',
+    causal_entry_versions JSONB NOT NULL DEFAULT '{}',
     final_action_index INTEGER
 );
 
@@ -463,13 +464,16 @@ $$ LANGUAGE sql IMMUTABLE;
 -- One step of an outcome: one outcome type applied to one set of causal keys,
 -- credit-split over those keys. The trigger calls this once per failed
 -- attempt and once for the terminal outcome.
+DROP FUNCTION IF EXISTS amfs_apply_outcome_step(TEXT, UUID, TEXT[], TEXT, NUMERIC, TEXT);
+
 CREATE OR REPLACE FUNCTION amfs_apply_outcome_step(
     p_namespace TEXT,
     p_account UUID,
     p_keys TEXT[],
     p_outcome_type TEXT,
     p_causal_confidence NUMERIC,
-    p_model TEXT
+    p_model TEXT,
+    p_versions JSONB
 ) RETURNS INTEGER AS $$
 DECLARE
     keys TEXT[];
@@ -477,6 +481,8 @@ DECLARE
     ep TEXT;
     k TEXT;
     cur RECORD;
+    read_version INTEGER;
+    read_value JSONB;
     n_keys INTEGER;
     is_ok BOOLEAN;
     target NUMERIC;
@@ -516,6 +522,22 @@ BEGIN
 
         IF NOT FOUND THEN
             CONTINUE;
+        END IF;
+
+        -- Credit the claim that was read. If the key has been rewritten since
+        -- and now says something else, this outcome is about the old claim.
+        read_version := NULLIF(COALESCE(p_versions, '{}'::jsonb)->>entry_key, '')::INTEGER;
+        IF read_version IS NOT NULL AND read_version <> cur.version THEN
+            SELECT value INTO read_value FROM amfs_memory_entries
+            WHERE namespace = p_namespace
+              AND entity_path = ep
+              AND key = k
+              AND version = read_version
+              AND account_id IS NOT DISTINCT FROM p_account
+            LIMIT 1;
+            IF FOUND AND read_value IS DISTINCT FROM cur.value THEN
+                CONTINUE;
+            END IF;
         END IF;
 
         prior := LEAST(1.0, GREATEST(0.0, COALESCE(cur.prior_confidence, cur.confidence)));
@@ -592,14 +614,16 @@ BEGIN
         PERFORM amfs_apply_outcome_step(
             NEW.namespace, NEW.account_id, att_keys,
             COALESCE(att->>'outcome_type', 'minor_failure'),
-            NEW.causal_confidence, model
+            NEW.causal_confidence, model,
+            COALESCE(att->'causal_entry_versions', '{}'::jsonb)
         );
     END LOOP;
 
     -- Then the terminal outcome to the entries the resolution relied on.
     PERFORM amfs_apply_outcome_step(
         NEW.namespace, NEW.account_id, NEW.causal_entry_keys,
-        NEW.outcome_type, NEW.causal_confidence, model
+        NEW.outcome_type, NEW.causal_confidence, model,
+        COALESCE(NEW.causal_entry_versions, '{}'::jsonb)
     );
 
     PERFORM pg_notify('amfs_outcome', json_build_object(

@@ -41,6 +41,16 @@
 -- `final_action_index` names which tool call produced the terminal outcome so
 -- training pipelines stop guessing "the first one".
 --
+-- The claim that was read is the claim that is credited: amfs_outcomes gains
+-- `causal_entry_versions JSONB` ({entry_key: version read}), and each attempt
+-- carries the same map. When the live version of a cited key differs from the
+-- one the agent read, the step compares the two values; if the claim changed
+-- in between (the agent's own reflection rewrote the key with a new lesson
+-- before committing, or a colleague did), the outcome is not applied to the
+-- new claim. Without this, an agent that tried a stale lesson, succeeded by
+-- another route, wrote the better lesson under the same key and then
+-- committed handed the stale lesson's failure to its replacement.
+--
 -- AMFS_OUTCOME_MODEL=multiplicative (the adapter sets the `amfs.outcome_model`
 -- session setting) restores the 006 arithmetic; the evidence columns are still
 -- maintained so the status vocabulary keeps working.
@@ -61,6 +71,7 @@ ALTER TABLE amfs_memory_entries ADD COLUMN IF NOT EXISTS discredited_at TIMESTAM
 ALTER TABLE amfs_outcomes ADD COLUMN IF NOT EXISTS account_id UUID;
 ALTER TABLE amfs_outcomes ADD COLUMN IF NOT EXISTS attempts JSONB NOT NULL DEFAULT '[]';
 ALTER TABLE amfs_outcomes ADD COLUMN IF NOT EXISTS final_action_index INTEGER;
+ALTER TABLE amfs_outcomes ADD COLUMN IF NOT EXISTS causal_entry_versions JSONB NOT NULL DEFAULT '{}';
 
 -- Discredited rows are excluded from most reads; the partial index keeps the
 -- "show me what stopped working" queries cheap on large tables.
@@ -104,13 +115,18 @@ $$ LANGUAGE sql IMMUTABLE;
 -- One step of an outcome: one outcome type applied to one set of causal keys,
 -- credit-split over those keys. The trigger calls this once per failed
 -- attempt and once for the terminal outcome.
+-- The six-argument form predates causal_entry_versions; the trigger below
+-- calls the seven-argument one, so the old overload is retired here.
+DROP FUNCTION IF EXISTS amfs_apply_outcome_step(TEXT, UUID, TEXT[], TEXT, NUMERIC, TEXT);
+
 CREATE OR REPLACE FUNCTION amfs_apply_outcome_step(
     p_namespace TEXT,
     p_account UUID,
     p_keys TEXT[],
     p_outcome_type TEXT,
     p_causal_confidence NUMERIC,
-    p_model TEXT
+    p_model TEXT,
+    p_versions JSONB
 ) RETURNS INTEGER AS $$
 DECLARE
     keys TEXT[];
@@ -118,6 +134,8 @@ DECLARE
     ep TEXT;
     k TEXT;
     cur RECORD;
+    read_version INTEGER;
+    read_value JSONB;
     n_keys INTEGER;
     is_ok BOOLEAN;
     target NUMERIC;
@@ -157,6 +175,22 @@ BEGIN
 
         IF NOT FOUND THEN
             CONTINUE;
+        END IF;
+
+        -- Credit the claim that was read. If the key has been rewritten since
+        -- and now says something else, this outcome is about the old claim.
+        read_version := NULLIF(COALESCE(p_versions, '{}'::jsonb)->>entry_key, '')::INTEGER;
+        IF read_version IS NOT NULL AND read_version <> cur.version THEN
+            SELECT value INTO read_value FROM amfs_memory_entries
+            WHERE namespace = p_namespace
+              AND entity_path = ep
+              AND key = k
+              AND version = read_version
+              AND account_id IS NOT DISTINCT FROM p_account
+            LIMIT 1;
+            IF FOUND AND read_value IS DISTINCT FROM cur.value THEN
+                CONTINUE;
+            END IF;
         END IF;
 
         prior := LEAST(1.0, GREATEST(0.0, COALESCE(cur.prior_confidence, cur.confidence)));
@@ -233,14 +267,16 @@ BEGIN
         PERFORM amfs_apply_outcome_step(
             NEW.namespace, NEW.account_id, att_keys,
             COALESCE(att->>'outcome_type', 'minor_failure'),
-            NEW.causal_confidence, model
+            NEW.causal_confidence, model,
+            COALESCE(att->'causal_entry_versions', '{}'::jsonb)
         );
     END LOOP;
 
     -- Then the terminal outcome to the entries the resolution relied on.
     PERFORM amfs_apply_outcome_step(
         NEW.namespace, NEW.account_id, NEW.causal_entry_keys,
-        NEW.outcome_type, NEW.causal_confidence, model
+        NEW.outcome_type, NEW.causal_confidence, model,
+        COALESCE(NEW.causal_entry_versions, '{}'::jsonb)
     );
 
     PERFORM pg_notify('amfs_outcome', json_build_object(

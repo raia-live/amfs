@@ -321,6 +321,13 @@ class FilesystemAdapter(AdapterABC):
     # commit_outcome
     # ------------------------------------------------------------------
 
+    def _version_lookup(self, entity_path: str, key: str, version: int) -> MemoryEntry | None:
+        """The version an agent read, for the claim check in ``apply_record_to_entry``."""
+        try:
+            return self.read_at_version(entity_path, key, version)
+        except Exception:  # noqa: BLE001
+            return None
+
     def commit_outcome(self, record: OutcomeRecord) -> list[MemoryEntry]:
         # One new version per cited entry, carrying every step of the record
         # (failed attempts first, then the terminal outcome) through the
@@ -333,7 +340,9 @@ class FilesystemAdapter(AdapterABC):
             if current is None:
                 logger.warning("Causal entry not found: %s/%s", entity_path, key)
                 continue
-            new_entry, steps = apply_record_to_entry(current, record, now=now)
+            new_entry, steps = apply_record_to_entry(
+                current, record, now=now, version_lookup=self._version_lookup
+            )
             if not steps:
                 continue
             written = self.write(new_entry.model_copy(update={"version": 1}))

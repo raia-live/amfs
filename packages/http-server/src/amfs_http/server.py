@@ -302,6 +302,9 @@ from amfs_core.exclusions import (  # noqa: E402
 from amfs_core.exclusions import (  # noqa: E402
     is_excluded_entity as _is_excluded_entity,
 )
+from amfs_core.evidence import (  # noqa: E402
+    is_synthetic_key as _is_synthetic_key,
+)
 
 
 def _retrieve_min_semantic() -> float:
@@ -1974,11 +1977,15 @@ async def retrieve_entries(
                 entry.entry_key, {"entry": entry, "sim": 0.0, "keyword": 1.0}
             )
 
-    # 4. Drop benchmark/system scratch namespaces from user recall.
+    # 4. Drop benchmark/system scratch namespaces from user recall, and the
+    #    system-written contrast lessons: those are consumed by the briefing
+    #    (folded into the discredited section as "replaced by") and are not
+    #    knowledge an agent should read or be credited for.
     candidates = {
         k: v
         for k, v in candidates.items()
         if not _is_excluded_entity(getattr(v["entry"], "entity_path", ""))
+        and not _is_synthetic_key(getattr(v["entry"], "key", ""))
     }
 
     # 5. Visibility (account RLS already scoped the fetch; this adds per-user +
@@ -3132,6 +3139,7 @@ async def _memories_matching_task(
         k: v
         for k, v in candidates.items()
         if not _is_excluded_entity(getattr(v["entry"], "entity_path", ""))
+        and not _is_synthetic_key(getattr(v["entry"], "key", ""))
     }
 
     # Applied over the merged set, once, for the same reason retrieve does it
@@ -3290,6 +3298,8 @@ async def commit_outcome(
             causal_confidence=req.causal_confidence,
             attempts=attempts,
             final_action_index=final_action_index,
+            # The client's read versions, never the server's shared tracker.
+            causal_entry_versions=req.causal_entry_versions or {},
             # Not scanned here: commit_outcome scans at trace construction, so
             # every caller gets it. Scanning again would be harmless but would
             # imply this endpoint is where the guarantee lives, which is the

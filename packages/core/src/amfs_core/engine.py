@@ -225,9 +225,11 @@ class ReadTracker:
             # on*. Frozen here for the same reason confidence is: a trace, and
             # the training prompt rendered from it, must show what the agent
             # saw, and the live record moves with every later outcome.
-            "evidence_status": entry.evidence_status,
-            "success_count": entry.success_count,
-            "failure_count": entry.failure_count,
+            # ``getattr`` because journaled replays hand this a stand-in that
+            # carries only the fields the older core read.
+            "evidence_status": getattr(entry, "evidence_status", None) or "untested",
+            "success_count": int(getattr(entry, "success_count", 0) or 0),
+            "failure_count": int(getattr(entry, "failure_count", 0) or 0),
         }
 
     def record_surfaced(
@@ -389,6 +391,7 @@ class ReadTracker:
             "attempt": len(self._state.attempts) + 1,
             "outcome_type": outcome_type,
             "causal_entry_keys": keys,
+            "causal_entry_versions": self.versions_for(keys),
             "action_indices": indices,
             "summary": summary,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
@@ -466,6 +469,15 @@ class ReadTracker:
     def read_version(self, entry_key: str) -> int | None:
         """Return the version we last read for an entry, or None if never read."""
         return self._versions.get(entry_key)
+
+    def versions_for(self, entry_keys: list[str]) -> dict[str, int]:
+        """``entry_key -> version read`` for the keys this session has a version for."""
+        out: dict[str, int] = {}
+        for k in entry_keys:
+            v = self._versions.get(k)
+            if v is not None:
+                out[k] = int(v)
+        return out
 
     def record_query(
         self,
@@ -612,7 +624,8 @@ class CoWEngine:
             value=value,
             provenance=self._tagger.tag(pattern_refs=pattern_refs),
             confidence=confidence,
-            outcome_count=current.outcome_count if current else 0,
+            # The outcome record (outcome_count included) belongs to the claim:
+            # inherit_evidence below carries it over when the claim is unchanged.
             recall_count=current.recall_count if current else 0,
             importance_score=importance_score,
             importance_dimensions=importance_dimensions,
@@ -625,6 +638,10 @@ class CoWEngine:
             content_hash=value_hash,
             integrity_chain=chain,
         )
+        # An unchanged claim keeps its outcome record (see amfs_core.evidence).
+        from amfs_core.evidence import inherit_evidence
+
+        entry = inherit_evidence(entry, current)
 
         return self._adapter.write(entry)
 

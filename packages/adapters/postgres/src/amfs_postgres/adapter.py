@@ -467,6 +467,52 @@ class _TenantRLSPoolWrapper:
         return getattr(self._inner, name)
 
 
+#: Outcome-record columns (migration 008). Persisted on write so a restated
+#: claim keeps its record; see ``amfs_core.evidence.inherit_evidence``.
+_EVIDENCE_COLUMNS: tuple[str, ...] = (
+    "success_count", "failure_count", "evidence_success", "evidence_failure",
+    "last_outcome", "last_outcome_at", "discredited_at", "prior_confidence",
+)
+_EVIDENCE_SELECT = ", outcome_count, " + ", ".join(_EVIDENCE_COLUMNS)
+
+
+def _evidence_params(entry: MemoryEntry) -> list[Any]:
+    lo = entry.last_outcome
+    return [
+        int(entry.success_count or 0),
+        int(entry.failure_count or 0),
+        float(entry.evidence_success or 0.0),
+        float(entry.evidence_failure or 0.0),
+        (lo.value if hasattr(lo, "value") else lo) if lo is not None else None,
+        entry.last_outcome_at,
+        entry.discredited_at,
+        entry.prior_confidence,
+    ]
+
+
+def _inherit_from_row(entry: MemoryEntry, row: Any) -> MemoryEntry:
+    """Apply ``inherit_evidence`` against the live row fetched inside the write
+    transaction, so the hot paths that bypass the engine honour the same rule."""
+    from amfs_core.evidence import EVIDENCE_FIELDS, inherit_evidence
+
+    value = row["value"]
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            pass
+    current = entry.model_copy(update={
+        "value": value,
+        "confidence": float(row["confidence"]),
+        **{f: row.get(f) if f not in ("outcome_count", "success_count", "failure_count")
+           else int(row.get(f) or 0)
+           for f in EVIDENCE_FIELDS},
+        "evidence_success": float(row.get("evidence_success") or 0.0),
+        "evidence_failure": float(row.get("evidence_failure") or 0.0),
+    })
+    return inherit_evidence(entry, current)
+
+
 class PostgresAdapter(AdapterABC):
     """Store AMFS entries in PostgreSQL.
 
@@ -503,6 +549,7 @@ class PostgresAdapter(AdapterABC):
         self._has_embedding_col = False
         self._has_search_tsv = False
         self._has_is_artifact_col = False
+        self._has_evidence_cols = False
         # When an embedder is provided, embeddings are computed at write time and
         # persisted, so ANN retrieval (semantic_search / pgvector HNSW) works
         # without a separate backfill pass. embedding_dim must match the column
@@ -1380,13 +1427,14 @@ class PostgresAdapter(AdapterABC):
                     """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'amfs_memory_entries'
-                      AND column_name IN ('embedding', 'search_tsv', 'is_artifact')
+                      AND column_name IN ('embedding', 'search_tsv', 'is_artifact', 'success_count')
                     """,
                 )
                 found = {row["column_name"] for row in cur.fetchall()}
                 self._has_embedding_col = "embedding" in found
                 self._has_search_tsv = "search_tsv" in found
                 self._has_is_artifact_col = "is_artifact" in found
+                self._has_evidence_cols = "success_count" in found
 
     # ------------------------------------------------------------------
     # read
@@ -1478,8 +1526,9 @@ class PostgresAdapter(AdapterABC):
             with conn.transaction():
                 with conn.cursor() as cur:
                     cur.execute(
-                        """
-                        SELECT version FROM amfs_memory_entries
+                        f"""
+                        SELECT version, value, confidence{_EVIDENCE_SELECT if self._has_evidence_cols else ""}
+                        FROM amfs_memory_entries
                         WHERE namespace = %s AND branch = %s
                           AND entity_path = %s AND key = %s
                           AND superseded_at IS NULL
@@ -1491,6 +1540,8 @@ class PostgresAdapter(AdapterABC):
                     row = cur.fetchone()
                     current_version = row["version"] if row else 0
                     new_version = current_version + 1
+                    if row and self._has_evidence_cols:
+                        entry = _inherit_from_row(entry, row)
 
                     if entry.version > 1 and entry.version != new_version:
                         raise VersionConflictError(
@@ -1555,6 +1606,10 @@ class PostgresAdapter(AdapterABC):
                     if self._has_is_artifact_col:
                         columns.append("is_artifact")
                         params.append(is_artifact)
+
+                    if self._has_evidence_cols:
+                        columns.extend(_EVIDENCE_COLUMNS)
+                        params.extend(_evidence_params(entry))
 
                     # Write-time embedding: compute and persist an embedding when
                     # the caller did not supply one and an embedder is configured.
@@ -3131,8 +3186,8 @@ class PostgresAdapter(AdapterABC):
                     INSERT INTO amfs_outcomes (
                         namespace, outcome_ref, outcome_type, causal_confidence,
                         committed_at, causal_entry_keys, agent_id,
-                        attempts, final_action_index
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+                        attempts, final_action_index, causal_entry_versions
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb)
                     """,
                     (
                         self._namespace,
@@ -3147,6 +3202,7 @@ class PostgresAdapter(AdapterABC):
                             default=str,
                         ),
                         record.final_action_index,
+                        json.dumps(dict(record.causal_entry_versions or {})),
                     ),
                 )
 

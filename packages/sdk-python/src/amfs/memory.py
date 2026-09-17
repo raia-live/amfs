@@ -1268,6 +1268,7 @@ class AgentMemory:
         persist_trace: bool = True,
         attempts: list[AttemptRecord | dict[str, Any]] | None = None,
         final_action_index: int | None = None,
+        causal_entry_versions: dict[str, int] | None = None,
     ) -> list[MemoryEntry]:
         """Record an outcome and back-propagate confidence changes.
 
@@ -1368,10 +1369,17 @@ class AgentMemory:
         # wire on the SaaS path.
         tool_calls = self._scanned_actions(tool_calls)
 
+        # The versions the agent read, so the store credits the claim it acted on
+        # and not whatever the key says by the time the commit lands (its own
+        # reflection may have rewritten it a moment ago). Explicit map wins;
+        # otherwise whatever this session's read log knows.
+        if causal_entry_versions is None:
+            causal_entry_versions = self._read_tracker.versions_for(list(causal_entry_keys))
         record = OutcomeBackPropagator.make_record(
             outcome_ref=outcome_ref,
             outcome_type=outcome_type,
             causal_entry_keys=causal_entry_keys,
+            causal_entry_versions=causal_entry_versions,
             agent_id=self.agent_id,
             causal_confidence=causal_confidence,
             # Carried on the record because the adapter's commit_outcome is what

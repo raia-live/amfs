@@ -67,6 +67,9 @@ class OutcomeRequest(BaseModel):
     #: Index into ``tool_calls`` of the action that produced the terminal
     #: outcome, when there was more than one.
     final_action_index: int | None = None
+    #: ``entry_key -> version`` the agent read for ``causal_entry_keys``; the
+    #: outcome is applied only where the key still carries that claim.
+    causal_entry_versions: dict[str, int] | None = None
 
 
 class SearchRequest(BaseModel):

@@ -256,7 +256,7 @@ class BriefingService:
             reverse=True,
         )[:_EVIDENCE_SECTION_LIMIT]
         discredited = sorted(
-            (e for e in entries if e.discredited_at is not None),
+            (e for e in entries if e.discredited_at is not None and not _is_synthetic(e.key)),
             key=lambda e: e.last_outcome_at or e.discredited_at or e.provenance.written_at,
             reverse=True,
         )[:_EVIDENCE_SECTION_LIMIT]
@@ -265,7 +265,7 @@ class BriefingService:
         # replacement, not just the warning.
         replacements = self._replacements_from_lessons(entries)
 
-        shifted = self._regime_shift(entries)
+        shifted = [e for e in self._regime_shift(entries) if not _is_synthetic(e.key)]
 
         lead.summary["validated"] = [
             {

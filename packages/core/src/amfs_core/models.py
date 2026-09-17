@@ -300,6 +300,10 @@ class AttemptRecord(BaseModel):
     attempt: int
     outcome_type: OutcomeType = OutcomeType.MINOR_FAILURE
     causal_entry_keys: list[str] = Field(default_factory=list)
+    #: ``entry_key -> version`` as read during this attempt. The outcome is
+    #: applied only if the key still says what it said then; see
+    #: ``OutcomeRecord.causal_entry_versions``.
+    causal_entry_versions: dict[str, int] = Field(default_factory=dict)
     action_indices: list[int] = Field(default_factory=list)
     summary: str | None = None
 
@@ -312,6 +316,13 @@ class OutcomeRecord(BaseModel):
     causal_confidence: float = 1.0
     committed_at: datetime
     causal_entry_keys: list[str] = Field(default_factory=list)
+    #: ``entry_key -> version`` the agent actually read, for the keys above.
+    #: Credit goes to the claim that was read: when the live version of a key
+    #: differs from this one *and* its value changed in between (the agent's
+    #: reflection rewrote the lesson before committing, or a colleague did),
+    #: the outcome is not applied to the new claim. Keys absent from the map
+    #: are applied unconditionally, as before.
+    causal_entry_versions: dict[str, int] = Field(default_factory=dict)
     agent_id: str
     #: Failed attempts that preceded the terminal outcome, oldest first. Each is
     #: applied to its own causal entries before ``outcome_type`` is applied to

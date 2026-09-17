@@ -308,6 +308,8 @@ class HttpAdapter(AdapterABC):
             body["attempts"] = [a.model_dump(mode="json") for a in record.attempts]
         if record.final_action_index is not None:
             body["final_action_index"] = record.final_action_index
+        if record.causal_entry_versions:
+            body["causal_entry_versions"] = dict(record.causal_entry_versions)
         data = self._post("/api/v1/outcomes", body)
         # The ABC returns entries, so anything else the server computed for this
         # commit has nowhere to go in the signature and would be dropped here.
