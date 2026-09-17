@@ -117,9 +117,13 @@ def gate_prod_loop() -> bool:
                 detail.setdefault("miscredits", []).append([h.entry.key for h in hits])
                 # fall back to an explicit read so the round still credits the target
                 m.read(scope, target_key)
+            # Blame/credit the target alone: once it is discredited, retrieve stops
+            # returning it and the sibling becomes the top hit, so leaving the
+            # causal set implicit would charge the sibling for the target's rounds.
             affected = m.commit_outcome(f"preflight-success-{i}", OutcomeType.SUCCESS,
                                         task_input="preflight reinforcement round",
-                                        response_text=f"followed {target_key}")
+                                        response_text=f"followed {target_key}",
+                                        causal_entry_keys=[f"{scope}/{target_key}"])
             if any(e.key == target_key for e in affected):
                 credited += 1
         finally:
@@ -142,7 +146,8 @@ def gate_prod_loop() -> bool:
                 m.read(scope, target_key)
             affected = m.commit_outcome(f"preflight-failure-{i}", OutcomeType.CRITICAL_FAILURE,
                                         task_input="preflight discredit round",
-                                        response_text=f"followed {target_key}; outage")
+                                        response_text=f"followed {target_key}; outage",
+                                        causal_entry_keys=[f"{scope}/{target_key}"])
             if any(e.key == target_key for e in affected):
                 discredited += 1
         finally:
@@ -153,9 +158,21 @@ def gate_prod_loop() -> bool:
     detail["credited_failure_rounds"] = discredited
     detail["after_failure"] = after_failure
     detail["after_failure_gated"] = gated
-    conf_final = next((c for k, _, c in after_failure if k == target_key), None)
+    # A discredited entry is excluded from retrieve by default (I5), so its
+    # confidence is read from the entry itself rather than looked for in the hits.
+    obs = _amfs("cl-preflight-observer")
+    try:
+        target_entry = obs.read(scope, target_key)
+    finally:
+        obs.close()
+    conf_final = round(target_entry.confidence, 4) if target_entry else None
     detail["target_conf_after_failure"] = conf_final
-    flipped_down = after_failure[0][0] != target_key
+    detail["target_after_failure"] = {
+        "failure_count": getattr(target_entry, "failure_count", None),
+        "discredited": bool(getattr(target_entry, "discredited_at", None)),
+        "excluded_from_retrieve": all(k != target_key for k, _, _ in after_failure),
+    }
+    flipped_down = bool(after_failure) and after_failure[0][0] != target_key
     excluded = all(k != target_key for k, _, _ in gated)
 
     ok = (
