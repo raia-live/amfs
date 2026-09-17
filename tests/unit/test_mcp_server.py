@@ -228,8 +228,9 @@ class TestMCPTools:
         result = json.loads(amfs_commit_outcome("INC-001", "critical_failure"))
         assert result["outcome_ref"] == "INC-001"
         assert result["affected_entries"] == 1
-        # CRITICAL_FAILURE erodes confidence: 1.0 * 0.85 = 0.85
-        assert result["entries"][0]["confidence"] == pytest.approx(0.85)
+        # CRITICAL_FAILURE erodes confidence: first critical failure on a 1.0
+        # entry lands at 2/(2+6) = 0.25 under the evidence model.
+        assert result["entries"][0]["confidence"] == pytest.approx(0.25)
 
     def test_amfs_commit_outcome_invalid_type(self) -> None:
         from amfs_mcp.server import amfs_commit_outcome

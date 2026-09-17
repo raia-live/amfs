@@ -519,6 +519,9 @@ def _serialize_entry(entry: Any) -> dict[str, Any]:
     """Convert a MemoryEntry to a JSON-safe dict for MCP responses."""
     data = entry.model_dump(mode="json")
     data.pop("embedding", None)
+    status = getattr(entry, "evidence_status", None)
+    if status is not None:
+        data["evidence_status"] = status
     return data
 
 
@@ -1102,6 +1105,7 @@ def amfs_retrieve(
     confidence_weight: float = 0.2,
     depth: int = 3,
     include_artifacts: bool = True,
+    include_avoid: bool = True,
 ) -> str:
     """Find memories by meaning — the default tool for any recall/lookup.
 
@@ -1127,20 +1131,30 @@ def amfs_retrieve(
         depth: Tier depth (1=hot only, 2=hot+warm, 3=all tiers)
         include_artifacts: When False, exclude stored source files from results
             (they are demoted by default so genuine facts rank above code)
+        include_avoid: When True (default), the response also carries `avoid`:
+            entries matching the query that a failure discredited, with how
+            they failed. Read it before acting — these are the approaches that
+            stopped working here. They are never ranked among the entries.
 
-    Returns ranked results with score breakdowns showing how each
-    signal contributed to the final ranking.
+    Returns ranked results with score breakdowns showing how each signal
+    contributed to the final ranking. Every entry carries `evidence_status`:
+    `validated` (confirmed by outcomes — act on it), `untested`, `contested`
+    (recent failures), or `discredited`. An untested 0.9 and a validated 0.9
+    are different things to act on.
 
     Long values come back as a 2000-character preview with `value_truncated`
     and `full_value` set; call amfs_read for the whole value.
     """
     from amfs_core.models import RecallConfig
 
+    from amfs.memory import is_avoid
+
     mem = _get_memory()
     recall_config = RecallConfig(
         semantic_weight=semantic_weight,
         recency_weight=recency_weight,
         confidence_weight=confidence_weight,
+        include_avoid=include_avoid,
     )
 
     # Prefer server-side semantic retrieval (embedder + pgvector live on the
@@ -1156,23 +1170,52 @@ def amfs_retrieve(
     )
 
     serialized = []
+    avoid: list[dict[str, Any]] = []
     for scored, data in zip(results, _serialize_entries(s.entry for s in results)):
+        if is_avoid(scored):
+            e = scored.entry
+            avoid.append({
+                "entity_path": e.entity_path,
+                "key": e.key,
+                "value": data.get("value"),
+                "confidence": round(e.confidence, 3),
+                "failure_count": e.failure_count,
+                "success_count": e.success_count,
+                "last_outcome": e.last_outcome,
+                "discredited_at": e.discredited_at.isoformat() if e.discredited_at else None,
+            })
+            continue
         data["_score"] = round(scored.score, 4)
-        data["_breakdown"] = {k: round(v, 4) for k, v in scored.breakdown.items()}
+        data["_breakdown"] = {
+            k: round(v, 4) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
+            for k, v in scored.breakdown.items()
+        }
         serialized.append(data)
 
     if not serialized:
-        return json.dumps({
+        empty: dict[str, Any] = {
             "status": "empty",
             "count": 0,
             "message": "No entries matched your query.",
             "query": query,
             "entity_path": entity_path,
-        })
-    return json.dumps(_with_reuse_value(mem, {
-        "count": len(serialized),
-        "entries": serialized,
-    }), default=str)
+        }
+        if avoid:
+            empty["avoid"] = avoid
+            empty["avoid_note"] = _AVOID_NOTE
+        return json.dumps(empty, default=str)
+    payload: dict[str, Any] = {"count": len(serialized), "entries": serialized}
+    if avoid:
+        payload["avoid"] = avoid
+        payload["avoid_note"] = _AVOID_NOTE
+    return json.dumps(_with_reuse_value(mem, payload), default=str)
+
+
+_AVOID_NOTE = (
+    "These entries matched your query but a failure discredited them: the approach "
+    "they describe stopped working here. Do not act on them; prefer validated entries, "
+    "and call amfs_record_attempt if you try one anyway and it fails again."
+)
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": True})
@@ -1572,6 +1615,17 @@ def amfs_commit_outcome(
         "affected_entries": len(entries),
         "entries": [_serialize_entry(e) for e in entries],
     }
+    # What the outcome did to each entry, in words an agent can act on next
+    # time: which entries were validated, which were discredited.
+    if entries:
+        result["evidence"] = {
+            "validated": [e.entry_key for e in entries if e.evidence_status == "validated"],
+            "contested": [e.entry_key for e in entries if e.evidence_status == "contested"],
+            "discredited": [e.entry_key for e in entries if e.evidence_status == "discredited"],
+        }
+    attempts_recorded = len(getattr(trace.session_metadata, "attempts", []) or []) if trace is not None and trace.session_metadata is not None else 0
+    if attempts_recorded:
+        result["attempts"] = attempts_recorded
     if trace is not None:
         # Only the id is adapter-dependent — the filesystem adapter persists a
         # trace without minting one. Gating the whole block on it dropped the
@@ -1729,6 +1783,57 @@ def amfs_record_context(
     mem = _get_memory()
     mem.record_context(label, summary, source=source or None)
     return json.dumps({"recorded": label, "source": source or None})
+
+
+@mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "destructiveHint": False})
+def amfs_record_attempt(
+    outcome_type: str = "minor_failure",
+    summary: str | None = None,
+    causal_entry_keys: list[str] | None = None,
+) -> str:
+    """Mark the approach you just tried as failed, before trying another one.
+
+    Call this the moment a remembered fix, runbook step or pattern did NOT work
+    and you are about to try something else. Everything you read since the
+    last attempt (or since the session began) and every action you recorded
+    since then is attributed to this attempt. When you later call
+    amfs_commit_outcome, the entries this attempt relied on receive its failure
+    and only what you read afterwards is credited with the eventual success —
+    so a stale memory that sent you down the wrong path loses confidence
+    instead of being reinforced by your recovery.
+
+    Nothing is sent yet; the attempt travels with the outcome, inside the same
+    decision trace. If the task ends in failure anyway, commit that: the
+    attempts still tell the story.
+
+    Args:
+        outcome_type: How badly the attempt failed: "minor_failure" (default,
+            a wrong guess you recovered from), "failure", or "critical_failure"
+            (it caused damage before you noticed).
+        summary: Optional one line on what you tried and what happened.
+        causal_entry_keys: Optional. The exact "entity_path/key" entries this
+            attempt acted on, when you know them. Defaults to everything read
+            since the previous attempt.
+
+    Example: amfs_record_attempt(summary="restarted worker per runbook; queue still stuck")
+    """
+    mem = _get_memory()
+    try:
+        otype = OutcomeType(outcome_type.lower())
+    except ValueError:
+        return json.dumps({
+            "error": f"Invalid outcome_type '{outcome_type}'. Use minor_failure, failure or critical_failure."
+        })
+    attempt = mem.record_attempt(
+        outcome_type=otype, summary=summary, causal_entry_keys=causal_entry_keys
+    )
+    return json.dumps({
+        "recorded_attempt": attempt.attempt,
+        "outcome_type": attempt.outcome_type.value,
+        "causal_entry_keys": attempt.causal_entry_keys,
+        "action_indices": attempt.action_indices,
+        "hint": "Now try a different approach; commit the task's outcome with amfs_commit_outcome when it is resolved.",
+    })
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "destructiveHint": False})
@@ -1977,6 +2082,7 @@ def amfs_briefing(
     entity_path: str | None = None,
     agent_id: str | None = None,
     limit: int = 10,
+    compact: bool = False,
 ) -> str:
     """Get a compiled knowledge briefing — call this at the START of every session after setting identity.
 
@@ -1992,8 +2098,18 @@ def amfs_briefing(
         entity_path: Focus on this entity (e.g. "checkout-service")
         agent_id: Focus on this agent's context (defaults to current agent)
         limit: Max digests to return (default 10)
+        compact: Return only the lead entity digest with its hot context and
+            evidence sections — `validated` (entries every outcome confirmed),
+            `discredited` (entries a failure gated, with `replaced_by` where a
+            later success is known) and `regime_shift` (long-validated entries
+            that recently started failing). A fraction of the tokens; use it at
+            the top of every task.
 
-    Example: amfs_briefing(entity_path="checkout-service")
+    Read the evidence sections first: act on `validated` entries, avoid
+    `discredited` ones, and treat a `regime_shift` warning as "verify before
+    reusing anything here".
+
+    Example: amfs_briefing(entity_path="checkout-service", compact=True)
     """
     # When the host bound this environment to an entity (AMFS_ENTITY_PATH),
     # default to it so a fresh, disposable process hydrates the right memory
@@ -2005,6 +2121,7 @@ def amfs_briefing(
         entity_path=entity_path,
         agent_id=agent_id,
         limit=limit,
+        compact=compact,
         # A tool call is an agent about to act on what it is handed, so this is
         # a real read and books reuse of the knowledge surfaced. The HTTP
         # endpoint cannot assume that for itself — it also serves the dashboard

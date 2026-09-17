@@ -25,6 +25,7 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
 - `amfs_commit_outcome(outcome_ref, outcome_type, task_input?)` — **critical**: snapshots the full decision trace (all reads, writes, decisions, contexts, actions) and persists it. Call this after completing significant work, and pass `task_input` whenever you have it.
 - `amfs_record_context(label, summary, source?)` — capture decisions, external tool results, or user choices in the causal chain. Call this **as decisions happen**, not at the end.
 - `amfs_record_action(tool_name, arguments?, result?, success?)` — record a consequential action you took. Call this **right after taking it**.
+- `amfs_record_attempt(outcome_type?, summary?, causal_entry_keys?)` — mark the approach you just tried as **failed** before trying another. The entries it relied on receive the failure at commit time instead of being reinforced by your recovery. No round-trip; travels with the outcome.
 - `amfs_history(entity_path, key, since?, until?)` — retrieve version history of an entry
 - `amfs_explain(outcome_ref?)` — inspect the current session's decision trace: reads + external contexts
 - `amfs_list_traces(entity_path?, agent_id?, limit?)` — browse persisted decision traces from past sessions
@@ -59,6 +60,8 @@ Get a compiled briefing from the Memory Cortex first — this gives you pre-comp
 ```
 amfs_briefing(entity_path="<repo>/<module>")
 ```
+The lead digest carries the state of knowledge from the outcome record: `validated` (entries every outcome confirmed — act on these), `discredited` (entries a failure gated, with `replaced_by` where a later success is known — avoid these), and `regime_shift` (long-validated entries that recently started failing — something changed; verify before reusing anything in the scope). Every `hot_context` row carries an `evidence_status` of `untested`, `validated`, `contested` or `discredited`; an untested 0.9 and a validated 0.9 are different things to act on. Pass `compact=True` for just the lead digest with these sections, at a fraction of the tokens.
+
 Then check your own specific memories:
 ```
 amfs_recall("<repo>/<module>", "task-summary-<area>")
@@ -114,6 +117,20 @@ amfs_record_action("deploy", {"service": "api"}, result="timed out", success=Fal
 ```
 Not for reads or searches — `record_context` covers what you learned, this covers
 what you did. Use the real tool name, and use it consistently.
+
+### When an approach fails (mark the attempt, then try another)
+The moment a remembered fix, runbook step or pattern did **not** work and you are
+about to try something else, close the attempt:
+```
+amfs_record_attempt(summary="restarted worker per runbook; queue still stuck")
+amfs_record_attempt(outcome_type="failure", causal_entry_keys=["acme/support/fix-restart"])
+```
+Everything you read and did since the previous attempt is attributed to it. At
+`commit_outcome` those entries receive the attempt's failure and only what you read
+afterwards is credited with the success — so a stale memory that sent you down the
+wrong path loses confidence instead of gaining it, and SenseLab writes a
+`lesson-contrast-*` entry naming what failed and what worked. Commit **once**, at the
+end, whatever the final outcome; the attempts travel inside the same trace.
 
 ### After completing significant work (commit the trace)
 **Always call `commit_outcome`** after finishing a task. This snapshots all reads, writes, decisions, contexts, and recorded actions into a persisted `DecisionTrace`:

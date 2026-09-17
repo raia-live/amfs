@@ -38,11 +38,16 @@ from amfs_core.models import (
 from amfs_core.scope import descendants_sql
 
 from amfs_postgres.adapter import (
+    PostgresAdapter,
+    _EVIDENCE_COLUMNS,
+    _EVIDENCE_SELECT,
     _EXCLUDE_SHARED_PATHS,
     _REUSE_EVENT_INSERT_SQL,
-    PostgresAdapter,
-    pool_bounds,
+    _evidence_params,
+    _inherit_from_row,
     connection_options,
+    entry_select,
+    pool_bounds,
 )
 from amfs_postgres.tenant_gucs import areset_tenant_gucs
 
@@ -159,6 +164,7 @@ class AsyncPostgresAdapter:
         self._has_embedding_col = False
         self._has_search_tsv = False
         self._has_is_artifact_col = False
+        self._has_evidence_cols = False
         connect_kwargs: dict[str, Any] = {"row_factory": dict_row, "autocommit": True}
         # The ceiling belongs here most of all. This adapter serves the hot-path
         # REST endpoints, so it holds the statements a caller is actually waiting
@@ -203,12 +209,13 @@ class AsyncPostgresAdapter:
                     """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'amfs_memory_entries'
-                      AND column_name IN ('embedding', 'search_tsv', 'is_artifact')
+                      AND column_name IN ('embedding', 'search_tsv', 'is_artifact', 'success_count')
                     """,
                 )
                 rows = await cur.fetchall()
                 found = {row["column_name"] for row in rows}
                 self._has_embedding_col = "embedding" in found
+                self._has_evidence_cols = "success_count" in found
                 self._has_search_tsv = "search_tsv" in found
                 self._has_is_artifact_col = "is_artifact" in found
 
@@ -299,8 +306,9 @@ class AsyncPostgresAdapter:
             async with conn.transaction():
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        """
-                        SELECT version FROM amfs_memory_entries
+                        f"""
+                        SELECT version, value, confidence{_EVIDENCE_SELECT if self._has_evidence_cols else ""}
+                        FROM amfs_memory_entries
                         WHERE namespace = %s AND branch = %s
                           AND entity_path = %s AND key = %s
                           AND superseded_at IS NULL
@@ -312,6 +320,8 @@ class AsyncPostgresAdapter:
                     row = await cur.fetchone()
                     current_version = row["version"] if row else 0
                     new_version = current_version + 1
+                    if row and self._has_evidence_cols:
+                        entry = _inherit_from_row(entry, row)
 
                     if entry.version > 1 and entry.version != new_version:
                         raise VersionConflictError(
@@ -377,6 +387,10 @@ class AsyncPostgresAdapter:
                         columns.append("is_artifact")
                         params.append(is_artifact)
 
+                    if self._has_evidence_cols:
+                        columns.extend(_EVIDENCE_COLUMNS)
+                        params.extend(_evidence_params(entry))
+
                     if self._has_embedding_col and entry.embedding:
                         columns.append("embedding")
                         params.append(
@@ -440,7 +454,10 @@ class AsyncPostgresAdapter:
             conditions.append("superseded_at IS NULL")
 
         where = " AND ".join(conditions)
-        query = f"SELECT * FROM amfs_memory_entries WHERE {where} ORDER BY entity_path, key, version"
+        query = (
+            f"SELECT {entry_select(self._has_is_artifact_col)} FROM amfs_memory_entries "
+            f"WHERE {where} ORDER BY entity_path, key, version"
+        )
 
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -526,7 +543,7 @@ class AsyncPostgresAdapter:
 
         where = " AND ".join(conditions)
         sql = f"""
-            SELECT * FROM amfs_memory_entries
+            SELECT {entry_select(col_ready)} FROM amfs_memory_entries
             WHERE {where}
             ORDER BY {order}
             LIMIT %s

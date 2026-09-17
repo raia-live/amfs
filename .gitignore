@@ -20,3 +20,8 @@ pytest-of-*/
 
 # macOS finder metadata, committed three times by accident already.
 .DS_Store
+
+# local secrets
+.env
+*.env
+!.env.example
