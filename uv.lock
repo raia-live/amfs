@@ -203,7 +203,7 @@ wheels = [
 
 [[package]]
 name = "amfs"
-version = "0.5.20"
+version = "0.5.21"
 source = { editable = "packages/sdk-python" }
 dependencies = [
     { name = "amfs-adapter-filesystem" },
@@ -222,7 +222,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-filesystem"
-version = "0.1.5"
+version = "0.1.6"
 source = { editable = "packages/adapters/filesystem" }
 dependencies = [
     { name = "amfs-core" },
@@ -237,7 +237,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-http"
-version = "0.1.22"
+version = "0.1.23"
 source = { editable = "packages/adapters/http" }
 dependencies = [
     { name = "amfs-core" },
@@ -252,7 +252,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-postgres"
-version = "0.2.16"
+version = "0.2.17"
 source = { editable = "packages/adapters/postgres" }
 dependencies = [
     { name = "amfs-core" },
@@ -269,7 +269,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-s3"
-version = "0.1.4"
+version = "0.1.5"
 source = { editable = "packages/adapters/s3" }
 dependencies = [
     { name = "amfs-core" },
@@ -351,7 +351,7 @@ provides-extras = ["cli"]
 
 [[package]]
 name = "amfs-core"
-version = "0.3.29"
+version = "0.3.30"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "pydantic" },
@@ -375,7 +375,7 @@ provides-extras = ["embedder", "embedder-st"]
 
 [[package]]
 name = "amfs-cortex"
-version = "0.1.4"
+version = "0.1.5"
 source = { editable = "packages/cortex" }
 dependencies = [
     { name = "amfs" },
@@ -448,7 +448,7 @@ provides-extras = ["server", "adapters"]
 
 [[package]]
 name = "amfs-http-server"
-version = "0.3.33"
+version = "0.3.34"
 source = { editable = "packages/http-server" }
 dependencies = [
     { name = "amfs" },
@@ -518,7 +518,7 @@ provides-extras = ["langgraph"]
 
 [[package]]
 name = "amfs-mcp-server"
-version = "0.7.29"
+version = "0.7.30"
 source = { editable = "packages/mcp-server" }
 dependencies = [
     { name = "amfs" },
