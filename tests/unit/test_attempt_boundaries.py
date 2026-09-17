@@ -259,3 +259,38 @@ def test_record_attempt_refuses_a_success(tmp_amfs_root) -> None:
         with pytest.raises(ValueError, match="commit_outcome"):
             mem.record_attempt(outcome_type=good)
     assert mem._read_tracker.attempts == []
+
+
+def test_a_read_on_the_boundary_tick_is_credited_to_one_attempt_only(
+    mem: AgentMemory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_keys_since`` is inclusive of the boundary. If the boundary were stamped
+    with a plain ``now()`` that happened to equal the last read's timestamp — a
+    coarse clock, or a search-then-fail inside one tick — the read would be
+    blamed by the attempt *and* reinforced by the terminal success."""
+    from datetime import datetime, timezone
+
+    from amfs_core import engine as engine_mod
+
+    # In the past, so the real clock used after ``undo()`` is later than it.
+    frozen = datetime(2020, 1, 1, 12, 0, 0, 500000, tzinfo=timezone.utc)
+
+    class _StoppedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            return frozen if tz is None else frozen.astimezone(tz)
+
+    monkeypatch.setattr(engine_mod, "datetime", _StoppedClock)
+
+    mem.read("acme/support", "fix-restart")
+    attempt = mem.record_attempt(summary="restart did nothing")
+    assert attempt.causal_entry_keys == ["acme/support/fix-restart"]
+
+    tracker = mem._read_tracker
+    assert tracker._state.attempt_boundary_at > frozen
+    assert tracker.terminal_causal_keys == []
+
+    # A read that genuinely follows the boundary is still the terminal attempt's.
+    monkeypatch.undo()
+    mem.read("acme/support", "fix-rotate-key")
+    assert tracker.terminal_causal_keys == ["acme/support/fix-rotate-key"]

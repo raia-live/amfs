@@ -7,7 +7,7 @@ import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 from amfs_core.abc import AdapterABC
@@ -397,7 +397,17 @@ class ReadTracker:
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         }
         self._state.attempts.append(attempt)
-        self._state.attempt_boundary_at = datetime.now(timezone.utc)
+        # The boundary must sit strictly after every read it just attributed.
+        # ``_keys_since`` is inclusive, and a read stamped on the same clock
+        # tick as a plain ``now()`` (Windows' ~15 ms clock; a same-turn
+        # search-then-fail) would land on both sides of it: blamed by this
+        # attempt and then reinforced by the terminal success — the exact leak
+        # per-attempt credit exists to close.
+        boundary = datetime.now(timezone.utc)
+        latest_read = max(self._reads.values(), default=None)
+        if latest_read is not None and latest_read >= boundary:
+            boundary = latest_read + timedelta(microseconds=1)
+        self._state.attempt_boundary_at = boundary
         self._state.attempt_action_cursor = n_actions
         return attempt
 
