@@ -21,6 +21,20 @@ permissions:
   contents: read
 
 jobs:
+  decision-runtime:
+    name: Decision contracts and CPU runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - name: Install isolated CPU runtime
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --python .venv/bin/python -e packages/core -e 'packages/decision-runtime[server]' pytest pytest-asyncio
+      - name: Test contracts, offline artifacts and multi-model isolation
+        run: .venv/bin/python -m pytest tests/decisions -q
+
   test:
     runs-on: ubuntu-latest
     strategy:
