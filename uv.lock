@@ -231,7 +231,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-postgres"
-version = "0.2.14"
+version = "0.2.15"
 source = { editable = "packages/adapters/postgres" }
 dependencies = [
     { name = "amfs-core" },

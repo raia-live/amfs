@@ -475,6 +475,53 @@ _EVIDENCE_COLUMNS: tuple[str, ...] = (
 )
 _EVIDENCE_SELECT = ", outcome_count, " + ", ".join(_EVIDENCE_COLUMNS)
 
+#: The columns ``_row_to_entry`` reads, named so that entry-returning SELECTs
+#: never fetch ``embedding`` (pgvector) or ``search_tsv`` (tsvector). Neither
+#: is used to build a MemoryEntry, and together they are most of a row's
+#: bytes: measured on 5,000 rows with 384-dim vectors, ``SELECT *`` returned
+#: 20.5 MB where this projection returns 3.4 MB. With ``SELECT *``, an
+#: unscoped ``list()`` over a 20k-row namespace moved ~80 MB per call, and a
+#: dashboard page that fans out to several such calls took 20-35 s while the
+#: database sat at 1% CPU (2026-09-17). Every column here is created by
+#: schema.sql or ensured by ``_apply_migrations`` (including migration 008),
+#: so the projection is safe on any bootstrapped database.
+_ENTRY_COLUMNS: tuple[str, ...] = (
+    "id",
+    "namespace",
+    "entity_path",
+    "key",
+    "version",
+    "value",
+    "agent_id",
+    "session_id",
+    "written_at",
+    "pattern_refs",
+    "confidence",
+    "outcome_count",
+    "recall_count",
+    "priority_score",
+    "tier",
+    "importance_score",
+    "importance_dimensions",
+    "ttl_at",
+    "memory_type",
+    "shared",
+    "artifact_refs",
+    "superseded_at",
+    "branch",
+    "is_artifact",
+    *_EVIDENCE_COLUMNS,
+)
+ENTRY_SELECT = ", ".join(_ENTRY_COLUMNS)
+#: For the window before ``_apply_migrations`` adds is_artifact; the decoder
+#: defaults it, exactly as the ``col_ready`` branches in search() already do.
+ENTRY_SELECT_NO_ARTIFACT_COL = ", ".join(c for c in _ENTRY_COLUMNS if c != "is_artifact")
+
+
+def entry_select(has_is_artifact_col: bool) -> str:
+    """The SELECT list for queries whose rows become MemoryEntry objects."""
+    return ENTRY_SELECT if has_is_artifact_col else ENTRY_SELECT_NO_ARTIFACT_COL
+
 
 def _evidence_params(entry: MemoryEntry) -> list[Any]:
     lo = entry.last_outcome
@@ -1920,7 +1967,10 @@ class PostgresAdapter(AdapterABC):
             conditions.append("superseded_at IS NULL")
 
         where = " AND ".join(conditions)
-        query = f"SELECT * FROM amfs_memory_entries WHERE {where} ORDER BY entity_path, key, version"
+        query = (
+            f"SELECT {entry_select(self._has_is_artifact_col)} FROM amfs_memory_entries "
+            f"WHERE {where} ORDER BY entity_path, key, version"
+        )
 
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
@@ -2023,7 +2073,7 @@ class PostgresAdapter(AdapterABC):
 
         where = " AND ".join(conditions)
         sql = f"""
-            SELECT * FROM amfs_memory_entries
+            SELECT {entry_select(col_ready)} FROM amfs_memory_entries
             WHERE {where}
             ORDER BY {order}
             LIMIT %s

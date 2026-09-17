@@ -46,6 +46,7 @@ from amfs_postgres.adapter import (
     _evidence_params,
     _inherit_from_row,
     connection_options,
+    entry_select,
     pool_bounds,
 )
 from amfs_postgres.tenant_gucs import areset_tenant_gucs
@@ -453,7 +454,10 @@ class AsyncPostgresAdapter:
             conditions.append("superseded_at IS NULL")
 
         where = " AND ".join(conditions)
-        query = f"SELECT * FROM amfs_memory_entries WHERE {where} ORDER BY entity_path, key, version"
+        query = (
+            f"SELECT {entry_select(self._has_is_artifact_col)} FROM amfs_memory_entries "
+            f"WHERE {where} ORDER BY entity_path, key, version"
+        )
 
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -539,7 +543,7 @@ class AsyncPostgresAdapter:
 
         where = " AND ".join(conditions)
         sql = f"""
-            SELECT * FROM amfs_memory_entries
+            SELECT {entry_select(col_ready)} FROM amfs_memory_entries
             WHERE {where}
             ORDER BY {order}
             LIMIT %s
