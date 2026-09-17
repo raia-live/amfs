@@ -3,6 +3,9 @@
  */
 
 export { AgentMemory, MemoryScope } from "./memory.js";
+export { DecisionClient } from "./decisions.js";
+export type { DecideRequest, DecideResponse, DecisionAnswer, DecisionCandidate,
+  DecisionQuestion, DecisionOutcome, VerificationCheck, DecisionModelSpec, DecisionModel } from "./decisions.js";
 export type { AgentMemoryOptions, SearchOptions, MemoryStats } from "./memory.js";
 export type { AmfsAdapter, WatchHandle } from "./adapter.js";
 export { createWatchHandle } from "./adapter.js";

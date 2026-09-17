@@ -28,8 +28,10 @@ from amfs_core.models import (
 from amfs_core.exceptions import StaleWriteError
 
 from amfs.memory import AgentMemory, MemoryScope
+from amfs.decisions import DecisionClient
 
 __all__ = [
+    "DecisionClient",
     "AgentMemory",
     "AMFSConfig",
     "ConflictPolicy",

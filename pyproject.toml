@@ -23,6 +23,7 @@ dev = [
 
 [tool.uv.workspace]
 members = [
+    "packages/decision-runtime",
     "packages/core",
     "packages/adapters/filesystem",
     "packages/adapters/postgres",
@@ -54,6 +55,7 @@ line-length = 100
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.uv.sources]
+amfs-decision-runtime = { workspace = true }
 amfs-core = { workspace = true }
 amfs-adapter-filesystem = { workspace = true }
 amfs-adapter-postgres = { workspace = true }
