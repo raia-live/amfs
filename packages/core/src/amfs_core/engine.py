@@ -70,9 +70,19 @@ class _TrackerState:
     #: Failed attempts closed by ``record_attempt`` since the last clear. Each
     #: owns the reads and actions between the previous boundary and its own.
     attempts: list[dict] = field(default_factory=list)
-    #: When the last attempt boundary was drawn; reads at or after it belong to
-    #: the attempt in progress. ``None`` until the first boundary.
-    attempt_boundary_at: datetime | None = None
+    #: Reads are attributed to attempts by order, not by clock. Each read takes
+    #: the next value of ``read_counter`` and ``read_seq`` keeps the latest per
+    #: key; a boundary is the counter's value when it was drawn, so a read is on
+    #: one side of it by construction. Timestamps cannot do this: two reads, or
+    #: a read and the boundary, can share a clock tick (Windows' ~15 ms clock; a
+    #: search-then-fail inside one turn), and whichever way the comparison
+    #: leans, one side is either credited twice or not at all.
+    read_counter: int = 0
+    read_seq: dict[str, int] = field(default_factory=dict)
+    #: ``read_counter`` when the last attempt boundary was drawn; reads
+    #: sequenced after it belong to the attempt in progress. 0 until the first
+    #: boundary, which is "since the session began".
+    attempt_boundary_seq: int = 0
     #: ``len(actions)`` at the last boundary: actions from here on belong to the
     #: attempt in progress.
     attempt_action_cursor: int = 0
@@ -173,6 +183,13 @@ class ReadTracker:
     def _reads(self) -> dict[str, datetime]:
         return self._state.reads
 
+    def _mark_read(self, entry_key: str) -> None:
+        """Stamp *entry_key* as read now, and sequence it after every earlier read."""
+        state = self._state
+        state.reads[entry_key] = datetime.now(timezone.utc)
+        state.read_counter += 1
+        state.read_seq[entry_key] = state.read_counter
+
     @property
     def _versions(self) -> dict[str, int]:
         return self._state.versions
@@ -213,7 +230,7 @@ class ReadTracker:
 
     def record(self, entry: MemoryEntry) -> None:
         """Record that an entry was read during this session."""
-        self._reads[entry.entry_key] = datetime.now(timezone.utc)
+        self._mark_read(entry.entry_key)
         self._versions[entry.entry_key] = entry.version
         self._entries[entry.entry_key] = {
             "value": entry.value,
@@ -265,7 +282,7 @@ class ReadTracker:
         acted on*.
         """
         ek = f"{entity_path}/{key}"
-        self._reads[ek] = datetime.now(timezone.utc)
+        self._mark_read(ek)
         self._versions[ek] = version
         self._entries[ek] = {
             "value": value,
@@ -343,16 +360,15 @@ class ReadTracker:
 
     @property
     def causal_keys(self) -> list[str]:
-        """All entry keys read in this session, ordered by read time."""
-        return [k for k, _ in sorted(self._reads.items(), key=lambda x: x[1])]
+        """All entry keys read in this session, in read order."""
+        return self._keys_since(0)
 
     # ── Attempt boundaries ─────────────────────────────────────────────
 
-    def _keys_since(self, when: datetime | None) -> list[str]:
-        items = self._reads.items() if when is None else (
-            (k, t) for k, t in self._reads.items() if t >= when
-        )
-        return [k for k, _ in sorted(items, key=lambda x: x[1])]
+    def _keys_since(self, boundary_seq: int) -> list[str]:
+        """Keys whose latest read was sequenced after *boundary_seq*, in read order."""
+        seq = self._state.read_seq
+        return sorted((k for k, s in seq.items() if s > boundary_seq), key=seq.__getitem__)
 
     def record_attempt(
         self,
@@ -378,7 +394,7 @@ class ReadTracker:
         tracker's log but will arrive as ``tool_calls`` on the commit — the
         indices then refer to that list. Returns the attempt as recorded.
         """
-        since = self._state.attempt_boundary_at
+        since = self._state.attempt_boundary_seq
         keys = list(dict.fromkeys(causal_entry_keys)) if causal_entry_keys is not None else self._keys_since(since)
         n_actions = len(self._actions)
         cursor = self._state.attempt_action_cursor
@@ -397,7 +413,9 @@ class ReadTracker:
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         }
         self._state.attempts.append(attempt)
-        self._state.attempt_boundary_at = datetime.now(timezone.utc)
+        # Every read so far is sequenced at or below the counter, so it is this
+        # attempt's; the next read takes counter + 1 and is the terminal one's.
+        self._state.attempt_boundary_seq = self._state.read_counter
         self._state.attempt_action_cursor = n_actions
         return attempt
 
@@ -411,7 +429,7 @@ class ReadTracker:
         """The entries the attempt in progress read: what the terminal outcome
         should be credited to. Identical to ``causal_keys`` when no attempt
         boundary has been drawn."""
-        return self._keys_since(self._state.attempt_boundary_at)
+        return self._keys_since(self._state.attempt_boundary_seq)
 
     @property
     def final_action_index(self) -> int | None:
@@ -519,7 +537,9 @@ class ReadTracker:
         self._writes.clear()
         self._actions.clear()
         self._state.attempts.clear()
-        self._state.attempt_boundary_at = None
+        self._state.read_seq.clear()
+        self._state.read_counter = 0
+        self._state.attempt_boundary_seq = 0
         self._state.attempt_action_cursor = 0
         # The window this tracker describes restarts here, so a trace committed
         # after a clear reports the duration of its own work rather than the

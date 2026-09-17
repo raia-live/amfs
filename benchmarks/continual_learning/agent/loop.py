@@ -208,17 +208,26 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
 
         # reflection: one note for the future (all arms with memory, identical prompt)
         if arm.has_memory:
-            messages.append({"role": "user", "content": REFLECT_PROMPT.format(outcome=outcome.summary)})
-            rt = llm.chat(messages, MEMORY_TOOLS[1:], tool_choice="memory_write", max_tokens=400)
-            r_usage.add(rt.usage)
-            for call in rt.tool_calls:
-                if call.name == "memory_write":
-                    writes += 1
-                    a = call.arguments
-                    session.write(str(a.get("key", f"lesson-ep{task.episode}"))[:80], str(a.get("note", ""))[:1200],
-                                  confidence=float(a.get("confidence", 0.7) or 0.7), kind=str(a.get("kind", "experience")))
-                    if keep_transcript:
-                        transcript.append({"reflection": a})
+            # Guarded on its own: the verdict below must reach the store even if
+            # this extra LLM turn or its write fails. Letting the exception
+            # escape here would skip ``session.end`` while the record still
+            # said ``success`` — a cell that looks learned-from when the memory
+            # never received the outcome, which silently breaks H1–H5 and the
+            # ``senselab`` vs ``senselab-nofeedback`` comparison.
+            try:
+                messages.append({"role": "user", "content": REFLECT_PROMPT.format(outcome=outcome.summary)})
+                rt = llm.chat(messages, MEMORY_TOOLS[1:], tool_choice="memory_write", max_tokens=400)
+                r_usage.add(rt.usage)
+                for call in rt.tool_calls:
+                    if call.name == "memory_write":
+                        writes += 1
+                        a = call.arguments
+                        session.write(str(a.get("key", f"lesson-ep{task.episode}"))[:80], str(a.get("note", ""))[:1200],
+                                      confidence=float(a.get("confidence", 0.7) or 0.7), kind=str(a.get("kind", "experience")))
+                        if keep_transcript:
+                            transcript.append({"reflection": a})
+            except Exception as e:  # noqa: BLE001
+                error = f"reflection: {type(e).__name__}: {e}"[:400]
         if scenario.feedback_delay > 0:
             # delayed-feedback sweep: the verdict reaches memory only `feedback_delay` episodes later
             # (the runner drains ``arm.deferred`` before each episode). Reads/writes are already done.
