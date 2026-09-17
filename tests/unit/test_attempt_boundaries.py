@@ -261,18 +261,19 @@ def test_record_attempt_refuses_a_success(tmp_amfs_root) -> None:
     assert mem._read_tracker.attempts == []
 
 
-def test_a_read_on_the_boundary_tick_is_credited_to_one_attempt_only(
+def test_same_tick_reads_land_on_exactly_one_side_of_the_boundary(
     mem: AgentMemory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``_keys_since`` is inclusive of the boundary. If the boundary were stamped
-    with a plain ``now()`` that happened to equal the last read's timestamp — a
-    coarse clock, or a search-then-fail inside one tick — the read would be
-    blamed by the attempt *and* reinforced by the terminal success."""
+    """Attribution is by read order, not by clock. With the clock frozen — one
+    tick spanning a read, the failed attempt, and the next read — the first
+    read must be the attempt's only, and the second the terminal outcome's
+    only. A timestamp boundary cannot do both: inclusive, the first read is
+    blamed *and* reinforced; nudged past the last read, the second read is
+    credited to neither."""
     from datetime import datetime, timezone
 
     from amfs_core import engine as engine_mod
 
-    # In the past, so the real clock used after ``undo()`` is later than it.
     frozen = datetime(2020, 1, 1, 12, 0, 0, 500000, tzinfo=timezone.utc)
 
     class _StoppedClock(datetime):
@@ -287,10 +288,14 @@ def test_a_read_on_the_boundary_tick_is_credited_to_one_attempt_only(
     assert attempt.causal_entry_keys == ["acme/support/fix-restart"]
 
     tracker = mem._read_tracker
-    assert tracker._state.attempt_boundary_at > frozen
     assert tracker.terminal_causal_keys == []
 
-    # A read that genuinely follows the boundary is still the terminal attempt's.
-    monkeypatch.undo()
     mem.read("acme/support", "fix-rotate-key")
+    assert tracker._reads["acme/support/fix-rotate-key"] == frozen  # same tick, by construction
     assert tracker.terminal_causal_keys == ["acme/support/fix-rotate-key"]
+    assert tracker.causal_keys == ["acme/support/fix-restart", "acme/support/fix-rotate-key"]
+
+    # Re-reading an entry the attempt blamed moves it into the terminal window:
+    # the agent consulted it again, so the final outcome is its to receive too.
+    mem.read("acme/support", "fix-restart")
+    assert tracker.terminal_causal_keys == ["acme/support/fix-rotate-key", "acme/support/fix-restart"]
