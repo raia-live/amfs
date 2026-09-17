@@ -34,6 +34,15 @@ def _make_entry(
     )
 
 
+def _expected_confidence(start: float, record: OutcomeRecord) -> float:
+    """What ``amfs_core.evidence`` says ``record`` leaves a fresh entry at."""
+    from amfs_core.evidence import apply_record_to_entry
+
+    entry = _make_entry(confidence=start)
+    new, _ = apply_record_to_entry(entry, record)
+    return new.confidence
+
+
 class AdapterContractTests:
     """Mixin providing contract tests for any AdapterABC implementation."""
 
@@ -132,9 +141,15 @@ class AdapterContractTests:
         )
         updated = adapter.commit_outcome(record)
         assert len(updated) == 1
-        # CRITICAL_FAILURE erodes confidence: 1.0 * 0.85 = 0.85
-        assert abs(updated[0].confidence - 0.85) < 1e-6
+        # CRITICAL_FAILURE erodes confidence. The exact number is the evidence
+        # model's (amfs_core.evidence); the contract is that every adapter
+        # lands on it, and that a first critical failure gates the entry.
+        expected = _expected_confidence(1.0, record)
+        assert abs(updated[0].confidence - expected) < 1e-4
+        assert updated[0].confidence < 0.5
         assert updated[0].outcome_count == 1
+        assert updated[0].failure_count == 1
+        assert updated[0].discredited_at is not None
 
     def test_commit_outcome_clean_deploy(self, adapter: AdapterABC) -> None:
         adapter.write(_make_entry(confidence=0.9))
@@ -149,8 +164,11 @@ class AdapterContractTests:
         )
         updated = adapter.commit_outcome(record)
         assert len(updated) == 1
-        # SUCCESS reinforces confidence: 0.9 * 1.03 = 0.927
-        assert abs(updated[0].confidence - 0.927) < 1e-6
+        # SUCCESS reinforces confidence.
+        expected = _expected_confidence(0.9, record)
+        assert abs(updated[0].confidence - expected) < 1e-4
+        assert updated[0].confidence > 0.9
+        assert updated[0].success_count == 1
 
     def test_commit_outcome_preserves_the_rest_of_the_entry(
         self, adapter: AdapterABC
@@ -193,7 +211,9 @@ class AdapterContractTests:
 
         current = adapter.read("checkout-service", "retry-pattern")
         assert current is not None
-        assert abs(current.confidence - 0.927) < 1e-6, "confidence should change"
+        assert abs(current.confidence - _expected_confidence(0.9, record)) < 1e-4, (
+            "confidence should change"
+        )
         assert current.shared is False, (
             "an outcome republished a private entry — the new version took the "
             "column default instead of carrying the value forward"

@@ -14,12 +14,11 @@ from typing import Callable
 from amfs_core.abc import AdapterABC, WatchHandle
 from amfs_core.exceptions import AdapterError, EntryNotFoundError, VersionConflictError
 from amfs_core.lock import AdvisoryLock
+from amfs_core.evidence import apply_record_to_entry, cited_entries
 from amfs_core.models import (
-    OUTCOME_MULTIPLIERS,
     Commit,
     MemoryEntry,
     OutcomeRecord,
-    clamp_confidence,
 )
 
 from amfs_filesystem.layout import PathLayout
@@ -322,34 +321,31 @@ class FilesystemAdapter(AdapterABC):
     # commit_outcome
     # ------------------------------------------------------------------
 
+    def _version_lookup(self, entity_path: str, key: str, version: int) -> MemoryEntry | None:
+        """The version an agent read, for the claim check in ``apply_record_to_entry``."""
+        try:
+            return self.read_at_version(entity_path, key, version)
+        except Exception:  # noqa: BLE001
+            return None
+
     def commit_outcome(self, record: OutcomeRecord) -> list[MemoryEntry]:
-        multiplier = OUTCOME_MULTIPLIERS[record.outcome_type]
+        # One new version per cited entry, carrying every step of the record
+        # (failed attempts first, then the terminal outcome) through the
+        # evidence model. The arithmetic lives in ``amfs_core.evidence`` so
+        # this adapter, S3 and the Postgres trigger agree to the digit.
         updated: list[MemoryEntry] = []
-
-        for entry_key_spec in record.causal_entry_keys:
-            # entry_key_spec format: "entity_path/key"
-            parts = entry_key_spec.rsplit("/", 1)
-            if len(parts) != 2:
-                logger.warning("Invalid causal_entry_key format: %s", entry_key_spec)
-                continue
-            entity_path, key = parts
-
+        now = datetime.now(timezone.utc)
+        for entity_path, key in cited_entries(record):
             current = self.read(entity_path, key)
             if current is None:
-                logger.warning("Causal entry not found: %s", entry_key_spec)
+                logger.warning("Causal entry not found: %s/%s", entity_path, key)
                 continue
-
-            new_confidence = clamp_confidence(
-                current.confidence * multiplier * record.causal_confidence
+            new_entry, steps = apply_record_to_entry(
+                current, record, now=now, version_lookup=self._version_lookup
             )
-            new_entry = current.model_copy(
-                update={
-                    "version": 1,
-                    "confidence": new_confidence,
-                    "outcome_count": current.outcome_count + 1,
-                }
-            )
-            written = self.write(new_entry)
+            if not steps:
+                continue
+            written = self.write(new_entry.model_copy(update={"version": 1}))
             updated.append(written)
 
         return updated

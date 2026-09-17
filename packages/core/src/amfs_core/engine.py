@@ -67,6 +67,15 @@ class _TrackerState:
     errors: list[dict] = field(default_factory=list)
     writes: list[dict] = field(default_factory=list)
     actions: list[dict] = field(default_factory=list)
+    #: Failed attempts closed by ``record_attempt`` since the last clear. Each
+    #: owns the reads and actions between the previous boundary and its own.
+    attempts: list[dict] = field(default_factory=list)
+    #: When the last attempt boundary was drawn; reads at or after it belong to
+    #: the attempt in progress. ``None`` until the first boundary.
+    attempt_boundary_at: datetime | None = None
+    #: ``len(actions)`` at the last boundary: actions from here on belong to the
+    #: attempt in progress.
+    attempt_action_cursor: int = 0
 
 
 #: The session in force for the current context, if any. Unset in a normal
@@ -212,6 +221,15 @@ class ReadTracker:
             "version": entry.version,
             "memory_type": entry.memory_type.value if hasattr(entry.memory_type, 'value') else str(entry.memory_type),
             "written_by": entry.provenance.agent_id,
+            # What the outcome record said about the entry *when it was acted
+            # on*. Frozen here for the same reason confidence is: a trace, and
+            # the training prompt rendered from it, must show what the agent
+            # saw, and the live record moves with every later outcome.
+            # ``getattr`` because journaled replays hand this a stand-in that
+            # carries only the fields the older core read.
+            "evidence_status": getattr(entry, "evidence_status", None) or "untested",
+            "success_count": int(getattr(entry, "success_count", 0) or 0),
+            "failure_count": int(getattr(entry, "failure_count", 0) or 0),
         }
 
     def record_surfaced(
@@ -228,6 +246,9 @@ class ReadTracker:
         confidence: float,
         memory_type: str | None = None,
         written_by: str | None = None,
+        evidence_status: str | None = None,
+        success_count: int = 0,
+        failure_count: int = 0,
     ) -> None:
         """Record a read of an entry that arrived already-materialised.
 
@@ -252,6 +273,12 @@ class ReadTracker:
             "version": version,
             "memory_type": memory_type or "fact",
             "written_by": written_by,
+            # A digest compiled before the evidence model carries no status;
+            # that entry had never met an outcome, so "untested" is what a
+            # direct read of it would have recorded.
+            "evidence_status": evidence_status or "untested",
+            "success_count": int(success_count or 0),
+            "failure_count": int(failure_count or 0),
         }
 
     def record_context(
@@ -319,6 +346,84 @@ class ReadTracker:
         """All entry keys read in this session, ordered by read time."""
         return [k for k, _ in sorted(self._reads.items(), key=lambda x: x[1])]
 
+    # ── Attempt boundaries ─────────────────────────────────────────────
+
+    def _keys_since(self, when: datetime | None) -> list[str]:
+        items = self._reads.items() if when is None else (
+            (k, t) for k, t in self._reads.items() if t >= when
+        )
+        return [k for k, _ in sorted(items, key=lambda x: x[1])]
+
+    def record_attempt(
+        self,
+        *,
+        outcome_type: str = "minor_failure",
+        summary: str | None = None,
+        causal_entry_keys: list[str] | None = None,
+        action_indices: list[int] | None = None,
+    ) -> dict:
+        """Close the attempt in progress as a failure and start the next one.
+
+        Everything read since the previous boundary (or since the session began)
+        becomes the attempt's causal entries, and every action recorded since
+        then its ``action_indices`` into the session's action log. The terminal
+        ``commit_outcome`` then applies the attempt's outcome to those entries
+        and its own outcome only to what was read afterwards — so the entry the
+        agent trusted, tried, and had to abandon receives the failure instead
+        of a share of the eventual success.
+
+        Pass *causal_entry_keys* to name the entries explicitly (an agent that
+        knows which memory it acted on should say so); otherwise the read window
+        is used. Pass *action_indices* when the actions are not in this
+        tracker's log but will arrive as ``tool_calls`` on the commit — the
+        indices then refer to that list. Returns the attempt as recorded.
+        """
+        since = self._state.attempt_boundary_at
+        keys = list(dict.fromkeys(causal_entry_keys)) if causal_entry_keys is not None else self._keys_since(since)
+        n_actions = len(self._actions)
+        cursor = self._state.attempt_action_cursor
+        indices = (
+            sorted({int(i) for i in action_indices if int(i) >= 0})
+            if action_indices is not None
+            else list(range(cursor, n_actions))
+        )
+        attempt = {
+            "attempt": len(self._state.attempts) + 1,
+            "outcome_type": outcome_type,
+            "causal_entry_keys": keys,
+            "causal_entry_versions": self.versions_for(keys),
+            "action_indices": indices,
+            "summary": summary,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._state.attempts.append(attempt)
+        self._state.attempt_boundary_at = datetime.now(timezone.utc)
+        self._state.attempt_action_cursor = n_actions
+        return attempt
+
+    @property
+    def attempts(self) -> list[dict]:
+        """Failed attempts closed in this session, oldest first."""
+        return [dict(a) for a in self._state.attempts]
+
+    @property
+    def terminal_causal_keys(self) -> list[str]:
+        """The entries the attempt in progress read: what the terminal outcome
+        should be credited to. Identical to ``causal_keys`` when no attempt
+        boundary has been drawn."""
+        return self._keys_since(self._state.attempt_boundary_at)
+
+    @property
+    def final_action_index(self) -> int | None:
+        """Index into ``actions`` of the last action taken after the last attempt
+        boundary — the one that produced the terminal outcome — or ``None`` when
+        no boundary was drawn or nothing was done since."""
+        if not self._state.attempts:
+            return None
+        if len(self._actions) <= self._state.attempt_action_cursor:
+            return None
+        return len(self._actions) - 1
+
     @property
     def external_contexts(self) -> list[ExternalContext]:
         """All external contexts recorded in this session, in order."""
@@ -365,6 +470,15 @@ class ReadTracker:
         """Return the version we last read for an entry, or None if never read."""
         return self._versions.get(entry_key)
 
+    def versions_for(self, entry_keys: list[str]) -> dict[str, int]:
+        """``entry_key -> version read`` for the keys this session has a version for."""
+        out: dict[str, int] = {}
+        for k in entry_keys:
+            v = self._versions.get(k)
+            if v is not None:
+                out[k] = int(v)
+        return out
+
     def record_query(
         self,
         operation: str,
@@ -404,6 +518,9 @@ class ReadTracker:
         self._errors.clear()
         self._writes.clear()
         self._actions.clear()
+        self._state.attempts.clear()
+        self._state.attempt_boundary_at = None
+        self._state.attempt_action_cursor = 0
         # The window this tracker describes restarts here, so a trace committed
         # after a clear reports the duration of its own work rather than the
         # lifetime of the process.
@@ -507,7 +624,8 @@ class CoWEngine:
             value=value,
             provenance=self._tagger.tag(pattern_refs=pattern_refs),
             confidence=confidence,
-            outcome_count=current.outcome_count if current else 0,
+            # The outcome record (outcome_count included) belongs to the claim:
+            # inherit_evidence below carries it over when the claim is unchanged.
             recall_count=current.recall_count if current else 0,
             importance_score=importance_score,
             importance_dimensions=importance_dimensions,
@@ -520,6 +638,10 @@ class CoWEngine:
             content_hash=value_hash,
             integrity_chain=chain,
         )
+        # An unchanged claim keeps its outcome record (see amfs_core.evidence).
+        from amfs_core.evidence import inherit_evidence
+
+        entry = inherit_evidence(entry, current)
 
         return self._adapter.write(entry)
 

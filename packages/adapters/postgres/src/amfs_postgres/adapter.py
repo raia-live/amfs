@@ -28,6 +28,7 @@ from amfs_core.exclusions import (
     AGENT_ID_NOT_EXCLUDED_SQL,
     ENTITY_PATH_NOT_EXCLUDED_SQL,
 )
+from amfs_core.evidence import cited_entries, outcome_model
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
     Agent,
@@ -53,6 +54,7 @@ from amfs_core.models import (
     MergeConflict,
     MergeResult,
     MergeStrategy,
+    AttemptRecord,
     OutcomeRecord,
     OutcomeType,
     PRReview,
@@ -114,7 +116,36 @@ _EXCLUDE_SYSTEM_ROWS = (
     f"({ENTITY_PATH_NOT_EXCLUDED_SQL} AND {AGENT_ID_NOT_EXCLUDED_SQL})"
 )
 
+def _attempts_from_row(raw: Any) -> list[AttemptRecord]:
+    """``AttemptRecord`` list from the ``attempts`` JSONB column, tolerant of
+    the column being absent, NULL, or a not-yet-decoded JSON string."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    out: list[AttemptRecord] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            out.append(AttemptRecord.model_validate(item))
+        except Exception:  # noqa: BLE001 — a malformed attempt is dropped, not fatal
+            continue
+    return out
+
+
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
+#: Migration 008 — evidence-based outcome propagation. Applied verbatim by
+#: ``_apply_migrations`` so the adapter has no copy of its own to drift; the
+#: file is folded into the schema fingerprint alongside schema.sql.
+_OUTCOME_EVIDENCE_SQL = (
+    Path(__file__).parent / "migrations" / "008_outcome_evidence.sql"
+).read_text(encoding="utf-8")
 
 # Shared by the sync and async adapters so the two cannot drift apart. account_id
 # is omitted on purpose: the hosted product gives the column a default in a tenant
@@ -436,6 +467,52 @@ class _TenantRLSPoolWrapper:
         return getattr(self._inner, name)
 
 
+#: Outcome-record columns (migration 008). Persisted on write so a restated
+#: claim keeps its record; see ``amfs_core.evidence.inherit_evidence``.
+_EVIDENCE_COLUMNS: tuple[str, ...] = (
+    "success_count", "failure_count", "evidence_success", "evidence_failure",
+    "last_outcome", "last_outcome_at", "discredited_at", "prior_confidence",
+)
+_EVIDENCE_SELECT = ", outcome_count, " + ", ".join(_EVIDENCE_COLUMNS)
+
+
+def _evidence_params(entry: MemoryEntry) -> list[Any]:
+    lo = entry.last_outcome
+    return [
+        int(entry.success_count or 0),
+        int(entry.failure_count or 0),
+        float(entry.evidence_success or 0.0),
+        float(entry.evidence_failure or 0.0),
+        (lo.value if hasattr(lo, "value") else lo) if lo is not None else None,
+        entry.last_outcome_at,
+        entry.discredited_at,
+        entry.prior_confidence,
+    ]
+
+
+def _inherit_from_row(entry: MemoryEntry, row: Any) -> MemoryEntry:
+    """Apply ``inherit_evidence`` against the live row fetched inside the write
+    transaction, so the hot paths that bypass the engine honour the same rule."""
+    from amfs_core.evidence import EVIDENCE_FIELDS, inherit_evidence
+
+    value = row["value"]
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            pass
+    current = entry.model_copy(update={
+        "value": value,
+        "confidence": float(row["confidence"]),
+        **{f: row.get(f) if f not in ("outcome_count", "success_count", "failure_count")
+           else int(row.get(f) or 0)
+           for f in EVIDENCE_FIELDS},
+        "evidence_success": float(row.get("evidence_success") or 0.0),
+        "evidence_failure": float(row.get("evidence_failure") or 0.0),
+    })
+    return inherit_evidence(entry, current)
+
+
 class PostgresAdapter(AdapterABC):
     """Store AMFS entries in PostgreSQL.
 
@@ -472,6 +549,7 @@ class PostgresAdapter(AdapterABC):
         self._has_embedding_col = False
         self._has_search_tsv = False
         self._has_is_artifact_col = False
+        self._has_evidence_cols = False
         # When an embedder is provided, embeddings are computed at write time and
         # persisted, so ANN retrieval (semantic_search / pgvector HNSW) works
         # without a separate backfill pass. embedding_dim must match the column
@@ -614,7 +692,7 @@ class PostgresAdapter(AdapterABC):
         if migrations is None:
             return None
         return hashlib.sha256(
-            (_SCHEMA_SQL + migrations).encode("utf-8")
+            (_SCHEMA_SQL + migrations + _OUTCOME_EVIDENCE_SQL).encode("utf-8")
         ).hexdigest()
 
     def _expected_tables(self) -> frozenset[str]:
@@ -956,89 +1034,11 @@ class PostgresAdapter(AdapterABC):
             ON amfs_memory_entries (namespace, entity_path)
             WHERE tier <= 2 AND superseded_at IS NULL
         """)
-        cur.execute("""
-            -- Must stay identical to schema.sql and migrations/007. All three
-            -- are CREATE OR REPLACE, so whichever runs last silently becomes
-            -- the function and a stale copy is a regression, not dead code.
-            -- This one runs at container start whenever the schema fingerprint
-            -- changes, which makes it the copy most able to overwrite the
-            -- others after a deploy.
-            CREATE OR REPLACE FUNCTION amfs_propagate_outcome() RETURNS TRIGGER AS $$
-            DECLARE
-                multiplier NUMERIC;
-                entry_key TEXT;
-                ep TEXT;
-                k TEXT;
-                cur RECORD;
-            BEGIN
-                -- SUCCESS reinforces confidence (>1.0), failures erode it (<1.0).
-                -- Result is clamped to [0,1] below.
-                CASE NEW.outcome_type
-                    WHEN 'critical_failure' THEN multiplier := 0.85;
-                    WHEN 'failure' THEN multiplier := 0.90;
-                    WHEN 'minor_failure' THEN multiplier := 0.92;
-                    WHEN 'success' THEN multiplier := 1.03;
-                    WHEN 'p1_incident' THEN multiplier := 0.85;
-                    WHEN 'p2_incident' THEN multiplier := 0.90;
-                    WHEN 'regression' THEN multiplier := 0.92;
-                    WHEN 'clean_deploy' THEN multiplier := 1.03;
-                    ELSE multiplier := 1.0;
-                END CASE;
-
-                FOREACH entry_key IN ARRAY NEW.causal_entry_keys
-                LOOP
-                    IF position('/' in entry_key) = 0 THEN
-                        CONTINUE;
-                    END IF;
-                    k := substring(entry_key from '([^/]+)$');
-                    ep := left(entry_key, length(entry_key) - length(k) - 1);
-
-                    SELECT * INTO cur FROM amfs_memory_entries
-                    WHERE namespace = NEW.namespace
-                      AND entity_path = ep
-                      AND key = k
-                      AND superseded_at IS NULL
-                      AND account_id IS NOT DISTINCT FROM NEW.account_id
-                    ORDER BY version DESC LIMIT 1;
-
-                    IF FOUND THEN
-                        UPDATE amfs_memory_entries
-                        SET superseded_at = NOW()
-                        WHERE id = cur.id;
-
-                        -- Copy the row; override only what a new version
-                        -- changes. The column list this replaces was the live
-                        -- one, and it reset every column added after it was
-                        -- written: recall_count, shared, tier, branch,
-                        -- embedding, and any column a deployment adds. See
-                        -- migrations/007 for the full reasoning.
-                        INSERT INTO amfs_memory_entries
-                        SELECT * FROM jsonb_populate_record(
-                            NULL::amfs_memory_entries,
-                            to_jsonb(cur) || jsonb_build_object(
-                                'id', gen_random_uuid(),
-                                'version', cur.version + 1,
-                                'confidence', LEAST(1.0, GREATEST(0.0,
-                                    cur.confidence * multiplier * NEW.causal_confidence)),
-                                'outcome_count', cur.outcome_count + 1,
-                                'superseded_at', NULL
-                            )
-                        );
-                    END IF;
-                END LOOP;
-
-                PERFORM pg_notify('amfs_outcome', json_build_object(
-                    'namespace', NEW.namespace,
-                    'outcome_ref', NEW.outcome_ref,
-                    'outcome_type', NEW.outcome_type,
-                    'agent_id', NEW.agent_id,
-                    'causal_confidence', NEW.causal_confidence
-                )::TEXT);
-
-                RETURN NEW;
-            END;
-            $$ LANGUAGE plpgsql
-        """)
+        # Outcome propagation (trigger v3): evidence columns on entries,
+        # attempts/final_action_index on outcomes, and the propagate function
+        # with its helpers. Applied from the migration file rather than a copy
+        # here — the copy is what drifted twice before (see 006 and 007).
+        cur.execute(_OUTCOME_EVIDENCE_SQL)
         # Soft-delete for team members (user removal flow)
         cur.execute("""
             ALTER TABLE amfs_team_members
@@ -1427,13 +1427,14 @@ class PostgresAdapter(AdapterABC):
                     """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'amfs_memory_entries'
-                      AND column_name IN ('embedding', 'search_tsv', 'is_artifact')
+                      AND column_name IN ('embedding', 'search_tsv', 'is_artifact', 'success_count')
                     """,
                 )
                 found = {row["column_name"] for row in cur.fetchall()}
                 self._has_embedding_col = "embedding" in found
                 self._has_search_tsv = "search_tsv" in found
                 self._has_is_artifact_col = "is_artifact" in found
+                self._has_evidence_cols = "success_count" in found
 
     # ------------------------------------------------------------------
     # read
@@ -1525,8 +1526,9 @@ class PostgresAdapter(AdapterABC):
             with conn.transaction():
                 with conn.cursor() as cur:
                     cur.execute(
-                        """
-                        SELECT version FROM amfs_memory_entries
+                        f"""
+                        SELECT version, value, confidence{_EVIDENCE_SELECT if self._has_evidence_cols else ""}
+                        FROM amfs_memory_entries
                         WHERE namespace = %s AND branch = %s
                           AND entity_path = %s AND key = %s
                           AND superseded_at IS NULL
@@ -1538,6 +1540,8 @@ class PostgresAdapter(AdapterABC):
                     row = cur.fetchone()
                     current_version = row["version"] if row else 0
                     new_version = current_version + 1
+                    if row and self._has_evidence_cols:
+                        entry = _inherit_from_row(entry, row)
 
                     if entry.version > 1 and entry.version != new_version:
                         raise VersionConflictError(
@@ -1602,6 +1606,10 @@ class PostgresAdapter(AdapterABC):
                     if self._has_is_artifact_col:
                         columns.append("is_artifact")
                         params.append(is_artifact)
+
+                    if self._has_evidence_cols:
+                        columns.extend(_EVIDENCE_COLUMNS)
+                        params.extend(_evidence_params(entry))
 
                     # Write-time embedding: compute and persist an embedding when
                     # the caller did not supply one and an embedder is configured.
@@ -3164,14 +3172,22 @@ class PostgresAdapter(AdapterABC):
     # ------------------------------------------------------------------
 
     def commit_outcome(self, record: OutcomeRecord) -> list[MemoryEntry]:
-        with self._pool.connection() as conn:
+        with self._pool.connection() as conn, conn.transaction():
             with conn.cursor() as cur:
+                # The trigger reads the outcome model off this session setting.
+                # The pool runs autocommit, so the explicit transaction above is
+                # what keeps the transaction-local setting alive for the insert.
+                cur.execute(
+                    "SELECT set_config('amfs.outcome_model', %s, true)",
+                    (outcome_model(),),
+                )
                 cur.execute(
                     """
                     INSERT INTO amfs_outcomes (
                         namespace, outcome_ref, outcome_type, causal_confidence,
-                        committed_at, causal_entry_keys, agent_id
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        committed_at, causal_entry_keys, agent_id,
+                        attempts, final_action_index, causal_entry_versions
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb)
                     """,
                     (
                         self._namespace,
@@ -3181,15 +3197,19 @@ class PostgresAdapter(AdapterABC):
                         record.committed_at,
                         record.causal_entry_keys,
                         record.agent_id,
+                        json.dumps(
+                            [a.model_dump(mode="json") for a in record.attempts],
+                            default=str,
+                        ),
+                        record.final_action_index,
+                        json.dumps(dict(record.causal_entry_versions or {})),
                     ),
                 )
 
+        # Every entry any step cited, including the failed attempts' — those
+        # got a new version too and callers want to see where they landed.
         updated: list[MemoryEntry] = []
-        for spec in record.causal_entry_keys:
-            parts = spec.rsplit("/", 1)
-            if len(parts) != 2:
-                continue
-            ep, key = parts
+        for ep, key in cited_entries(record):
             entry = self.read(ep, key)
             if entry:
                 updated.append(entry)
@@ -3252,7 +3272,8 @@ class PostgresAdapter(AdapterABC):
         )
         sql = f"""
             SELECT outcome_ref, outcome_type, causal_confidence,
-                   committed_at, causal_entry_keys, agent_id
+                   committed_at, causal_entry_keys, agent_id,
+                   attempts, final_action_index
             FROM amfs_outcomes
             WHERE {where}
             ORDER BY committed_at DESC
@@ -3279,6 +3300,8 @@ class PostgresAdapter(AdapterABC):
                     committed_at=row["committed_at"],
                     causal_entry_keys=row.get("causal_entry_keys") or [],
                     agent_id=row["agent_id"],
+                    attempts=_attempts_from_row(row.get("attempts")),
+                    final_action_index=row.get("final_action_index"),
                 )
             )
         return results
@@ -3848,6 +3871,16 @@ class PostgresAdapter(AdapterABC):
             ),
             confidence=float(row["confidence"]),
             outcome_count=row["outcome_count"],
+            success_count=int(row.get("success_count") or 0),
+            failure_count=int(row.get("failure_count") or 0),
+            evidence_success=float(row.get("evidence_success") or 0.0),
+            evidence_failure=float(row.get("evidence_failure") or 0.0),
+            prior_confidence=(
+                float(row["prior_confidence"]) if row.get("prior_confidence") is not None else None
+            ),
+            last_outcome=row.get("last_outcome"),
+            last_outcome_at=row.get("last_outcome_at"),
+            discredited_at=row.get("discredited_at"),
             recall_count=row.get("recall_count", 0),
             priority_score=float(row["priority_score"]) if row.get("priority_score") is not None else None,
             tier=row.get("tier", 3),

@@ -15,6 +15,15 @@ from amfs_core.models import (
     clamp_confidence,
 )
 from amfs_core.outcome import OutcomeBackPropagator
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _legacy_multiplier_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests pin the constant-multiplier arithmetic, which is now the
+    opt-in ``AMFS_OUTCOME_MODEL=multiplicative`` model. The default evidence
+    model has its own numbers, pinned in ``test_evidence.py``."""
+    monkeypatch.setenv("AMFS_OUTCOME_MODEL", "multiplicative")
 
 
 # ---------------------------------------------------------------------------

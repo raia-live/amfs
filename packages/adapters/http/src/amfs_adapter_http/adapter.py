@@ -113,6 +113,12 @@ class HttpAdapter(AdapterABC):
         timeout: Optional httpx Timeout override.
     """
 
+    #: Outcome learning happens on the server this adapter talks to: it runs
+    #: the trigger and writes derived entries (contrast lessons) itself, under
+    #: the caller's identity. The SDK checks this to avoid doing the same
+    #: work a second time on the client.
+    remote_learning = True
+
     # The server's write handler (POST /api/v1/entries) records the WRITE
     # timeline event, so the SDK must not log it again (avoids double events).
     server_side_write_events: bool = True
@@ -295,6 +301,15 @@ class HttpAdapter(AdapterABC):
         # coming, say so, and the server seals once from the better of the two.
         if record.trace_follows:
             body["trace_follows"] = True
+        # Failed attempts and the terminal action: the trigger applies each
+        # attempt's outcome to its own entries server-side, so these must
+        # arrive on the outcome, not only on the trace.
+        if record.attempts:
+            body["attempts"] = [a.model_dump(mode="json") for a in record.attempts]
+        if record.final_action_index is not None:
+            body["final_action_index"] = record.final_action_index
+        if record.causal_entry_versions:
+            body["causal_entry_versions"] = dict(record.causal_entry_versions)
         data = self._post("/api/v1/outcomes", body)
         # The ABC returns entries, so anything else the server computed for this
         # commit has nowhere to go in the signature and would be dropped here.
@@ -388,7 +403,11 @@ class HttpAdapter(AdapterABC):
         confidence_weight: float = 0.2,
         branch: str = "main",
         include_artifacts: bool = True,
-    ) -> list[tuple[MemoryEntry, float, dict[str, float]]]:
+        evidence_weight: float | None = None,
+        include_discredited: bool | None = None,
+        include_avoid: bool | None = None,
+        adaptive_k: bool | None = None,
+    ) -> list[tuple[MemoryEntry, float, dict[str, Any]]]:
         """Server-side semantic retrieval via POST /api/v1/retrieve.
 
         The server does the embedding + pgvector similarity + blend, so this
@@ -409,13 +428,28 @@ class HttpAdapter(AdapterABC):
         }
         if entity_path:
             body["entity_path"] = entity_path
+        # Sent only when set, so an older server that does not know the fields
+        # is not handed keys it would reject.
+        if evidence_weight is not None:
+            body["evidence_weight"] = evidence_weight
+        if include_discredited is not None:
+            body["include_discredited"] = include_discredited
+        if include_avoid is not None:
+            body["include_avoid"] = include_avoid
+        if adaptive_k is not None:
+            body["adaptive_k"] = adaptive_k
         data = self._post("/api/v1/retrieve", body)
         self._capture_reuse_value()
         rows = data if isinstance(data, list) else data.get("entries", [])
-        out: list[tuple[MemoryEntry, float, dict[str, float]]] = []
+        out: list[tuple[MemoryEntry, float, dict[str, Any]]] = []
         for e in rows:
             score = float(e.get("_score", 0.0)) if isinstance(e, dict) else 0.0
-            breakdown = e.get("_breakdown", {}) if isinstance(e, dict) else {}
+            breakdown = dict(e.get("_breakdown", {}) or {}) if isinstance(e, dict) else {}
+            if isinstance(e, dict) and e.get("_avoid"):
+                # A discredited entry the server appended because the caller
+                # asked what not to do. Carried in the breakdown so ScoredEntry
+                # keeps it and the SDK can hand it back as an avoid list.
+                breakdown["_avoid"] = True
             out.append((_parse_entry(e), score, breakdown))
         return out
 
@@ -876,6 +910,7 @@ class HttpAdapter(AdapterABC):
         agent_id: str | None = None,
         limit: int = 10,
         credit_reuse: bool = False,
+        compact: bool = False,
     ) -> list[Digest]:
         """Proxy briefing to the HTTP server which has full Cortex access."""
         params: dict[str, Any] = {"limit": limit}
@@ -888,6 +923,8 @@ class HttpAdapter(AdapterABC):
         # and false for a panel rendering it for a human, so the caller decides.
         if credit_reuse:
             params["credit_reuse"] = "true"
+        if compact:
+            params["compact"] = "true"
         data = self._get("/api/v1/briefing", **params)
         # A credited briefing is a credited read, so it carries the reuse header
         # like any other. Unconditional: _capture_reuse_value always assigns, so

@@ -59,6 +59,17 @@ class OutcomeRequest(BaseModel):
     #: trace for one outcome. Only the SDK sets this, and only because its
     #: ``commit_outcome`` posts the trace on every path out of itself.
     trace_follows: bool = False
+    #: Failed attempts that preceded the terminal outcome, oldest first:
+    #: ``{attempt, outcome_type, causal_entry_keys, action_indices, summary}``.
+    #: Each is applied to its own causal entries before ``outcome_type`` is
+    #: applied to ``causal_entry_keys`` — inside this one outcome and trace.
+    attempts: list[dict[str, Any]] = Field(default_factory=list)
+    #: Index into ``tool_calls`` of the action that produced the terminal
+    #: outcome, when there was more than one.
+    final_action_index: int | None = None
+    #: ``entry_key -> version`` the agent read for ``causal_entry_keys``; the
+    #: outcome is applied only where the key still carries that claim.
+    causal_entry_versions: dict[str, int] | None = None
 
 
 class SearchRequest(BaseModel):
@@ -118,6 +129,23 @@ class RetrieveRequest(BaseModel):
     # When True (default) artifacts (stored source files) are demoted but still
     # returned; when False they are excluded entirely from results.
     include_artifacts: bool = True
+    #: Weight of the outcome-evidence term in the blend (see
+    #: ``amfs_core.evidence.evidence_signal``): a validated entry outranks an
+    #: untested one at equal confidence, a contested one falls behind both.
+    evidence_weight: float = 0.15
+    #: Discredited entries — a failure left them under the discredit
+    #: threshold and nothing has lifted them since — are excluded from the
+    #: ranked results by default. Set to rank them like any other entry.
+    include_discredited: bool = False
+    #: Append the discredited entries that *would* have ranked, flagged
+    #: ``_avoid: true`` with ``_score: 0``, after the results. What not to do is
+    #: knowledge too; opt-in because a client that does not know the flag would
+    #: read them as hits.
+    include_avoid: bool = False
+    #: Shrink the result list when the top hit is validated and clearly ahead:
+    #: a memory the record has confirmed does not need nine alternatives beside
+    #: it in the prompt. Opt-in.
+    adaptive_k: bool = False
 
 
 class ContextRequest(BaseModel):

@@ -125,9 +125,15 @@ class TestCoWEngine:
         )
         adapter.write(entry)
 
-        w2 = engine.write("svc-a", "key-1", {"x": 2})
+        # The record belongs to the claim: restating it keeps the count, a new
+        # claim under the same key starts over (amfs_core.evidence.inherit_evidence).
+        w2 = engine.write("svc-a", "key-1", {"x": 1})
         assert w2.version == 2
         assert w2.outcome_count == 3
+
+        w3 = engine.write("svc-a", "key-1", {"x": 2})
+        assert w3.version == 3
+        assert w3.outcome_count == 0
 
     def test_write_with_confidence(self) -> None:
         engine, _ = self._make_engine()

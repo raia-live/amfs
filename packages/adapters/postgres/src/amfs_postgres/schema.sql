@@ -14,6 +14,14 @@ CREATE TABLE IF NOT EXISTS amfs_memory_entries (
     pattern_refs TEXT[] DEFAULT '{}',
     confidence NUMERIC(6,4) DEFAULT 1.0,
     outcome_count INTEGER DEFAULT 0,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    evidence_success NUMERIC(10,4) NOT NULL DEFAULT 0,
+    evidence_failure NUMERIC(10,4) NOT NULL DEFAULT 0,
+    prior_confidence NUMERIC(6,4),
+    last_outcome TEXT,
+    last_outcome_at TIMESTAMPTZ,
+    discredited_at TIMESTAMPTZ,
     recall_count INTEGER DEFAULT 0,
     priority_score NUMERIC(10,6),
     tier SMALLINT DEFAULT 3,
@@ -47,7 +55,10 @@ CREATE TABLE IF NOT EXISTS amfs_outcomes (
     committed_at TIMESTAMPTZ NOT NULL,
     causal_entry_keys TEXT[] DEFAULT '{}',
     agent_id TEXT NOT NULL,
-    account_id UUID
+    account_id UUID,
+    attempts JSONB NOT NULL DEFAULT '[]',
+    causal_entry_versions JSONB NOT NULL DEFAULT '{}',
+    final_action_index INTEGER
 );
 
 -- Range-partitioned by month on created_at. Traces are append-only and read by
@@ -400,87 +411,238 @@ CREATE TABLE IF NOT EXISTS amfs_pr_reviews (
 CREATE INDEX IF NOT EXISTS idx_pr_reviews_pr
     ON amfs_pr_reviews (pr_id);
 
--- Back-propagation trigger: when an outcome is inserted,
--- for each causal_entry_key: supersede current entry and insert
--- a new version with confidence *= multiplier * causal_confidence.
+-- Back-propagation trigger: when an outcome is inserted, apply each failed
+-- attempt's outcome to that attempt's causal entries, then the terminal outcome
+-- to causal_entry_keys, through the evidence model (recency-weighted Beta
+-- posterior with credit split and surprise scaling). Each touched entry gets a
+-- new version carrying the updated evidence columns.
 --
--- This definition must stay identical to migrations/007. It is the fourth place
--- this function has been defined, and the reason to keep them in step is that
--- every one of them is a CREATE OR REPLACE: whichever runs last silently
--- becomes the function, so a stale copy here is not dead code, it is a
--- regression waiting for the next deploy. This file carried the pre-006
--- inverted multipliers for exactly that long — corrected here in the same
--- change that removed the column list. See 007 for the full reasoning.
+-- These definitions must stay identical to migrations/008_outcome_evidence.sql,
+-- which PostgresAdapter._apply_migrations applies verbatim. Every copy is a
+-- CREATE OR REPLACE: whichever runs last silently becomes the function, so a
+-- stale copy here is not dead code, it is a regression waiting for the next
+-- deploy. The arithmetic is also implemented in amfs_core/evidence.py for the
+-- filesystem and S3 adapters; tests/unit/test_evidence.py pins the numbers.
 
-CREATE OR REPLACE FUNCTION amfs_propagate_outcome() RETURNS TRIGGER AS $$
+CREATE INDEX IF NOT EXISTS idx_entries_discredited
+    ON amfs_memory_entries (namespace, entity_path, discredited_at)
+    WHERE discredited_at IS NOT NULL AND superseded_at IS NULL;
+
+CREATE OR REPLACE FUNCTION amfs_outcome_is_success(t TEXT) RETURNS BOOLEAN AS $$
+    SELECT t IN ('success', 'clean_deploy');
+$$ LANGUAGE sql IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION amfs_outcome_is_known(t TEXT) RETURNS BOOLEAN AS $$
+    SELECT t IN ('success', 'clean_deploy', 'minor_failure', 'regression',
+                 'failure', 'p2_incident', 'critical_failure', 'p1_incident');
+$$ LANGUAGE sql IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION amfs_outcome_severity(t TEXT) RETURNS NUMERIC AS $$
+    SELECT CASE t
+        WHEN 'success' THEN 1.0
+        WHEN 'clean_deploy' THEN 1.0
+        WHEN 'minor_failure' THEN 1.5
+        WHEN 'regression' THEN 1.5
+        WHEN 'failure' THEN 2.0
+        WHEN 'p2_incident' THEN 2.0
+        WHEN 'critical_failure' THEN 3.0
+        WHEN 'p1_incident' THEN 3.0
+        ELSE 1.0
+    END;
+$$ LANGUAGE sql IMMUTABLE;
+
+-- The 006 multipliers, kept for AMFS_OUTCOME_MODEL=multiplicative.
+CREATE OR REPLACE FUNCTION amfs_outcome_multiplier(t TEXT) RETURNS NUMERIC AS $$
+    SELECT CASE t
+        WHEN 'critical_failure' THEN 0.85
+        WHEN 'failure' THEN 0.90
+        WHEN 'minor_failure' THEN 0.92
+        WHEN 'success' THEN 1.03
+        WHEN 'p1_incident' THEN 0.85
+        WHEN 'p2_incident' THEN 0.90
+        WHEN 'regression' THEN 0.92
+        WHEN 'clean_deploy' THEN 1.03
+        ELSE 1.0
+    END;
+$$ LANGUAGE sql IMMUTABLE;
+
+-- One step of an outcome: one outcome type applied to one set of causal keys,
+-- credit-split over those keys. The trigger calls this once per failed
+-- attempt and once for the terminal outcome.
+DROP FUNCTION IF EXISTS amfs_apply_outcome_step(TEXT, UUID, TEXT[], TEXT, NUMERIC, TEXT);
+
+CREATE OR REPLACE FUNCTION amfs_apply_outcome_step(
+    p_namespace TEXT,
+    p_account UUID,
+    p_keys TEXT[],
+    p_outcome_type TEXT,
+    p_causal_confidence NUMERIC,
+    p_model TEXT,
+    p_versions JSONB
+) RETURNS INTEGER AS $$
 DECLARE
-    multiplier NUMERIC;
+    keys TEXT[];
     entry_key TEXT;
     ep TEXT;
     k TEXT;
     cur RECORD;
+    read_version INTEGER;
+    read_value JSONB;
+    n_keys INTEGER;
+    is_ok BOOLEAN;
+    target NUMERIC;
+    w NUMERIC;
+    prior NUMERIC;
+    e_s NUMERIC;
+    e_f NUMERIC;
+    new_conf NUMERIC;
+    disc TIMESTAMPTZ;
+    touched INTEGER := 0;
 BEGIN
-    -- SUCCESS reinforces confidence (>1.0), failures erode it (<1.0).
-    CASE NEW.outcome_type
-        WHEN 'critical_failure' THEN multiplier := 0.85;
-        WHEN 'failure' THEN multiplier := 0.90;
-        WHEN 'minor_failure' THEN multiplier := 0.92;
-        WHEN 'success' THEN multiplier := 1.03;
-        WHEN 'p1_incident' THEN multiplier := 0.85;
-        WHEN 'p2_incident' THEN multiplier := 0.90;
-        WHEN 'regression' THEN multiplier := 0.92;
-        WHEN 'clean_deploy' THEN multiplier := 1.03;
-        ELSE multiplier := 1.0;
-    END CASE;
+    -- Distinct, well-formed specs only; a key cited twice is one citation.
+    SELECT COALESCE(array_agg(DISTINCT x), '{}') INTO keys
+    FROM unnest(COALESCE(p_keys, '{}')) AS x
+    WHERE position('/' in x) > 0;
+    n_keys := cardinality(keys);
+    IF n_keys = 0 THEN
+        RETURN 0;
+    END IF;
 
-    FOREACH entry_key IN ARRAY NEW.causal_entry_keys
+    -- An outcome type neither side of the model knows is not evidence of
+    -- anything (the multipliers treated it as x1.0; this treats it as no step).
+    IF NOT amfs_outcome_is_known(p_outcome_type) THEN
+        RETURN 0;
+    END IF;
+    is_ok := amfs_outcome_is_success(p_outcome_type);
+    target := CASE WHEN is_ok THEN 1.0 ELSE 0.0 END;
+
+    FOREACH entry_key IN ARRAY keys
     LOOP
-        -- Parse "entity_path/key" using last-slash split (matches Python rsplit("/", 1))
-        -- e.g. "myapp/checkout/risk" -> ep="myapp/checkout", k="risk"
-        IF position('/' in entry_key) = 0 THEN
-            CONTINUE;
-        END IF;
+        -- Last-slash split, matching Python's rsplit("/", 1).
         k := substring(entry_key from '([^/]+)$');
         ep := left(entry_key, length(entry_key) - length(k) - 1);
 
-        -- Find current (non-superseded) entry
         SELECT * INTO cur FROM amfs_memory_entries
-        WHERE namespace = NEW.namespace
+        WHERE namespace = p_namespace
           AND entity_path = ep
           AND key = k
           AND superseded_at IS NULL
-          AND account_id IS NOT DISTINCT FROM NEW.account_id
+          AND account_id IS NOT DISTINCT FROM p_account
         ORDER BY version DESC LIMIT 1;
 
-        IF FOUND THEN
-            -- Supersede the current entry
-            UPDATE amfs_memory_entries
-            SET superseded_at = NOW()
-            WHERE id = cur.id;
-
-            -- Copy the row; override only what a new version changes. A column
-            -- list here silently reset every column added after it was written.
-            INSERT INTO amfs_memory_entries
-            SELECT * FROM jsonb_populate_record(
-                NULL::amfs_memory_entries,
-                to_jsonb(cur) || jsonb_build_object(
-                    'id', gen_random_uuid(),
-                    'version', cur.version + 1,
-                    'confidence', LEAST(1.0, GREATEST(0.0,
-                        cur.confidence * multiplier * NEW.causal_confidence)),
-                    'outcome_count', cur.outcome_count + 1,
-                    'superseded_at', NULL
-                )
-            );
+        IF NOT FOUND THEN
+            CONTINUE;
         END IF;
+
+        -- Credit the claim that was read. If the key has been rewritten since
+        -- and now says something else, this outcome is about the old claim.
+        read_version := NULLIF(COALESCE(p_versions, '{}'::jsonb)->>entry_key, '')::INTEGER;
+        IF read_version IS NOT NULL AND read_version <> cur.version THEN
+            SELECT value INTO read_value FROM amfs_memory_entries
+            WHERE namespace = p_namespace
+              AND entity_path = ep
+              AND key = k
+              AND version = read_version
+              AND account_id IS NOT DISTINCT FROM p_account
+            LIMIT 1;
+            IF FOUND AND read_value IS DISTINCT FROM cur.value THEN
+                CONTINUE;
+            END IF;
+        END IF;
+
+        prior := LEAST(1.0, GREATEST(0.0, COALESCE(cur.prior_confidence, cur.confidence)));
+
+        IF p_model = 'multiplicative' THEN
+            new_conf := LEAST(1.0, GREATEST(0.0,
+                cur.confidence * amfs_outcome_multiplier(p_outcome_type) * p_causal_confidence));
+            e_s := COALESCE(cur.evidence_success, 0) + CASE WHEN is_ok THEN 1 ELSE 0 END;
+            e_f := COALESCE(cur.evidence_failure, 0) + CASE WHEN is_ok THEN 0 ELSE 1 END;
+        ELSE
+            w := amfs_outcome_severity(p_outcome_type)
+                 * GREATEST(0.0, p_causal_confidence)
+                 / n_keys
+                 * (1.0 + abs(target - LEAST(1.0, GREATEST(0.0, cur.confidence))));
+            e_s := COALESCE(cur.evidence_success, 0) * 0.8 + CASE WHEN is_ok THEN w ELSE 0 END;
+            e_f := COALESCE(cur.evidence_failure, 0) * 0.8 + CASE WHEN is_ok THEN 0 ELSE w END;
+            new_conf := LEAST(1.0, GREATEST(0.0, (2.0 * prior + e_s) / (2.0 + e_s + e_f)));
+        END IF;
+
+        IF new_conf < 0.5 AND NOT is_ok THEN
+            disc := COALESCE(cur.discredited_at, NOW());
+        ELSIF new_conf >= 0.5 THEN
+            disc := NULL;
+        ELSE
+            disc := cur.discredited_at;
+        END IF;
+
+        UPDATE amfs_memory_entries
+        SET superseded_at = NOW()
+        WHERE id = cur.id;
+
+        -- Copy the row (see 007); override only what this version changes.
+        INSERT INTO amfs_memory_entries
+        SELECT * FROM jsonb_populate_record(
+            NULL::amfs_memory_entries,
+            to_jsonb(cur) || jsonb_build_object(
+                'id', gen_random_uuid(),
+                'version', cur.version + 1,
+                'confidence', new_conf,
+                'outcome_count', cur.outcome_count + 1,
+                'success_count', COALESCE(cur.success_count, 0) + CASE WHEN is_ok THEN 1 ELSE 0 END,
+                'failure_count', COALESCE(cur.failure_count, 0) + CASE WHEN is_ok THEN 0 ELSE 1 END,
+                'evidence_success', e_s,
+                'evidence_failure', e_f,
+                'prior_confidence', prior,
+                'last_outcome', p_outcome_type,
+                'last_outcome_at', NOW(),
+                'discredited_at', disc,
+                'superseded_at', NULL
+            )
+        );
+        touched := touched + 1;
     END LOOP;
+    RETURN touched;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION amfs_propagate_outcome() RETURNS TRIGGER AS $$
+DECLARE
+    model TEXT;
+    att JSONB;
+    att_keys TEXT[];
+BEGIN
+    model := COALESCE(NULLIF(current_setting('amfs.outcome_model', true), ''), 'evidence');
+
+    -- Failed attempts first, oldest to newest: each hands its own failure to
+    -- the entries that attempt relied on.
+    FOR att IN
+        SELECT value FROM jsonb_array_elements(COALESCE(NEW.attempts, '[]'::jsonb))
+        ORDER BY COALESCE((value->>'attempt')::INTEGER, 0)
+    LOOP
+        SELECT COALESCE(array_agg(x), '{}') INTO att_keys
+        FROM jsonb_array_elements_text(COALESCE(att->'causal_entry_keys', '[]'::jsonb)) AS x;
+        PERFORM amfs_apply_outcome_step(
+            NEW.namespace, NEW.account_id, att_keys,
+            COALESCE(att->>'outcome_type', 'minor_failure'),
+            NEW.causal_confidence, model,
+            COALESCE(att->'causal_entry_versions', '{}'::jsonb)
+        );
+    END LOOP;
+
+    -- Then the terminal outcome to the entries the resolution relied on.
+    PERFORM amfs_apply_outcome_step(
+        NEW.namespace, NEW.account_id, NEW.causal_entry_keys,
+        NEW.outcome_type, NEW.causal_confidence, model,
+        COALESCE(NEW.causal_entry_versions, '{}'::jsonb)
+    );
 
     PERFORM pg_notify('amfs_outcome', json_build_object(
         'namespace', NEW.namespace,
         'outcome_ref', NEW.outcome_ref,
         'outcome_type', NEW.outcome_type,
         'agent_id', NEW.agent_id,
-        'causal_confidence', NEW.causal_confidence
+        'causal_confidence', NEW.causal_confidence,
+        'attempts', jsonb_array_length(COALESCE(NEW.attempts, '[]'::jsonb))
     )::TEXT);
 
     RETURN NEW;

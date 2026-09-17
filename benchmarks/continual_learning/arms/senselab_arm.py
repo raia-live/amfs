@@ -1,0 +1,404 @@
+"""SenseLab arm (production HTTP API), wired per its documented agent contract.
+
+Per episode, from a FRESH connection (so the causal read set is this episode's alone):
+  1. ``briefing(entity_path=scope, compact=True)``   — the lead digest with its hot context and
+                                                       the outcome-derived sections (validated /
+                                                       discredited / regime_shift)
+  2. ``retrieve(query, include_avoid, adaptive_k)``   — ranked recall with the evidence signal in
+                                                       the score; discredited knowledge is
+                                                       served as an explicit avoid list, not as
+                                                       a candidate
+  3. ``write(...)``                                   — notes / heuristics with a type
+  4. ``record_action(...)``                           — domain tool calls, sealed in the trace
+  5. ``record_attempt(...)``  (local, no round trip)  — when a remembered approach failed and
+                                                       the agent is about to try another, so
+                                                       the failure lands on what that attempt
+                                                       relied on
+  6. ``commit_outcome(ref, type, causal_entry_keys, task_input, response_text)``
+     — the environment's verdict, attributed to the memories the agent cited (or, if it
+       cited none, to the top hit of each retrieve, which the SDK records automatically).
+       Attempt boundaries travel inside the same request.
+
+Variants:
+  ``senselab``             the full protocol above
+  ``senselab-episode``     steps 1-4 and 6 only: one outcome per task, attributed to the final
+                           attempt's reads. Isolates what per-attempt credit assignment adds.
+  ``senselab-nofeedback``  steps 1-4 only; step 6 never happens. The ablation that separates
+                           "good retrieval" from "learning from outcomes".
+  ``senselab-attempts``    legacy: per-attempt failures committed as separate outcomes (one
+                           HTTP round trip each). Kept so the grid-v1 rows stay interpretable.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import random
+import threading
+import time
+from typing import Any
+
+from amfs import AgentMemory
+from amfs_adapter_http import HttpAdapter
+from amfs_core.models import MemoryType, OutcomeType, RecallConfig
+
+from .. import config
+from .base import EpisodeSession, MemoryArm, MemoryHit, Outcome
+
+_KIND = {"fact": MemoryType.FACT, "belief": MemoryType.BELIEF, "experience": MemoryType.EXPERIENCE}
+BRIEFING_MAX_CHARS = 2400
+
+
+class _RateLimiter:
+    """Process-global token bucket. The production API key is limited to 120 requests/min;
+    the benchmark runs many SenseLab cells in parallel, so calls are paced below that
+    limit here rather than discovered as 429s mid-episode. Override with AMFS_RPM."""
+
+    def __init__(self, rpm: float) -> None:
+        self.interval = 60.0 / max(rpm, 1.0)
+        self.lock = threading.Lock()
+        self.next_at = 0.0
+
+    def acquire(self) -> None:
+        with self.lock:
+            now = time.monotonic()
+            wait = max(0.0, self.next_at - now)
+            self.next_at = max(now, self.next_at) + self.interval
+        if wait > 0:
+            time.sleep(wait)
+            _TLS.waited = getattr(_TLS, "waited", 0.0) + wait
+
+
+_TLS = threading.local()
+_LIMITER = _RateLimiter(float(os.environ.get("AMFS_RPM", "100")))
+_SEED_LOCK = threading.Lock()
+
+
+class _PacedTimer:
+    """Like the base timer, but benchmark-side pacing (limiter sleeps, 429 back-off) is
+    subtracted from the arm's latency and reported separately as ``rate_limit_wait_ms``.
+    Waiting on our own key's quota is a property of this benchmark, not of the product."""
+
+    def __init__(self, acct) -> None:
+        self.acct = acct
+
+    def __enter__(self):
+        self.t = time.perf_counter()
+        self.w0 = getattr(_TLS, "waited", 0.0)
+        return self
+
+    def __exit__(self, *exc):
+        waited = getattr(_TLS, "waited", 0.0) - self.w0
+        self.acct.memory_ms += max(0.0, (time.perf_counter() - self.t) - waited) * 1000
+        self.acct.ops += 1
+        if waited:
+            self.acct.notes["rate_limit_wait_ms"] = round(self.acct.notes.get("rate_limit_wait_ms", 0.0) + waited * 1000, 1)
+
+
+class _ThrottledHttpAdapter(HttpAdapter):
+    """HttpAdapter paced by the global limiter, with patient 429 handling (the SDK's own
+    retry gives up after four quick attempts, which is not enough under sustained load)."""
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        for attempt in range(10):
+            _LIMITER.acquire()
+            resp = self._client.request(method, path, **kwargs)
+            if resp.status_code == 429 and attempt < 9:
+                wait = min(max(float(resp.headers.get("Retry-After", 1.0)), 0.5) * (1.5 ** attempt), 30.0)
+                wait += random.uniform(0, 0.5)
+                time.sleep(wait)
+                _TLS.waited = getattr(_TLS, "waited", 0.0) + wait
+                continue
+            from amfs_adapter_http.adapter import _raise_with_detail
+            _raise_with_detail(resp)
+            return resp.json()
+        raise RuntimeError("unreachable")
+
+
+def _ev(it: dict[str, Any]) -> str:
+    st = it.get("evidence_status")
+    w, l = int(it.get("success_count") or 0), int(it.get("failure_count") or 0)
+    parts = []
+    conf = it.get("confidence")
+    if isinstance(conf, (int, float)):
+        parts.append(f"confidence {conf:.2f}")
+    if st and (st != "untested" or w or l):
+        parts.append(f"{st}: {w} won / {l} failed" if (w or l) else st)
+    return f" ({'; '.join(parts)})" if parts else ""
+
+
+def _render_briefing(digests: list[Any]) -> str | None:
+    """Render what the agent reads at the top of a task. Evidence sections first — they are
+    the part of a briefing that only a system with outcomes can produce."""
+    lines: list[str] = []
+    for d in digests or []:
+        summary = getattr(d, "summary", None)
+        if summary is None and isinstance(d, dict):
+            summary = d.get("summary")
+        dtype = getattr(d, "digest_type", None) or (d.get("digest_type") if isinstance(d, dict) else "")
+        if not isinstance(summary, dict):
+            if summary:
+                lines.append(f"- ({dtype}) {str(summary)[:400]}")
+            continue
+        rs = summary.get("regime_shift")
+        if isinstance(rs, dict) and rs.get("suspected"):
+            keys = ", ".join(str(e.get("key")) for e in (rs.get("entries") or [])[:6] if isinstance(e, dict))
+            lines.append(f"WARNING — regime shift suspected: {rs.get('message', '')} Affected: {keys}.")
+        disc = summary.get("discredited")
+        if isinstance(disc, list) and disc:
+            lines.append("Discredited by outcomes (do not act on these):")
+            for it in disc[:6]:
+                if not isinstance(it, dict):
+                    continue
+                rep = it.get("replaced_by") or []
+                rep_s = f" Replaced by: {', '.join(map(str, rep[:3]))}." if rep else ""
+                lines.append(f"  - [{it.get('key')}]{_ev(it)}: {str(it.get('value_preview') or '')[:200]}{rep_s}")
+        val = summary.get("validated")
+        if isinstance(val, list) and val:
+            lines.append("Validated by outcomes: " + ", ".join(
+                f"[{it.get('key')}] ({int(it.get('success_count') or 0)} won)" for it in val[:8] if isinstance(it, dict)))
+        for k in ("hot_context", "entries", "facts", "patterns", "key_facts", "risks"):
+            items = summary.get(k)
+            if isinstance(items, list) and items:
+                for it in items[:8]:
+                    if isinstance(it, dict):
+                        key = it.get("key") or it.get("entity_path") or ""
+                        val_ = it.get("value") or it.get("summary") or it.get("text") or ""
+                        lines.append(f"- [{key}]{_ev(it)}: {str(val_)[:300]}")
+                    else:
+                        lines.append(f"- {str(it)[:300]}")
+        text = summary.get("narrative") or summary.get("text") or summary.get("overview")
+        if text:
+            lines.append(f"- ({dtype}) {str(text)[:400]}")
+    if not lines:
+        return None
+    out = "\n".join(lines)
+    return out[:BRIEFING_MAX_CHARS]
+
+
+class _SenseLabSession(EpisodeSession):
+    def __init__(self, arm: "SenseLabArm", agent_id: str, episode: int) -> None:
+        super().__init__(arm, agent_id, episode)
+        self.arm: SenseLabArm = arm
+        self.mem = AgentMemory(
+            agent_id=agent_id,
+            adapter=_ThrottledHttpAdapter(base_url=config.AMFS_HTTP_URL,
+                                          api_key=config.env("AMFS_API_KEY", required=True)),
+        )
+
+        self._attempts_marked = 0
+
+    def _timed(self):
+        return _PacedTimer(self.acct)
+
+    def briefing(self) -> str | None:
+        with self._timed():
+            try:
+                digests = self.mem.briefing(entity_path=self.arm.scope, limit=8,
+                                            compact=self.arm.compact_briefing)
+            except Exception as e:  # noqa: BLE001
+                self.acct.notes["briefing_error"] = str(e)[:200]
+                return None
+        # Hard cell-isolation guard. The server's briefing is agent-centric and may include
+        # digests for other entities the same agent identity touched; keep only this cell's
+        # entity digest and this cell's own agent brief. Dropped digests are counted so the
+        # leak channel is measurable.
+        kept, dropped = [], 0
+        for d in digests or []:
+            sc = getattr(d, "scope", None) or (d.get("scope") if isinstance(d, dict) else None)
+            if sc in (self.arm.scope, self.agent_id) or (sc or "").startswith(self.arm.scope + "/"):
+                kept.append(d)
+            else:
+                dropped += 1
+        if dropped:
+            self.acct.notes["briefing_digests_dropped"] = self.acct.notes.get("briefing_digests_dropped", 0) + dropped
+        text = _render_briefing(kept)
+        if text:
+            self.acct.retrieved_bytes += len(text)
+        return text
+
+    def search(self, query: str, top_k: int) -> list[MemoryHit]:
+        cfg = RecallConfig(include_avoid=self.arm.evidence_aware, adaptive_k=self.arm.evidence_aware)
+        with self._timed():
+            rows = self.mem.retrieve(query, entity_path=self.arm.scope,
+                                     min_confidence=config.STUDY.min_confidence_gate, limit=top_k,
+                                     recall_config=cfg)
+        hits = []
+        for r in rows:
+            e = r.entry
+            avoid = bool((r.breakdown or {}).get("_avoid"))
+            hits.append(MemoryHit(
+                key=e.key, text=str(e.value), score=float(r.score), confidence=float(e.confidence),
+                evidence_status=getattr(e, "evidence_status", None) or "untested",
+                success_count=int(getattr(e, "success_count", 0) or 0),
+                failure_count=int(getattr(e, "failure_count", 0) or 0), avoid=avoid))
+        kept = [h for h in hits if not h.avoid]
+        self.acct.retrieved_bytes += sum(len(h.text) for h in hits)
+        if any(h.avoid for h in hits):
+            self.acct.notes["avoid_served"] = self.acct.notes.get("avoid_served", 0) + sum(h.avoid for h in hits)
+        self.read_keys.extend(h.key for h in kept[:1])
+        return hits
+
+    def write(self, key: str, text: str, *, confidence: float = 0.7, kind: str = "experience") -> None:
+        with self._timed():
+            self.mem.write(self.arm.scope, key, text, confidence=confidence,
+                           memory_type=_KIND.get(kind, MemoryType.EXPERIENCE))
+
+    def record_action(self, tool: str, arguments: dict[str, Any], result: str, success: bool) -> None:
+        # Local: the SDK buffers actions and ships them as ``tool_calls`` on the commit.
+        # Not timed and not an op — there is no round-trip to count.
+        try:
+            self.mem.record_action(tool, arguments, result=result[:500], success=success)
+        except Exception as e:  # noqa: BLE001
+            self.acct.notes["record_action_error"] = str(e)[:200]
+
+    def end(self, outcome: Outcome, *, task_input: str, response_text: str,
+            cited_keys: list[str]) -> None:
+        if not self.arm.learns_from_outcomes:
+            return
+        keys = [f"{self.arm.scope}/{k}" for k in cited_keys] or None
+        with self._timed():
+            try:
+                affected = self.mem.commit_outcome(
+                    f"{self.agent_id}-ep{self.episode}", OutcomeType(outcome.severity),
+                    causal_entry_keys=keys, task_input=task_input[:2000],
+                    response_text=response_text[:2000], decision_summary=outcome.summary[:500],
+                )
+                self.acct.trace_verifiable = True
+                self.acct.notes["affected_entries"] = len(affected)
+                if self._attempts_marked:
+                    self.acct.notes["attempts_in_trace"] = self._attempts_marked
+            except Exception as e:  # noqa: BLE001
+                self.acct.notes["commit_error"] = str(e)[:300]
+
+    def attempt_failed(self, attempt: int, severity: str, cited_keys: list[str], answer: str) -> None:
+        if self.arm.attempt_boundaries and self.arm.learns_from_outcomes:
+            # Local bookkeeping only: the boundary and the entries it blames leave with the
+            # terminal commit_outcome, inside the same trace. Zero extra round trips.
+            keys = [f"{self.arm.scope}/{k}" for k in cited_keys] or None
+            try:
+                self.mem.record_attempt(outcome_type=OutcomeType(severity), causal_entry_keys=keys,
+                                        summary=f"attempt {attempt} failed; answer={answer}"[:300])
+                self._attempts_marked += 1
+            except Exception as e:  # noqa: BLE001
+                self.acct.notes["record_attempt_error"] = str(e)[:200]
+            return
+        if not getattr(self.arm, "per_attempt_outcomes", False) or not cited_keys:
+            return
+        keys = [f"{self.arm.scope}/{k}" for k in cited_keys]
+        with self._timed():
+            try:
+                affected = self.mem.commit_outcome(
+                    f"{self.agent_id}-ep{self.episode}-attempt{attempt}", OutcomeType(severity),
+                    causal_entry_keys=keys, decision_summary=f"attempt {attempt} failed; answer={answer}"[:500],
+                )
+                self.acct.notes["attempt_outcomes"] = self.acct.notes.get("attempt_outcomes", 0) + 1
+                self.acct.notes["attempt_affected"] = self.acct.notes.get("attempt_affected", 0) + len(affected)
+            except Exception as e:  # noqa: BLE001
+                self.acct.notes["attempt_commit_error"] = str(e)[:300]
+
+    def close(self) -> None:
+        try:
+            self.mem.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class SenseLabArm(MemoryArm):
+    """The full documented protocol: compact briefing with evidence sections, evidence-aware
+    retrieve with an avoid list, attempt boundaries, one outcome per task."""
+
+    name = "senselab"
+    learns_from_outcomes = True
+    compact_briefing = True      # briefing(compact=True): lead digest + evidence sections
+    evidence_aware = True        # retrieve(include_avoid=True, adaptive_k=True)
+    attempt_boundaries = True    # record_attempt on each failed non-final attempt
+
+    def session(self, agent_id: str, episode: int) -> EpisodeSession:
+        return _SenseLabSession(self, agent_id, episode)
+
+    def confidence_history(self, keys: list[str]) -> list[dict[str, Any]] | None:
+        out: list[dict[str, Any]] = []
+        mem = AgentMemory(agent_id="cl-analysis",
+                          adapter=_ThrottledHttpAdapter(base_url=config.AMFS_HTTP_URL,
+                                                        api_key=config.env("AMFS_API_KEY", required=True)))
+        try:
+            for key in list(dict.fromkeys(keys))[:40]:
+                try:
+                    versions = mem.history(self.scope, key)
+                except Exception as e:  # noqa: BLE001
+                    out.append({"key": key, "error": str(e)[:120]})
+                    continue
+                for v in versions:
+                    out.append({
+                        "key": key, "version": getattr(v, "version", None),
+                        "confidence": round(float(getattr(v, "confidence", 0.0)), 4),
+                        "evidence_status": getattr(v, "evidence_status", None),
+                        "success_count": getattr(v, "success_count", 0),
+                        "failure_count": getattr(v, "failure_count", 0),
+                        "last_outcome": getattr(v, "last_outcome", None),
+                        "written_at": str(getattr(getattr(v, "provenance", None), "written_at", "")),
+                    })
+        finally:
+            try:
+                mem.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return out
+
+    def seed(self, entries, *, agent_id: str = "seed-agent") -> None:
+        """Pre-load the store with the batch-commit endpoint (``POST /api/v1/commits``, the
+        documented bulk path: one server-side transaction per chunk instead of one request
+        per entry, which matters under the 120 RPM key limit). Seeding is a one-off before
+        episode 1 and is timed by the runner, not charged to episodes."""
+        import httpx
+
+        adapter = _ThrottledHttpAdapter(base_url=config.AMFS_HTTP_URL,
+                                        api_key=config.env("AMFS_API_KEY", required=True),
+                                        timeout=httpx.Timeout(180.0, connect=10.0))
+        # One cell seeds at a time: a batch commit embeds every entry server-side, and a
+        # dozen cells doing that at once pushed single requests past the read timeout.
+        with _SEED_LOCK:
+            for i in range(0, len(entries), 20):
+                chunk = entries[i:i + 20]
+                for attempt in range(3):
+                    try:
+                        adapter.commit_batch(
+                            [{"entity_path": self.scope, "key": key, "value": text, "confidence": conf,
+                              "memory_type": MemoryType.FACT.value} for key, text, conf in chunk],
+                            message=f"benchmark seed {i // 20 + 1}", agent_id=agent_id,
+                        )
+                        break
+                    except (httpx.TimeoutException, httpx.TransportError):
+                        if attempt == 2:
+                            raise
+                        time.sleep(5 * (attempt + 1))
+
+
+class SenseLabEpisodeArm(SenseLabArm):
+    """Ablation: everything in ``senselab`` except attempt boundaries. One outcome per task,
+    attributed to what the *final* attempt read. When attempt 1 follows a stale lesson and
+    fails and attempt 2 succeeds by another route, the stale lesson is not blamed here (the
+    grid-v1 behaviour). The gap to ``senselab`` is what per-attempt credit assignment buys."""
+
+    name = "senselab-episode"
+    attempt_boundaries = False
+
+
+class SenseLabNoFeedbackArm(SenseLabArm):
+    """Ablation: the same reads, no ``commit_outcome``. Every entry stays untested, so the
+    evidence sections are empty and the avoid list never fills; what remains is retrieval."""
+
+    name = "senselab-nofeedback"
+    learns_from_outcomes = False
+    attempt_boundaries = False
+
+
+class SenseLabAttemptsArm(SenseLabArm):
+    """Legacy grid-v1 variant: each failed attempt committed as its own outcome (one HTTP
+    round trip per failure, separate traces). Superseded by ``record_attempt`` in ``senselab``;
+    kept only so v1 rows can be compared like for like."""
+
+    name = "senselab-attempts"
+    attempt_boundaries = False
+    per_attempt_outcomes = True

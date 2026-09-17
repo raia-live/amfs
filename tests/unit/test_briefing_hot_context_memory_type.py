@@ -48,16 +48,20 @@ class TestTheSnapshotRecordsTheKind:
 
 
 class TestTheBuildersCarryIt:
-    """Both hot-context builders, because there are two and only one being fixed
-    is how the field came to be missing from one of them in the first place."""
+    """Two hot-context paths (compiled digest and standalone) used to have two
+    hand-written row builders, and only one being fixed is how the field came
+    to be missing from the other. They now share ``_entry_brief``; pin that
+    both call it and that the one builder carries the field."""
 
     def test_every_hot_entry_builder_includes_memory_type(self) -> None:
         builders = _BRIEFING_SRC.count('"recall_count": e.recall_count')
         carried = _BRIEFING_SRC.count('"memory_type": e.memory_type.value')
-        assert builders >= 2, "expected both hot-context builders in this module"
+        assert builders == 1, "expected a single shared hot-context row builder"
         assert carried == builders, (
             f"{builders} hot-context builders but {carried} carry memory_type"
         )
+        callers = _BRIEFING_SRC.count("[self._entry_brief(e) for e in entries]")
+        assert callers == 2, "both hot-context paths must use the shared builder"
 
     def test_it_is_a_plain_string_not_an_enum_repr(self) -> None:
         """The dict is serialised into a digest summary, so an enum would arrive
