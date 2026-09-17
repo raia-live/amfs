@@ -5,9 +5,9 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, field_validator
 
 
 class MemoryType(str, Enum):
@@ -417,6 +417,25 @@ class ToolCall(BaseModel):
     duration_ms: int = 0
     source: str | None = None
     success: bool = True
+
+    # Caller-reported available labels; never counterfactual outcome evidence.
+    choices: list[Annotated[str, Field(min_length=1, max_length=128)]] | None = Field(default=None, min_length=1, max_length=32)
+    decision_type: Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")] | None = None
+
+    @field_validator("choices")
+    @classmethod
+    def _valid_choices(cls, values):
+        if values is not None and (any(not v.strip() for v in values) or len(set(values)) != len(values)):
+            raise ValueError("choices must be unique nonblank labels")
+        return values
+
+    @model_serializer(mode="wrap")
+    def _legacy_shape(self, handler):
+        data = handler(self)
+        for key in ("choices", "decision_type"):
+            if getattr(self, key) is None:
+                data.pop(key, None)
+        return data
 
 
 class QueryEvent(BaseModel):

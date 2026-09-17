@@ -12,7 +12,7 @@ from typing import Any, Iterator
 
 from amfs_core.abc import AdapterABC
 from amfs_core.hashing import content_hash, integrity_chain_hash
-from amfs_core.models import ArtifactRef, MemoryEntry, MemoryType, Provenance
+from amfs_core.models import ArtifactRef, MemoryEntry, MemoryType, Provenance, ToolCall
 
 ExternalContext = dict[str, Any]
 
@@ -328,6 +328,8 @@ class ReadTracker:
         source: str | None = None,
         duration_ms: int = 0,
         success: bool = True,
+        choices: list[str] | None = None,
+        decision_type: str | None = None,
     ) -> None:
         """Record an action the agent took during this session.
 
@@ -338,6 +340,9 @@ class ReadTracker:
         The result is hashed in full and stored only as a prefix: a trace is a
         record of the decision, not a cache of everybody's API responses.
         """
+        metadata = ToolCall(tool_name=tool_name, choices=choices, decision_type=decision_type)
+        optional = {k: v for k, v in metadata.model_dump().items()
+                    if k in ("choices", "decision_type")}
         result_hash = hashlib.sha256(result.encode("utf-8")).hexdigest() if result else ""
         summary = result[:_MAX_ACTION_RESULT_CHARS]
         if len(result) > _MAX_ACTION_RESULT_CHARS:
@@ -351,6 +356,7 @@ class ReadTracker:
             "duration_ms": duration_ms,
             "source": source,
             "success": success,
+            **optional,
         })
 
     @property

@@ -314,6 +314,13 @@ class TestMCPTools:
         assert "Nothing was read" not in result["note"]
         assert "causal_entries" in result["note"]
 
+    def test_choice_metadata_reaches_sdk_tracker(self):
+        import amfs_mcp.server as srv
+        srv.amfs_record_action("retry", choices=["retry", "escalate"], decision_type="next_tool")
+        action = srv._get_memory()._read_tracker.actions[-1]
+        assert action["choices"] == ["retry", "escalate"]
+        assert action["decision_type"] == "next_tool"
+
     def test_the_recorded_actions_are_counted_back(self) -> None:
         """The only signal an agent gets that its actions reached the trace.
 
