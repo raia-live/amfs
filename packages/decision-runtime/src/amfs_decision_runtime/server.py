@@ -27,11 +27,39 @@ class ScoreRequest(BaseModel):
     questions: dict[str, list[str]] = Field(min_length=1, max_length=16)
 
 
+def warmup_keys(value: str, registry: dict, capacity: int) -> list[str]:
+    """Operator-only JSON configuration, never supplied by a scoring request."""
+    keys = json.loads(value)
+    if not isinstance(keys, list) or any(not isinstance(key, str) or not 1 <= len(key) <= 256 for key in keys):
+        raise ValueError("AMFS_DECISION_WARMUP_KEYS must be a JSON array of runtime keys")
+    if len(keys) > capacity:
+        raise ValueError("startup warmup exceeds the configured model cache capacity")
+    if len(set(keys)) != len(keys):
+        raise ValueError("startup warmup contains duplicate runtime keys")
+    if any(key not in registry for key in keys):
+        raise ValueError("startup warmup contains an unregistered runtime key")
+    return keys
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.pool = ArtifactPool(json.loads(Path(os.environ["AMFS_DECISION_ARTIFACTS"]).read_text()),
-                                  int(os.environ.get("AMFS_DECISION_CACHE_MODELS", "2")))
-    yield
+    # A prior lifespan cannot leave a stale ready flag after restart failure.
+    if hasattr(app.state, "pool"):
+        del app.state.pool
+    pool = ArtifactPool(json.loads(Path(os.environ["AMFS_DECISION_ARTIFACTS"]).read_text()),
+                        int(os.environ.get("AMFS_DECISION_CACHE_MODELS", "2")))
+    try:
+        keys = warmup_keys(os.environ.get("AMFS_DECISION_WARMUP_KEYS", "[]"), pool.registry, pool.capacity)
+        # Construct privately and publish only after EVERY requested digest,
+        # version and device load succeeds. Failure aborts startup; no partial
+        # model set is advertised ready. No warmup is performed by default.
+        await run_in_threadpool(pool.warmup, keys)
+        app.state.pool = pool
+        yield
+    finally:
+        if getattr(app.state, "pool", None) is pool:
+            del app.state.pool
+        pool.close()
 
 
 class ArtifactPool:
@@ -48,6 +76,19 @@ class ArtifactPool:
         self.registry, self.capacity = registry, capacity
         self.cache = OrderedDict()
         self.lock = threading.Lock()
+
+    def warmup(self, keys: list[str]):
+        # Validate before the first allocation, including direct operator use.
+        keys = warmup_keys(json.dumps(keys), self.registry, self.capacity)
+        with self.lock, torch.inference_mode():
+            for key in keys:
+                self.get(key)
+
+    def close(self):
+        with self.lock:
+            self.cache.clear()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def get(self, key: str):
         entry = self.registry.get(key)

@@ -67,3 +67,28 @@ No useful pretrained SenseLab decision checkpoint is released with this code.
 Public weights require data rights, a model card, pinned runtime, independent
 evaluation and release review. Synthetic smoke-test metrics are not evidence
 of superiority over Jev or a production automation guarantee.
+
+### Optional startup artifact preload
+
+The reference server remains lazy by default. An operator may set
+`AMFS_DECISION_WARMUP_KEYS` to a JSON array of existing opaque runtime keys, for
+example `["account-a:recovery:v1","account-a:triage:v2"]`. The array comes only
+from process configuration; scoring clients cannot set warmup paths or keys.
+Every key must exist in `AMFS_DECISION_ARTIFACTS`, be unique and fit within
+`AMFS_DECISION_CACHE_MODELS`. Invalid configuration fails before loading models.
+
+Startup constructs a private pool, checks each full artifact digest and version,
+and loads the requested models onto the selected device. Readiness is published
+only after the entire requested set succeeds. A missing/corrupt artifact, version
+mismatch or device allocation failure aborts startup and clears the partial pool;
+the service does not advertise partial readiness. Set startup-probe timeouts for
+the actual measured preload duration. No new models are downloaded by this path.
+
+This preloads artifacts; it does not execute a representative inference request
+or establish a latency SLO. Model count bounds are not GPU memory byte bounds:
+operators must choose capacity and artifact sizes that fit the device, including
+inference activation memory. OOM is a startup failure, not permission to silently
+drop a warmup key. Subsequent traffic still uses the bounded LRU and may evict
+preloaded models. Cold container startup, new artifact misses, tokenization,
+queueing and inference can still contribute latency. Benchmark the configured
+service under representative concurrency before making performance claims.
