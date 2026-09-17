@@ -83,6 +83,11 @@ CREATE OR REPLACE FUNCTION amfs_outcome_is_success(t TEXT) RETURNS BOOLEAN AS $$
     SELECT t IN ('success', 'clean_deploy');
 $$ LANGUAGE sql IMMUTABLE;
 
+CREATE OR REPLACE FUNCTION amfs_outcome_is_known(t TEXT) RETURNS BOOLEAN AS $$
+    SELECT t IN ('success', 'clean_deploy', 'minor_failure', 'regression',
+                 'failure', 'p2_incident', 'critical_failure', 'p1_incident');
+$$ LANGUAGE sql IMMUTABLE;
+
 CREATE OR REPLACE FUNCTION amfs_outcome_severity(t TEXT) RETURNS NUMERIC AS $$
     SELECT CASE t
         WHEN 'success' THEN 1.0
@@ -156,6 +161,11 @@ BEGIN
         RETURN 0;
     END IF;
 
+    -- An outcome type neither side of the model knows is not evidence of
+    -- anything (the multipliers treated it as x1.0; this treats it as no step).
+    IF NOT amfs_outcome_is_known(p_outcome_type) THEN
+        RETURN 0;
+    END IF;
     is_ok := amfs_outcome_is_success(p_outcome_type);
     target := CASE WHEN is_ok THEN 1.0 ELSE 0.0 END;
 

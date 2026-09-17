@@ -236,3 +236,32 @@ class TestStatus:
         # Pre-split-count history: direction read off the confidence left behind.
         assert _entry(0.9, outcome_count=3).evidence_status == "validated"
         assert _entry(0.3, outcome_count=3).evidence_status == "contested"
+
+
+class TestReviewFindings:
+    """Two model-side findings from the first review of this branch."""
+
+    def test_multiplicative_success_below_the_gate_keeps_the_flag(self) -> None:
+        # Python used to clear ``discredited`` on any success under the legacy
+        # model while the SQL step kept it until the posterior cleared 0.5, so
+        # filesystem and Postgres disagreed on what retrieval excluded.
+        e = _entry(0.30, discredited_at=datetime.now(UTC), success_count=0, failure_count=3)
+        upd = ev.apply_outcome_multiplicative(e, OutcomeType.SUCCESS)
+        assert upd.confidence < ev.DISCREDIT_THRESHOLD
+        assert upd.discredited is True
+
+    def test_multiplicative_success_over_the_gate_clears_the_flag(self) -> None:
+        e = _entry(0.49, discredited_at=datetime.now(UTC))
+        upd = ev.apply_outcome_multiplicative(e, OutcomeType.SUCCESS)
+        assert upd.confidence >= ev.DISCREDIT_THRESHOLD
+        assert upd.discredited is False
+
+    def test_an_unknown_outcome_type_is_not_evidence(self) -> None:
+        assert not ev.is_known("something_new")
+        e = _entry(0.9)
+        rec = _record(OutcomeType.SUCCESS, ["svc/mod/rule"])
+        rec = rec.model_copy(update={"outcome_type": "something_new"})
+        new, updates = ev.apply_record_to_entry(e, rec, model="evidence")
+        assert updates == []
+        assert new.confidence == pytest.approx(0.9)
+        assert (new.success_count, new.failure_count) == (0, 0)

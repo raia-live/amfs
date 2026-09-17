@@ -1590,6 +1590,16 @@ class AgentMemory:
         retrieve, and one commit.
         """
         name = outcome_type.value if isinstance(outcome_type, OutcomeType) else str(outcome_type)
+        from amfs_core.evidence import is_success
+
+        if is_success(name):
+            # A boundary marks what failed; a success here would credit the
+            # entries the caller is marking down. The final success is what
+            # ``commit_outcome`` is for.
+            raise ValueError(
+                f"record_attempt marks a failed attempt; {name!r} is a success. "
+                "Commit the success with commit_outcome."
+            )
         recorded = self._read_tracker.record_attempt(
             outcome_type=name,
             summary=summary,

@@ -246,3 +246,16 @@ class TestHttpServerAttempts:
             "final_action_index": 3,
         }
         assert client.post("/api/v1/outcomes", json=body).status_code == 422
+
+
+def test_record_attempt_refuses_a_success(tmp_amfs_root) -> None:
+    """A boundary marks what failed; a success here would credit the entries
+    being marked down. The gateway tool enforces the same rule."""
+    from amfs import AgentMemory
+    from amfs_filesystem.adapter import FilesystemAdapter
+
+    mem = AgentMemory(agent_id="a", adapter=FilesystemAdapter(root=tmp_amfs_root, namespace="t"))
+    for good in (OutcomeType.SUCCESS, "clean_deploy"):
+        with pytest.raises(ValueError, match="commit_outcome"):
+            mem.record_attempt(outcome_type=good)
+    assert mem._read_tracker.attempts == []

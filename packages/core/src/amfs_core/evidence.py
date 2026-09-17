@@ -89,6 +89,11 @@ def is_success(outcome_type: OutcomeType | str) -> bool:
     return _name(outcome_type) in SUCCESS_TYPES
 
 
+def is_known(outcome_type: OutcomeType | str) -> bool:
+    """Whether the model has a verdict for this type. Unknown types are not evidence."""
+    return _name(outcome_type) in SEVERITY
+
+
 def severity(outcome_type: OutcomeType | str) -> float:
     return SEVERITY.get(_name(outcome_type), 1.0)
 
@@ -219,6 +224,14 @@ def apply_outcome_multiplicative(
     new_conf = clamp_confidence(entry.confidence * multiplier * causal_confidence)
     success = is_success(outcome_type)
     prior = entry.prior_confidence if entry.prior_confidence is not None else entry.confidence
+    # Same hysteresis as the evidence model and the SQL step: a success that
+    # does not clear the threshold leaves the flag where it was.
+    if new_conf < DISCREDIT_THRESHOLD and not success:
+        discredited = True
+    elif new_conf >= DISCREDIT_THRESHOLD:
+        discredited = False
+    else:
+        discredited = entry.discredited_at is not None
     return EvidenceUpdate(
         confidence=new_conf,
         evidence_success=entry.evidence_success + (1.0 if success else 0.0),
@@ -227,7 +240,7 @@ def apply_outcome_multiplicative(
         failure_count=entry.failure_count + (0 if success else 1),
         prior_confidence=clamp_confidence(prior),
         last_outcome=_name(outcome_type),
-        discredited=new_conf < DISCREDIT_THRESHOLD and not success,
+        discredited=discredited,
         delta=new_conf - entry.confidence,
     )
 
@@ -336,6 +349,8 @@ def apply_record_to_entry(
         if entry.entry_key not in keys:
             continue
         if not claim_still_held(entry, versions.get(entry.entry_key), version_lookup):
+            continue
+        if not is_known(outcome_type):
             continue
         if model == "multiplicative":
             upd = apply_outcome_multiplicative(
@@ -487,6 +502,7 @@ __all__ = [
     "SYNTHETIC_KEY_PREFIXES",
     "EvidenceUpdate",
     "apply_outcome",
+    "is_known",
     "apply_outcome_multiplicative",
     "apply_record_to_entry",
     "cited_entries",

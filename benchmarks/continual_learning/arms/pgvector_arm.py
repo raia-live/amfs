@@ -76,6 +76,8 @@ class _PgSession(EpisodeSession):
     def __init__(self, arm: "PgVectorArm", agent_id: str, episode: int) -> None:
         super().__init__(arm, agent_id, episode)
         self.arm: PgVectorArm = arm
+        self._boundary = 0            # index into read_keys where the current attempt began
+        self._blamed: set[str] = set()  # keys already charged for a failed attempt
 
     def search(self, query: str, top_k: int) -> list[MemoryHit]:
         with self._timed():
@@ -157,12 +159,22 @@ class _PgSession(EpisodeSession):
     def end(self, outcome, *, task_input: str, response_text: str, cited_keys: list[str]) -> None:
         if not self.arm.track_outcomes:
             return
-        self._tally(cited_keys or self.read_keys, outcome.success)
+        # The terminal verdict goes to what the final attempt relied on. Without
+        # explicit citations that is the top hit of each search made since the
+        # last failed attempt, never a key already charged for that failure —
+        # otherwise the stale hit that caused the failure is paid back a win on
+        # recovery, which is the very credit leak the study measures.
+        keys = cited_keys or self.read_keys[self._boundary:]
+        keys = [k for k in keys if k not in self._blamed]
+        self._tally(keys, outcome.success)
 
     def attempt_failed(self, attempt: int, severity: str, cited_keys: list[str], answer: str) -> None:
         if not self.arm.track_outcomes:
             return
-        self._tally(cited_keys or self.read_keys[-1:], False)
+        blamed = cited_keys or self.read_keys[self._boundary:][-1:]
+        self._blamed.update(blamed)
+        self._boundary = len(self.read_keys)
+        self._tally(blamed, False)
 
     def write(self, key: str, text: str, *, confidence: float = 0.7, kind: str = "experience") -> None:
         with self._timed():
