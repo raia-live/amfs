@@ -47,6 +47,8 @@ def test_pretrained_architecture_export_loads_offline(tmp_path, monkeypatch):
     model.save(destination)
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     restored = DecisionScorer.load(destination)
+    with pytest.raises(ValueError, match="token limit"):
+        restored("failure " * 513, ["retry", "inspect"])
     with torch.inference_mode():
         assert torch.allclose(model("failure", ["retry", "inspect"])["logits"],
                               restored("failure", ["retry", "inspect"])["logits"], atol=1e-6)

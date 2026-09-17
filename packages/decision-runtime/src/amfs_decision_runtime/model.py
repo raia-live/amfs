@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import torch
@@ -43,6 +43,20 @@ class ScorerConfig:
     max_candidate_tokens: int = 256
     version: str = "experimental-v1"
     architecture: str = "senselab.shared-state-cross-attention.v1"
+    lora_rank: int | None = None
+    lora_alpha: int = 16
+    lora_dropout: float = 0.0
+    lora_targets: tuple[str, ...] = ("query", "value")
+    lora_merged: bool = False
+
+    def __post_init__(self):
+        if self.lora_rank is not None:
+            if not self.backbone or self.lora_rank < 1 or self.lora_alpha < 1:
+                raise ValueError("LoRA requires a pretrained backbone and positive rank/alpha")
+            if not 0 <= self.lora_dropout < 1 or not self.lora_targets:
+                raise ValueError("invalid LoRA dropout or target modules")
+        elif self.lora_merged:
+            raise ValueError("merged LoRA metadata requires a rank")
 
 
 class DecisionScorer(nn.Module):
@@ -81,6 +95,14 @@ class DecisionScorer(nn.Module):
                 dropout=0, batch_first=True,
             )
             self.encoder = nn.TransformerEncoder(layer, num_layers=2)
+        if config.lora_rank is not None and not config.lora_merged:
+            from peft import LoraConfig, get_peft_model
+            # Each scorer owns its adapter. Never mutate a shared backbone to
+            # switch customers during concurrent inference.
+            adapter = LoraConfig(r=config.lora_rank, lora_alpha=config.lora_alpha,
+                                 lora_dropout=config.lora_dropout, bias="none",
+                                 target_modules=list(config.lora_targets))
+            self.encoder = get_peft_model(self.encoder, adapter)
         self.attention = nn.MultiheadAttention(config.hidden_size, config.heads, batch_first=True)
         self.norm = nn.LayerNorm(config.hidden_size)
         self.decision_head = nn.Linear(config.hidden_size, 1)
@@ -95,6 +117,13 @@ class DecisionScorer(nn.Module):
 
     def encode(self, texts: list[str], limit: int) -> tuple[torch.Tensor, torch.Tensor]:
         if self.tokenizer:
+            # Artifact limits cannot increase the pretrained encoder's context.
+            # Reject explicitly instead of truncating state or failing inside
+            # positional embeddings (e.g. BERT's 512-position capacity).
+            for maximum in (getattr(self.encoder.config, "max_position_embeddings", None),
+                            getattr(self.tokenizer, "model_max_length", None)):
+                if isinstance(maximum, int) and maximum > 0:
+                    limit = min(limit, maximum)
             encoded = self.tokenizer(texts, padding=True, truncation=False, return_tensors="pt")
             if encoded.input_ids.shape[1] > limit:
                 raise ValueError("text exceeds model token limit; explicit state compilation required")
@@ -129,6 +158,16 @@ class DecisionScorer(nn.Module):
             "outcome_logits": self.outcome_head(representation).squeeze(-1),
             "utility": self.utility_head(representation).squeeze(-1),
         }
+
+    def merge_adapter(self) -> None:
+        """Finalize a training model into a standalone immutable serving model.
+
+        Call only after training/checkpoint selection, never on a live server.
+        The merged export loads without the optional PEFT dependency.
+        """
+        if self.config.lora_rank is not None and not self.config.lora_merged:
+            self.encoder = self.encoder.merge_and_unload(safe_merge=True)
+            self.config = replace(self.config, lora_merged=True)
 
     def save(self, directory: str | Path) -> None:
         from safetensors.torch import save_file

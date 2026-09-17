@@ -52,13 +52,42 @@ export interface DecisionModel {
   serving_mode: "observe" | "route"; active_version: string | null; created_at: string;
 }
 
+export interface DecisionVersion {
+  version: string; artifact_sha256: string; evaluation: Record<string, unknown>;
+  calibration: Record<string, unknown>; created_at: string;
+}
+export interface DecisionDataset { id: string; name: string; manifest_sha256: string }
+export interface DecisionTrainingJob {
+  id: string; model_id: string; version: string; dataset_id: string;
+  state: "queued" | "submitting" | "running" | "succeeded" | "failed";
+  attempts: number; error_code: string | null; created_at: string; updated_at: string;
+}
+export interface DecisionUsage {
+  decision_count: number; answered_units: number; automated_decisions: number;
+  automation_rate: number | null; days: number; since: string;
+  by_engine: { engine: string; question_count: number }[];
+  daily: { date: string; decision_count: number; answered_units: number; automated_decisions: number }[];
+  billing_status: "preview_unbilled"; cost_usd: null;
+}
+export interface DecisionSummary {
+  decision_id: string; created_at: string; answered_units: number; automate: boolean;
+  answers: Record<string, Pick<DecisionAnswer, "candidate_id" | "served_by" | "model_version" | "reason" | "disposition" | "automate">>;
+}
+export interface DecisionHistory { decisions: DecisionSummary[]; next_cursor: string | null; usage: DecisionUsage }
+export interface DecisionDetail {
+  request: DecideRequest; response: DecideResponse;
+  outcomes: { event: DecisionOutcome; verified: boolean }[];
+  integrity: { status: "verified" | "invalid" | "key_unavailable"; content_valid: boolean;
+    signature_valid: boolean | null; signing_key_id: string };
+}
+
 export class DecisionClient {
   constructor(private options: { baseUrl: string; apiKey: string; fetch?: typeof fetch; timeoutMs?: number }) {}
 
-  private async request<T>(path: string, body?: unknown, key?: string, resource = "decisions"): Promise<T> {
+  private async request<T>(path: string, body?: unknown, key?: string, resource = "decisions", method?: "GET" | "POST" | "PATCH"): Promise<T> {
     const response = await (this.options.fetch ?? fetch)(
       `${this.options.baseUrl.replace(/\/$/, "")}/api/v1/${resource}${path}`, {
-        method: body === undefined ? "GET" : "POST",
+        method: method ?? (body === undefined ? "GET" : "POST"),
         headers: { "Content-Type": "application/json", "X-AMFS-API-Key": this.options.apiKey,
           ...(key ? { "Idempotency-Key": key } : {}) },
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -78,11 +107,47 @@ export class DecisionClient {
     const response = await this.request<{ models: DecisionModel[] }>("", undefined, undefined, "decision-models");
     return response.models;
   }
+  getModel(name: string): Promise<DecisionModel> {
+    return this.request(`/${encodeURIComponent(name)}`, undefined, undefined, "decision-models");
+  }
+  setMode(name: string, servingMode: "observe" | "route"): Promise<DecisionModel> {
+    return this.request(`/${encodeURIComponent(name)}`, { serving_mode: servingMode }, undefined, "decision-models", "PATCH");
+  }
+  async listVersions(name: string): Promise<DecisionVersion[]> {
+    return (await this.request<{ versions: DecisionVersion[] }>(`/${encodeURIComponent(name)}/versions`, undefined, undefined, "decision-models")).versions;
+  }
+  async listDatasets(name: string): Promise<DecisionDataset[]> {
+    return (await this.request<{ datasets: DecisionDataset[] }>(`/${encodeURIComponent(name)}/datasets`, undefined, undefined, "decision-models")).datasets;
+  }
+  async listJobs(name: string): Promise<DecisionTrainingJob[]> {
+    return (await this.request<{ jobs: DecisionTrainingJob[] }>(`/${encodeURIComponent(name)}/jobs`, undefined, undefined, "decision-models")).jobs;
+  }
+  /** Reuse this explicit key and payload to retry an uncertain response. */
+  enqueueTraining(name: string, body: { version: string; dataset_id: string }, idempotencyKey: string): Promise<DecisionTrainingJob> {
+    if (!idempotencyKey || idempotencyKey.length > 128) throw new Error("idempotencyKey must contain 1 to 128 characters");
+    return this.request(`/${encodeURIComponent(name)}/jobs`, body, idempotencyKey, "decision-models");
+  }
+  /** Compare-and-set activation. null means first activation; every activation starts in observe mode. */
+  activateVersion(name: string, version: string, expectedActiveVersion: string | null): Promise<DecisionModel> {
+    if (expectedActiveVersion === undefined) throw new Error("expectedActiveVersion is required, including null for first activation");
+    return this.request(`/${encodeURIComponent(name)}/versions/${encodeURIComponent(version)}/activate`,
+      { expected_active_version: expectedActiveVersion }, undefined, "decision-models");
+  }
+  history(name: string, options: { limit?: number; cursor?: string } = {}): Promise<DecisionHistory> {
+    const limit = options.limit ?? 50;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("limit must be between 1 and 100");
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (options.cursor !== undefined) query.set("cursor", options.cursor);
+    return this.request(`/${encodeURIComponent(name)}/decisions?${query}`, undefined, undefined, "decision-models");
+  }
+  usage(name: string, days = 30): Promise<DecisionUsage> {
+    if (!Number.isInteger(days) || days < 1 || days > 90) throw new Error("days must be between 1 and 90");
+    return this.request(`/${encodeURIComponent(name)}/usage?days=${days}`, undefined, undefined, "decision-models");
+  }
   reportOutcome(decisionId: string, event: DecisionOutcome): Promise<{ event_id: string; verified: boolean }> {
     return this.request(`/${encodeURIComponent(decisionId)}/outcomes`, event);
   }
-  get(decisionId: string): Promise<{ request: DecideRequest; response: DecideResponse;
-    outcomes: { event: DecisionOutcome; verified: boolean }[] }> {
+  get(decisionId: string): Promise<DecisionDetail> {
     return this.request(`/${encodeURIComponent(decisionId)}`);
   }
 }

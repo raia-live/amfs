@@ -99,7 +99,8 @@ def score_batch(body: ScoreRequest):
             version = scorer.config.version
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
-    return {"distributions": result, "model_version": version}
+    return {"distributions": result, "model_version": version, "runtime_key": body.runtime_key,
+            "artifact_sha256": app.state.pool.registry[body.runtime_key]["sha256"]}
 
 
 @app.post("/score")
