@@ -259,3 +259,43 @@ def test_record_attempt_refuses_a_success(tmp_amfs_root) -> None:
         with pytest.raises(ValueError, match="commit_outcome"):
             mem.record_attempt(outcome_type=good)
     assert mem._read_tracker.attempts == []
+
+
+def test_same_tick_reads_land_on_exactly_one_side_of_the_boundary(
+    mem: AgentMemory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Attribution is by read order, not by clock. With the clock frozen — one
+    tick spanning a read, the failed attempt, and the next read — the first
+    read must be the attempt's only, and the second the terminal outcome's
+    only. A timestamp boundary cannot do both: inclusive, the first read is
+    blamed *and* reinforced; nudged past the last read, the second read is
+    credited to neither."""
+    from datetime import datetime, timezone
+
+    from amfs_core import engine as engine_mod
+
+    frozen = datetime(2020, 1, 1, 12, 0, 0, 500000, tzinfo=timezone.utc)
+
+    class _StoppedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            return frozen if tz is None else frozen.astimezone(tz)
+
+    monkeypatch.setattr(engine_mod, "datetime", _StoppedClock)
+
+    mem.read("acme/support", "fix-restart")
+    attempt = mem.record_attempt(summary="restart did nothing")
+    assert attempt.causal_entry_keys == ["acme/support/fix-restart"]
+
+    tracker = mem._read_tracker
+    assert tracker.terminal_causal_keys == []
+
+    mem.read("acme/support", "fix-rotate-key")
+    assert tracker._reads["acme/support/fix-rotate-key"] == frozen  # same tick, by construction
+    assert tracker.terminal_causal_keys == ["acme/support/fix-rotate-key"]
+    assert tracker.causal_keys == ["acme/support/fix-restart", "acme/support/fix-rotate-key"]
+
+    # Re-reading an entry the attempt blamed moves it into the terminal window:
+    # the agent consulted it again, so the final outcome is its to receive too.
+    mem.read("acme/support", "fix-restart")
+    assert tracker.terminal_causal_keys == ["acme/support/fix-rotate-key", "acme/support/fix-restart"]
