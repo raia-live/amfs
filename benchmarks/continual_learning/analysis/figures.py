@@ -23,10 +23,11 @@ from . import regime_change as rc  # noqa: E402
 from . import transfer as tr  # noqa: E402
 
 COLORS = {"none": "#999999", "pgvector": "#1f77b4", "pgvector-diy": "#8c564b", "pgvector-diy+outcomes": "#17becf",
-          "mem0": "#ff7f0e", "senselab-nofeedback": "#bcbd22", "senselab-nopriors": "#e377c2", "senselab": "#d62728"}
+          "mem0": "#ff7f0e", "senselab-nofeedback": "#bcbd22", "senselab-nopriors": "#e377c2", "senselab-lean": "#9467bd",
+          "senselab": "#d62728"}
 SHORT = {"none": "no memory", "pgvector": "pgvector RAG", "pgvector-diy": "pgvector DIY", "pgvector-diy+outcomes": "pgvector DIY\n+ outcome counter",
          "mem0": "Mem0", "senselab-nofeedback": "SenseLab\nno outcomes", "senselab-nopriors": "SenseLab\nno priors",
-         "senselab": "SenseLab CL"}
+         "senselab-lean": "SenseLab CL\nlean briefing", "senselab": "SenseLab CL"}
 
 
 def paired(rows, ref: str, other: str, *, episodes=None, fleet=1):

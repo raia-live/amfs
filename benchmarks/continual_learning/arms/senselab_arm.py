@@ -42,6 +42,11 @@ Variants:
   ``senselab-nopriors``    the full protocol without action priors / recommendation / compact
                            payload (the grid-v2 wiring). The gap to ``senselab`` is what
                            action-level learning buys.
+  ``senselab-lean``        the full protocol with the briefing cut to its evidence sections
+                           (regime shift, discredited, validated, tried here, explore) — no
+                           hot-context previews. The retrieve that follows returns the same
+                           notes when they are relevant, so this measures what the previews
+                           cost in tokens against what they add in accuracy.
 
 Env: ``CL_SENSELAB_PRIORS=0`` turns priors off for every senselab arm (same as
 ``senselab-nopriors``); ``CL_SENSELAB_SINCE=0`` turns off incremental repeat briefings
@@ -161,9 +166,10 @@ def _ev(it: dict[str, Any]) -> str:
     return f" ({'; '.join(parts)})" if parts else ""
 
 
-def _render_briefing(digests: list[Any]) -> str | None:
+def _render_briefing(digests: list[Any], *, hot_context: bool = True) -> str | None:
     """Render what the agent reads at the top of a task. Evidence sections first — they are
-    the part of a briefing that only a system with outcomes can produce."""
+    the part of a briefing that only a system with outcomes can produce. ``hot_context=False``
+    leaves out the entry previews (``senselab-lean``)."""
     lines: list[str] = []
     for d in digests or []:
         summary = getattr(d, "summary", None)
@@ -200,6 +206,8 @@ def _render_briefing(digests: list[Any]) -> str | None:
         if isinstance(explore, dict) and explore.get("suggested_action"):
             lines.append(f"Explore: try {explore['suggested_action']} first. {explore.get('why', '')}".rstrip())
         for k in ("hot_context", "entries", "facts", "patterns", "key_facts", "risks"):
+            if not hot_context:
+                break
             items = summary.get(k)
             if isinstance(items, list) and items:
                 for it in items[:8]:
@@ -263,7 +271,7 @@ class _SenseLabSession(EpisodeSession):
                 dropped += 1
         if dropped:
             self.acct.notes["briefing_digests_dropped"] = self.acct.notes.get("briefing_digests_dropped", 0) + dropped
-        text = _render_briefing(kept)
+        text = _render_briefing(kept, hot_context=self.arm.briefing_hot_context)
         if text:
             self.acct.retrieved_bytes += len(text)
         return text
@@ -413,6 +421,8 @@ class SenseLabArm(MemoryArm):
     priors = os.environ.get("CL_SENSELAB_PRIORS", "1") not in ("0", "false", "no")
     # briefing(since=<last briefing this agent received>) — see the module docstring.
     briefing_since = os.environ.get("CL_SENSELAB_SINCE", "1") not in ("0", "false", "no")
+    # Whether the rendered briefing carries the hot-context previews (``senselab-lean`` drops them).
+    briefing_hot_context = True
 
     def open(self, scope: str) -> None:
         super().open(scope)
@@ -514,6 +524,16 @@ class SenseLabAttemptsArm(SenseLabArm):
     name = "senselab-attempts"
     attempt_boundaries = False
     per_attempt_outcomes = True
+
+
+class SenseLabLeanArm(SenseLabArm):
+    """The full protocol with the briefing cut to its evidence sections. The runbook probe
+    put the protocol's token premium over ``pgvector`` at ~1.65x, most of it the three
+    hot-context previews carried on every call of the episode and then returned again by the
+    retrieve. The gap to ``senselab`` is what those previews cost and what they buy."""
+
+    name = "senselab-lean"
+    briefing_hot_context = False
 
 
 class SenseLabNoPriorsArm(SenseLabArm):
