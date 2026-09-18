@@ -17,10 +17,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from psycopg.rows import dict_row
-from psycopg_pool import AsyncConnectionPool
-
-from amfs_postgres._fts import or_tsquery
 from amfs_core.content import classify_artifact
 from amfs_core.exceptions import VersionConflictError
 from amfs_core.models import (
@@ -37,19 +33,23 @@ from amfs_core.models import (
     SemanticQuery,
 )
 from amfs_core.scope import descendants_sql
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
+from amfs_postgres._fts import or_tsquery
 from amfs_postgres.adapter import (
-    PostgresAdapter,
     _EVIDENCE_COLUMNS,
     _EVIDENCE_SELECT,
     _EXCLUDE_SHARED_PATHS,
     _REUSE_EVENT_INSERT_SQL,
+    PostgresAdapter,
     _evidence_params,
     _inherit_from_row,
     connection_options,
     entry_select,
     pool_bounds,
 )
+from amfs_postgres.knn import hnsw_scan_settings, parse_pgvector_version, use_hnsw_scan
 from amfs_postgres.tenant_gucs import areset_tenant_gucs
 
 logger = logging.getLogger(__name__)
@@ -166,6 +166,7 @@ class AsyncPostgresAdapter:
         self._has_search_tsv = False
         self._has_is_artifact_col = False
         self._has_evidence_cols = False
+        self._pgvector_version: tuple[int, ...] | None = None
         connect_kwargs: dict[str, Any] = {"row_factory": dict_row, "autocommit": True}
         # The ceiling belongs here most of all. This adapter serves the hot-path
         # REST endpoints, so it holds the statements a caller is actually waiting
@@ -219,6 +220,17 @@ class AsyncPostgresAdapter:
                 self._has_evidence_cols = "success_count" in found
                 self._has_search_tsv = "search_tsv" in found
                 self._has_is_artifact_col = "is_artifact" in found
+                self._pgvector_version = None
+                if self._has_embedding_col:
+                    # Decides whether the account-wide vector search may take
+                    # the HNSW route (see amfs_postgres.knn).
+                    await cur.execute(
+                        "SELECT extversion FROM pg_extension WHERE extname = 'vector'"
+                    )
+                    row = await cur.fetchone()
+                    self._pgvector_version = parse_pgvector_version(
+                        row["extversion"] if row else None
+                    )
 
     # ── helpers (delegated to sync adapter statics) ─────────────────
 
@@ -619,18 +631,39 @@ class AsyncPostgresAdapter:
             params.append(query.max_confidence)
 
         where = " AND ".join(conditions)
+        # Projected, not ``*``: the ranked rows do not need their own 1536-dim
+        # vectors shipped back only to be dropped by ``_row_to_entry`` — that
+        # was ~6 KB per candidate, per query variant.
         sql = f"""
-            SELECT *, 1 - (embedding <=> %s::vector) AS similarity
+            SELECT {entry_select(self._has_is_artifact_col)},
+                   1 - (embedding <=> %s::vector) AS similarity
             FROM amfs_memory_entries
             WHERE {where}
             ORDER BY embedding <=> %s::vector
             LIMIT %s
         """
+        sql_params = [vec_str] + params + [vec_str, query.limit]
 
         async with self._pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(sql, [vec_str] + params + [vec_str, query.limit])
-                rows = await cur.fetchall()
+            rows: list[dict[str, Any]] | None = None
+            if use_hnsw_scan(entity_path=query.entity_path, version=self._pgvector_version):
+                # Account-wide: put this one statement on the HNSW index (see
+                # amfs_postgres.knn for the measurement and the rule). SET
+                # LOCAL scopes the settings to the transaction, so the pooled
+                # connection comes back exactly as it went out.
+                async with conn.transaction():
+                    await conn.execute(hnsw_scan_settings(query.limit))
+                    async with conn.cursor() as cur:
+                        await cur.execute(sql, sql_params)
+                        rows = await cur.fetchall()
+                if len(rows) < query.limit:
+                    # The iterative scan gave up before the filter let enough
+                    # rows through; the exact scan below is complete.
+                    rows = None
+            if rows is None:
+                async with conn.cursor() as cur:
+                    await cur.execute(sql, sql_params)
+                    rows = await cur.fetchall()
 
         results: list[tuple[MemoryEntry, float]] = []
         for row in rows:

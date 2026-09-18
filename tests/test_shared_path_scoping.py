@@ -46,6 +46,20 @@ def _method(path: Path, name: str) -> str:
     return src[start : start + 10 + (end.start() if end else len(rest))]
 
 
+#: Where a read builds its WHERE clause when that is not the method itself.
+#: ``list`` and ``count_entries`` share ``_list_conditions`` so a page and the
+#: ``total`` it reports cannot disagree about which rows exist; the guard
+#: therefore lives there, and these tests follow it.
+WHERE_BUILDER: dict[tuple[Path, str], str] = {
+    (SYNC, "list"): "_list_conditions",
+}
+
+
+def _where_body(path: Path, method: str) -> str:
+    """The source that decides which rows *method* reads."""
+    return _method(path, WHERE_BUILDER.get((path, method), method))
+
+
 class TestTheGuardIsDefinedOnce:
     def test_it_matches_prefixed_paths_only(self) -> None:
         """A bare '@name' with no topic is not a shared namespace, and an
@@ -116,7 +130,7 @@ class TestUnscopedReadsExcludeSharedNamespaces:
         ],
     )
     def test_the_guard_is_applied_when_no_path_is_given(self, path, method) -> None:
-        body = _method(path, method)
+        body = _where_body(path, method)
         assert GUARD in body, (
             f"{path.name}:{method} can return shared-namespace entries to a "
             f"query that never asked for them"
@@ -137,7 +151,7 @@ class TestUnscopedReadsExcludeSharedNamespaces:
         """Applying it unconditionally would break the scoped read too, which
         is the one case that must keep working: naming the path is how a
         caller says they want it."""
-        body = _method(path, method)
+        body = _where_body(path, method)
         assert re.search(
             r'conditions\.append\("entity_path = %s"\)\s*\n'
             r'\s*params\.append\([^)]+\)\s*\n'
