@@ -2,6 +2,8 @@
 
 `amfs_decision_runtime.decider_artifact` supplies an opt-in local loader. It does not change the existing server, artifact pool, model dispatch or public-base `DeciderChoiceScorer`. A research training directory is **not** accepted directly, and no customer checkpoint is promoted by this module.
 
+**Model readiness:** the selected development checkpoint did not beat the Jev grounding comparator and is not approved for production enablement. This module is reusable loading infrastructure only; its existence is not a release recommendation.
+
 An operator-curated directory contains only:
 
 - `manifest.json` with schema `amfs.mapika-peft.v1`, canonical UUID `account_id`/`model_id`, immutable `version`, `spec_hash`, fixed `base_id`/`base_revision`, and a complete relative-file SHA-256 map;
