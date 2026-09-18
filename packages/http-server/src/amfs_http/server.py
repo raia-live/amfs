@@ -244,14 +244,6 @@ async def _offload(executor: ThreadPoolExecutor, fn: Any, /, *args: Any, **kwarg
     )
 
 
-# ``commit_outcome`` mutates the shared memory handle (its tagger and the
-# trace it just built) for the length of the commit. While the commit ran
-# inline on the loop nothing could interleave; now that it runs in a thread
-# and is awaited, two commits on one process must not overlap or each would
-# be attributed to the other's agent. Commits are a small share of traffic,
-# so serialising them costs little; everything else on the instance keeps
-# being served while one is in flight.
-_outcome_lock = asyncio.Lock()
 _known_agents: set[str] = set()
 # Tracks (agent, namespace, user) triples whose owner linkage was already
 # upserted, so the hot write path doesn't repeat the DB call. Kept separate
@@ -404,9 +396,13 @@ async def _task_corpus(entity_path: str | None) -> list[str]:
         return hit[1]
     try:
         texts = await _offload(_db_executor, fn, entity_path, limit=TASK_CORPUS_LIMIT)
-    except Exception:  # noqa: BLE001 - the pool statistics stand
+    except Exception:  # noqa: BLE001
+        # A failed read is not "this entity has no tasks": serve the stale
+        # corpus if there is one and leave the cache alone, so the next
+        # retrieve tries again instead of weighting by the candidate pool for
+        # a minute because of one transient error.
         logger.debug("recent_task_texts failed", exc_info=True)
-        texts = []
+        return list(hit[1]) if hit is not None else []
     if len(_task_corpus_cache) >= _TASK_CORPUS_CACHE_MAX:
         oldest = min(_task_corpus_cache, key=lambda k: _task_corpus_cache[k][0])
         _task_corpus_cache.pop(oldest, None)
@@ -1551,93 +1547,75 @@ async def write_entry(
     }
     mt = type_map.get(req.memory_type.lower(), MemoryType.FACT)
 
-    original_agent = mem._tagger.agent_id if req.agent_id else None
-    original_session = mem._tagger.session_id if req.session_id else None
-    if req.agent_id:
-        mem._tagger.agent_id = req.agent_id
-    if req.session_id:
-        mem._tagger.session_id = req.session_id
+    # The caller's identity lives on a per-request handle. This block awaits
+    # (ensure_agent, the write-time embedding, the async write), and a swap of
+    # the shared tagger restored in a ``finally`` is exactly what stamped
+    # concurrent writes with each other's agent — see ``AgentMemory.as_agent``.
+    handle = mem
+    if req.agent_id or req.session_id:
+        handle = mem.as_agent(req.agent_id or mem.agent_id)
+        if req.session_id:
+            handle._tagger.session_id = req.session_id
 
-    try:
-        _used_async = False
-        if _async_adapter is not None:
-            _agent_ns = _async_adapter._namespace
-            if req.agent_id:
-                _agent_cache_key = f"{req.agent_id}:{_agent_ns}"
-                if _agent_cache_key not in _known_agents:
-                    try:
-                        await _async_adapter.ensure_agent(req.agent_id, _agent_ns)
-                        _known_agents.add(_agent_cache_key)
-                    except Exception:
-                        pass
-                _link_agent_owner_once(request, req.agent_id, _agent_ns)
-
-            from amfs_core.content import embedding_input
-            from amfs_core.models import Provenance
-            provenance = mem._tagger.tag(pattern_refs=req.pattern_refs or None)
-            # Classify here so the flag is set before the inline-built entry hits
-            # the async adapter, and embed a clean descriptor for artifacts.
-            _is_artifact, _embed_text = embedding_input(req.key, req.value)
-            entry_obj = MemoryEntry(
-                entity_path=req.entity_path,
-                key=req.key,
-                version=1,
-                value=req.value,
-                provenance=provenance,
-                confidence=req.confidence,
-                memory_type=mt,
-                shared=req.shared,
-                branch=req.branch,
-                is_artifact=_is_artifact,
-            )
-            # Write-time embedding for semantic retrieval. The async adapter
-            # persists entry.embedding when the pgvector column exists; without
-            # this the hot write path stores no vector (embeddings never land).
-            # Crash-safe: a failure here just stores the entry without a vector.
-            _embedder = _get_server_embedder()
-            if _embedder is not None:
+    _used_async = False
+    if _async_adapter is not None:
+        _agent_ns = _async_adapter._namespace
+        if req.agent_id:
+            _agent_cache_key = f"{req.agent_id}:{_agent_ns}"
+            if _agent_cache_key not in _known_agents:
                 try:
-                    entry_obj = entry_obj.model_copy(
-                        update={
-                            "embedding": await _offload(
-                                _model_executor, _embedder.embed, _embed_text
-                            )
-                        }
-                    )
-                except Exception:  # noqa: BLE001 - never fail a write on embedding
-                    logger.warning(
-                        "write-time embedding failed for %s/%s — storing without vector",
-                        req.entity_path, req.key, exc_info=True,
-                    )
+                    await _async_adapter.ensure_agent(req.agent_id, _agent_ns)
+                    _known_agents.add(_agent_cache_key)
+                except Exception:
+                    pass
+            _link_agent_owner_once(request, req.agent_id, _agent_ns)
+
+        from amfs_core.content import embedding_input
+        from amfs_core.models import Provenance
+        provenance = handle._tagger.tag(pattern_refs=req.pattern_refs or None)
+        # Classify here so the flag is set before the inline-built entry hits
+        # the async adapter, and embed a clean descriptor for artifacts.
+        _is_artifact, _embed_text = embedding_input(req.key, req.value)
+        entry_obj = MemoryEntry(
+            entity_path=req.entity_path,
+            key=req.key,
+            version=1,
+            value=req.value,
+            provenance=provenance,
+            confidence=req.confidence,
+            memory_type=mt,
+            shared=req.shared,
+            branch=req.branch,
+            is_artifact=_is_artifact,
+        )
+        # Write-time embedding for semantic retrieval. The async adapter
+        # persists entry.embedding when the pgvector column exists; without
+        # this the hot write path stores no vector (embeddings never land).
+        # Crash-safe: a failure here just stores the entry without a vector.
+        _embedder = _get_server_embedder()
+        if _embedder is not None:
             try:
-                entry = await _async_adapter.write(entry_obj)
-                _used_async = True
-            except Exception:
+                entry_obj = entry_obj.model_copy(
+                    update={
+                        "embedding": await _offload(
+                            _model_executor, _embedder.embed, _embed_text
+                        )
+                    }
+                )
+            except Exception:  # noqa: BLE001 - never fail a write on embedding
                 logger.warning(
-                    "Async write failed for %s/%s — falling back to sync adapter",
+                    "write-time embedding failed for %s/%s — storing without vector",
                     req.entity_path, req.key, exc_info=True,
                 )
-                entry = mem.write(
-                    req.entity_path,
-                    req.key,
-                    req.value,
-                    confidence=req.confidence,
-                    pattern_refs=req.pattern_refs or None,
-                    memory_type=mt,
-                    shared=req.shared,
-                    branch=req.branch,
-                )
-        if not _used_async and _async_adapter is None:
-            if req.agent_id:
-                _agent_cache_key = f"{req.agent_id}:{mem.namespace}"
-                if _agent_cache_key not in _known_agents:
-                    try:
-                        mem._adapter.ensure_agent(req.agent_id, mem.namespace)
-                        _known_agents.add(_agent_cache_key)
-                    except Exception:
-                        pass
-                _link_agent_owner_once(request, req.agent_id, mem.namespace)
-            entry = mem.write(
+        try:
+            entry = await _async_adapter.write(entry_obj)
+            _used_async = True
+        except Exception:
+            logger.warning(
+                "Async write failed for %s/%s — falling back to sync adapter",
+                req.entity_path, req.key, exc_info=True,
+            )
+            entry = handle.write(
                 req.entity_path,
                 req.key,
                 req.value,
@@ -1647,11 +1625,26 @@ async def write_entry(
                 shared=req.shared,
                 branch=req.branch,
             )
-    finally:
-        if original_agent is not None:
-            mem._tagger.agent_id = original_agent
-        if original_session is not None:
-            mem._tagger.session_id = original_session
+    if not _used_async and _async_adapter is None:
+        if req.agent_id:
+            _agent_cache_key = f"{req.agent_id}:{mem.namespace}"
+            if _agent_cache_key not in _known_agents:
+                try:
+                    mem._adapter.ensure_agent(req.agent_id, mem.namespace)
+                    _known_agents.add(_agent_cache_key)
+                except Exception:
+                    pass
+            _link_agent_owner_once(request, req.agent_id, mem.namespace)
+        entry = handle.write(
+            req.entity_path,
+            req.key,
+            req.value,
+            confidence=req.confidence,
+            pattern_refs=req.pattern_refs or None,
+            memory_type=mt,
+            shared=req.shared,
+            branch=req.branch,
+        )
     _sse_manager.broadcast(entry)
 
     _resource = f"{req.entity_path}/{req.key}"
@@ -2791,8 +2784,16 @@ async def retrieve_entries(
             query_vector=priors_vec,
         )
         top = head[0][0] if head else None
+        top_bd = head[0][2] if head else {}
+        # A rescued top hit is discredited by the pooled record and working
+        # on tasks like this one. The recommendation reads the local verdict
+        # — the status step 7 rendered ("contested"), no recent failure, no
+        # shift — or the rescue would be undone here by an ``explore`` for
+        # exactly the class of task the rule still works on.
+        top_rescued = bool(top is not None and top.entry_key in rescued)
         recent_failure = bool(
             top is not None
+            and not top_rescued
             and top.last_outcome is not None
             and not _evidence_is_success(top.last_outcome)
         )
@@ -2864,14 +2865,22 @@ async def retrieve_entries(
             e for e in avoided
             if _about_this_query(e, *avoided_match.get(e.entry_key, (0.0, 0.0)))
         )
-        shifted_local_entries = [e for e in local_pool if _regime_shifted(e, now=now)]
+        shifted_local_entries = [
+            e for e in local_pool
+            if e.entry_key not in rescued and _regime_shifted(e, now=now)
+        ]
         shifted_local = bool(shifted_local_entries)
-        top_shifted = bool(top is not None and _regime_shifted(top, now=now))
+        top_shifted = bool(
+            top is not None and not top_rescued and _regime_shifted(top, now=now)
+        )
         recommendation = _recommend(
             priors,
             agent_id=req.agent_id or "",
             candidate_actions=req.candidate_actions,
-            top_hit_status=top.evidence_status if top is not None else None,
+            top_hit_status=(
+                str(top_bd.get("evidence_status") or top.evidence_status)
+                if top is not None else None
+            ),
             top_hit_recent_failure=recent_failure,
             top_hit_shifted=top_shifted,
             regime_shift=shifted_local,
@@ -4096,42 +4105,41 @@ async def commit_outcome(
     # The commit and the seal run on the DB executor rather than inline: the
     # sync adapter's transaction, the outcome embedding, the trace insert and
     # the immutable seal together held the event loop for seconds under load,
-    # and every other request on the instance waited behind them. They are
-    # awaited under ``_outcome_lock`` because both read state the shared
-    # handle carries for exactly this block — the tagger's agent and the
-    # trace the commit just built — and an interleaved commit would attribute
-    # each to the other's caller.
-    async with _outcome_lock:
-        original_agent = mem._tagger.agent_id if req.agent_id else None
-        if req.agent_id:
-            # Ownership guard first: a 409 for a foreign-owned identity must not
-            # leave the process-wide tagger pointing at the requested agent.
-            _link_agent_owner_once(request, req.agent_id, mem.namespace)
-            mem._tagger.agent_id = req.agent_id
-            try:
-                await _offload(_db_executor, mem._adapter.ensure_agent, req.agent_id, mem.namespace)
-            except Exception:
-                pass
+    # and every other request on the instance waited behind them.
+    #
+    # They run on a per-request handle (``as_agent``), not the shared one.
+    # The commit reads the handle's identity throughout and leaves the trace
+    # it built on the handle for the seal to pick up; now that both sides of
+    # that hand-off are awaited, swapping the shared tagger and restoring it
+    # in a ``finally`` would stamp interleaved commits and writes with each
+    # other's agent — the corruption ``as_agent`` exists to end. The clone
+    # shares the adapter and nothing mutable, so commits no longer serialize
+    # on the process.
+    if req.agent_id:
+        # Ownership guard first: a 409 for a foreign-owned identity ends the
+        # request before anything is written as that agent.
+        _link_agent_owner_once(request, req.agent_id, mem.namespace)
         try:
-            entries = await _offload(
-                _db_executor, mem.commit_outcome, req.outcome_ref, otype, **commit_kwargs
-            )
-            # Skipped when the caller's own trace is on its way. What would be
-            # sealed here is assembled on the shared handle: the caller's actions
-            # and attribute bag were passed in explicitly above, but the causal
-            # entries, query events, state diff and session window are read off
-            # that handle's tracker, so they belong to whichever requests last
-            # touched it. Sealing it as well as the caller's left two traces per
-            # outcome — doubling every count and average taken over them — and
-            # chained the fabricated one under this process's session id, a
-            # chain every account on the process shares.
-            immutable_trace_id = (
-                None if req.trace_follows
-                else await _offload(_db_executor, _auto_seal_trace, mem)
-            )
-        finally:
-            if original_agent is not None:
-                mem._tagger.agent_id = original_agent
+            await _offload(_db_executor, mem._adapter.ensure_agent, req.agent_id, mem.namespace)
+        except Exception:
+            pass
+    # With no causal keys on the body the SDK falls back to the handle's read
+    # tracker; the clone's resolves to this request's scope exactly as the
+    # shared one does (``read_tracker_scope`` middleware), so that path is
+    # unchanged by the clone.
+    handle = mem.as_agent(req.agent_id or mem.agent_id)
+    entries = await _offload(
+        _db_executor, handle.commit_outcome, req.outcome_ref, otype, **commit_kwargs
+    )
+    # Skipped when the caller's own trace is on its way: the caller's actions
+    # and attribute bag were passed in explicitly above, but the causal
+    # entries, query events and session window on this handle are only what
+    # this request supplied. Sealing it as well as the caller's left two
+    # traces per outcome — doubling every count and average taken over them.
+    immutable_trace_id = (
+        None if req.trace_follows
+        else await _offload(_db_executor, _auto_seal_trace, handle)
+    )
 
     _ip = request.client.host if request.client else None
     _bg_executor.submit(

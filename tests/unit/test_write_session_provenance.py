@@ -53,23 +53,38 @@ def client(
 ) -> TestClient:
     mem = MagicMock()
     mem.namespace = "test-ns"
+    mem.agent_id = SERVER_AGENT
     mem._tagger = tagger
 
-    def _capture(entity_path, key, value, **kwargs):
-        observed["agent_id"] = tagger.agent_id
-        observed["session_id"] = tagger.session_id
-        return MemoryEntry(
-            entity_path=entity_path,
-            key=key,
-            value=value,
-            provenance=Provenance(
-                agent_id=tagger.agent_id,
-                session_id=tagger.session_id,
-                written_at=datetime.now(timezone.utc),
-            ),
-        )
+    def _capture_for(t: SimpleNamespace):
+        def _capture(entity_path, key, value, **kwargs):
+            observed["agent_id"] = t.agent_id
+            observed["session_id"] = t.session_id
+            return MemoryEntry(
+                entity_path=entity_path,
+                key=key,
+                value=value,
+                provenance=Provenance(
+                    agent_id=t.agent_id,
+                    session_id=t.session_id,
+                    written_at=datetime.now(timezone.utc),
+                ),
+            )
+        return _capture
 
-    mem.write.side_effect = _capture
+    mem.write.side_effect = _capture_for(tagger)
+
+    def _as_agent(agent_id: str):
+        # What ``AgentMemory.as_agent`` does: a handle with its own tagger,
+        # starting from the shared session, sharing nothing mutable.
+        clone = MagicMock()
+        clone.namespace = mem.namespace
+        clone.agent_id = agent_id
+        clone._tagger = SimpleNamespace(agent_id=agent_id, session_id=tagger.session_id)
+        clone.write.side_effect = _capture_for(clone._tagger)
+        return clone
+
+    mem.as_agent.side_effect = _as_agent
     monkeypatch.setattr(server, "_memory", mem)
     monkeypatch.setattr(server, "_get_memory", lambda: mem)
     monkeypatch.setattr(server, "_async_adapter", None)

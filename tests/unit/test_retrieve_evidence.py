@@ -269,3 +269,141 @@ def test_mcp_retrieve_reports_avoid_separately(mem: AgentMemory, monkeypatch) ->
     assert "avoid_note" in payload
     assert payload["entries"][0]["evidence_status"] == "validated"
 
+
+
+class _AsyncShim:
+    """The async adapter, reduced to what retrieve calls, over the filesystem
+    store: no vectors, so semantic channels are empty and every candidate is a
+    lexical hit; the point is to let the query be embedded so the local
+    evidence read runs."""
+
+    def __init__(self, adapter) -> None:
+        self._adapter = adapter
+        self._namespace = adapter._namespace if hasattr(adapter, "_namespace") else "test"
+
+    async def semantic_search(self, query, embedder, branch=None):
+        return []
+
+    async def search(self, query, branch=None):
+        try:
+            return self._adapter.search(query, branch=branch)
+        except TypeError:
+            return self._adapter.search(query)
+
+
+def test_a_rescued_top_hit_is_recommended_on_its_local_record(
+    client, mem: AgentMemory, monkeypatch
+) -> None:
+    """Discredited by the pooled record, working on tasks like this one: the
+    rescue keeps the entry and labels it ``contested`` — and the recommendation
+    must be told the same, not the pooled ``discredited`` plus a shift, or it
+    would send the agent exploring past the rule that still works here."""
+    from amfs_http import server
+
+    class _Embedder:
+        def embed(self, text):
+            return [1.0, 0.0, 0.0]
+
+    monkeypatch.setattr(server, "_get_server_embedder", lambda: _Embedder())
+    monkeypatch.setattr(server, "_async_adapter", _AsyncShim(mem._adapter))
+    monkeypatch.setattr(
+        mem._adapter, "evidence_near",
+        lambda keys, vec, **kw: {
+            "acme/support/fix-restart": {
+                "success": 3.0, "failure": 0.0, "n": 3, "best_similarity": 0.9
+            }
+        },
+        raising=False,
+    )
+    told: dict = {}
+
+    def _recording_recommend(priors, **kwargs):
+        told.update(kwargs)
+        return None
+
+    from amfs_core import actions as actions_mod
+
+    # Imported into retrieve at call time, so patched at its source.
+    monkeypatch.setattr(actions_mod, "recommend", _recording_recommend)
+    # Every fix failed somewhere; only fix-restart still works on tasks like
+    # this one, so it is the one hit and the other two are avoided.
+    _outcome(mem, "fix-restart", OutcomeType.FAILURE, "t1")
+    _outcome(mem, "fix-rotate", OutcomeType.FAILURE, "t2")
+    _outcome(mem, "fix-scale", OutcomeType.FAILURE, "t3")
+
+    rows = client.post(
+        "/api/v1/retrieve",
+        json={
+            "query": "queue stuck", "entity_path": "acme/support", "limit": 10,
+            "include_avoid": True, "include_priors": True,
+        },
+    ).json()
+    hits = [e for e in rows if not e.get("_avoid") and not e.get("_meta")]
+    assert [e["key"] for e in hits] == ["fix-restart"], rows
+    assert hits[0]["_rescued"] is True
+    assert hits[0]["evidence_status"] == "contested"
+    assert sorted(e["key"] for e in rows if e.get("_avoid")) == ["fix-rotate", "fix-scale"]
+    assert told["top_hit_status"] == "contested"
+    assert told["top_hit_recent_failure"] is False
+    assert told["top_hit_shifted"] is False
+    assert told["regime_shift"] is False
+
+
+def test_a_failed_task_corpus_read_is_not_cached_as_no_history(mem: AgentMemory, monkeypatch) -> None:
+    """One transient database error must not weight the lexical term by the
+    candidate pool for a minute: the stale corpus is served if there is one,
+    and nothing is cached so the next retrieve reads again."""
+    import asyncio
+
+    from amfs_http import server
+
+    calls = {"n": 0}
+
+    def _recent(entity_path, limit=200):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("connection is closed")
+        return [f"task {calls['n']}"]
+
+    monkeypatch.setattr(mem._adapter, "recent_task_texts", _recent, raising=False)
+    server._task_corpus_cache.clear()
+    monkeypatch.setattr(server, "TASK_CORPUS_TTL_S", 0.0)
+
+    assert asyncio.run(server._task_corpus("acme/support")) == ["task 1"]
+    # The failed read: serves what it had, caches nothing new.
+    assert asyncio.run(server._task_corpus("acme/support")) == ["task 1"]
+    # The next read goes to the store again rather than to a cached [].
+    assert asyncio.run(server._task_corpus("acme/support")) == ["task 3"]
+    assert calls["n"] == 3
+
+
+def test_a_commit_acts_as_the_caller_without_touching_the_shared_handle(
+    client, mem: AgentMemory, monkeypatch
+) -> None:
+    """The commit runs on a thread and is awaited, so it must carry the
+    caller's identity on its own handle: swapping the shared tagger for the
+    duration is what stamped interleaved requests with each other's agent."""
+    seen: dict = {}
+    real = AgentMemory.commit_outcome
+
+    def _spy(self, *args, **kwargs):
+        seen["handle_agent"] = self._tagger.agent_id
+        seen["shared_agent"] = mem._tagger.agent_id
+        seen["causal"] = list(kwargs.get("causal_entry_keys") or [])
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(AgentMemory, "commit_outcome", _spy)
+    resp = client.post(
+        "/api/v1/outcomes",
+        json={
+            "outcome_ref": "t1", "outcome_type": "success", "agent_id": "caller",
+            "causal_entry_keys": ["acme/support/fix-rotate"],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert seen["handle_agent"] == "caller"
+    assert seen["shared_agent"] == "http-server"
+    assert seen["causal"] == ["acme/support/fix-rotate"]
+    assert mem._tagger.agent_id == "http-server"
+    assert resp.json()["affected_entries"] == 1
+    assert mem.read("acme/support", "fix-rotate").evidence_status == "validated"

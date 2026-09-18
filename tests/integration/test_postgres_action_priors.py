@@ -169,3 +169,34 @@ def test_migration_is_idempotent_on_a_bootstrapped_database(adapter) -> None:
         assert cur.fetchone()["n"] == 1
         cur.execute("SELECT pronargs FROM pg_proc WHERE proname = 'amfs_apply_outcome_step'")
         assert cur.fetchone()["pronargs"] == 8
+
+
+def test_evidence_near_counts_outcomes_not_credits(adapter) -> None:
+    """One task that failed on a rule and then succeeded with the same rule
+    credits it twice — a failure from the attempt, a success from the terminal
+    outcome — but is one nearby task. ``n`` must say one, or a single task
+    would clear LOCAL_EVIDENCE_MIN_N by itself and override the pooled record."""
+    from amfs_core.models import AttemptRecord
+
+    emb = _Embedder()
+    adapter.write(_entry("rule"))
+    key = "acme/support/rule"
+    rec = _record(OutcomeType.SUCCESS, [key], paths=["acme/support"], situation="card declined")
+    rec = rec.model_copy(update={"attempts": [
+        AttemptRecord(attempt=1, outcome_type=OutcomeType.FAILURE, causal_entry_keys=[key], action_indices=[])
+    ]})
+    adapter.commit_outcome(rec)
+
+    near = adapter.evidence_near([key], emb.embed("card declined"))
+    assert near[key]["n"] == 1, near
+    assert near[key]["success"] == pytest.approx(1.0, abs=1e-6)
+    assert near[key]["failure"] == pytest.approx(1.0, abs=1e-6)
+
+    # A second task like it is the second outcome.
+    adapter.commit_outcome(_record(OutcomeType.SUCCESS, [key], paths=["acme/support"], situation="card declined"))
+    near = adapter.evidence_near([key], emb.embed("card declined"))
+    assert near[key]["n"] == 2 and near[key]["success"] == pytest.approx(2.0, abs=1e-6)
+    # A task about something else is orthogonal here and does not count.
+    adapter.commit_outcome(_record(OutcomeType.FAILURE, [key], paths=["acme/support"], situation="shipping delayed"))
+    near = adapter.evidence_near([key], emb.embed("card declined"), min_similarity=0.5)
+    assert near[key]["n"] == 2 and near[key]["failure"] == pytest.approx(1.0, abs=1e-6)

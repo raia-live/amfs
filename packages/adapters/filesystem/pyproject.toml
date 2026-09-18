@@ -1,11 +1,11 @@
 [project]
 name = "amfs-adapter-filesystem"
-version = "0.1.6"
+version = "0.1.7"
 description = "AMFS filesystem adapter with CoW via atomic rename"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-    "amfs-core>=0.3.30",
+    "amfs-core>=0.3.31",
     # Keep this compatible with strands-agents>=1.0, which requires watchdog>=6:
     # a <5 cap makes the workspace (amfs-strands[strands] + this) unresolvable and
     # breaks Dependabot. Only the stable PollingObserver / events API is used here.

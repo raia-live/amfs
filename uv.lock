@@ -201,7 +201,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-filesystem"
-version = "0.1.6"
+version = "0.1.7"
 source = { editable = "packages/adapters/filesystem" }
 dependencies = [
     { name = "amfs-core" },
@@ -216,7 +216,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-http"
-version = "0.1.23"
+version = "0.1.24"
 source = { editable = "packages/adapters/http" }
 dependencies = [
     { name = "amfs-core" },
@@ -248,7 +248,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-s3"
-version = "0.1.5"
+version = "0.1.6"
 source = { editable = "packages/adapters/s3" }
 dependencies = [
     { name = "amfs-core" },
@@ -465,7 +465,7 @@ provides-extras = ["langgraph"]
 
 [[package]]
 name = "amfs-mcp-server"
-version = "0.7.30"
+version = "0.7.31"
 source = { editable = "packages/mcp-server" }
 dependencies = [
     { name = "amfs" },

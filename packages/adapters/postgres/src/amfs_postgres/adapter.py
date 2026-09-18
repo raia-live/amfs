@@ -3650,10 +3650,13 @@ class PostgresAdapter(AdapterABC):
         # Each row is unnested to (key, is_failure) pairs: the terminal outcome
         # for every causal key, and a failure for every key inside a failed
         # attempt. Rows are narrowed first by key overlap (indexed), then
-        # ranked per key by task similarity and cut at per_key.
+        # ranked per key by task similarity and cut at per_key. ``n`` counts
+        # distinct outcomes, not credits: one outcome that names a key in a
+        # failed attempt and again as a causal key is one nearby task, and
+        # must not on its own clear LOCAL_EVIDENCE_MIN_N.
         sql = """
             WITH near AS (
-                SELECT o.outcome_type, o.causal_entry_keys, o.attempts,
+                SELECT o.id AS outcome_id, o.outcome_type, o.causal_entry_keys, o.attempts,
                        1 - (o.task_embedding <=> %s::vector) AS similarity
                 FROM amfs_outcomes o
                 WHERE o.namespace = %s
@@ -3671,12 +3674,13 @@ class PostgresAdapter(AdapterABC):
                   )
             ),
             credited AS (
-                SELECT k AS entry_key, amfs_outcome_is_success(n.outcome_type) AS success,
+                SELECT n.outcome_id, k AS entry_key,
+                       amfs_outcome_is_success(n.outcome_type) AS success,
                        n.similarity
                 FROM near n, unnest(n.causal_entry_keys) AS k
                 WHERE k = ANY(%s::text[])
                 UNION ALL
-                SELECT ak AS entry_key, FALSE AS success, n.similarity
+                SELECT n.outcome_id, ak AS entry_key, FALSE AS success, n.similarity
                 FROM near n,
                      jsonb_array_elements(n.attempts) AS att,
                      jsonb_array_elements_text(
@@ -3685,7 +3689,7 @@ class PostgresAdapter(AdapterABC):
                 WHERE ak = ANY(%s::text[])
             ),
             ranked AS (
-                SELECT entry_key, success, similarity,
+                SELECT outcome_id, entry_key, success, similarity,
                        row_number() OVER (PARTITION BY entry_key ORDER BY similarity DESC) AS rn
                 FROM credited
                 WHERE similarity >= %s
@@ -3693,7 +3697,7 @@ class PostgresAdapter(AdapterABC):
             SELECT entry_key,
                    SUM(CASE WHEN success THEN similarity ELSE 0 END) AS success,
                    SUM(CASE WHEN success THEN 0 ELSE similarity END) AS failure,
-                   COUNT(*) AS n,
+                   COUNT(DISTINCT outcome_id) AS n,
                    MAX(similarity) AS best_similarity
             FROM ranked
             WHERE rn <= %s
