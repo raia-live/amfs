@@ -79,6 +79,7 @@ class EpisodeRecord:
     stale_in_context: int          # hits (non-avoid) whose key is a known stale seed/lesson for this task
     discredited_served: int        # hits served in the avoid list
     cited_keys: list[str]
+    written_keys: list[str]        # keys this agent wrote this episode (authorship for transfer analysis)
     flags: dict[str, Any]
     tags: dict[str, Any]
     usage: dict[str, Any]
@@ -117,6 +118,7 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
     searches_log: list[dict[str, Any]] = []
     answers: list[str] = []
     cited: list[str] = []
+    written: list[str] = []
     flags: dict[str, Any] = {}
     attempts = 0
     success = False
@@ -162,7 +164,9 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
                     content = _tool_result_text(hits)
                 elif name == "memory_write":
                     writes += 1
-                    session.write(str(args.get("key", f"note-ep{task.episode}"))[:80], str(args.get("note", ""))[:1200],
+                    wkey = str(args.get("key", f"note-ep{task.episode}"))[:80]
+                    written.append(wkey)
+                    session.write(wkey, str(args.get("note", ""))[:1200],
                                   confidence=float(args.get("confidence", 0.7) or 0.7), kind=str(args.get("kind", "experience")))
                     content = "Saved."
                 else:
@@ -222,7 +226,9 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
                     if call.name == "memory_write":
                         writes += 1
                         a = call.arguments
-                        session.write(str(a.get("key", f"lesson-ep{task.episode}"))[:80], str(a.get("note", ""))[:1200],
+                        wkey = str(a.get("key", f"lesson-ep{task.episode}"))[:80]
+                        written.append(wkey)
+                        session.write(wkey, str(a.get("note", ""))[:1200],
                                       confidence=float(a.get("confidence", 0.7) or 0.7), kind=str(a.get("kind", "experience")))
                         if keep_transcript:
                             transcript.append({"reflection": a})
@@ -256,7 +262,7 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
         memory_searches=searches, memory_writes=writes, hits_total=len(all_hits),
         contradictions_in_context=scenario.contradictions(all_hits), searches_log=searches_log,
         stale_in_context=sum(1 for h in all_hits if not h.avoid and _mentions_stale(h, task)),
-        discredited_served=sum(1 for h in all_hits if h.avoid), cited_keys=cited, flags=flags,
+        discredited_served=sum(1 for h in all_hits if h.avoid), cited_keys=cited, written_keys=written, flags=flags,
         tags=task.tags, usage=asdict(usage), reflection_usage=asdict(r_usage), memory=session.acct.as_dict(),
         wall_ms=(time.perf_counter() - t0) * 1000, steps=steps, explanation=explanation, error=error,
         transcript=transcript,

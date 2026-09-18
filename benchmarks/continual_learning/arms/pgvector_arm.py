@@ -204,8 +204,14 @@ class PgVectorArm(MemoryArm):
 
         self.conn = psycopg.connect(config.PG_DSN)
         with self.conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            cur.execute(DDL)
+            # Cells open concurrently; two CREATE ... IF NOT EXISTS racing on the same
+            # catalog row raise UniqueViolation (pg_type_typname). Serialise the DDL.
+            cur.execute("SELECT pg_advisory_lock(7431001)")
+            try:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                cur.execute(DDL)
+            finally:
+                cur.execute("SELECT pg_advisory_unlock(7431001)")
         self.conn.commit()
 
     def open(self, scope: str) -> None:

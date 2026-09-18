@@ -252,11 +252,24 @@ class _SenseLabSession(EpisodeSession):
         except Exception as e:  # noqa: BLE001
             self.acct.notes["record_action_error"] = str(e)[:200]
 
+    def _blame(self, cited_keys: list[str]) -> list[str] | None:
+        """The entries an outcome is attributed to.
+
+        What the agent cited (``used_memory_keys``) when it cited anything; otherwise the
+        top hit of each retrieve since the last attempt boundary — the entry it most
+        plausibly acted on. Never the whole read window: a retrieve returns 5-7 entries and
+        the agent follows one, so blaming all of them for a failed attempt discredits
+        correct lessons that merely shared the context. ``None`` when nothing identifies.
+        """
+        boundary = getattr(self, "_boundary", 0)
+        keys = list(cited_keys) or list(dict.fromkeys(self.read_keys[boundary:]))
+        return [f"{self.arm.scope}/{k}" for k in keys] or None
+
     def end(self, outcome: Outcome, *, task_input: str, response_text: str,
             cited_keys: list[str]) -> None:
         if not self.arm.learns_from_outcomes:
             return
-        keys = [f"{self.arm.scope}/{k}" for k in cited_keys] or None
+        keys = self._blame(cited_keys)
         with self._timed():
             try:
                 affected = self.mem.commit_outcome(
@@ -275,11 +288,20 @@ class _SenseLabSession(EpisodeSession):
         if self.arm.attempt_boundaries and self.arm.learns_from_outcomes:
             # Local bookkeeping only: the boundary and the entries it blames leave with the
             # terminal commit_outcome, inside the same trace. Zero extra round trips.
-            keys = [f"{self.arm.scope}/{k}" for k in cited_keys] or None
+            keys = self._blame(cited_keys)
+            if keys is None:
+                # Nothing identifies what this attempt relied on: no search since the last
+                # boundary and no citation. An attempt that names no entry teaches nothing,
+                # and blaming the whole read window would charge entries the agent never
+                # followed (the guilt-by-association that grid v2 measured: 25% of versions
+                # discredited, pre-change first-attempt success below the no-feedback arm).
+                self.acct.notes["attempt_unattributed"] = self.acct.notes.get("attempt_unattributed", 0) + 1
+                return
             try:
                 self.mem.record_attempt(outcome_type=OutcomeType(severity), causal_entry_keys=keys,
                                         summary=f"attempt {attempt} failed; answer={answer}"[:300])
                 self._attempts_marked += 1
+                self._boundary = len(self.read_keys)
             except Exception as e:  # noqa: BLE001
                 self.acct.notes["record_attempt_error"] = str(e)[:200]
             return
