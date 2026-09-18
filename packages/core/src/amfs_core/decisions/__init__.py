@@ -3,11 +3,11 @@
 from .models import (
     Candidate, DecisionAnswer, DecisionRequest, DecisionResponse, OutcomeEvent,
     Question, RiskEvidence, VerificationCheck, BranchEstimates,
-    ExperimentalDecisionDiagnostics, canonical_json, fingerprint,
+    ExperimentalDecisionDiagnostics, GraphDecisionDiagnostics, JointAssignment, canonical_json, fingerprint,
 )
 
 __all__ = [
     "Candidate", "DecisionAnswer", "DecisionRequest", "DecisionResponse", "OutcomeEvent",
     "Question", "RiskEvidence", "VerificationCheck", "BranchEstimates",
-    "ExperimentalDecisionDiagnostics", "canonical_json", "fingerprint",
+    "ExperimentalDecisionDiagnostics", "GraphDecisionDiagnostics", "JointAssignment", "canonical_json", "fingerprint",
 ]

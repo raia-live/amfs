@@ -167,6 +167,42 @@ class ExperimentalDecisionDiagnostics(Contract):
         return self
 
 
+class JointAssignment(Contract):
+    check: Literal["skip", "inspect"]
+    action: Literal["retry", "wait", "review"]
+
+
+class GraphDecisionDiagnostics(Contract):
+    schema_version: Literal["decision-graph-experimental.v1"] = "decision-graph-experimental.v1"
+    architecture: Literal["experimental-relation-graph.v1"]
+    artifact_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    compiler_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    runtime_source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    assignment: JointAssignment | None
+    independent_assignment: JointAssignment | None
+    joint_score: float | None = Field(allow_inf_nan=False)
+    independent_score: float | None = Field(allow_inf_nan=False)
+    feasible_assignments: int = Field(ge=0, le=6)
+    solver_status: Literal["feasible", "review"]
+    remaining_cost: float = Field(ge=0, allow_inf_nan=False)
+    selected_cost: float | None = Field(ge=0, allow_inf_nan=False)
+    policy_reason: str = Field(min_length=1, max_length=128)
+    evidence_authority: Literal["caller_asserted_diagnostic_only"] = "caller_asserted_diagnostic_only"
+    observe_only: Literal[True] = True
+    research_gate_status: Literal["failed"] = "failed"
+
+    @model_validator(mode="after")
+    def consistent_assignment(self):
+        values = (self.assignment, self.independent_assignment, self.joint_score,
+                  self.independent_score, self.selected_cost)
+        if self.solver_status == "feasible":
+            if any(value is None for value in values) or self.feasible_assignments < 1:
+                raise ValueError("feasible graph requires complete joint and control diagnostics")
+        elif any(value is not None for value in values) or self.feasible_assignments != 0:
+            raise ValueError("review graph cannot carry a partial assignment")
+        return self
+
+
 class DecisionAnswer(Contract):
     value: str | bool | float | None = None
     candidate_id: str | None = None
@@ -181,7 +217,7 @@ class DecisionAnswer(Contract):
     risk: RiskEvidence | None = None
     verification: list[VerificationCheck] = Field(default_factory=list)
     candidate_distribution: dict[str, Probability] | None = None
-    experimental: ExperimentalDecisionDiagnostics | None = None
+    experimental: ExperimentalDecisionDiagnostics | GraphDecisionDiagnostics | None = None
 
     @model_serializer(mode="wrap")
     def preserve_baseline_wire(self, handler):
