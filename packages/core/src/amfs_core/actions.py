@@ -268,6 +268,34 @@ def stable_bucket(agent_id: str, n: int) -> int:
     return int(digest, 16) % n
 
 
+def _won_since(prior: Mapping[str, Any], moment: datetime | None) -> bool:
+    """Whether the prior's newest take came after *moment* and won.
+
+    Without a *moment* there is nothing to be after, so the answer is no: the
+    shift is then read as covering every win in the record.
+    """
+    if moment is None:
+        return False
+    last_3 = list(prior.get("last_3") or [])
+    if not last_3 or last_3[0] != "won":
+        return False
+    raw = prior.get("last_at")
+    if isinstance(raw, datetime):
+        at = raw
+    elif isinstance(raw, str) and raw:
+        try:
+            at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    else:
+        return False
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return at > moment
+
+
 def recommend(
     priors: Mapping[str, Any] | None,
     *,
@@ -276,6 +304,7 @@ def recommend(
     top_hit_status: str | None = None,
     top_hit_recent_failure: bool = False,
     regime_shift: bool = False,
+    regime_shift_at: datetime | None = None,
 ) -> dict[str, Any] | None:
     """Decide ``act`` / ``explore`` / ``escalate`` from priors and the top hit.
 
@@ -285,6 +314,13 @@ def recommend(
     ``candidate_actions`` — without knowing what could be tried, "everything
     failed" cannot be asserted, and a false escalate costs a task a retry
     would have won.
+
+    A regime shift skips the winning priors, because their wins may predate the
+    change — except a winner whose latest take was *after* the shift and won
+    (``regime_shift_at`` against the prior's ``last_at``, and its newest
+    ``last_3`` entry). That is the replacement the shift called for, already
+    found; sending the agent to explore past it would re-learn what the record
+    already knows.
     """
     tried: list[Mapping[str, Any]] = list((priors or {}).get("tried") or [])
     untried: list[str] = list((priors or {}).get("untried") or [])
@@ -294,6 +330,16 @@ def recommend(
     losers = [t for t in tried if float(t.get("p", 1)) < EXPLORE_MAX_P and int(t.get("n", 0)) >= EXPLORE_MIN_N]
     all_tried_failed = bool(tried) and len(losers) == len(tried)
 
+    if winners and regime_shift:
+        since = [w for w in winners if _won_since(w, regime_shift_at)]
+        if since:
+            best = since[0]
+            return {
+                "mode": "act",
+                "suggested_action": best["action_key"],
+                "why": f"regime shift suspected, but {best['action_key']} has won since it "
+                       f"({best['won']}/{best['n']} on similar tasks here)",
+            }
     if winners and not regime_shift:
         best = winners[0]
         return {

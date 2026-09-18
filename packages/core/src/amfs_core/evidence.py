@@ -81,7 +81,12 @@ FIRST_STRIKE_MIN_WINS = 3
 #: first-strike case (one failure against a long run, still ``validated``) is
 #: not a shift and the second failure in a row is. The briefing's
 #: ``regime_shift`` section and retrieve's ``regime_shift`` flag both read this.
+#: A shift is an event, not a state: the flag holds for ``REGIME_WINDOW_DAYS``
+#: after the rule's latest failure and then clears. Without the bound a rule
+#: discredited weeks ago would keep steering every retrieve on its entity to
+#: ``explore`` long after a replacement had been found and validated.
 REGIME_MIN_SUCCESSES = 3
+REGIME_WINDOW_DAYS = 7
 #: Failures weigh more than successes: trust is easy to lose, slow to rebuild.
 SEVERITY: dict[str, float] = {
     OutcomeType.SUCCESS.value: 1.0,
@@ -113,17 +118,28 @@ def is_known(outcome_type: OutcomeType | str) -> bool:
     return _name(outcome_type) in SEVERITY
 
 
-def regime_shifted(entry: Any) -> bool:
-    """Whether *entry* looks like a rule that used to work and has stopped.
+def regime_shifted(
+    entry: Any,
+    *,
+    now: datetime | None = None,
+    window_days: int | None = REGIME_WINDOW_DAYS,
+) -> bool:
+    """Whether *entry* looks like a rule that used to work and has just stopped.
 
     Validated at least ``REGIME_MIN_SUCCESSES`` times, the latest outcome a
-    failure, and the evidence label no longer ``validated`` — ``contested`` or
-    ``discredited``. Reading the label rather than a failure ratio is what
-    keeps this consistent with first-strike tolerance: the same failure that
-    the label forgives (one against a long run) is not a shift, and the second
-    failure in a row, which the label does not forgive, is. A ratio over the
-    evidence masses cannot draw that line — one failure carries severity 2
-    against a decayed run of successes and already reads as half the mass.
+    failure within the last *window_days*, and the evidence label no longer
+    ``validated`` — ``contested`` or ``discredited``. Reading the label rather
+    than a failure ratio is what keeps this consistent with first-strike
+    tolerance: the same failure that the label forgives (one against a long
+    run) is not a shift, and the second failure in a row, which the label does
+    not forgive, is. A ratio over the evidence masses cannot draw that line —
+    one failure carries severity 2 against a decayed run of successes and
+    already reads as half the mass.
+
+    The window is what makes this an event rather than a permanent mark: a
+    rule discredited last month is history the ``discredited`` section covers,
+    not a reason to keep skipping the action that has been winning since. Pass
+    ``window_days=None`` to read the state without the bound.
 
     Works on anything with the evidence fields of ``MemoryEntry``, including the
     discredited entries retrieve keeps aside: a long-validated rule that was
@@ -134,6 +150,18 @@ def regime_shifted(entry: Any) -> bool:
     last = getattr(entry, "last_outcome", None)
     if successes < REGIME_MIN_SUCCESSES or failures < 1 or last is None or is_success(last):
         return False
+    if window_days is not None:
+        at = getattr(entry, "last_outcome_at", None)
+        if not isinstance(at, datetime):
+            # No timestamp, no way to call it recent.
+            return False
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=UTC)
+        moment = now or datetime.now(UTC)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC)
+        if (moment - at).total_seconds() > window_days * 86400:
+            return False
     status = getattr(entry, "evidence_status", None)
     if not isinstance(status, str):
         from .labels import evidence_label

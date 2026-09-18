@@ -713,6 +713,41 @@ def _compact_entry_response(entry: MemoryEntry, *, rank: int = 0) -> dict[str, A
     return data
 
 
+async def _discredited_below_gate(
+    sq_lex: SearchQuery, *, branch: Any, seen: set[str]
+) -> list[MemoryEntry]:
+    """Query-matched discredited entries the confidence gate kept out.
+
+    Same lexical query as the candidate fetch with ``min_confidence`` lifted,
+    kept to entries that are discredited and not already in hand. Read only for
+    the regime-shift flag: a rule that was validated many times and then failed
+    twice has a confidence under the discredit threshold, so a retrieve gated at
+    that threshold — the benchmark's setting, and a reasonable production one —
+    never saw the very rows that carry the signal. Best-effort; a store that
+    cannot answer contributes nothing rather than failing the retrieve.
+    """
+    ungated = sq_lex.model_copy(update={"min_confidence": 0.0, "sort_by": "recency"})
+    rows: list[MemoryEntry] = []
+    try:
+        if _async_adapter is not None:
+            rows = await _async_adapter.search(ungated, branch=branch)
+        else:
+            adapter = _get_memory()._adapter
+            try:
+                rows = adapter.search(ungated, branch=branch)
+            except TypeError:
+                rows = adapter.search(ungated)
+    except Exception:
+        logger.debug("ungated discredited fetch failed", exc_info=True)
+        return []
+    return [
+        e for e in rows
+        if getattr(e, "discredited_at", None) is not None
+        and e.entry_key not in seen
+        and not _is_synthetic_key(getattr(e, "key", ""))
+    ]
+
+
 def _priors_for_retrieve(
     *,
     entity_path: str,
@@ -2370,8 +2405,27 @@ async def retrieve_entries(
         # is. The first-strike case — one failure, still ``validated`` — is not
         # a shift, or the recommendation would skip a winning action on the
         # same failure the label forgives.
-        shifted = any(_regime_shifted(e) for e, _, _ in head) or any(
-            _regime_shifted(e) for e in avoided
+        #
+        # The candidate fetch honours min_confidence, and a discredited rule sits
+        # below the discredit threshold by definition — so with the gate at or
+        # above it (the benchmark's setting) the rows this reads never arrived.
+        # Fetched here without the gate, for this reading only: the ranked list
+        # is unchanged.
+        shift_pool: list[MemoryEntry] = [e for e, _, _ in head] + list(avoided)
+        if req.min_confidence > 0.0:
+            seen_keys = {e.entry_key for e in shift_pool}
+            shift_pool.extend(
+                await _discredited_below_gate(sq_lex, branch=branch, seen=seen_keys)
+            )
+        shifted_entries = [e for e in shift_pool if _regime_shifted(e, now=now)]
+        shifted = bool(shifted_entries)
+        shift_at = max(
+            (
+                at if at.tzinfo else at.replace(tzinfo=UTC)
+                for at in (e.last_outcome_at for e in shifted_entries)
+                if at is not None
+            ),
+            default=None,
         )
         recommendation = _recommend(
             priors,
@@ -2380,6 +2434,7 @@ async def retrieve_entries(
             top_hit_status=top.evidence_status if top is not None else None,
             top_hit_recent_failure=recent_failure,
             regime_shift=shifted,
+            regime_shift_at=shift_at,
         )
         if priors is not None or recommendation is not None:
             out.append({

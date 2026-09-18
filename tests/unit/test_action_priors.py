@@ -335,6 +335,77 @@ def test_a_second_failure_flags_the_shift_even_after_the_rule_leaves_the_head(cl
     assert "regime shift" in meta["recommendation"]["why"]
 
 
+def test_the_shift_still_fires_when_the_confidence_gate_hid_the_discredited_rule(client, server_mem) -> None:
+    """The candidate fetch honours min_confidence; a discredited rule sits below
+    the discredit threshold, so a retrieve gated there (the benchmark's setting)
+    never saw it — and the two-failure signal went with it. The flag reads a
+    separate, ungated fetch of the query-matched discredited rows."""
+    _stub_stats(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _outcomes(server_mem, "fix-a", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
+    entry = server_mem._adapter.read("acme/support", "fix-a")
+    assert entry.discredited_at is not None and entry.confidence < 0.5
+
+    body, meta = _priors_meta(client, min_confidence=0.5)
+    assert all(e.get("key") != "fix-a" for e in body if not e.get("_meta"))
+    assert meta["regime_shift"] is True
+    assert meta["recommendation"]["mode"] == "explore"
+
+
+def test_the_shift_clears_after_the_window(client, server_mem, monkeypatch) -> None:
+    """A shift is an event. A rule discredited two weeks ago is history the
+    discredited section covers, not a standing reason to skip the action that
+    has been winning here since."""
+    from amfs_http import server as http_server
+
+    _stub_stats(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _outcomes(server_mem, "fix-a", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
+
+    from amfs_core.evidence import regime_shifted
+
+    # The server takes its clock from a function-local import, so move the
+    # predicate's clock instead: the same call the server makes, two weeks on.
+    later = datetime.now(UTC) + timedelta(days=14)
+    monkeypatch.setattr(
+        http_server, "_regime_shifted",
+        lambda e, now=None, **kw: regime_shifted(e, now=later, **kw),
+    )
+    _, meta = _priors_meta(client)
+    assert meta["regime_shift"] is False
+    assert meta["recommendation"]["mode"] == "act"
+    assert meta["recommendation"]["suggested_action"] == "resolve:a"
+
+
+def test_a_winner_that_has_won_since_the_shift_is_still_acted_on() -> None:
+    """The shift skips winners because their wins may predate it. One whose
+    latest take came after the shift and won is the replacement the shift called
+    for; exploring past it would re-learn what the record already knows."""
+    shift_at = datetime.now(UTC) - timedelta(hours=6)
+    stale = {"action_key": "resolve:old", "won": 5, "lost": 0, "p": 0.86, "n": 5, "agents": 2,
+             "last_3": ["won", "won", "won"], "last_at": (shift_at - timedelta(days=2)).isoformat()}
+    fresh = {"action_key": "resolve:new", "won": 3, "lost": 0, "p": 0.8, "n": 3, "agents": 1,
+             "last_3": ["won", "won", "won"], "last_at": (shift_at + timedelta(hours=1)).isoformat()}
+
+    rec = act.recommend({"tried": [stale, fresh], "untried": ["resolve:c"]}, agent_id="a1",
+                        regime_shift=True, regime_shift_at=shift_at)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "resolve:new"
+    assert "since" in rec["why"]
+
+    # Only stale winners: the shift still sends the agent exploring.
+    rec = act.recommend({"tried": [stale], "untried": ["resolve:c"]}, agent_id="a1",
+                        regime_shift=True, regime_shift_at=shift_at)
+    assert rec["mode"] == "explore" and rec["suggested_action"] == "resolve:c"
+
+    # A fresh take that lost is not a replacement.
+    lost = dict(fresh, last_3=["lost", "won", "won"])
+    rec = act.recommend({"tried": [stale, lost], "untried": ["resolve:c"]}, agent_id="a1",
+                        regime_shift=True, regime_shift_at=shift_at)
+    assert rec["mode"] == "explore"
+
+    # Without a moment to be after, every win is read as pre-shift.
+    rec = act.recommend({"tried": [fresh], "untried": ["resolve:c"]}, agent_id="a1", regime_shift=True)
+    assert rec["mode"] == "explore"
+
+
 def test_regime_shifted_reads_the_label_not_a_failure_ratio() -> None:
     """The predicate has to agree with first-strike tolerance, and a ratio over
     the evidence masses cannot: after eight successes one failure already
@@ -346,7 +417,7 @@ def test_regime_shifted_reads_the_label_not_a_failure_ratio() -> None:
     def entry(**kw):
         base = dict(success_count=0, failure_count=0, last_outcome=None,
                     evidence_success=0.0, evidence_failure=0.0, discredited_at=None,
-                    outcome_count=0, confidence=0.8)
+                    outcome_count=0, confidence=0.8, last_outcome_at=datetime.now(UTC))
         base.update(kw)
         return SimpleNamespace(**base)
 
@@ -371,6 +442,16 @@ def test_regime_shifted_reads_the_label_not_a_failure_ratio() -> None:
     # An entry that carries its own label is read through it.
     labelled = entry(success_count=5, failure_count=3, last_outcome="failure", evidence_status="contested")
     assert regime_shifted(labelled) is True
+    # The window: the same discredited rule, two weeks on, is history.
+    old = entry(success_count=8, failure_count=2, last_outcome="failure",
+                evidence_success=2.98, evidence_failure=4.93, outcome_count=10,
+                discredited_at=datetime.now(UTC) - timedelta(days=14),
+                last_outcome_at=datetime.now(UTC) - timedelta(days=14))
+    assert regime_shifted(old) is False
+    assert regime_shifted(old, window_days=None) is True
+    # No timestamp cannot be called recent.
+    assert regime_shifted(entry(success_count=8, failure_count=2, last_outcome="failure",
+                                evidence_status="discredited", last_outcome_at=None)) is False
 
 
 def test_retrieve_priors_need_an_entity_path(client, server_mem) -> None:
