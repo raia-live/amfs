@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_serializer, model_validator
 
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")]
 Probability = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
@@ -141,6 +141,32 @@ class RiskEvidence(Contract):
     expires_at: datetime
 
 
+class BranchEstimates(Contract):
+    """Model estimates from experimental branch learning, not calibrated risks."""
+    completion: Probability
+    harm: Probability
+
+
+class ExperimentalDecisionDiagnostics(Contract):
+    schema_version: Literal["decision-experimental.v1"] = "decision-experimental.v1"
+    architecture: Literal["experimental-recovery-vector.v1"]
+    artifact_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    feature_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    continuation_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    branches: dict[Literal["skip", "acquire"], BranchEstimates]
+    acquisition_cost: float = Field(ge=0, allow_inf_nan=False)
+    remaining_cost: float = Field(ge=0, allow_inf_nan=False)
+    policy_reason: str = Field(min_length=1, max_length=128)
+    observe_only: Literal[True] = True
+    research_gate_status: Literal["failed"] = "failed"
+
+    @model_validator(mode="after")
+    def complete_branches(self):
+        if set(self.branches) != {"skip", "acquire"}:
+            raise ValueError("both experimental branch estimates are required")
+        return self
+
+
 class DecisionAnswer(Contract):
     value: str | bool | float | None = None
     candidate_id: str | None = None
@@ -155,9 +181,25 @@ class DecisionAnswer(Contract):
     risk: RiskEvidence | None = None
     verification: list[VerificationCheck] = Field(default_factory=list)
     candidate_distribution: dict[str, Probability] | None = None
+    experimental: ExperimentalDecisionDiagnostics | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_baseline_wire(self, handler):
+        # Old signed envelopes and idempotent replays must retain their exact
+        # shape. An absent experimental payload must not add a null field.
+        value = handler(self)
+        if self.experimental is None:
+            value.pop("experimental", None)
+        return value
 
     @model_validator(mode="after")
     def distribution_is_normalized(self) -> DecisionAnswer:
+        if self.experimental is not None and (
+            self.automate or self.risk is not None or self.distribution
+            or self.decision_probability is not None or self.estimated_success is not None
+            or self.candidate_distribution is not None or self.disposition != "defer"
+        ):
+            raise ValueError("experimental estimates are observe-only and cannot be probability or risk certificates")
         if self.distribution and not math.isclose(sum(self.distribution.values()), 1, abs_tol=1e-6):
             raise ValueError("distribution must sum to one")
         return self

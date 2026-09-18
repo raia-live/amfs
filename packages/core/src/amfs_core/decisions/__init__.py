@@ -2,10 +2,12 @@
 
 from .models import (
     Candidate, DecisionAnswer, DecisionRequest, DecisionResponse, OutcomeEvent,
-    Question, RiskEvidence, VerificationCheck, canonical_json, fingerprint,
+    Question, RiskEvidence, VerificationCheck, BranchEstimates,
+    ExperimentalDecisionDiagnostics, canonical_json, fingerprint,
 )
 
 __all__ = [
     "Candidate", "DecisionAnswer", "DecisionRequest", "DecisionResponse", "OutcomeEvent",
-    "Question", "RiskEvidence", "VerificationCheck", "canonical_json", "fingerprint",
+    "Question", "RiskEvidence", "VerificationCheck", "BranchEstimates",
+    "ExperimentalDecisionDiagnostics", "canonical_json", "fingerprint",
 ]
