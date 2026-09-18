@@ -723,12 +723,14 @@ async def _discredited_below_gate(
     include_artifacts: bool,
     limit: int,
 ) -> list[MemoryEntry]:
-    """The entity's discredited entries the confidence gate kept out.
+    """The entity's discredited entries the ranked list did not hold.
 
-    Read only for the regime-shift flag: a rule that was validated many times
-    and then failed twice has a confidence under the discredit threshold, so a
+    Read only for the regime-shift flag, on every priors call. Two ways the
+    ranked list misses the signal: a rule that was validated many times and
+    then failed twice has a confidence under the discredit threshold, so a
     retrieve gated at that threshold — the benchmark's setting, and a reasonable
-    production one — never saw the very rows that carry the signal.
+    production one — never saw it; and with no gate at all, the rule that
+    stopped working may simply not match this query.
 
     Not a re-run of the lexical query. The rule that stopped working need not
     share words with this query (it may have matched semantically, or not at
@@ -2441,19 +2443,22 @@ async def retrieve_entries(
         # above it (the benchmark's setting) the rows this reads never arrived.
         # Fetched here without the gate, for this reading only: the ranked list
         # is unchanged.
+        # Always, not only when a confidence gate is set: the read is
+        # entity-wide, so it also brings in the rule that stopped working but
+        # shares no words with this query — which the ranked list never held
+        # whatever the gate.
         shift_pool: list[MemoryEntry] = [e for e, _, _ in head] + list(avoided)
-        if req.min_confidence > 0.0:
-            seen_keys = {e.entry_key for e in shift_pool}
-            shift_pool.extend(
-                await _discredited_below_gate(
-                    req.entity_path,
-                    branch=branch,
-                    seen=seen_keys,
-                    vis=vis,
-                    include_artifacts=req.include_artifacts,
-                    limit=pool,
-                )
+        seen_keys = {e.entry_key for e in shift_pool}
+        shift_pool.extend(
+            await _discredited_below_gate(
+                req.entity_path,
+                branch=branch,
+                seen=seen_keys,
+                vis=vis,
+                include_artifacts=req.include_artifacts,
+                limit=pool,
             )
+        )
         shifted_entries = [e for e in shift_pool if _regime_shifted(e, now=now)]
         shifted = bool(shifted_entries)
         shift_at = max(

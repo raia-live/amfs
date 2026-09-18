@@ -367,6 +367,20 @@ def test_the_below_gate_read_is_entity_wide_not_a_rerun_of_the_query(client, ser
     assert meta["recommendation"]["mode"] == "explore"
 
 
+def test_the_off_query_rule_fires_the_shift_at_the_default_gate_too(client, server_mem) -> None:
+    """``min_confidence`` defaults to 0, so the documented include_priors call
+    has no gate to lift — the entity-wide read must still run, or a rule that
+    stopped working but shares no words with the query never flags."""
+    server_mem.write("acme/support", "fix-old", "rotate the ingest worker on a stuck queue", confidence=0.8)
+    server_mem._read_tracker.clear()
+    _stub_stats(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _outcomes(server_mem, "fix-old", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
+
+    _, meta = _priors_meta(client)  # default min_confidence=0.0
+    assert meta["regime_shift"] is True
+    assert meta["recommendation"]["mode"] == "explore"
+
+
 def test_the_below_gate_read_respects_the_callers_visibility(client, server_mem, monkeypatch) -> None:
     """Rows the caller cannot see must not steer the recommendation either. The
     rows are not returned, but the policy decision they drive is."""
