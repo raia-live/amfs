@@ -24,6 +24,41 @@ from .base import EpisodeSession, MemoryArm, MemoryHit
 READY_TIMEOUT_S = 60.0         # bounded per-episode readiness wait (charged to the arm)
 SEED_READY_TIMEOUT_S = 900.0   # one-off bulk seeding before episode 1 (not charged)
 
+# Zep Cloud rate-limits per second (x-ratelimit-limit: 5 observed on graph writes). A burst of
+# cells opening at once hits it and the SDK raises ApiError(429); this retries with the
+# server's retry-after (or a short backoff) so a rate limit is a wait, not a dead cell. The
+# wait is charged to the arm's memory latency like any other provider stall.
+_RATE_LIMIT_MAX_TRIES = 8
+_PACE_LOCK = __import__("threading").Lock()
+_last_call = [0.0]
+_MIN_INTERVAL_S = 0.25         # <= 4 calls/s process-wide, under the limit of 5
+
+
+def _paced(fn, *args, **kwargs):
+    """Call a Zep SDK method under the process-wide pace, retrying on 429."""
+    for attempt in range(_RATE_LIMIT_MAX_TRIES):
+        with _PACE_LOCK:
+            wait = _last_call[0] + _MIN_INTERVAL_S - time.perf_counter()
+            if wait > 0:
+                time.sleep(wait)
+            _last_call[0] = time.perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            status = getattr(e, "status_code", None)
+            text = str(e)
+            if status != 429 and "429" not in text and "ratelimit" not in text.lower():
+                raise
+            if attempt == _RATE_LIMIT_MAX_TRIES - 1:
+                raise
+            headers = getattr(e, "headers", None) or {}
+            try:
+                retry_after = float(headers.get("retry-after", 0) or 0)
+            except (TypeError, ValueError):
+                retry_after = 0.0
+            time.sleep(max(retry_after, 1.0) * (1 + attempt * 0.5))
+    raise RuntimeError("unreachable")
+
 
 class _ZepSession(EpisodeSession):
     def __init__(self, arm: "ZepArm", agent_id: str, episode: int) -> None:
@@ -34,7 +69,7 @@ class _ZepSession(EpisodeSession):
         self._refresh_pending()
         self.acct.notes["zep_lag_at_read"] = max(self.acct.notes.get("zep_lag_at_read", 0), len(self.arm.pending))
         with self._timed():
-            r = self.arm.client.graph.search(user_id=self.arm.user_id, query=query, limit=top_k)
+            r = _paced(self.arm.client.graph.search, user_id=self.arm.user_id, query=query, limit=top_k)
         hits: list[MemoryHit] = []
         for e in (r.edges or []):
             if getattr(e, "invalid_at", None) or getattr(e, "expired_at", None):
@@ -46,7 +81,7 @@ class _ZepSession(EpisodeSession):
                                       score=float(getattr(n, "score", 0) or 0)))
         if not hits:
             with self._timed():
-                r2 = self.arm.client.graph.search(user_id=self.arm.user_id, query=query, limit=top_k,
+                r2 = _paced(self.arm.client.graph.search, user_id=self.arm.user_id, query=query, limit=top_k,
                                                   scope="episodes")
             for ep in (r2.episodes or []):
                 hits.append(MemoryHit(key=f"episode:{ep.uuid_[:8]}", text=ep.content, score=0.0))
@@ -57,7 +92,7 @@ class _ZepSession(EpisodeSession):
 
     def write(self, key: str, text: str, *, confidence: float = 0.7, kind: str = "experience") -> None:
         with self._timed():
-            ep = self.arm.client.graph.add(user_id=self.arm.user_id, type="text", data=text,
+            ep = _paced(self.arm.client.graph.add, user_id=self.arm.user_id, type="text", data=text,
                                            source_description=key)
         self.arm.pending.append(ep.uuid_)
 
@@ -69,7 +104,7 @@ class _ZepSession(EpisodeSession):
         while self.arm.pending and checked < 25:
             checked += 1
             try:
-                if self.arm.client.graph.episode.get(self.arm.pending[0]).processed:
+                if _paced(self.arm.client.graph.episode.get, self.arm.pending[0]).processed:
                     self.arm.pending.pop(0)
                     continue
             except Exception:  # noqa: BLE001
@@ -82,7 +117,7 @@ class _ZepSession(EpisodeSession):
         while self.arm.pending and time.perf_counter() < deadline:
             uuid = self.arm.pending[0]
             try:
-                if self.arm.client.graph.episode.get(uuid).processed:
+                if _paced(self.arm.client.graph.episode.get, uuid).processed:
                     self.arm.pending.pop(0)
                     continue
             except Exception:  # noqa: BLE001
@@ -110,10 +145,10 @@ class ZepArm(MemoryArm):
         super().open(scope)
         self.user_id = scope.replace("/", "-")
         try:
-            self.client.user.delete(self.user_id)
+            _paced(self.client.user.delete, self.user_id)
         except Exception:  # noqa: BLE001
             pass
-        self.client.user.add(user_id=self.user_id)
+        _paced(self.client.user.add, user_id=self.user_id)
 
     def seed(self, entries, *, agent_id: str = "seed-agent") -> None:
         """Bulk-load the initial store with graph.add_batch (Zep's documented path for
@@ -125,7 +160,7 @@ class ZepArm(MemoryArm):
         try:
             for i in range(0, len(entries), 20):
                 chunk = entries[i:i + 20]
-                eps = self.client.graph.add_batch(
+                eps = _paced(self.client.graph.add_batch,
                     user_id=self.user_id,
                     episodes=[EpisodeData(data=text, type="text", source_description=key) for key, text, _ in chunk])
                 self.pending.extend(e.uuid_ for e in eps)

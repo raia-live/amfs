@@ -328,6 +328,7 @@ class ReadTracker:
         source: str | None = None,
         duration_ms: int = 0,
         success: bool = True,
+        action_key: str | None = None,
     ) -> None:
         """Record an action the agent took during this session.
 
@@ -351,6 +352,7 @@ class ReadTracker:
             "duration_ms": duration_ms,
             "source": source,
             "success": success,
+            "action_key": action_key,
         })
 
     @property

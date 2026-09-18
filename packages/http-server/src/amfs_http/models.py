@@ -70,6 +70,17 @@ class OutcomeRequest(BaseModel):
     #: ``entry_key -> version`` the agent read for ``causal_entry_keys``; the
     #: outcome is applied only where the key still carries that claim.
     causal_entry_versions: dict[str, int] | None = None
+    #: What happened to each decisive action (``amfs_core.actions.actions_taken``
+    #: rows). Derived here from ``tool_calls`` + ``attempts`` +
+    #: ``final_action_index`` when absent, so a direct REST client gets priors
+    #: without computing them.
+    actions_taken: list[dict[str, Any]] | None = None
+    #: The entities this outcome is about. Defaults to the causal keys' paths
+    #: plus ``entity_path``.
+    entity_paths: list[str] | None = None
+    entity_path: str | None = None
+    #: Optional label for the kind of task ("card-declined ticket").
+    situation: str | None = None
 
 
 class SearchRequest(BaseModel):
@@ -146,6 +157,27 @@ class RetrieveRequest(BaseModel):
     #: a memory the record has confirmed does not need nine alternatives beside
     #: it in the prompt. Opt-in.
     adaptive_k: bool = False
+    #: The calling agent, for the per-agent exploration assignment in the
+    #: recommendation. A fleet whose members pass distinct ids spreads its
+    #: search over the untried actions instead of all trying the same one.
+    agent_id: str | None = None
+    #: Append action priors — what was tried on the most similar past tasks
+    #: about ``entity_path`` and how it went — and a recommendation
+    #: (act / explore / escalate) as a trailing ``{"_meta": true, ...}`` element.
+    #: Requires ``entity_path``. Opt-in, because a client that does not know
+    #: the element would read it as a hit.
+    include_priors: bool = False
+    #: The actions the caller could take, as action keys (``tool:action``). With
+    #: them the priors can say which are untried here and the recommendation
+    #: can say ``escalate`` when every one has failed; without them it never does.
+    candidate_actions: list[str] | None = None
+    #: What kind of task this is, embedded for the priors' nearest-neighbour
+    #: lookup in place of the query when given.
+    situation: str | None = None
+    #: Return the fields an agent acts on and drop the bookkeeping (score
+    #: breakdown, importance dimensions, integrity fields, long values trimmed).
+    #: Roughly a third of the tokens of the full payload.
+    compact: bool = False
 
 
 class ContextRequest(BaseModel):

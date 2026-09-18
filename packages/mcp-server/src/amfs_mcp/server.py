@@ -25,7 +25,9 @@ import argparse
 import json
 import logging
 import os
+import re
 import time
+from datetime import datetime
 from pathlib import Path
 from collections.abc import Iterable
 from typing import Any
@@ -359,13 +361,19 @@ def _call_compat(fn: Any, **kwargs: Any) -> Any:
     hard-breaks recall on clients like Claude Desktop. Retry once without the
     offending kwarg so retrieval degrades gracefully instead of failing.
     """
-    try:
-        return fn(**kwargs)
-    except TypeError as e:
-        if "include_artifacts" in kwargs and "include_artifacts" in str(e):
-            kwargs.pop("include_artifacts", None)
+    # Each retry drops exactly the keyword the SDK named, so an older SDK that
+    # predates several of them (include_artifacts, include_priors, action_key,
+    # situation ...) is walked down to what it accepts rather than failing hard.
+    for _ in range(len(kwargs) + 1):
+        try:
             return fn(**kwargs)
-        raise
+        except TypeError as e:
+            m = re.search(r"unexpected keyword argument '([^']+)'", str(e))
+            if m and m.group(1) in kwargs:
+                kwargs.pop(m.group(1))
+                continue
+            raise
+    return fn(**kwargs)
 
 
 def _get_adapter() -> AdapterABC:
@@ -1106,6 +1114,10 @@ def amfs_retrieve(
     depth: int = 3,
     include_artifacts: bool = True,
     include_avoid: bool = True,
+    include_priors: bool = False,
+    candidate_actions: list[str] | None = None,
+    situation: str | None = None,
+    compact: bool = False,
 ) -> str:
     """Find memories by meaning — the default tool for any recall/lookup.
 
@@ -1135,6 +1147,19 @@ def amfs_retrieve(
             entries matching the query that a failure discredited, with how
             they failed. Read it before acting — these are the approaches that
             stopped working here. They are never ranked among the entries.
+        include_priors: When True (needs `entity_path`), the response also
+            carries `priors` — what was *done* on the most similar past tasks
+            about this entity and how it went (`tried`: action, won/n, agents;
+            `untried`) — and a `recommendation`: `act` (a validated rule or a
+            winning action), `explore` (an untried action picked for you, so a
+            fleet spreads its search), or `escalate` (every candidate action has
+            failed here). Read it before choosing an action.
+        candidate_actions: The actions you could take, as `tool:action` keys
+            (e.g. ["resolve:resend_email", "resolve:refund"]). Lets the priors
+            name the untried ones and the recommendation say `escalate`.
+        situation: A short label for the kind of task ("card-declined ticket"),
+            used to find similar past tasks in place of the query.
+        compact: Return only the fields you act on (about a third of the tokens).
 
     Returns ranked results with score breakdowns showing how each signal
     contributed to the final ranking. Every entry carries `evidence_status`:
@@ -1167,7 +1192,12 @@ def amfs_retrieve(
         limit=limit,
         recall_config=recall_config,
         include_artifacts=include_artifacts,
+        include_priors=include_priors,
+        candidate_actions=candidate_actions,
+        situation=situation,
+        compact=compact,
     )
+    priors_meta = getattr(mem, "last_priors", None) if include_priors else None
 
     serialized = []
     avoid: list[dict[str, Any]] = []
@@ -1186,10 +1216,13 @@ def amfs_retrieve(
             })
             continue
         data["_score"] = round(scored.score, 4)
-        data["_breakdown"] = {
-            k: round(v, 4) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
-            for k, v in scored.breakdown.items()
-        }
+        if compact:
+            data = _compact_tool_entry(scored.entry, data)
+        else:
+            data["_breakdown"] = {
+                k: round(v, 4) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
+                for k, v in scored.breakdown.items()
+            }
         serialized.append(data)
 
     if not serialized:
@@ -1203,12 +1236,62 @@ def amfs_retrieve(
         if avoid:
             empty["avoid"] = avoid
             empty["avoid_note"] = _AVOID_NOTE
+        _attach_priors(empty, priors_meta)
         return json.dumps(empty, default=str)
     payload: dict[str, Any] = {"count": len(serialized), "entries": serialized}
     if avoid:
         payload["avoid"] = avoid
         payload["avoid_note"] = _AVOID_NOTE
+    _attach_priors(payload, priors_meta)
     return json.dumps(_with_reuse_value(mem, payload), default=str)
+
+
+def _compact_tool_entry(entry: Any, data: dict[str, Any]) -> dict[str, Any]:
+    """The fields an agent acts on, for ``compact=True``."""
+    p, n = entry.posterior
+    return {
+        "entity_path": data.get("entity_path"),
+        "key": data.get("key"),
+        "value": data.get("value"),
+        "confidence": round(float(entry.confidence), 3),
+        "evidence_status": entry.evidence_status,
+        "posterior": {"p": p, "n": n},
+        "validators": len(entry.validators or []),
+        "written_by": entry.provenance.agent_id,
+        "_score": data.get("_score"),
+        **({"value_truncated": True, "full_value": data.get("full_value")} if data.get("value_truncated") else {}),
+    }
+
+
+def _attach_priors(payload: dict[str, Any], meta: dict[str, Any] | None) -> None:
+    """Add the priors / recommendation block and a one-line reading of it."""
+    if not meta:
+        return
+    priors = meta.get("priors")
+    rec = meta.get("recommendation")
+    if priors:
+        payload["priors"] = {
+            "tried": [
+                {k: t.get(k) for k in ("action_key", "won", "n", "p", "agents", "last_3")}
+                for t in (priors.get("tried") or [])[:8]
+            ],
+            "untried": list(priors.get("untried") or [])[:10],
+            "n_outcomes": priors.get("n_outcomes", 0),
+        }
+    if rec:
+        payload["recommendation"] = rec
+    if meta.get("regime_shift"):
+        payload["regime_shift"] = True
+    if priors or rec:
+        payload["priors_note"] = _PRIORS_NOTE
+
+
+_PRIORS_NOTE = (
+    "`priors` is what agents actually did on similar tasks here and how it went; "
+    "`recommendation` reads it for you: act on the suggested action or validated "
+    "entry; explore means try the suggested untried action before repeating a failed "
+    "one; escalate means every known action has failed here — hand off rather than retry."
+)
 
 
 _AVOID_NOTE = (
@@ -1545,6 +1628,8 @@ def amfs_commit_outcome(
     outcome_type: str,
     task_input: str | None = None,
     response_text: str | None = None,
+    entity_path: str | None = None,
+    situation: str | None = None,
 ) -> str:
     """Record an outcome and auto-link it to everything read this session.
 
@@ -1578,6 +1663,12 @@ def amfs_commit_outcome(
             the agent said (a promise it could not keep, a claim nothing
             supports, a missing next step) has nothing to read. Pass it on
             every commit. Secrets are scanned and redacted before storage.
+        entity_path: Optional. The entity this work was about, when the memories
+            you read do not say (a task that read nothing still happened
+            somewhere). It is what lets a later `amfs_retrieve(include_priors=True)`
+            on that entity find this outcome and the actions you recorded.
+        situation: Optional short label for the kind of task ("card-declined
+            ticket"), so similar tasks find each other.
 
     Example: amfs_commit_outcome("task-42", "success")
     Example: amfs_commit_outcome("INC-2047", "success", task_input="API p99 latency above 2s in us-east")
@@ -1605,9 +1696,17 @@ def amfs_commit_outcome(
             "error": f"Invalid outcome_type '{outcome_type}'. Must be one of: {valid}"
         })
 
-    entries = mem.commit_outcome(
-        outcome_ref, otype, task_input=task_input, response_text=response_text
-    )
+    commit_kwargs: dict[str, Any] = {
+        "task_input": task_input,
+        "response_text": response_text,
+    }
+    # Sent only when set, so an older SDK that predates them is not handed
+    # keywords it would reject.
+    if entity_path:
+        commit_kwargs["entity_path"] = entity_path
+    if situation:
+        commit_kwargs["situation"] = situation
+    entries = mem.commit_outcome(outcome_ref, otype, **commit_kwargs)
     trace = getattr(mem, "_last_trace", None)
     result: dict[str, Any] = {
         "outcome_ref": outcome_ref,
@@ -1842,6 +1941,7 @@ def amfs_record_action(
     arguments: dict[str, Any] | None = None,
     result: str = "",
     success: bool = True,
+    action_key: str | None = None,
 ) -> str:
     """Record an action you took — the tool you called and what you passed it.
 
@@ -1866,16 +1966,22 @@ def amfs_record_action(
             Stored truncated — it is a record, not a cache.
         success: Whether the action succeeded. Record failed actions too; a trace
             committed as a failure is more useful when it shows what was tried.
+        action_key: Optional. The identity of this action for action-level
+            learning, as `tool:action` (e.g. "resolve:resend_email"). Derived
+            from tool_name and the `action` argument (or the first short
+            argument) when omitted; pass it when that guess would be wrong.
 
     Example: amfs_record_action("deploy_rollback", {"service": "checkout", "to_version": "v41"})
     Example: amfs_record_action("refund_payment", {"charge_id": "ch_123"}, result="refunded", success=True)
     """
     mem = _get_memory()
-    mem.record_action(
-        tool_name,
-        arguments or {},
+    _call_compat(
+        mem.record_action,
+        tool_name=tool_name,
+        arguments=arguments or {},
         result=result,
         success=success,
+        action_key=action_key,
     )
     return json.dumps({"recorded_action": tool_name, "success": success})
 
@@ -2083,6 +2189,7 @@ def amfs_briefing(
     agent_id: str | None = None,
     limit: int = 10,
     compact: bool = False,
+    since: str | None = None,
 ) -> str:
     """Get a compiled knowledge briefing — call this at the START of every session after setting identity.
 
@@ -2104,10 +2211,15 @@ def amfs_briefing(
             later success is known) and `regime_shift` (long-validated entries
             that recently started failing). A fraction of the tokens; use it at
             the top of every task.
+        since: ISO-8601 timestamp. Return only what changed after it in the
+            list sections (hot context, validated, discredited, tried_here) —
+            the delta since your last briefing, at a fraction of the tokens.
 
     Read the evidence sections first: act on `validated` entries, avoid
     `discredited` ones, and treat a `regime_shift` warning as "verify before
-    reusing anything here".
+    reusing anything here". `tried_here` is what agents *did* on this entity
+    and how each action went (won/n, agents); `explore.avoid` lists actions
+    that keep failing here — do not repeat them without a reason.
 
     Example: amfs_briefing(entity_path="checkout-service", compact=True)
     """
@@ -2117,7 +2229,17 @@ def amfs_briefing(
     if entity_path is None:
         entity_path = _default_entity_path()
     mem = _get_memory()
-    digests = mem.briefing(
+    since_at = None
+    if since:
+        try:
+            since_at = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError:
+            return json.dumps({"error": f"since must be an ISO-8601 timestamp, got {since!r}"})
+    briefing_kwargs: dict[str, Any] = {}
+    if since_at is not None:
+        briefing_kwargs["since"] = since_at
+    digests = _call_compat(
+        mem.briefing,
         entity_path=entity_path,
         agent_id=agent_id,
         limit=limit,
@@ -2127,6 +2249,7 @@ def amfs_briefing(
         # endpoint cannot assume that for itself — it also serves the dashboard
         # panel — so the assertion has to come from here.
         credit_reuse=True,
+        **briefing_kwargs,
     )
     if digests:
         # Wrapped in an object rather than returned as a bare list, because the

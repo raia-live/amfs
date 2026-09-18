@@ -146,6 +146,14 @@ _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
 _OUTCOME_EVIDENCE_SQL = (
     Path(__file__).parent / "migrations" / "008_outcome_evidence.sql"
 ).read_text(encoding="utf-8")
+#: Migration 009 — action-level learning (actions_taken / entity_paths /
+#: situation on outcomes, validators on entries, first-strike tolerance in the
+#: step function). Same treatment as 008. The outcomes' ``task_embedding``
+#: column is not in the file: it is a pgvector column whose dimension follows
+#: the entries' embedding, so ``ensure_outcome_embedding_column`` adds it.
+_ACTION_PRIORS_SQL = (
+    Path(__file__).parent / "migrations" / "009_action_priors.sql"
+).read_text(encoding="utf-8")
 
 # Shared by the sync and async adapters so the two cannot drift apart. account_id
 # is omitted on purpose: the hosted product gives the column a default in a tenant
@@ -518,9 +526,14 @@ ENTRY_SELECT = ", ".join(_ENTRY_COLUMNS)
 ENTRY_SELECT_NO_ARTIFACT_COL = ", ".join(c for c in _ENTRY_COLUMNS if c != "is_artifact")
 
 
-def entry_select(has_is_artifact_col: bool) -> str:
-    """The SELECT list for queries whose rows become MemoryEntry objects."""
-    return ENTRY_SELECT if has_is_artifact_col else ENTRY_SELECT_NO_ARTIFACT_COL
+def entry_select(has_is_artifact_col: bool, has_validators_col: bool = False) -> str:
+    """The SELECT list for queries whose rows become MemoryEntry objects.
+
+    ``validators`` (migration 009) is appended only once the column exists; the
+    decoder defaults it to an empty list otherwise.
+    """
+    base = ENTRY_SELECT if has_is_artifact_col else ENTRY_SELECT_NO_ARTIFACT_COL
+    return base + ", validators" if has_validators_col else base
 
 
 def _evidence_params(entry: MemoryEntry) -> list[Any]:
@@ -535,6 +548,18 @@ def _evidence_params(entry: MemoryEntry) -> list[Any]:
         entry.discredited_at,
         entry.prior_confidence,
     ]
+
+
+def _jsonb(raw: Any, default: Any) -> Any:
+    """A JSONB column as Python, whether the driver decoded it or left a string."""
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return default
+    return raw
 
 
 def _inherit_from_row(entry: MemoryEntry, row: Any) -> MemoryEntry:
@@ -556,8 +581,19 @@ def _inherit_from_row(entry: MemoryEntry, row: Any) -> MemoryEntry:
            for f in EVIDENCE_FIELDS},
         "evidence_success": float(row.get("evidence_success") or 0.0),
         "evidence_failure": float(row.get("evidence_failure") or 0.0),
+        "validators": _validators_of(row),
     })
     return inherit_evidence(entry, current)
+
+
+def _validators_of(row: Any) -> list[str]:
+    raw = row.get("validators") if hasattr(row, "get") else None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    return [str(v) for v in raw] if isinstance(raw, list) else []
 
 
 class PostgresAdapter(AdapterABC):
@@ -597,6 +633,9 @@ class PostgresAdapter(AdapterABC):
         self._has_search_tsv = False
         self._has_is_artifact_col = False
         self._has_evidence_cols = False
+        self._has_validators_col = False
+        self._has_action_cols = False
+        self._has_outcome_embedding_col = False
         # When an embedder is provided, embeddings are computed at write time and
         # persisted, so ANN retrieval (semantic_search / pgvector HNSW) works
         # without a separate backfill pass. embedding_dim must match the column
@@ -739,7 +778,7 @@ class PostgresAdapter(AdapterABC):
         if migrations is None:
             return None
         return hashlib.sha256(
-            (_SCHEMA_SQL + migrations + _OUTCOME_EVIDENCE_SQL).encode("utf-8")
+            (_SCHEMA_SQL + migrations + _OUTCOME_EVIDENCE_SQL + _ACTION_PRIORS_SQL).encode("utf-8")
         ).hexdigest()
 
     def _expected_tables(self) -> frozenset[str]:
@@ -1086,6 +1125,30 @@ class PostgresAdapter(AdapterABC):
         # with its helpers. Applied from the migration file rather than a copy
         # here — the copy is what drifted twice before (see 006 and 007).
         cur.execute(_OUTCOME_EVIDENCE_SQL)
+        # Action-level learning (trigger v4): see migration 009.
+        cur.execute(_ACTION_PRIORS_SQL)
+        # task_embedding on outcomes follows the entries' embedding dimension,
+        # so it is derived here rather than declared in the migration.
+        cur.execute(
+            """
+            SELECT format_type(a.atttypid, a.atttypmod) AS t
+            FROM pg_attribute a
+            WHERE a.attrelid = 'amfs_memory_entries'::regclass
+              AND a.attname = 'embedding' AND NOT a.attisdropped
+            """
+        )
+        row = cur.fetchone()
+        m = re.search(r"vector\((\d+)\)", str(row["t"])) if row else None
+        if m:
+            cur.execute(
+                f"ALTER TABLE amfs_outcomes ADD COLUMN IF NOT EXISTS "
+                f"task_embedding vector({int(m.group(1))})"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_outcomes_task_embedding "
+                "ON amfs_outcomes USING hnsw (task_embedding vector_cosine_ops) "
+                "WITH (m = 16, ef_construction = 64)"
+            )
         # Soft-delete for team members (user removal flow)
         cur.execute("""
             ALTER TABLE amfs_team_members
@@ -1474,7 +1537,7 @@ class PostgresAdapter(AdapterABC):
                     """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'amfs_memory_entries'
-                      AND column_name IN ('embedding', 'search_tsv', 'is_artifact', 'success_count')
+                      AND column_name IN ('embedding', 'search_tsv', 'is_artifact', 'success_count', 'validators')
                     """,
                 )
                 found = {row["column_name"] for row in cur.fetchall()}
@@ -1482,6 +1545,17 @@ class PostgresAdapter(AdapterABC):
                 self._has_search_tsv = "search_tsv" in found
                 self._has_is_artifact_col = "is_artifact" in found
                 self._has_evidence_cols = "success_count" in found
+                self._has_validators_col = "validators" in found
+                cur.execute(
+                    """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'amfs_outcomes'
+                      AND column_name IN ('actions_taken', 'task_embedding')
+                    """,
+                )
+                found = {row["column_name"] for row in cur.fetchall()}
+                self._has_action_cols = "actions_taken" in found
+                self._has_outcome_embedding_col = "task_embedding" in found
 
     # ------------------------------------------------------------------
     # read
@@ -1574,7 +1648,7 @@ class PostgresAdapter(AdapterABC):
                 with conn.cursor() as cur:
                     cur.execute(
                         f"""
-                        SELECT version, value, confidence{_EVIDENCE_SELECT if self._has_evidence_cols else ""}
+                        SELECT version, value, confidence{_EVIDENCE_SELECT if self._has_evidence_cols else ""}{", validators" if self._has_validators_col else ""}
                         FROM amfs_memory_entries
                         WHERE namespace = %s AND branch = %s
                           AND entity_path = %s AND key = %s
@@ -1657,6 +1731,9 @@ class PostgresAdapter(AdapterABC):
                     if self._has_evidence_cols:
                         columns.extend(_EVIDENCE_COLUMNS)
                         params.extend(_evidence_params(entry))
+                    if self._has_validators_col:
+                        columns.append("validators")
+                        params.append(json.dumps(list(entry.validators or [])))
 
                     # Write-time embedding: compute and persist an embedding when
                     # the caller did not supply one and an embedder is configured.
@@ -1968,7 +2045,7 @@ class PostgresAdapter(AdapterABC):
 
         where = " AND ".join(conditions)
         query = (
-            f"SELECT {entry_select(self._has_is_artifact_col)} FROM amfs_memory_entries "
+            f"SELECT {entry_select(self._has_is_artifact_col, self._has_validators_col)} FROM amfs_memory_entries "
             f"WHERE {where} ORDER BY entity_path, key, version"
         )
 
@@ -2073,7 +2150,7 @@ class PostgresAdapter(AdapterABC):
 
         where = " AND ".join(conditions)
         sql = f"""
-            SELECT {entry_select(col_ready)} FROM amfs_memory_entries
+            SELECT {entry_select(col_ready, self._has_validators_col)} FROM amfs_memory_entries
             WHERE {where}
             ORDER BY {order}
             LIMIT %s
@@ -3231,29 +3308,44 @@ class PostgresAdapter(AdapterABC):
                     "SELECT set_config('amfs.outcome_model', %s, true)",
                     (outcome_model(),),
                 )
-                cur.execute(
-                    """
-                    INSERT INTO amfs_outcomes (
-                        namespace, outcome_ref, outcome_type, causal_confidence,
-                        committed_at, causal_entry_keys, agent_id,
-                        attempts, final_action_index, causal_entry_versions
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb)
-                    """,
-                    (
-                        self._namespace,
-                        record.outcome_ref,
-                        record.outcome_type.value,
-                        record.causal_confidence,
-                        record.committed_at,
-                        record.causal_entry_keys,
-                        record.agent_id,
-                        json.dumps(
-                            [a.model_dump(mode="json") for a in record.attempts],
-                            default=str,
-                        ),
-                        record.final_action_index,
-                        json.dumps(dict(record.causal_entry_versions or {})),
+                columns = [
+                    "namespace", "outcome_ref", "outcome_type", "causal_confidence",
+                    "committed_at", "causal_entry_keys", "agent_id",
+                    "attempts", "final_action_index", "causal_entry_versions",
+                ]
+                placeholders = ["%s"] * 7 + ["%s::jsonb", "%s", "%s::jsonb"]
+                params: list[Any] = [
+                    self._namespace,
+                    record.outcome_ref,
+                    record.outcome_type.value,
+                    record.causal_confidence,
+                    record.committed_at,
+                    record.causal_entry_keys,
+                    record.agent_id,
+                    json.dumps(
+                        [a.model_dump(mode="json") for a in record.attempts],
+                        default=str,
                     ),
+                    record.final_action_index,
+                    json.dumps(dict(record.causal_entry_versions or {})),
+                ]
+                if self._has_action_cols:
+                    columns += ["actions_taken", "entity_paths", "situation"]
+                    placeholders += ["%s::jsonb", "%s", "%s"]
+                    params += [
+                        json.dumps(list(record.actions_taken or []), default=str),
+                        list(record.entity_paths or []),
+                        record.situation,
+                    ]
+                task_embedding = self._outcome_embedding(record)
+                if task_embedding is not None:
+                    columns.append("task_embedding")
+                    placeholders.append("%s")
+                    params.append(f"[{','.join(str(v) for v in task_embedding)}]")
+                cur.execute(
+                    f"INSERT INTO amfs_outcomes ({', '.join(columns)}) "
+                    f"VALUES ({', '.join(placeholders)})",
+                    params,
                 )
 
         # Every entry any step cited, including the failed attempts' — those
@@ -3320,10 +3412,11 @@ class PostgresAdapter(AdapterABC):
         where, params = self._outcome_conditions(
             entity_path=entity_path, since=since, outcome_ref=outcome_ref
         )
+        extra = ", actions_taken, entity_paths, situation" if self._has_action_cols else ""
         sql = f"""
             SELECT outcome_ref, outcome_type, causal_confidence,
                    committed_at, causal_entry_keys, agent_id,
-                   attempts, final_action_index
+                   attempts, final_action_index, causal_entry_versions{extra}
             FROM amfs_outcomes
             WHERE {where}
             ORDER BY committed_at DESC
@@ -3352,9 +3445,158 @@ class PostgresAdapter(AdapterABC):
                     agent_id=row["agent_id"],
                     attempts=_attempts_from_row(row.get("attempts")),
                     final_action_index=row.get("final_action_index"),
+                    causal_entry_versions=_jsonb(row.get("causal_entry_versions"), {}),
+                    actions_taken=_jsonb(row.get("actions_taken"), []),
+                    entity_paths=list(row.get("entity_paths") or []),
+                    situation=row.get("situation"),
                 )
             )
         return results
+
+    # ------------------------------------------------------------------
+    # action priors (migration 009)
+    # ------------------------------------------------------------------
+
+    def _outcome_embedding(self, record: OutcomeRecord) -> list[float] | None:
+        """The vector stored with an outcome so later tasks can find it by
+        similarity. Built from the situation label and the task input; ``None``
+        when there is nothing to embed, no embedder, or no column."""
+        if self._embedder is None or not self._has_outcome_embedding_col:
+            return None
+        text = " ".join(t for t in (record.situation, record.task_input) if t).strip()
+        if not text:
+            return None
+        try:
+            return self._embedder.embed(text[:2000])
+        except Exception:  # noqa: BLE001
+            logger.warning("outcome embedding failed for %s; storing without vector",
+                           record.outcome_ref, exc_info=True)
+            return None
+
+    def ensure_outcome_embedding_column(self) -> bool:
+        """Add ``amfs_outcomes.task_embedding`` at the entries' embedding dimension.
+
+        Idempotent. Returns ``False`` (and does nothing) when the entries table
+        has no embedding column yet — the dimension is read from it, never
+        assumed, because deployments provision 384 or 1024 (see
+        ``ensure_embedding_column``). The HNSW index is built over a column that
+        is NULL on every existing row, so it is cheap on a populated table.
+        """
+        with self._maintenance_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT format_type(a.atttypid, a.atttypmod) AS t
+                    FROM pg_attribute a
+                    WHERE a.attrelid = 'amfs_memory_entries'::regclass
+                      AND a.attname = 'embedding' AND NOT a.attisdropped
+                    """
+                )
+                row = cur.fetchone()
+                if not row:
+                    return False
+                m = re.search(r"vector\((\d+)\)", str(row["t"]))
+                if not m:
+                    return False
+                dim = int(m.group(1))
+                cur.execute(
+                    f"ALTER TABLE amfs_outcomes ADD COLUMN IF NOT EXISTS task_embedding vector({dim})"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_outcomes_task_embedding "
+                    "ON amfs_outcomes USING hnsw (task_embedding vector_cosine_ops) "
+                    "WITH (m = 16, ef_construction = 64)"
+                )
+        self._detect_optional_columns()
+        return True
+
+    def similar_outcomes(
+        self,
+        entity_path: str,
+        embedding: list[float],
+        *,
+        k: int = 20,
+        min_similarity: float = 0.75,
+        since: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """The ``k`` committed outcomes about ``entity_path`` whose task was most
+        like the one embedded, each with its ``actions_taken`` and ``similarity``.
+
+        Empty when the store has no task embeddings (no embedder, or the column
+        is not provisioned), so callers fall back to :meth:`action_stats`.
+        """
+        if not self._has_outcome_embedding_col or not self._has_action_cols or not embedding:
+            return []
+        vec = f"[{','.join(str(v) for v in embedding)}]"
+        conditions = ["namespace = %s", "task_embedding IS NOT NULL", "%s = ANY(entity_paths)"]
+        params: list[Any] = [self._namespace, entity_path]
+        if since is not None:
+            conditions.append("committed_at >= %s")
+            params.append(since)
+        sql = f"""
+            SELECT outcome_ref, outcome_type, committed_at, agent_id, actions_taken, situation,
+                   1 - (task_embedding <=> %s::vector) AS similarity
+            FROM amfs_outcomes
+            WHERE {" AND ".join(conditions)}
+            ORDER BY task_embedding <=> %s::vector
+            LIMIT %s
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, [vec, *params, vec, int(k)])
+                rows = cur.fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            sim = float(row["similarity"] or 0.0)
+            if sim < min_similarity:
+                continue
+            out.append({
+                "outcome_ref": row["outcome_ref"],
+                "outcome_type": row["outcome_type"],
+                "committed_at": row["committed_at"],
+                "agent_id": row["agent_id"],
+                "situation": row.get("situation"),
+                "actions_taken": _jsonb(row.get("actions_taken"), []),
+                "similarity": sim,
+            })
+        return out
+
+    def action_stats(
+        self,
+        entity_path: str,
+        *,
+        since: datetime | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """The most recent outcomes about ``entity_path`` with their
+        ``actions_taken`` — the similarity-free fallback for priors."""
+        if not self._has_action_cols:
+            return []
+        conditions = ["namespace = %s", "%s = ANY(entity_paths)", "actions_taken <> '[]'::jsonb"]
+        params: list[Any] = [self._namespace, entity_path]
+        if since is not None:
+            conditions.append("committed_at >= %s")
+            params.append(since)
+        sql = f"""
+            SELECT outcome_ref, outcome_type, committed_at, agent_id, actions_taken, situation
+            FROM amfs_outcomes
+            WHERE {" AND ".join(conditions)}
+            ORDER BY committed_at DESC
+            LIMIT %s
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, [*params, int(limit)])
+                rows = cur.fetchall()
+        return [{
+            "outcome_ref": row["outcome_ref"],
+            "outcome_type": row["outcome_type"],
+            "committed_at": row["committed_at"],
+            "agent_id": row["agent_id"],
+            "situation": row.get("situation"),
+            "actions_taken": _jsonb(row.get("actions_taken"), []),
+            "similarity": 1.0,
+        } for row in rows]
 
     # ------------------------------------------------------------------
     # decision traces
@@ -3931,6 +4173,7 @@ class PostgresAdapter(AdapterABC):
             last_outcome=row.get("last_outcome"),
             last_outcome_at=row.get("last_outcome_at"),
             discredited_at=row.get("discredited_at"),
+            validators=_validators_of(row),
             recall_count=row.get("recall_count", 0),
             priority_score=float(row["priority_score"]) if row.get("priority_score") is not None else None,
             tier=row.get("tier", 3),

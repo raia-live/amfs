@@ -31,6 +31,9 @@ def make_arm(name: str) -> MemoryArm:
     if name == "senselab-attempts":
         from .senselab_arm import SenseLabAttemptsArm
         return SenseLabAttemptsArm()
+    if name == "senselab-nopriors":
+        from .senselab_arm import SenseLabNoPriorsArm
+        return SenseLabNoPriorsArm()
     if name == "pgvector-diy+outcomes":
         from .pgvector_arm import PgVectorDiyOutcomesArm
         return PgVectorDiyOutcomesArm()

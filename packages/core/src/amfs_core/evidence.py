@@ -27,13 +27,22 @@ the agent trusted at 0.95 counts nearly twice as much as one on an entry at
 ``n_causal`` is the *credit split*: an outcome that cited eight entries cannot
 hand each of them a full unit of evidence.
 
+One exception to the surprise term: the *first* failure of an entry that has
+at least ``FIRST_STRIKE_MIN_WINS`` successes and no failure yet is weighed
+without surprise. A single failure on a four-times-validated rule is more often
+the agent's slip or a noisy environment than a change in the world, and with
+full surprise it discredited the rule outright (0.89 -> 0.49) and pulled it out
+of retrieval. Without it the same failure leaves the rule contested at ~0.62; a
+second failure still discredits it (~0.40), so a regime change is unlearned in
+two strikes exactly as before.
+
 With the defaults below a fresh 0.7 entry drops to ~0.26 on its first failure
 and lifts to ~0.82 on its first success; a long-validated entry survives one
-failure (contested, ~0.57) and is discredited on the second. Those are the
+failure (contested, ~0.62) and is discredited on the second. Those are the
 timescales a regime change in a live system plays out on.
 
-The same arithmetic is implemented in PL/pgSQL in ``amfs_postgres`` migration
-008 and must be kept identical; ``tests/unit/test_evidence.py`` pins the
+The same arithmetic is implemented in PL/pgSQL in ``amfs_postgres`` migrations
+008 and 009 and must be kept identical; ``tests/unit/test_evidence.py`` pins the
 numbers both implementations have to produce.
 
 ``AMFS_OUTCOME_MODEL=multiplicative`` restores the constant-multiplier model
@@ -63,6 +72,21 @@ PRIOR_STRENGTH = 2.0
 EVIDENCE_DECAY = 0.8
 #: Posterior below which a failing entry is marked discredited.
 DISCREDIT_THRESHOLD = 0.5
+#: Successes an entry needs, with no failure yet, for its first failure to be
+#: weighed without the surprise term (see the module docstring).
+FIRST_STRIKE_MIN_WINS = 3
+#: A regime shift is a rule that was validated repeatedly and whose record no
+#: longer supports acting on it. ``REGIME_MIN_SUCCESSES`` is how validated it
+#: must have been; "no longer" is read from the evidence label, so the
+#: first-strike case (one failure against a long run, still ``validated``) is
+#: not a shift and the second failure in a row is. The briefing's
+#: ``regime_shift`` section and retrieve's ``regime_shift`` flag both read this.
+#: A shift is an event, not a state: the flag holds for ``REGIME_WINDOW_DAYS``
+#: after the rule's latest failure and then clears. Without the bound a rule
+#: discredited weeks ago would keep steering every retrieve on its entity to
+#: ``explore`` long after a replacement had been found and validated.
+REGIME_MIN_SUCCESSES = 3
+REGIME_WINDOW_DAYS = 7
 #: Failures weigh more than successes: trust is easy to lose, slow to rebuild.
 SEVERITY: dict[str, float] = {
     OutcomeType.SUCCESS.value: 1.0,
@@ -92,6 +116,66 @@ def is_success(outcome_type: OutcomeType | str) -> bool:
 def is_known(outcome_type: OutcomeType | str) -> bool:
     """Whether the model has a verdict for this type. Unknown types are not evidence."""
     return _name(outcome_type) in SEVERITY
+
+
+def regime_shifted(
+    entry: Any,
+    *,
+    now: datetime | None = None,
+    window_days: int | None = REGIME_WINDOW_DAYS,
+) -> bool:
+    """Whether *entry* looks like a rule that used to work and has just stopped.
+
+    Validated at least ``REGIME_MIN_SUCCESSES`` times, the latest outcome a
+    failure within the last *window_days*, and the evidence label no longer
+    ``validated`` — ``contested`` or ``discredited``. Reading the label rather
+    than a failure ratio is what keeps this consistent with first-strike
+    tolerance: the same failure that the label forgives (one against a long
+    run) is not a shift, and the second failure in a row, which the label does
+    not forgive, is. A ratio over the evidence masses cannot draw that line —
+    one failure carries severity 2 against a decayed run of successes and
+    already reads as half the mass.
+
+    The window is what makes this an event rather than a permanent mark: a
+    rule discredited last month is history the ``discredited`` section covers,
+    not a reason to keep skipping the action that has been winning since. Pass
+    ``window_days=None`` to read the state without the bound.
+
+    Works on anything with the evidence fields of ``MemoryEntry``, including the
+    discredited entries retrieve keeps aside: a long-validated rule that was
+    discredited by its recent failures is the strongest form of the signal.
+    """
+    successes = int(getattr(entry, "success_count", 0) or 0)
+    failures = int(getattr(entry, "failure_count", 0) or 0)
+    last = getattr(entry, "last_outcome", None)
+    if successes < REGIME_MIN_SUCCESSES or failures < 1 or last is None or is_success(last):
+        return False
+    if window_days is not None:
+        at = getattr(entry, "last_outcome_at", None)
+        if not isinstance(at, datetime):
+            # No timestamp, no way to call it recent.
+            return False
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=UTC)
+        moment = now or datetime.now(UTC)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC)
+        if (moment - at).total_seconds() > window_days * 86400:
+            return False
+    status = getattr(entry, "evidence_status", None)
+    if not isinstance(status, str):
+        from .labels import evidence_label
+
+        status = evidence_label(
+            success_count=successes,
+            failure_count=failures,
+            evidence_success=float(getattr(entry, "evidence_success", 0.0) or 0.0),
+            evidence_failure=float(getattr(entry, "evidence_failure", 0.0) or 0.0),
+            discredited=getattr(entry, "discredited_at", None) is not None,
+            outcome_count=int(getattr(entry, "outcome_count", 0) or 0),
+            confidence=float(getattr(entry, "confidence", 1.0) or 0.0),
+        )
+    return status != "validated"
 
 
 def severity(outcome_type: OutcomeType | str) -> float:
@@ -132,16 +216,29 @@ class EvidenceUpdate:
         }
 
 
+def first_strike(outcome_type: OutcomeType | str, success_count: int, failure_count: int) -> bool:
+    """Is this the first failure of an entry with a clean, sufficiently long record?"""
+    return (
+        not is_success(outcome_type)
+        and int(failure_count) == 0
+        and int(success_count) >= FIRST_STRIKE_MIN_WINS
+    )
+
+
 def evidence_weight(
     outcome_type: OutcomeType | str,
     *,
     current_confidence: float,
     causal_confidence: float = 1.0,
     n_causal: int = 1,
+    success_count: int = 0,
+    failure_count: int = 0,
 ) -> float:
     """The evidence mass one outcome adds to one of its causal entries."""
     target = 1.0 if is_success(outcome_type) else 0.0
     surprise = 1.0 + abs(target - clamp_confidence(current_confidence))
+    if first_strike(outcome_type, success_count, failure_count):
+        surprise = 1.0
     share = 1.0 / max(1, n_causal)
     return severity(outcome_type) * max(0.0, causal_confidence) * share * surprise
 
@@ -176,6 +273,8 @@ def apply_outcome(
         current_confidence=entry.confidence,
         causal_confidence=causal_confidence,
         n_causal=n_causal,
+        success_count=entry.success_count,
+        failure_count=entry.failure_count,
     )
     success = is_success(outcome_type)
     e_s = entry.evidence_success * EVIDENCE_DECAY + (w if success else 0.0)
@@ -367,9 +466,31 @@ def apply_record_to_entry(
         if upd.discredited and current.discredited_at is not None:
             # Still discredited: keep the moment it happened, not the latest hit.
             fields["discredited_at"] = current.discredited_at
+        fields["validators"] = validators_after(
+            current.validators, record.agent_id, is_success(outcome_type)
+        )
         current = current.model_copy(update={**fields, "outcome_count": current.outcome_count + 1})
         updates.append(upd)
     return current, updates
+
+
+#: Most distinct validators kept on an entry; the list is a signal, not a log.
+MAX_VALIDATORS = 10
+
+
+def validators_after(current: list[str] | None, agent_id: str | None, success: bool) -> list[str]:
+    """The entry's validators once ``agent_id`` committed this outcome.
+
+    A success adds the agent (moved to the end if already present); a failure
+    leaves the list alone — the record of who stood behind the claim is still
+    true, and the counts say what happened since. Capped at ``MAX_VALIDATORS``,
+    dropping the oldest.
+    """
+    out = [v for v in (current or []) if v]
+    if not success or not agent_id:
+        return out
+    out = [v for v in out if v != agent_id] + [agent_id]
+    return out[-MAX_VALIDATORS:]
 
 
 def cited_entries(record: OutcomeRecord) -> list[tuple[str, str]]:
@@ -478,6 +599,7 @@ def inherit_evidence(new: MemoryEntry, current: MemoryEntry | None) -> MemoryEnt
         return new
     update: dict[str, Any] = {f: getattr(current, f) for f in EVIDENCE_FIELDS}
     update["confidence"] = current.confidence
+    update["validators"] = list(current.validators or [])
     return new.model_copy(update=update)
 
 
@@ -515,5 +637,6 @@ __all__ = [
     "outcome_model",
     "outcome_steps",
     "posterior",
+    "regime_shifted",
     "severity",
 ]

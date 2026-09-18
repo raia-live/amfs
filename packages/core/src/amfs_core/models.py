@@ -168,6 +168,11 @@ class MemoryEntry(BaseModel):
     # cleared when later evidence lifts it back. Read paths exclude discredited
     # entries by default and render them as anti-patterns in briefings.
     discredited_at: datetime | None = None
+    #: Distinct agent ids whose *successful* outcomes credited this version, most
+    #: recent last, capped at ten by the writer. "Validated by 3 agents" is a
+    #: stronger signal than one agent's repeated success, and a peer reading the
+    #: entry can see who stands behind it.
+    validators: list[str] = Field(default_factory=list)
     recall_count: int = 0
     priority_score: float | None = None
     tier: int = 3
@@ -236,25 +241,43 @@ class MemoryEntry(BaseModel):
     def evidence_status(self) -> str:
         """One of ``untested``, ``validated``, ``contested``, ``discredited``.
 
-        The word an agent sees next to an entry. ``validated`` means every
-        outcome that cited it succeeded; ``contested`` means the record is
-        mixed but the posterior is still above the discredit threshold;
+        The word an agent sees next to an entry. ``validated`` means the
+        record supports acting on this — every outcome that cited it succeeded,
+        or the posterior over its outcomes is high enough over enough of them
+        (see ``amfs_core.labels``); ``contested`` means the record is mixed and
+        thin, but the posterior is still above the discredit threshold;
         ``discredited`` means a failure pushed it below and nothing has lifted
         it since. ``untested`` entries have never been cited by an outcome, so
         their confidence is whatever the author claimed.
         """
-        if self.discredited_at is not None:
-            return "discredited"
-        total = self.success_count + self.failure_count
-        if total == 0:
-            if self.outcome_count == 0:
-                return "untested"
-            # Outcomes committed before the split counts existed: direction
-            # is unknown, so read it off the confidence they left behind.
-            return "validated" if self.confidence >= 0.5 else "contested"
-        if self.failure_count > 0:
-            return "contested"
-        return "validated"
+        from .labels import evidence_label
+
+        return evidence_label(
+            success_count=self.success_count,
+            failure_count=self.failure_count,
+            evidence_success=self.evidence_success,
+            evidence_failure=self.evidence_failure,
+            discredited=self.discredited_at is not None,
+            outcome_count=self.outcome_count,
+            confidence=self.confidence,
+        )
+
+    @property
+    def posterior(self) -> tuple[float, int]:
+        """``(p_success, n)``: the record behind the label.
+
+        ``p_success`` is the posterior mean of success from the entry's decayed
+        outcome evidence under a neutral prior — an untested entry is 0.5, not
+        whatever its author claimed — and ``n`` is how many outcomes it rests on.
+        A 0.9 over twelve outcomes and a 0.9 over one are different things to
+        act on, which is what the pair is for.
+        """
+        from .labels import posterior_mean
+
+        return (
+            round(posterior_mean(self.evidence_success, self.evidence_failure), 3),
+            int(self.success_count) + int(self.failure_count),
+        )
 
     @property
     def provenance_tier(self) -> ProvenanceTier:
@@ -332,6 +355,20 @@ class OutcomeRecord(BaseModel):
     #: terminal outcome, when the agent took more than one. Training pipelines
     #: use it as the supervised target instead of guessing "the first action".
     final_action_index: int | None = None
+    #: What happened to each decisive action, derived at commit from
+    #: ``tool_calls`` + ``attempts`` + ``final_action_index`` (see
+    #: ``amfs_core.actions.actions_taken``): the action that ended each failed
+    #: attempt is a loss, the terminal action carries the outcome. This is the
+    #: replay-buffer row that action priors are computed from. Persisted on the
+    #: outcome, never as a memory entry.
+    actions_taken: list[dict[str, Any]] = Field(default_factory=list)
+    #: The entities this outcome is about — the explicit one the caller named plus
+    #: those of the causal keys. Priors are scoped by overlap with the entity a
+    #: later retrieve asks about; the outcomes table had no entity scope before.
+    entity_paths: list[str] = Field(default_factory=list)
+    #: Optional caller label for the kind of situation ("card-declined ticket"),
+    #: stored verbatim for analysis; similarity itself comes from ``task_input``.
+    situation: str | None = None
     #: Captured prompt and response, carried alongside the outcome rather than
     #: only on the trace. On the SaaS path the adapter's ``commit_outcome`` is what
     #: reaches the server, and the server seals its immutable trace from that call
@@ -417,6 +454,9 @@ class ToolCall(BaseModel):
     duration_ms: int = 0
     source: str | None = None
     success: bool = True
+    #: Explicit identity of the action for action-level learning, when the agent
+    #: knows it better than the argument heuristic in ``amfs_core.actions`` does.
+    action_key: str | None = None
 
 
 class QueryEvent(BaseModel):

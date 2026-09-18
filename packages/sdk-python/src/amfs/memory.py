@@ -16,6 +16,7 @@ from typing import Any, Callable
 from pydantic import ValidationError
 
 from amfs_core.abc import AdapterABC, WatchHandle
+from amfs_core.actions import actions_taken as derive_actions_taken, entity_paths_of
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
 from amfs_core.content import embedding_input
 from amfs_core.embedder import EmbedderABC
@@ -831,6 +832,10 @@ class AgentMemory:
         limit: int = 10,
         recall_config: RecallConfig | None = None,
         include_artifacts: bool = True,
+        include_priors: bool = False,
+        candidate_actions: list[str] | None = None,
+        situation: str | None = None,
+        compact: bool = False,
     ) -> list[ScoredEntry]:
         """Rank memories by meaning for a natural-language query.
 
@@ -841,12 +846,30 @@ class AgentMemory:
 
         Artifacts (stored source files) are demoted by default; pass
         ``include_artifacts=False`` to exclude them entirely.
+
+        With ``include_priors=True`` (and an ``entity_path``) the server also
+        returns what was *done* on the most similar past tasks about that entity
+        and how it went, plus a recommendation — ``act`` / ``explore`` /
+        ``escalate`` — read afterwards from :attr:`last_priors`. Pass the
+        actions you could take as ``candidate_actions`` (``tool:action`` keys)
+        so it can name the untried ones; ``situation`` labels the kind of task.
+        ``compact=True`` trims each hit to the fields an agent acts on. Both are
+        server-side features; the local adapters return entries without them.
         """
         cfg = recall_config or RecallConfig()
 
         adapter_retrieve = getattr(self._adapter, "retrieve", None)
         if callable(adapter_retrieve):
             try:
+                extra: dict[str, Any] = {}
+                if include_priors or candidate_actions or situation or compact:
+                    extra = {
+                        "agent_id": self.agent_id,
+                        "include_priors": include_priors,
+                        "candidate_actions": candidate_actions,
+                        "situation": situation,
+                        "compact": compact,
+                    }
                 rows = adapter_retrieve(
                     query,
                     entity_path=entity_path,
@@ -860,6 +883,7 @@ class AgentMemory:
                     include_discredited=cfg.include_discredited,
                     include_avoid=cfg.include_avoid,
                     adaptive_k=cfg.adaptive_k,
+                    **extra,
                 )
                 scored = [
                     ScoredEntry(entry=entry, score=score, breakdown=breakdown or {})
@@ -913,6 +937,18 @@ class AgentMemory:
         )
         if results:
             self._read_tracker.record(results[0].entry)
+
+    @property
+    def last_priors(self) -> dict[str, Any] | None:
+        """The priors / recommendation block from the last ``retrieve``, or None.
+
+        ``{"priors": {"tried": [...], "untried": [...], ...}, "recommendation":
+        {"mode": "act"|"explore"|"escalate", "suggested_action", "why"} | None,
+        "regime_shift": bool}``. Only after a retrieve with
+        ``include_priors=True`` against a server that has the outcome record;
+        None on the local adapters.
+        """
+        return getattr(self._adapter, "_last_retrieve_meta", None)
 
     @property
     def last_reuse_value(self) -> dict[str, Any] | None:
@@ -1269,8 +1305,20 @@ class AgentMemory:
         attempts: list[AttemptRecord | dict[str, Any]] | None = None,
         final_action_index: int | None = None,
         causal_entry_versions: dict[str, int] | None = None,
+        entity_path: str | None = None,
+        entity_paths: list[str] | None = None,
+        situation: str | None = None,
+        actions_taken: list[dict[str, Any]] | None = None,
     ) -> list[MemoryEntry]:
         """Record an outcome and back-propagate confidence changes.
+
+        *entity_path* names the entity this outcome is about when the causal
+        keys alone do not (an episode that read nothing still happened
+        somewhere); with the causal keys' paths it becomes the record's
+        ``entity_paths``, which is how later retrieves on that entity find it.
+        *situation* is an optional label for the kind of task. *actions_taken*
+        is derived from the recorded actions, the attempts and the final action
+        index unless given explicitly — see ``amfs_core.actions.actions_taken``.
 
         If *causal_entry_keys* is ``None``, automatically uses the session's
         read log — every entry this agent read becomes a causal link. When
@@ -1367,6 +1415,7 @@ class AgentMemory:
         # above: the record leaves for the server before the trace is built, so a
         # scan deferred to trace construction would ship raw arguments over the
         # wire on the SaaS path.
+        raw_tool_calls = tool_calls
         tool_calls = self._scanned_actions(tool_calls)
 
         # The versions the agent read, so the store credits the claim it acted on
@@ -1375,6 +1424,38 @@ class AgentMemory:
         # otherwise whatever this session's read log knows.
         if causal_entry_versions is None:
             causal_entry_versions = self._read_tracker.versions_for(list(causal_entry_keys))
+        # What happened to each decisive action, from the *unscanned* action list
+        # so the indices line up with the attempt boundaries; only the action key
+        # is kept, and it is scanned like any other captured text.
+        if actions_taken is None:
+            raw_actions = raw_tool_calls if raw_tool_calls is not None else self._read_tracker.actions
+            # ``final_action_index`` on the record is only set once an attempt
+            # boundary exists; for the action record the terminal action of a
+            # session with no attempts is simply its last action.
+            terminal = final_action_index
+            if terminal is None and raw_actions:
+                terminal = len(raw_actions) - 1
+            actions_taken = derive_actions_taken(
+                raw_actions,
+                [a.model_dump(mode="json") for a in attempt_records],
+                terminal,
+                outcome_type.value if hasattr(outcome_type, "value") else str(outcome_type),
+            )
+            for row in actions_taken:
+                cleared = scan_captured_text(
+                    row.get("action_key"),
+                    adapter=self._adapter,
+                    agent_id=self.agent_id,
+                    session_id=self.session_id,
+                )
+                row["action_key"] = cleared or row.get("tool_name") or "action"
+        # The failed attempts' keys count too: an episode that read a rule,
+        # failed on it and resolved without it is still about that rule's entity.
+        all_keys = list(causal_entry_keys)
+        for a in attempt_records:
+            all_keys.extend(a.causal_entry_keys)
+        derived_paths = entity_paths_of(all_keys, entity_path)
+        entity_paths = list(dict.fromkeys([*(entity_paths or []), *derived_paths]))
         record = OutcomeBackPropagator.make_record(
             outcome_ref=outcome_ref,
             outcome_type=outcome_type,
@@ -1397,6 +1478,9 @@ class AgentMemory:
             trace_follows=True,
             attempts=attempt_records,
             final_action_index=final_action_index,
+            actions_taken=actions_taken,
+            entity_paths=entity_paths,
+            situation=situation,
         )
         updated = self._propagator.propagate(record)
         self._write_contrast_lesson(record)
@@ -1935,6 +2019,7 @@ class AgentMemory:
         source: str | None = None,
         duration_ms: int = 0,
         success: bool = True,
+        action_key: str | None = None,
     ) -> None:
         """Record an action taken during this session, sealed into the trace on commit.
 
@@ -1963,6 +2048,7 @@ class AgentMemory:
             source=source,
             duration_ms=duration_ms,
             success=success,
+            action_key=action_key,
         )
 
     def explain(self, outcome_ref: str | None = None) -> dict[str, Any]:
@@ -2297,13 +2383,15 @@ class AgentMemory:
         branch: str | None = None,
         credit_reuse: bool = False,
         compact: bool = False,
+        since: datetime | None = None,
     ) -> list:
         """Get a ranked briefing of compiled knowledge digests.
 
         *compact* returns only the lead entity digest with its hot context and
         evidence sections (validated / discredited / regime_shift), narrative
         trimmed — what an agent needs at the top of a task, at a fraction of
-        the tokens.
+        the tokens. *since* trims the list sections to what changed after that
+        moment: the delta since the last briefing, not the whole scope again.
 
         Returns pre-compiled Digest objects from the Cortex, ranked by
         relevance to the given entity or agent context.
@@ -2343,11 +2431,14 @@ class AgentMemory:
                 kwargs["credit_reuse"] = True
             if compact:
                 kwargs["compact"] = True
+            if since is not None:
+                kwargs["since"] = since
             try:
                 digests = adapter_briefing(**kwargs)
             except TypeError:
                 kwargs.pop("credit_reuse", None)
                 kwargs.pop("compact", None)
+                kwargs.pop("since", None)
                 digests = adapter_briefing(**kwargs)
             return self._book_briefing_lineage(digests, credit_reuse)
 
@@ -2370,6 +2461,7 @@ class AgentMemory:
                     limit=limit,
                     branch=resolved_branch,
                     compact=compact,
+                    since=since,
                 ),
                 credit_reuse,
             )
