@@ -119,6 +119,24 @@ def test_avoid_list_is_flagged_and_appended(client, mem: AgentMemory) -> None:
     assert rows.index(avoid[0]) == len(rows) - 1
 
 
+def test_compact_avoid_rows_are_previews(client, mem: AgentMemory) -> None:
+    """In compact mode an avoided entry is carried as a one-liner, like a
+    tail hit: its job is to name what stopped working, not to be read in
+    full. It keeps the fields the agent and lineage need."""
+    long_value = "queue stuck: restart the worker. " + "then check the consumer lag; " * 30
+    mem.write("acme/support", "fix-restart", long_value, confidence=0.9)
+    _outcome(mem, "fix-restart", OutcomeType.FAILURE, "t1")
+    rows = client.post(
+        "/api/v1/retrieve",
+        json={"query": "queue stuck", "limit": 10, "include_avoid": True, "compact": True},
+    ).json()
+    avoid = [e for e in rows if e.get("_avoid")]
+    assert [e["key"] for e in avoid] == ["fix-restart"]
+    assert avoid[0]["value_truncated"] is True and len(avoid[0]["value"]) < 200
+    assert avoid[0]["_breakdown"]["evidence_status"] == "discredited"
+    assert avoid[0]["evidence_status"] == "discredited" and "version" in avoid[0]
+
+
 def test_adaptive_k_shrinks_behind_a_validated_leader(client, mem: AgentMemory) -> None:
     for i in range(3):
         _outcome(mem, "fix-rotate", OutcomeType.SUCCESS, f"s{i}")

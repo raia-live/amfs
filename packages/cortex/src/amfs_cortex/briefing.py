@@ -31,8 +31,13 @@ _COMPACT_NARRATIVE_CHARS = 400
 #: ``compact`` cuts each hot-context value here. A benchmark note runs 500-1500
 #: characters and there are three of them on every task; the agent reads the
 #: head to decide whether to act and ``amfs_read`` fetches the rest when it
-#: does. ``value_truncated`` marks the cut so nothing takes the head for the whole.
-_COMPACT_VALUE_CHARS = 480
+#: does — and in the documented protocol a ``retrieve`` for the task follows
+#: the briefing, which returns the same notes in full when they are relevant.
+#: At 480 the three previews cost about a thousand characters per task, most
+#: of it text the retrieve then repeated; 240 keeps the sentence that says
+#: what the note is for. ``value_truncated`` marks the cut so nothing takes
+#: the head for the whole.
+_COMPACT_VALUE_CHARS = 240
 #: ``tried_here`` rows a ``since`` delta keeps whatever their timestamp: an
 #: action that has lost most of at least this many tries is a standing warning.
 _STANDING_LOSS_N = 2

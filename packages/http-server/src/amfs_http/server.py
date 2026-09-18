@@ -2750,7 +2750,14 @@ async def retrieve_entries(
     if req.include_avoid and avoided:
         avoided.sort(key=lambda e: (e.last_outcome_at or e.provenance.written_at), reverse=True)
         for entry in avoided[:AVOID_LIST_MAX]:
-            data = render(entry)
+            # A preview, in compact mode: an avoid row's work is to name what
+            # stopped working and how it failed, and a 120-character head is
+            # enough to recognise it. Rendering it at rank 0 carried the whole
+            # value, which for three avoided entries cost more than the hits.
+            data = (
+                _compact_entry_response(entry, rank=_COMPACT_FULL_HITS) if req.compact
+                else render(entry)
+            )
             data["_score"] = 0.0
             data["_avoid"] = True
             data["_breakdown"] = {

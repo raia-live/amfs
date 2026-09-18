@@ -217,7 +217,9 @@ def test_since_keeps_discredited_rows_and_compact_cuts_long_values(world) -> Non
 
     lead = svc.briefing(entity_path="acme/support", compact=True)[0]
     row = next(r for r in lead.summary["hot_context"] if r["key"] == "long-note")
-    assert row["value_truncated"] is True and len(row["value"]) <= 480
+    from amfs_cortex.briefing import _COMPACT_VALUE_CHARS
+
+    assert row["value_truncated"] is True and len(row["value"]) <= _COMPACT_VALUE_CHARS
     assert "recall_count" not in row and "posterior" not in row
     # What lineage books the row with is still there.
     assert row["version"] == 1 and row["entity_path"] == "acme/support" and row["memory_type"] == "fact"
