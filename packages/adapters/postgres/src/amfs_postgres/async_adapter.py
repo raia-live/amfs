@@ -9,6 +9,7 @@ The sync PostgresAdapter, SDK, MCP, and Cortex are completely unaffected.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -588,7 +589,14 @@ class AsyncPostgresAdapter:
         if not self._has_embedding_col:
             return []
 
-        query_vec = embedder.embed(query.text)
+        # The caller's vector when it has one; otherwise embed off the event
+        # loop. The embedder is an ONNX model and this method is awaited from
+        # request handlers, so embedding inline here stalled every other
+        # request on the process for the length of the inference.
+        if query.embedding is not None:
+            query_vec = query.embedding
+        else:
+            query_vec = await asyncio.to_thread(embedder.embed, query.text)
         vec_str = f"[{','.join(str(v) for v in query_vec)}]"
 
         conditions = [
@@ -606,6 +614,9 @@ class AsyncPostgresAdapter:
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
+        if query.max_confidence is not None:
+            conditions.append("confidence <= %s")
+            params.append(query.max_confidence)
 
         where = " AND ".join(conditions)
         sql = f"""

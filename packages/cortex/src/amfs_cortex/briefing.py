@@ -28,6 +28,24 @@ _HOT_CONTEXT_LIMIT = 3
 _EVIDENCE_SCAN_LIMIT = 40
 _EVIDENCE_SECTION_LIMIT = 5
 _COMPACT_NARRATIVE_CHARS = 400
+#: ``compact`` cuts each hot-context value here. A benchmark note runs 500-1500
+#: characters and there are three of them on every task; the agent reads the
+#: head to decide whether to act and ``amfs_read`` fetches the rest when it
+#: does — and in the documented protocol a ``retrieve`` for the task follows
+#: the briefing, which returns the same notes in full when they are relevant.
+#: At 480 the three previews cost about a thousand characters per task, most
+#: of it text the retrieve then repeated; 240 keeps the sentence that says
+#: what the note is for. ``value_truncated`` marks the cut so nothing takes
+#: the head for the whole.
+_COMPACT_VALUE_CHARS = 240
+#: ``tried_here`` rows a ``since`` delta keeps whatever their timestamp: an
+#: action that has lost most of at least this many tries is a standing warning.
+_STANDING_LOSS_N = 2
+_STANDING_LOSS_P = 0.4
+#: Digests loaded per briefing when the adapter can filter to the ones that
+#: name the entity or agent asked about. Recency-ordered, so on an account
+#: with more relevant digests than this the oldest are the ones not scored.
+_DIGEST_SCAN_LIMIT = 200
 #: Outcomes scanned for the ``tried_here`` section and rows it shows.
 _ACTIONS_SCAN_LIMIT = 200
 _ACTIONS_SECTION_LIMIT = 8
@@ -118,7 +136,7 @@ class BriefingService:
         """
         if compact:
             limit = 1
-        all_digests = self._adapter.list_digests(namespace=self._namespace, branch=branch)
+        all_digests = self._list_digests(entity_path, agent_id, branch)
 
         scored: list[tuple[float, Digest]] = []
         now = datetime.now(timezone.utc)
@@ -149,6 +167,31 @@ class BriefingService:
                 self._since(digests, entity_path, since)
 
         return digests
+
+    def _list_digests(
+        self, entity_path: str | None, agent_id: str | None, branch: str
+    ) -> list[Digest]:
+        """The digests worth scoring for this context.
+
+        ``_score`` awards nothing to a digest that names neither the entity
+        nor the agent asked about, so an adapter that can filter on those
+        strings (Postgres) is asked for just that set, bounded. Loading every
+        digest on the account was the briefing's cost under load: each row
+        carries a compiled summary, and the count grows with every entity an
+        agent writes to. Adapters without the filter get the plain call.
+        """
+        terms = [t for t in (entity_path, agent_id) if t]
+        if terms:
+            try:
+                return self._adapter.list_digests(
+                    namespace=self._namespace,
+                    branch=branch,
+                    relevant_to=terms,
+                    limit=_DIGEST_SCAN_LIMIT,
+                )
+            except TypeError:
+                pass
+        return self._adapter.list_digests(namespace=self._namespace, branch=branch)
 
     def _inject_action_sections(self, digests: list[Digest], entity_path: str) -> None:
         """Attach ``tried_here`` to the lead digest: per-action won/lost on this
@@ -200,8 +243,30 @@ class BriefingService:
             }
 
     @staticmethod
-    def _since(digests: list[Digest], entity_path: str, since: datetime) -> None:
-        """Trim the lead digest's list sections to what changed after ``since``."""
+    def _standing(section: str, row: dict[str, Any]) -> bool:
+        """A row a ``since`` delta must keep however old it is.
+
+        The delta pays for what changed, but two kinds of row are warnings
+        that stay in force: a discredited entry (with what replaced it), and
+        an action that keeps losing here. An agent briefed an hour ago that
+        asks for the delta would otherwise get a briefing with the "avoid"
+        list missing, act on the stale fix, and fail on it again — the
+        failure mode the sections exist to prevent. Both sections are capped,
+        so keeping them costs a handful of rows.
+        """
+        if section == "discredited":
+            return True
+        if section == "tried_here":
+            try:
+                return int(row.get("n") or 0) >= _STANDING_LOSS_N and float(row.get("p") or 0.0) < _STANDING_LOSS_P
+            except (TypeError, ValueError):
+                return False
+        return False
+
+    @classmethod
+    def _since(cls, digests: list[Digest], entity_path: str, since: datetime) -> None:
+        """Trim the lead digest's list sections to what changed after ``since``,
+        keeping the standing warnings (see ``_standing``)."""
         if since.tzinfo is None:
             since = since.replace(tzinfo=timezone.utc)
         for d in digests:
@@ -213,6 +278,9 @@ class BriefingService:
                     continue
                 kept = []
                 for row in rows:
+                    if isinstance(row, dict) and cls._standing(section, row):
+                        kept.append(row)
+                        continue
                     stamps = []
                     for field in ("last_outcome_at", "discredited_at", "last_at", "written_at"):
                         raw = row.get(field)
@@ -453,8 +521,26 @@ class BriefingService:
         narrative = summary.get("narrative")
         if isinstance(narrative, str) and len(narrative) > _COMPACT_NARRATIVE_CHARS:
             summary["narrative"] = narrative[:_COMPACT_NARRATIVE_CHARS].rstrip() + "…"
+        hot = summary.get("hot_context")
+        if isinstance(hot, list):
+            summary["hot_context"] = [
+                self._compact_hot_row(row) if isinstance(row, dict) else row for row in hot
+            ]
         lead.summary = summary
         return [lead]
+
+    @staticmethod
+    def _compact_hot_row(row: dict[str, Any]) -> dict[str, Any]:
+        """A hot-context row at compact size: the value cut to its head and the
+        counters an agent does not act on dropped. The fields lineage needs to
+        book the row as a read (key, entity_path, version, confidence,
+        memory_type, agent, evidence counts, written_at for ``since``) stay."""
+        out = {k: v for k, v in row.items() if k not in ("recall_count", "outcome_count", "posterior")}
+        value = out.get("value")
+        if isinstance(value, str) and len(value) > _COMPACT_VALUE_CHARS:
+            out["value"] = value[: _COMPACT_VALUE_CHARS - 1].rstrip() + "…"
+            out["value_truncated"] = True
+        return out
 
     def _inject_who_to_ask(
         self,

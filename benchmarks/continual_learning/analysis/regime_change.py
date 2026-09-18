@@ -65,8 +65,12 @@ def use_runs(prefix: str) -> None:
     """Read every arm from every run directory starting with *prefix* (grid v3 layout)."""
     global SOURCES, ARMS, HEAD, OUT, RUNS_PREFIX
     RUNS_PREFIX = prefix
+    # The transfer protocols, the probes and the long-horizon run have their own analyses
+    # (transfer.py, probes.py); mixing them in here would pool 20- and 120-episode cells with
+    # the 60-episode regime-change cells.
+    skip = ("-report", "-xfer-", "-probes", "-long", "-dry")
     runs = sorted(p.name for p in RESULTS.glob(f"{prefix}*") if (p / "episodes.jsonl").exists()
-                  and not p.name.endswith("-report"))
+                  and not any(s in p.name[len(prefix):] or p.name.endswith(s) for s in skip))
     arms: list[str] = []
     for run in runs:
         for line in (RESULTS / run / "episodes.jsonl").read_text().splitlines():
@@ -211,8 +215,69 @@ def main() -> None:
 
     md.append("## 1. After the world changes: changed-class tasks, episodes 20-59, single agent\n")
     md.append(headline(None, "all") + "\n")
-    md.append("### 1b. Same, restricted to the Mem0 scenarios (M)\n")
-    md.append(headline(mem0_scen, "M") + "\n")
+    if set(mem0_scen) != {x["scenario"] for x in rows}:
+        md.append("### 1b. Same, restricted to the Mem0 scenarios (M)\n")
+        md.append(headline(mem0_scen, "M") + "\n")
+
+    # ---- 1c. paired deltas: same scenario x seed cell, senselab minus each other arm ------
+    # A cell is one store; pairing on (scenario, seed) removes the scenario mix and the seed's
+    # task order from the comparison. Interval: bootstrap over the paired cells.
+    def paired(ref: str, other: str, *, episodes=None, scenarios=None, fleet=1):
+        def rate(a):
+            r = sel(rows, arm=a, fleet=fleet, pre=False, changed=True, scenarios=scenarios)
+            if episodes:
+                r = [x for x in r if episodes[0] <= x["episode"] < episodes[1]]
+            d = defaultdict(list)
+            for x in r:
+                d[(x["scenario"], x["seed"])].append(x["first_attempt_success"])
+            return {k: sum(v) / len(v) for k, v in d.items()}
+        ra, rb = rate(ref), rate(other)
+        keys = sorted(set(ra) & set(rb))
+        if not keys:
+            return None
+        deltas = [ra[k] - rb[k] for k in keys]
+        lo, hi = boot_ci({str(k): [d] for k, d in zip(keys, deltas)})
+        return mean(deltas, 3), lo, hi, sum(d > 0 for d in deltas), len(keys)
+
+    md.append("### 1c. Paired cell deltas: SenseLab CL minus each arm (same scenario x seed), "
+              "post-change changed-class first-attempt success\n")
+    lines = []
+    for a in HEAD:
+        if a == "senselab":
+            continue
+        all_ep = paired("senselab", a)
+        late = paired("senselab", a, episodes=(40, 60))
+        if not all_ep:
+            continue
+        d, lo, hi, pos, n = all_ep
+        dl, llo, lhi, _, _ = late if late else (float("nan"),) * 5
+        lines.append([f"vs {LABEL[a]}", f"{d:+.3f} [{lo:+.2f},{hi:+.2f}]", f"{pos}/{n}",
+                      f"{dl:+.3f} [{llo:+.2f},{lhi:+.2f}]" if late else "-"])
+    md.append(table(["comparison", "ep 20-59 delta [95% CI]", "cells with senselab ahead",
+                     "ep 40-59 delta [95% CI]"], lines) + "\n")
+
+    # ---- 1d. per scenario --------------------------------------------------------------
+    md.append("### 1d. Post-change changed-class first-attempt success by scenario (single agent)\n")
+    scen_all = sorted({x["scenario"] for x in rows})
+    lines = []
+    for a in HEAD:
+        cells = []
+        for s in scen_all:
+            r = sel(rows, arm=a, fleet=1, pre=False, changed=True, scenarios=[s])
+            cells.append(mean((x["first_attempt_success"] for x in r), 2) if r else "-")
+        if any(c != "-" for c in cells):
+            lines.append([LABEL[a], *cells])
+    md.append(table(["arm", *scen_all], lines) + "\n")
+    md.append("### 1e. Post-change changed-class escalation rate by scenario (single agent)\n")
+    lines = []
+    for a in HEAD:
+        cells = []
+        for s in scen_all:
+            r = sel(rows, arm=a, fleet=1, pre=False, changed=True, scenarios=[s])
+            cells.append(mean((x["escalated"] for x in r), 2) if r else "-")
+        if any(c != "-" for c in cells):
+            lines.append([LABEL[a], *cells])
+    md.append(table(["arm", *scen_all], lines) + "\n")
 
     # ---- 2. recovery curve -----------------------------------------------------------
     md.append("## 2. Recovery curve: first-attempt success on changed classes by 10-episode block\n")
@@ -265,6 +330,28 @@ def main() -> None:
                       f"{100 * mean(x['escalated'] for x in r):.0f}", f"{sum(x['cost'] for x in r) / max(1, len(succ)):.4f}"])
     md.append(table(["arm", "tokens / successful task", "seconds / successful task", "wasted tok / task",
                      "escalations / 100 tasks", "$ / successful task"], lines) + "\n")
+
+    # ---- 4b. whole horizon: every task, episodes 0-59 -----------------------------------
+    # The operator's view: over the whole run, changed classes and stable classes alike,
+    # what did each arm deliver and what did it cost. Per 1000 tasks so the ROI section
+    # can attach a price to an escalation and a token.
+    md.append("## 4b. Whole horizon, every task (episodes 0-59, single agent): outcomes and cost per 1000 tasks\n")
+    lines = []
+    for a in HEAD:
+        r = sel(rows, arm=a, fleet=1)
+        if not r:
+            continue
+        n = len(r)
+        fa = by_cell(r, lambda x: x["first_attempt_success"])
+        lo, hi = boot_ci(fa)
+        lines.append([LABEL[a], n, f"{mean(x['first_attempt_success'] for x in r)} [{lo:.2f},{hi:.2f}]",
+                      mean(x["success"] for x in r), f"{1000 * mean(x['escalated'] for x in r):.0f}",
+                      mean(x["attempts"] for x in r), f"{sum(x['tokens'] for x in r) / n * 1000 / 1e6:.2f}M",
+                      f"{sum(x['cost'] for x in r) / n * 1000:.0f}", f"{sum(x['wall_s'] for x in r) / n:.1f}",
+                      f"{sum(x['memory']['memory_ms'] for x in r) / n / 1000:.1f}"])
+    md.append(table(["arm", "n", "1st-attempt [95% CI]", "eventual success", "escalations / 1000",
+                     "attempts / task", "tokens / 1000 tasks", "$ / 1000 tasks", "wall s / task",
+                     "memory s / task"], lines) + "\n")
 
     # ---- 5. predictability ------------------------------------------------------------
     md.append("## 5. Predictability after the change (changed-class tasks)\n")
@@ -323,7 +410,7 @@ def main() -> None:
             status[v.get("evidence_status", "untested")] += 1
         latest = {}
         for v in vs:
-            if v["key"] not in latest or v["version"] > latest[v["key"]]["version"]:
+            if v["key"] not in latest or v.get("version", 0) > latest[v["key"]].get("version", 0):
                 latest[v["key"]] = v
         lines.append([LABEL[a], len(latest), len(vs), status["validated"], status["contested"], status["discredited"],
                       sum(1 for v in latest.values() if v.get("evidence_status") == "discredited")])

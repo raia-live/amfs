@@ -1276,3 +1276,92 @@ def test_the_python_and_sql_totals_report_the_same_thing(adapter) -> None:
     )
     for field in ("total_entries", "total_entities", "total_agents"):
         assert in_sql[field] == in_python[field], field
+
+
+def test_list_digests_relevant_to_keeps_what_the_briefing_would_score(adapter) -> None:
+    """The briefing awards a digest points only when the entity or agent it is
+    asked about is its scope or appears in its summary. ``relevant_to`` is that
+    predicate in SQL, so a briefing loads that set rather than every digest on
+    the account; ``limit`` bounds it, newest first."""
+    import uuid
+    from datetime import UTC, datetime, timedelta
+
+    from amfs_core.models import Digest, DigestType
+
+    now = datetime.now(UTC)
+    # The fixture does not clear amfs_digests, so this test owns a namespace.
+    ns = f"digests-{uuid.uuid4().hex[:8]}"
+
+    def _d(dtype, scope, summary, age_min):
+        return Digest(
+            digest_type=dtype, scope=scope, summary=summary, entry_count=1,
+            source_agents=[], compiled_at=now - timedelta(minutes=age_min),
+            namespace=ns, branch="main",
+        )
+
+    adapter.upsert_digest(_d(DigestType.ENTITY, "acme/support", {"narrative": "n"}, 30))
+    adapter.upsert_digest(_d(DigestType.AGENT_BRIEF, "a1", {"entities_written": ["acme/support"]}, 20))
+    adapter.upsert_digest(_d(DigestType.SOURCE, "github", {"entities_touched": ["acme/billing"]}, 10))
+    adapter.upsert_digest(_d(DigestType.ENTITY, "acme/billing", {"narrative": "unrelated"}, 5))
+    # A path that is a prefix of the one asked about is not it.
+    adapter.upsert_digest(_d(DigestType.ENTITY, "acme/support-legacy", {"narrative": "x"}, 1))
+
+    everything = adapter.list_digests(namespace=ns)
+    assert len(everything) == 5
+
+    got = adapter.list_digests(namespace=ns, relevant_to=["acme/support"])
+    # strpos is a substring test, so the legacy digest's scope does not match
+    # (its summary does not name the path) but a summary naming the path does.
+    assert sorted(d.scope for d in got) == ["a1", "acme/support"]
+
+    got = adapter.list_digests(namespace=ns, relevant_to=["acme/support", "a1"])
+    assert sorted(d.scope for d in got) == ["a1", "acme/support"]
+
+    newest_first = adapter.list_digests(namespace=ns, relevant_to=["acme/support"], limit=1)
+    assert [d.scope for d in newest_first] == ["a1"]
+
+    # No terms: the plain listing, unchanged.
+    assert len(adapter.list_digests(namespace=ns, relevant_to=[], limit=None)) == 5
+    assert len(adapter.list_digests(namespace=ns, digest_type=DigestType.ENTITY)) == 3
+
+
+def test_outcome_task_text_is_stored_and_read_back_per_entity(adapter) -> None:
+    """``task_input`` reaches the outcome row as ``task_text`` — the head of
+    it, and only when given — and ``recent_task_texts`` reads an entity's
+    corpus newest first, bounded, without the other entity's tasks. This is
+    the background the lexical term weights a query against."""
+    import uuid
+    from datetime import UTC, datetime, timedelta
+
+    from amfs_core.models import OutcomeRecord, OutcomeType
+    from amfs_postgres.adapter import TASK_TEXT_CHARS
+
+    ns = f"tt-{uuid.uuid4().hex[:8]}"
+    here, there = f"{ns}/deploy", f"{ns}/billing"
+    t0 = datetime.now(UTC)
+    for i, (path, text) in enumerate([
+        (here, "Deploy request #1 for the returns service"),
+        (here, "Deploy request #2 for the pricing service"),
+        (here, None),
+        (there, "Refund ticket for order 77"),
+        (here, "x" * (TASK_TEXT_CHARS + 500)),
+    ]):
+        adapter.commit_outcome(OutcomeRecord(
+            outcome_ref=f"TT-{i}",
+            outcome_type=OutcomeType.SUCCESS,
+            committed_at=t0 + timedelta(seconds=i),
+            causal_entry_keys=[f"{path}/k{i}"],
+            entity_paths=[path],
+            agent_id="a",
+            task_input=text,
+        ))
+    got = adapter.recent_task_texts(here)
+    assert len(got) == 3, got
+    assert len(got[0]) == TASK_TEXT_CHARS  # newest first, cut at the bound
+    assert got[1:] == [
+        "Deploy request #2 for the pricing service",
+        "Deploy request #1 for the returns service",
+    ]
+    assert adapter.recent_task_texts(here, limit=1) == [got[0]]
+    assert adapter.recent_task_texts(there) == ["Refund ticket for order 77"]
+    assert adapter.recent_task_texts(f"{ns}/nowhere") == []

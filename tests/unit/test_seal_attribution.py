@@ -23,6 +23,7 @@ all in an OSS install is why it reached production with no test.
 from __future__ import annotations
 
 import asyncio
+import copy
 from types import SimpleNamespace
 from typing import Any
 
@@ -53,6 +54,14 @@ class _SharedHandle:
     @property
     def agent_id(self) -> str:
         return self._tagger.agent_id
+
+    def as_agent(self, agent_id: str) -> "_SharedHandle":
+        # What ``AgentMemory.as_agent`` does: a handle onto the same store with
+        # its own identity and its own trace slot, sharing nothing mutable.
+        clone = copy.copy(self)
+        clone._tagger = SimpleNamespace(agent_id=agent_id)
+        clone._last_trace = None
+        return clone
 
     def commit_outcome(self, outcome_ref, outcome_type, **kwargs) -> list:
         # Built while the tagger still points at the caller, which is why the

@@ -154,6 +154,21 @@ _OUTCOME_EVIDENCE_SQL = (
 _ACTION_PRIORS_SQL = (
     Path(__file__).parent / "migrations" / "009_action_priors.sql"
 ).read_text(encoding="utf-8")
+#: Migration 010 — the index behind ``evidence_near`` (query-conditioned
+#: evidence read off the outcome rows). Same treatment as 008 and 009.
+_LOCAL_EVIDENCE_SQL = (
+    Path(__file__).parent / "migrations" / "010_local_evidence.sql"
+).read_text(encoding="utf-8")
+#: Migration 011 — the task text on the outcome row, the background corpus
+#: retrieve weights query terms against. Same treatment as 008–010.
+_OUTCOME_TASK_TEXT_SQL = (
+    Path(__file__).parent / "migrations" / "011_outcome_task_text.sql"
+).read_text(encoding="utf-8")
+#: Characters of ``task_input`` kept on the outcome row. Read for word
+#: statistics — which of a query's words recur across this entity's tasks —
+#: so the head of the request is all that is needed, and a pasted log or
+#: transcript does not make every commit a large write.
+TASK_TEXT_CHARS = 2_000
 
 # Shared by the sync and async adapters so the two cannot drift apart. account_id
 # is omitted on purpose: the hosted product gives the column a default in a tenant
@@ -636,6 +651,7 @@ class PostgresAdapter(AdapterABC):
         self._has_validators_col = False
         self._has_action_cols = False
         self._has_outcome_embedding_col = False
+        self._has_task_text_col = False
         # When an embedder is provided, embeddings are computed at write time and
         # persisted, so ANN retrieval (semantic_search / pgvector HNSW) works
         # without a separate backfill pass. embedding_dim must match the column
@@ -778,7 +794,10 @@ class PostgresAdapter(AdapterABC):
         if migrations is None:
             return None
         return hashlib.sha256(
-            (_SCHEMA_SQL + migrations + _OUTCOME_EVIDENCE_SQL + _ACTION_PRIORS_SQL).encode("utf-8")
+            (
+                _SCHEMA_SQL + migrations + _OUTCOME_EVIDENCE_SQL + _ACTION_PRIORS_SQL
+                + _LOCAL_EVIDENCE_SQL + _OUTCOME_TASK_TEXT_SQL
+            ).encode("utf-8")
         ).hexdigest()
 
     def _expected_tables(self) -> frozenset[str]:
@@ -1127,6 +1146,10 @@ class PostgresAdapter(AdapterABC):
         cur.execute(_OUTCOME_EVIDENCE_SQL)
         # Action-level learning (trigger v4): see migration 009.
         cur.execute(_ACTION_PRIORS_SQL)
+        # Query-conditioned evidence: see migration 010.
+        cur.execute(_LOCAL_EVIDENCE_SQL)
+        # The task text on outcomes: see migration 011.
+        cur.execute(_OUTCOME_TASK_TEXT_SQL)
         # task_embedding on outcomes follows the entries' embedding dimension,
         # so it is derived here rather than declared in the migration.
         cur.execute(
@@ -1550,12 +1573,13 @@ class PostgresAdapter(AdapterABC):
                     """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'amfs_outcomes'
-                      AND column_name IN ('actions_taken', 'task_embedding')
+                      AND column_name IN ('actions_taken', 'task_embedding', 'task_text')
                     """,
                 )
                 found = {row["column_name"] for row in cur.fetchall()}
                 self._has_action_cols = "actions_taken" in found
                 self._has_outcome_embedding_col = "task_embedding" in found
+                self._has_task_text_col = "task_text" in found
 
     # ------------------------------------------------------------------
     # read
@@ -2205,7 +2229,7 @@ class PostgresAdapter(AdapterABC):
         if not self._has_embedding_col:
             return super().semantic_search(query, embedder)
 
-        query_vec = embedder.embed(query.text)
+        query_vec = query.embedding if query.embedding is not None else embedder.embed(query.text)
 
         conditions = ["namespace = %s", "superseded_at IS NULL", "embedding IS NOT NULL"]
         params: list[Any] = [self._namespace]
@@ -2218,6 +2242,9 @@ class PostgresAdapter(AdapterABC):
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
+        if query.max_confidence is not None:
+            conditions.append("confidence <= %s")
+            params.append(query.max_confidence)
 
         where = " AND ".join(conditions)
         vec_str = f"[{','.join(str(v) for v in query_vec)}]"
@@ -3342,6 +3369,12 @@ class PostgresAdapter(AdapterABC):
                     columns.append("task_embedding")
                     placeholders.append("%s")
                     params.append(f"[{','.join(str(v) for v in task_embedding)}]")
+                # The head of the request, already redacted by the SDK before
+                # the record reached this adapter (see migration 011).
+                if self._has_task_text_col and record.task_input:
+                    columns.append("task_text")
+                    placeholders.append("%s")
+                    params.append(record.task_input[:TASK_TEXT_CHARS])
                 cur.execute(
                     f"INSERT INTO amfs_outcomes ({', '.join(columns)}) "
                     f"VALUES ({', '.join(placeholders)})",
@@ -3560,6 +3593,130 @@ class PostgresAdapter(AdapterABC):
                 "similarity": sim,
             })
         return out
+
+    def recent_task_texts(self, entity_path: str, *, limit: int = 200) -> list[str]:
+        """The task texts of the most recent outcomes about ``entity_path``,
+        newest first — the background corpus ``keyword_coverage`` weights a
+        query's terms against (see ``amfs_core.ranking``).
+
+        Bounded by ``limit`` and read through the GIN index on ``entity_paths``
+        (009). Empty when the column is not provisioned or nothing has been
+        committed with a ``task_input`` here, in which case the caller weights
+        by the candidate pool alone, as before 011.
+        """
+        if not self._has_task_text_col or not self._has_action_cols or not entity_path:
+            return []
+        sql = """
+            SELECT task_text
+            FROM amfs_outcomes
+            WHERE namespace = %s AND task_text IS NOT NULL AND %s = ANY(entity_paths)
+            ORDER BY committed_at DESC
+            LIMIT %s
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, [self._namespace, entity_path, int(limit)])
+                rows = cur.fetchall()
+        return [str(r["task_text"]) for r in rows if r.get("task_text")]
+
+    def evidence_near(
+        self,
+        entry_keys: list[str],
+        embedding: list[float],
+        *,
+        per_key: int = 50,
+        min_similarity: float = 0.0,
+    ) -> dict[str, dict[str, Any]]:
+        """The outcome record of each entry in ``entry_keys``, restricted to
+        outcomes whose task was like the one embedded.
+
+        Returns ``entry_key -> {"success", "failure", "n", "best_similarity"}``
+        where ``success`` and ``failure`` are similarity-weighted counts: an
+        outcome on a task at similarity 0.9 counts 0.9, one at 0.5 counts 0.5.
+        Keys with no nearby outcome are absent. Terminal outcomes credit the
+        row's ``causal_entry_keys``; the failed attempts inside ``attempts``
+        credit their own keys with a failure, exactly as the propagation
+        trigger applies them to the pooled columns — so this is the pooled
+        record, conditioned on the task, and nothing more.
+
+        Bounded on both sides: ``per_key`` nearest outcomes per entry, over
+        the outcomes the GIN index on ``causal_entry_keys`` narrows to.
+        Empty when the store has no task embeddings.
+        """
+        if not self._has_outcome_embedding_col or not embedding or not entry_keys:
+            return {}
+        vec = f"[{','.join(str(v) for v in embedding)}]"
+        keys = list(dict.fromkeys(entry_keys))
+        # Each row is unnested to (key, is_failure) pairs: the terminal outcome
+        # for every causal key, and a failure for every key inside a failed
+        # attempt. Rows are narrowed first by key overlap (indexed), then
+        # ranked per key by task similarity and cut at per_key. ``n`` counts
+        # distinct outcomes, not credits: one outcome that names a key in a
+        # failed attempt and again as a causal key is one nearby task, and
+        # must not on its own clear LOCAL_EVIDENCE_MIN_N.
+        sql = """
+            WITH near AS (
+                SELECT o.id AS outcome_id, o.outcome_type, o.causal_entry_keys, o.attempts,
+                       1 - (o.task_embedding <=> %s::vector) AS similarity
+                FROM amfs_outcomes o
+                WHERE o.namespace = %s
+                  AND o.task_embedding IS NOT NULL
+                  AND (
+                      o.causal_entry_keys && %s::text[]
+                      OR EXISTS (
+                          SELECT 1
+                          FROM jsonb_array_elements(o.attempts) AS att,
+                               jsonb_array_elements_text(
+                                   COALESCE(att->'causal_entry_keys', '[]'::jsonb)
+                               ) AS ak
+                          WHERE ak = ANY(%s::text[])
+                      )
+                  )
+            ),
+            credited AS (
+                SELECT n.outcome_id, k AS entry_key,
+                       amfs_outcome_is_success(n.outcome_type) AS success,
+                       n.similarity
+                FROM near n, unnest(n.causal_entry_keys) AS k
+                WHERE k = ANY(%s::text[])
+                UNION ALL
+                SELECT n.outcome_id, ak AS entry_key, FALSE AS success, n.similarity
+                FROM near n,
+                     jsonb_array_elements(n.attempts) AS att,
+                     jsonb_array_elements_text(
+                         COALESCE(att->'causal_entry_keys', '[]'::jsonb)
+                     ) AS ak
+                WHERE ak = ANY(%s::text[])
+            ),
+            ranked AS (
+                SELECT outcome_id, entry_key, success, similarity,
+                       row_number() OVER (PARTITION BY entry_key ORDER BY similarity DESC) AS rn
+                FROM credited
+                WHERE similarity >= %s
+            )
+            SELECT entry_key,
+                   SUM(CASE WHEN success THEN similarity ELSE 0 END) AS success,
+                   SUM(CASE WHEN success THEN 0 ELSE similarity END) AS failure,
+                   COUNT(DISTINCT outcome_id) AS n,
+                   MAX(similarity) AS best_similarity
+            FROM ranked
+            WHERE rn <= %s
+            GROUP BY entry_key
+        """
+        params = [vec, self._namespace, keys, keys, keys, keys, float(min_similarity), int(per_key)]
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        return {
+            row["entry_key"]: {
+                "success": float(row["success"] or 0.0),
+                "failure": float(row["failure"] or 0.0),
+                "n": int(row["n"] or 0),
+                "best_similarity": float(row["best_similarity"] or 0.0),
+            }
+            for row in rows
+        }
 
     def action_stats(
         self,
@@ -4261,36 +4418,51 @@ class PostgresAdapter(AdapterABC):
         digest_type: DigestType | None = None,
         namespace: str = "default",
         branch: str = "main",
+        *,
+        relevant_to: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[Digest]:
-        """List digests, optionally filtered by type and branch."""
+        """List digests, optionally filtered by type and branch.
+
+        ``relevant_to`` keeps only digests that name one of the given strings
+        — as their scope, or anywhere in their summary. The briefing scores a
+        digest only when the entity or agent it is asked about appears in one
+        of those two places, so this is the same set it would have kept after
+        loading everything, computed in the database instead of shipping every
+        digest on the account (each with its hot context) to score it in
+        Python. ``limit`` bounds the rows, most recently compiled first.
+        """
         account_id = self._get_current_account_id()
+        where = ["namespace = %s", "branch = %s"]
+        params: list[Any] = [namespace, branch]
+        if digest_type:
+            where.append("digest_type = %s")
+            params.append(digest_type.value)
+        if account_id:
+            where.append("account_id = %s")
+            params.append(account_id)
+        else:
+            where.append("account_id IS NULL")
+        terms = [t for t in (relevant_to or []) if t]
+        if terms:
+            # strpos rather than LIKE: no wildcard escaping, and an entity path
+            # is a literal substring of the JSON text whatever it contains.
+            where.append(
+                "(scope = ANY(%s) OR "
+                + " OR ".join("strpos(summary::text, %s) > 0" for _ in terms)
+                + ")"
+            )
+            params.append(terms)
+            params.extend(terms)
+        sql = f"""SELECT * FROM amfs_digests
+                  WHERE {" AND ".join(where)}
+                  ORDER BY compiled_at DESC"""
+        if limit is not None:
+            sql += " LIMIT %s"
+            params.append(int(limit))
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                if account_id:
-                    account_filter = "AND account_id = %s"
-                    base_params: list[Any] = [namespace, branch]
-                    extra_params: list[Any] = [account_id]
-                else:
-                    account_filter = "AND account_id IS NULL"
-                    base_params = [namespace, branch]
-                    extra_params = []
-
-                if digest_type:
-                    rows = cur.execute(
-                        f"""SELECT * FROM amfs_digests
-                           WHERE namespace = %s AND branch = %s AND digest_type = %s
-                           {account_filter}
-                           ORDER BY compiled_at DESC""",
-                        (*base_params, digest_type.value, *extra_params),
-                    ).fetchall()
-                else:
-                    rows = cur.execute(
-                        f"""SELECT * FROM amfs_digests
-                           WHERE namespace = %s AND branch = %s
-                           {account_filter}
-                           ORDER BY compiled_at DESC""",
-                        (*base_params, *extra_params),
-                    ).fetchall()
+                rows = cur.execute(sql, tuple(params)).fetchall()
         return [self._row_to_digest(r) for r in rows]
 
     @staticmethod

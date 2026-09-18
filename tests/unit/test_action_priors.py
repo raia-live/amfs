@@ -142,8 +142,60 @@ def test_recommend_escalates_only_when_candidates_were_given() -> None:
 def test_recommend_acts_on_a_validated_top_hit_and_not_on_a_shifted_one() -> None:
     assert act.recommend(None, top_hit_status="validated")["mode"] == "act"
     assert act.recommend(None, top_hit_status="validated", top_hit_recent_failure=True) is None
-    rec = act.recommend({"tried": [], "untried": ["resolve:c"]}, top_hit_status="validated", regime_shift=True)
+    # A shift elsewhere on the entity does not override the hit's own record...
+    mixed = {"tried": [{"action_key": "resolve:a", "won": 1, "lost": 1, "p": 0.5, "n": 2,
+                        "agents": 1, "last_3": ["lost", "won"], "last_at": None}],
+             "untried": ["resolve:c"]}
+    rec = act.recommend(mixed, top_hit_status="validated", regime_shift=True)
+    assert rec["mode"] == "act" and rec["suggested_action"] is None
+    assert "elsewhere" in rec["why"]
+    # ...but the hit being the rule that shifted does.
+    rec = act.recommend(mixed, top_hit_status="validated", regime_shift=True, top_hit_shifted=True)
     assert rec["mode"] == "explore" and rec["suggested_action"] == "resolve:c"
+
+
+def test_explore_needs_something_tried_to_explore_from() -> None:
+    """With nothing tried, "untried" is every candidate and the pick is a hash
+    of the agent's name: no information, so no advice."""
+    assert act.recommend({"tried": [], "untried": ["resolve:c"]}, regime_shift=True) is None
+    assert act.recommend({"tried": [], "untried": ["resolve:c"]}, top_hit_status="contested",
+                         regime_shift=True) is None
+
+
+def test_a_shift_over_entity_wide_priors_does_not_explore() -> None:
+    """The action_stats fallback is every outcome on the entity. A winner there
+    is acted on; a shift read over it is not a reason to explore."""
+    rec = act.recommend(_LOSERS, agent_id="x", candidate_actions=["resolve:a", "resolve:b", "resolve:c"],
+                        regime_shift=True, priors_are_local=False)
+    # all tried failed still explores — that claim holds for the whole entity.
+    assert rec["mode"] == "explore"
+    mixed = {"tried": [{"action_key": "resolve:a", "won": 2, "lost": 1, "p": 0.6, "n": 3,
+                        "agents": 1, "last_3": ["won", "won", "lost"], "last_at": None}],
+             "untried": ["resolve:c"]}
+    assert act.recommend(mixed, regime_shift=True, priors_are_local=False, agent_id="x") is None
+    assert act.recommend(mixed, regime_shift=True, priors_are_local=True, agent_id="x")["mode"] == "explore"
+
+
+def test_neighbourhood_weights_are_relative_to_the_best_match() -> None:
+    rows = [_row([("resolve:a", True)], sim=0.92), _row([("resolve:a", True)], sim=0.90),
+            _row([("resolve:b", False)], sim=0.86), _row([("resolve:b", False)], sim=0.80)]
+    out = act.neighbourhood_weights(rows)
+    weights = {round(r["task_similarity"], 2): round(r["similarity"], 3) for r in out}
+    assert weights[0.92] == 1.0
+    assert 0.4 < weights[0.90] < 0.6          # 0.02 behind: exp(-2/3)
+    assert 0.1 < weights[0.86] < 0.2          # 0.06 behind: exp(-2)
+    assert 0.80 not in weights, "0.12 behind is dropped, not counted"
+    priors = act.aggregate_priors(out)
+    tried = {t["action_key"]: t for t in priors["tried"]}
+    assert tried["resolve:a"]["n"] == 2 and tried["resolve:b"]["n"] == 1
+    assert tried["resolve:a"]["p"] > 0.6, "the near wins carry their weight"
+    assert tried["resolve:b"]["p"] > 0.4, "one far loss at a fifth of a weight is not a loser"
+
+
+def test_neighbourhood_weights_leave_rows_without_similarity_alone() -> None:
+    rows = [{"actions_taken": [], "committed_at": None, "agent_id": "a"}]
+    assert act.neighbourhood_weights(rows) == rows
+    assert act.neighbourhood_weights([]) == []
 
 
 def test_recommend_is_silent_with_nothing_to_say() -> None:
@@ -243,6 +295,23 @@ def _stub_stats(adapter, rows):
     adapter.action_stats = lambda entity_path, **kw: list(rows)  # type: ignore[attr-defined]
 
 
+class _StubEmbedder:
+    def embed(self, text: str) -> list[float]:
+        return [1.0, 0.0]
+
+
+def _stub_similar(adapter, rows):
+    """Priors from the outcomes nearest the query — the source that is about
+    this kind of task, and the one a shift may send exploring. Needs an
+    embedder for the query vector; the semantic channel itself stays off
+    because these tests run without the async adapter."""
+    from amfs_http import server
+
+    adapter.similar_outcomes = lambda entity_path, embedding, **kw: list(rows)  # type: ignore[attr-defined]
+    adapter.action_stats = lambda entity_path, **kw: []  # type: ignore[attr-defined]
+    server._get_server_embedder = lambda: _StubEmbedder()  # restored by the server_mem monkeypatch
+
+
 def test_retrieve_without_include_priors_is_unchanged(client, server_mem) -> None:
     _stub_stats(server_mem._adapter, [_row([("resolve:a", False)])])
     resp = client.post("/api/v1/retrieve", json={"query": "card declined", "entity_path": "acme/support"})
@@ -324,12 +393,13 @@ def test_a_second_failure_flags_the_shift_even_after_the_rule_leaves_the_head(cl
     the clearest case of a regime shift — a rule validated eight times and then
     discredited — is the one that fires it, and the winner is skipped for an
     untried action."""
-    _stub_stats(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _stub_similar(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
     _outcomes(server_mem, "fix-a", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
 
     body, meta = _priors_meta(client)
     assert all(e.get("key") != "fix-a" for e in body if not e.get("_meta")), "discredited rule left the head"
     assert meta["regime_shift"] is True
+    assert meta["regime_shift_scope"] == "query"
     assert meta["recommendation"]["mode"] == "explore"
     assert meta["recommendation"]["suggested_action"] == "resolve:b"
     assert "regime shift" in meta["recommendation"]["why"]
@@ -340,7 +410,7 @@ def test_the_shift_still_fires_when_the_confidence_gate_hid_the_discredited_rule
     the discredit threshold, so a retrieve gated there (the benchmark's setting)
     never saw it — and the two-failure signal went with it. The flag reads a
     separate, ungated fetch of the query-matched discredited rows."""
-    _stub_stats(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _stub_similar(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
     _outcomes(server_mem, "fix-a", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
     entry = server_mem._adapter.read("acme/support", "fix-a")
     assert entry.discredited_at is not None and entry.confidence < 0.5
@@ -348,23 +418,32 @@ def test_the_shift_still_fires_when_the_confidence_gate_hid_the_discredited_rule
     body, meta = _priors_meta(client, min_confidence=0.5)
     assert all(e.get("key") != "fix-a" for e in body if not e.get("_meta"))
     assert meta["regime_shift"] is True
+    assert meta["regime_shift_scope"] == "query", "the hidden rule matches this query"
     assert meta["recommendation"]["mode"] == "explore"
 
 
 def test_the_below_gate_read_is_entity_wide_not_a_rerun_of_the_query(client, server_mem) -> None:
     """The rule that stopped working need not share a word with this query, and
-    a rule validated over months is old by write time. The below-gate read is
-    the entity's discredited rows, whatever they say and whenever they were
-    written — the same scope priors and the briefing use."""
+    a rule validated over months is old by write time. The entity-wide flag
+    reads the entity's discredited rows, whatever they say and whenever they
+    were written — the same scope the briefing uses.
+
+    The flag is reported; it does not steer the recommendation. The rule that
+    shifted is about a stuck queue and this query is about a declined card, so
+    the winner for declined cards is still the recommendation. Sending every
+    class of task on the entity to explore past its own winning action was
+    measured in grid v3 at 14% success on the explores it produced."""
     server_mem.write("acme/support", "fix-old", "rotate the ingest worker on a stuck queue", confidence=0.8)
     server_mem._read_tracker.clear()
-    _stub_stats(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _stub_similar(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
     _outcomes(server_mem, "fix-old", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
     assert server_mem._adapter.read("acme/support", "fix-old").discredited_at is not None
 
     _, meta = _priors_meta(client, min_confidence=0.5)  # query: "card declined" — no overlap with fix-old
     assert meta["regime_shift"] is True
-    assert meta["recommendation"]["mode"] == "explore"
+    assert meta["regime_shift_scope"] == "entity"
+    assert meta["recommendation"]["mode"] == "act"
+    assert meta["recommendation"]["suggested_action"] == "resolve:a"
 
 
 def test_the_off_query_rule_fires_the_shift_at_the_default_gate_too(client, server_mem) -> None:
@@ -373,12 +452,13 @@ def test_the_off_query_rule_fires_the_shift_at_the_default_gate_too(client, serv
     stopped working but shares no words with the query never flags."""
     server_mem.write("acme/support", "fix-old", "rotate the ingest worker on a stuck queue", confidence=0.8)
     server_mem._read_tracker.clear()
-    _stub_stats(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _stub_similar(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
     _outcomes(server_mem, "fix-old", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
 
     _, meta = _priors_meta(client)  # default min_confidence=0.0
     assert meta["regime_shift"] is True
-    assert meta["recommendation"]["mode"] == "explore"
+    assert meta["regime_shift_scope"] == "entity"
+    assert meta["recommendation"]["mode"] == "act"
 
 
 def test_the_below_gate_read_respects_the_callers_visibility(client, server_mem, monkeypatch) -> None:

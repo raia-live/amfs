@@ -17,12 +17,16 @@ import argparse
 import asyncio
 import hashlib
 import inspect
+import contextvars
+import functools
 import json
 import logging
 import math
 import os
 import re
 import secrets
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, timezone
@@ -43,6 +47,9 @@ from amfs_core.aggregates import (
     entry_content_chars,
     recall_tokens_for_chars,
 )
+from amfs_core.ranking import composite_score
+from amfs_core.ranking import entry_text as _entry_text
+from amfs_core.ranking import keyword_coverage as _keyword_coverage
 from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
 from amfs_core.actions import actions_taken as derive_actions_taken
@@ -205,7 +212,38 @@ _sse_manager = SSEManager()
 # broadcasts aimed at it are dropped in silence — which is how it behaved.
 app.state.sse_manager = _sse_manager
 
-_bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="amfs-bg")
+_bg_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="amfs-bg")
+
+# ── Keeping the event loop free ────────────────────────────────────────
+# This server is one uvicorn process per instance, so everything that runs
+# synchronously inside an ``async def`` route stalls every other request on
+# the instance for as long as it takes. Three things did, and together they
+# were the production bottleneck measured on 2026-09-18 (a bare ``/stats``
+# at 27 s while the database sat at 3% CPU): the ONNX embedder on every write
+# and retrieve, the Pro cross-encoder rerank over up to thirty documents on
+# every retrieve, and ``commit_outcome`` calling the sync adapter end to end.
+#
+# Model work goes to ``_model_executor``, sized to the CPUs because ONNX
+# releases the GIL and more threads than cores only thrash. Sync adapter
+# work goes to ``_db_executor``; its size is a ceiling on concurrent
+# checkouts from the sync pool, not a throughput target. ``_offload`` copies
+# the calling context into the thread so the tenant ContextVars the RLS pool
+# reads are the request's, not the thread's leftovers.
+_model_executor = ThreadPoolExecutor(
+    max_workers=max(1, os.cpu_count() or 2), thread_name_prefix="amfs-model"
+)
+_db_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="amfs-db")
+
+
+async def _offload(executor: ThreadPoolExecutor, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+    """Run ``fn(*args, **kwargs)`` on ``executor`` with the current context."""
+    loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
+    return await loop.run_in_executor(
+        executor, functools.partial(ctx.run, functools.partial(fn, *args, **kwargs))
+    )
+
+
 _known_agents: set[str] = set()
 # Tracks (agent, namespace, user) triples whose owner linkage was already
 # upserted, so the hot write path doesn't repeat the DB call. Kept separate
@@ -307,8 +345,84 @@ from amfs_core.exclusions import (  # noqa: E402
 )
 from amfs_core.evidence import (  # noqa: E402
     DISCREDIT_THRESHOLD,
+    blend_local_evidence as _blend_local_evidence,
     is_synthetic_key as _is_synthetic_key,
+    locally_valid as _locally_valid,
 )
+
+
+def _local_evidence_enabled() -> bool:
+    """Whether retrieve conditions evidence on the query (default) or uses the
+    entry's pooled record alone. ``AMFS_LOCAL_EVIDENCE=0`` switches it off."""
+    return os.environ.get("AMFS_LOCAL_EVIDENCE", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+#: Entries whose local record is read per retrieve: the most relevant ones.
+#: Thirty matches the rerank window; the record of the long tail does not
+#: change what the agent is shown.
+LOCAL_EVIDENCE_HEAD = 30
+#: Most below-gate (discredited) entries read near the query per retrieve.
+BELOW_GATE_LIMIT = 50
+#: Most recent task texts read as the lexical term's background corpus, and
+#: how long one read serves an entity. Tasks arrive far slower than retrieves,
+#: and a corpus a minute stale weights a query's words the same.
+TASK_CORPUS_LIMIT = 200
+TASK_CORPUS_TTL_S = 60.0
+_task_corpus_cache: dict[tuple[str, str, str], tuple[float, list[str]]] = {}
+_TASK_CORPUS_CACHE_MAX = 512
+
+
+async def _task_corpus(entity_path: str | None) -> list[str]:
+    """The entity's recent task texts (see ``keyword_coverage``), read off the
+    event loop and held for ``TASK_CORPUS_TTL_S``. Empty for an adapter without
+    the read, a store without the column, or an entity with no task history —
+    the lexical term then weights by the candidate pool alone."""
+    if not entity_path:
+        return []
+    mem = _get_memory()
+    fn = getattr(mem._adapter, "recent_task_texts", None)
+    if not callable(fn):
+        return []
+    # Keyed by tenant as well as namespace: the adapter scopes the read to the
+    # request's account through the tenant context, and two accounts naming the
+    # same entity path must not read each other's tasks from this cache.
+    account = getattr(mem._adapter, "_get_current_account_id", lambda: None)()
+    cache_key = (str(account or ""), str(mem.namespace), entity_path)
+    now = time.monotonic()
+    hit = _task_corpus_cache.get(cache_key)
+    if hit is not None and now - hit[0] < TASK_CORPUS_TTL_S:
+        return hit[1]
+    try:
+        texts = await _offload(_db_executor, fn, entity_path, limit=TASK_CORPUS_LIMIT)
+    except Exception:  # noqa: BLE001
+        # A failed read is not "this entity has no tasks": serve the stale
+        # corpus if there is one and leave the cache alone, so the next
+        # retrieve tries again instead of weighting by the candidate pool for
+        # a minute because of one transient error.
+        logger.debug("recent_task_texts failed", exc_info=True)
+        return list(hit[1]) if hit is not None else []
+    if len(_task_corpus_cache) >= _TASK_CORPUS_CACHE_MAX:
+        oldest = min(_task_corpus_cache, key=lambda k: _task_corpus_cache[k][0])
+        _task_corpus_cache.pop(oldest, None)
+    _task_corpus_cache[cache_key] = (now, list(texts))
+    return list(texts)
+#: An entry is "about this query" — for the query-scoped regime shift — when
+#: its similarity is within this of the best hit's, or it matched on keywords.
+LOCAL_SIM_GAP = 0.1
+
+
+def _rank_anchored() -> bool:
+    """Whether trust modulates relevance (default) or is added to it.
+
+    ``AMFS_RANK_ADDITIVE_TRUST=1`` restores the pre-2026-09-18 weighted sum
+    without a code deploy. See ``amfs_core.ranking`` for why the default
+    changed.
+    """
+    return os.environ.get("AMFS_RANK_ADDITIVE_TRUST", "").strip().lower() not in (
+        "1", "true", "yes", "on",
+    )
 
 
 def _retrieve_min_semantic() -> float:
@@ -714,6 +828,14 @@ def _compact_entry_response(entry: MemoryEntry, *, rank: int = 0) -> dict[str, A
     return data
 
 
+def _search_sync(adapter: Any, query: SearchQuery, branch: Any) -> list[MemoryEntry]:
+    """``adapter.search`` with or without the branch keyword, whichever it takes."""
+    try:
+        return adapter.search(query, branch=branch)
+    except TypeError:
+        return adapter.search(query)
+
+
 async def _discredited_below_gate(
     entity_path: str,
     *,
@@ -786,18 +908,28 @@ def _priors_for_retrieve(
     text: str,
     embedder: Any,
     candidate_actions: list[str] | None,
+    query_vector: list[float] | None = None,
 ) -> dict[str, Any] | None:
     """Action priors for ``entity_path`` on tasks like ``text``.
 
-    Nearest committed outcomes by task embedding when the store can do that;
-    otherwise the most recent outcomes about the entity. ``None`` when the
-    adapter has no outcome record at all (filesystem, S3), so the caller sends
-    nothing rather than an empty block.
+    Nearest committed outcomes by task embedding when the store can do that,
+    re-weighted relative to the nearest one (``neighbourhood_weights``) so the
+    priors are about this kind of task and not every task on the entity;
+    otherwise the most recent outcomes about the entity. ``None`` when there
+    is no outcome record to report — the adapter keeps none (filesystem, S3)
+    or nothing has been committed on the entity yet — so the caller sends
+    nothing rather than a block whose only content is the candidate list the
+    agent itself supplied.
+
+    Synchronous, and blocking on the sync adapter: callers on the event loop
+    run it through ``_offload``. ``query_vector`` is the caller's embedding of
+    ``text`` when it has one, so the model is not run a second time.
     """
     from amfs_core.actions import (
         PRIORS_K,
         PRIORS_MIN_SIMILARITY,
         aggregate_priors,
+        neighbourhood_weights,
     )
 
     adapter = _get_memory()._adapter
@@ -805,14 +937,19 @@ def _priors_for_retrieve(
     stats = getattr(adapter, "action_stats", None)
     rows: list[dict[str, Any]] = []
     source = "none"
-    if callable(similar) and embedder is not None and text.strip():
+    if callable(similar) and text.strip() and (query_vector is not None or embedder is not None):
         try:
+            vec = query_vector if query_vector is not None else embedder.embed(text[:2000])
+            # Over-fetch, then keep the neighbourhood: the floor admits every
+            # task on the entity under a retrieval embedder, and the cut that
+            # matters is relative to the best match.
             rows = similar(
                 entity_path,
-                embedder.embed(text[:2000]),
-                k=PRIORS_K,
+                vec,
+                k=PRIORS_K * 3,
                 min_similarity=PRIORS_MIN_SIMILARITY,
             )
+            rows = neighbourhood_weights(rows)[:PRIORS_K]
             source = "similar_outcomes"
         except Exception:  # noqa: BLE001 - priors are best-effort
             logger.debug("similar_outcomes failed", exc_info=True)
@@ -824,11 +961,16 @@ def _priors_for_retrieve(
         except Exception:  # noqa: BLE001
             logger.debug("action_stats failed", exc_info=True)
             rows = []
-    if not rows and not candidate_actions:
+    if not rows:
         return None
     block = aggregate_priors(rows, candidate_actions=candidate_actions)
     block["source"] = source
     block["entity_path"] = entity_path
+    if source == "similar_outcomes" and rows:
+        block["neighbourhood"] = {
+            "best_similarity": round(max(float(r.get("task_similarity") or 0.0) for r in rows), 3),
+            "outcomes": len(rows),
+        }
     return block
 
 
@@ -1405,89 +1547,75 @@ async def write_entry(
     }
     mt = type_map.get(req.memory_type.lower(), MemoryType.FACT)
 
-    original_agent = mem._tagger.agent_id if req.agent_id else None
-    original_session = mem._tagger.session_id if req.session_id else None
-    if req.agent_id:
-        mem._tagger.agent_id = req.agent_id
-    if req.session_id:
-        mem._tagger.session_id = req.session_id
+    # The caller's identity lives on a per-request handle. This block awaits
+    # (ensure_agent, the write-time embedding, the async write), and a swap of
+    # the shared tagger restored in a ``finally`` is exactly what stamped
+    # concurrent writes with each other's agent — see ``AgentMemory.as_agent``.
+    handle = mem
+    if req.agent_id or req.session_id:
+        handle = mem.as_agent(req.agent_id or mem.agent_id)
+        if req.session_id:
+            handle._tagger.session_id = req.session_id
 
-    try:
-        _used_async = False
-        if _async_adapter is not None:
-            _agent_ns = _async_adapter._namespace
-            if req.agent_id:
-                _agent_cache_key = f"{req.agent_id}:{_agent_ns}"
-                if _agent_cache_key not in _known_agents:
-                    try:
-                        await _async_adapter.ensure_agent(req.agent_id, _agent_ns)
-                        _known_agents.add(_agent_cache_key)
-                    except Exception:
-                        pass
-                _link_agent_owner_once(request, req.agent_id, _agent_ns)
-
-            from amfs_core.content import embedding_input
-            from amfs_core.models import Provenance
-            provenance = mem._tagger.tag(pattern_refs=req.pattern_refs or None)
-            # Classify here so the flag is set before the inline-built entry hits
-            # the async adapter, and embed a clean descriptor for artifacts.
-            _is_artifact, _embed_text = embedding_input(req.key, req.value)
-            entry_obj = MemoryEntry(
-                entity_path=req.entity_path,
-                key=req.key,
-                version=1,
-                value=req.value,
-                provenance=provenance,
-                confidence=req.confidence,
-                memory_type=mt,
-                shared=req.shared,
-                branch=req.branch,
-                is_artifact=_is_artifact,
-            )
-            # Write-time embedding for semantic retrieval. The async adapter
-            # persists entry.embedding when the pgvector column exists; without
-            # this the hot write path stores no vector (embeddings never land).
-            # Crash-safe: a failure here just stores the entry without a vector.
-            _embedder = _get_server_embedder()
-            if _embedder is not None:
+    _used_async = False
+    if _async_adapter is not None:
+        _agent_ns = _async_adapter._namespace
+        if req.agent_id:
+            _agent_cache_key = f"{req.agent_id}:{_agent_ns}"
+            if _agent_cache_key not in _known_agents:
                 try:
-                    entry_obj = entry_obj.model_copy(
-                        update={"embedding": _embedder.embed(_embed_text)}
-                    )
-                except Exception:  # noqa: BLE001 - never fail a write on embedding
-                    logger.warning(
-                        "write-time embedding failed for %s/%s — storing without vector",
-                        req.entity_path, req.key, exc_info=True,
-                    )
+                    await _async_adapter.ensure_agent(req.agent_id, _agent_ns)
+                    _known_agents.add(_agent_cache_key)
+                except Exception:
+                    pass
+            _link_agent_owner_once(request, req.agent_id, _agent_ns)
+
+        from amfs_core.content import embedding_input
+        from amfs_core.models import Provenance
+        provenance = handle._tagger.tag(pattern_refs=req.pattern_refs or None)
+        # Classify here so the flag is set before the inline-built entry hits
+        # the async adapter, and embed a clean descriptor for artifacts.
+        _is_artifact, _embed_text = embedding_input(req.key, req.value)
+        entry_obj = MemoryEntry(
+            entity_path=req.entity_path,
+            key=req.key,
+            version=1,
+            value=req.value,
+            provenance=provenance,
+            confidence=req.confidence,
+            memory_type=mt,
+            shared=req.shared,
+            branch=req.branch,
+            is_artifact=_is_artifact,
+        )
+        # Write-time embedding for semantic retrieval. The async adapter
+        # persists entry.embedding when the pgvector column exists; without
+        # this the hot write path stores no vector (embeddings never land).
+        # Crash-safe: a failure here just stores the entry without a vector.
+        _embedder = _get_server_embedder()
+        if _embedder is not None:
             try:
-                entry = await _async_adapter.write(entry_obj)
-                _used_async = True
-            except Exception:
+                entry_obj = entry_obj.model_copy(
+                    update={
+                        "embedding": await _offload(
+                            _model_executor, _embedder.embed, _embed_text
+                        )
+                    }
+                )
+            except Exception:  # noqa: BLE001 - never fail a write on embedding
                 logger.warning(
-                    "Async write failed for %s/%s — falling back to sync adapter",
+                    "write-time embedding failed for %s/%s — storing without vector",
                     req.entity_path, req.key, exc_info=True,
                 )
-                entry = mem.write(
-                    req.entity_path,
-                    req.key,
-                    req.value,
-                    confidence=req.confidence,
-                    pattern_refs=req.pattern_refs or None,
-                    memory_type=mt,
-                    shared=req.shared,
-                    branch=req.branch,
-                )
-        if not _used_async and _async_adapter is None:
-            if req.agent_id:
-                _agent_cache_key = f"{req.agent_id}:{mem.namespace}"
-                if _agent_cache_key not in _known_agents:
-                    try:
-                        mem._adapter.ensure_agent(req.agent_id, mem.namespace)
-                        _known_agents.add(_agent_cache_key)
-                    except Exception:
-                        pass
-                _link_agent_owner_once(request, req.agent_id, mem.namespace)
-            entry = mem.write(
+        try:
+            entry = await _async_adapter.write(entry_obj)
+            _used_async = True
+        except Exception:
+            logger.warning(
+                "Async write failed for %s/%s — falling back to sync adapter",
+                req.entity_path, req.key, exc_info=True,
+            )
+            entry = handle.write(
                 req.entity_path,
                 req.key,
                 req.value,
@@ -1497,11 +1625,26 @@ async def write_entry(
                 shared=req.shared,
                 branch=req.branch,
             )
-    finally:
-        if original_agent is not None:
-            mem._tagger.agent_id = original_agent
-        if original_session is not None:
-            mem._tagger.session_id = original_session
+    if not _used_async and _async_adapter is None:
+        if req.agent_id:
+            _agent_cache_key = f"{req.agent_id}:{mem.namespace}"
+            if _agent_cache_key not in _known_agents:
+                try:
+                    mem._adapter.ensure_agent(req.agent_id, mem.namespace)
+                    _known_agents.add(_agent_cache_key)
+                except Exception:
+                    pass
+            _link_agent_owner_once(request, req.agent_id, mem.namespace)
+        entry = handle.write(
+            req.entity_path,
+            req.key,
+            req.value,
+            confidence=req.confidence,
+            pattern_refs=req.pattern_refs or None,
+            memory_type=mt,
+            shared=req.shared,
+            branch=req.branch,
+        )
     _sse_manager.broadcast(entry)
 
     _resource = f"{req.entity_path}/{req.key}"
@@ -2087,13 +2230,25 @@ async def retrieve_entries(
     candidates: dict[str, dict[str, Any]] = {}
 
     # 3a. Semantic channel (per query variant), keep best similarity per entry.
+    #     Each variant is embedded once, off the event loop, and the vector is
+    #     reused by the below-gate read further down.
+    query_vectors: dict[str, list[float]] = {}
     if embedder is not None and _async_adapter is not None:
         for qtext in queries:
+            # Best-effort: an embedder that cannot be driven from here (a test
+            # stub, an unexpected model failure) leaves the adapter to embed
+            # the text itself, exactly as it did before the vector was shared.
+            if callable(getattr(embedder, "embed", None)):
+                try:
+                    query_vectors[qtext] = await _offload(_model_executor, embedder.embed, qtext)
+                except Exception:  # noqa: BLE001
+                    logger.debug("query embedding failed — adapter will embed", exc_info=True)
             sq = SemanticQuery(
                 text=qtext,
                 entity_path=req.entity_path,
                 min_confidence=req.min_confidence,
                 limit=pool,
+                embedding=query_vectors.get(qtext),
             )
             try:
                 pairs = await _async_adapter.semantic_search(sq, embedder, branch=branch)
@@ -2146,6 +2301,73 @@ async def retrieve_entries(
                 entry.entry_key, {"entry": entry, "sim": 0.0, "keyword": 1.0}
             )
 
+    # 3d. Below-gate read, scoped to this query. A discredited entry sits under
+    #     the discredit threshold by definition, so a caller gating at or above
+    #     it (the benchmark's setting, and a reasonable production one) never
+    #     sees the rule that stopped working — nor, until now, the rule that
+    #     stopped working *elsewhere* but still works for tasks like this one.
+    #     Read semantically with the query vector already in hand, so each row
+    #     arrives with its similarity: only the discredited ones are kept, and
+    #     only as candidates for the avoid list, the local-evidence rescue in
+    #     6b, and the query-scoped regime-shift reading in 12. Entries that are
+    #     merely low-confidence stay hidden, as the caller's gate asks.
+    below_gate: dict[str, dict[str, Any]] = {}
+    if req.entity_path and req.min_confidence > 0.0:
+        gate_ceiling = min(req.min_confidence, DISCREDIT_THRESHOLD)
+        # Semantic, with the vector already in hand.
+        if _async_adapter is not None and embedder is not None and topical in query_vectors:
+            try:
+                pairs = await _async_adapter.semantic_search(
+                    SemanticQuery(
+                        text=topical,
+                        entity_path=req.entity_path,
+                        min_confidence=0.0,
+                        max_confidence=gate_ceiling,
+                        limit=BELOW_GATE_LIMIT,
+                        embedding=query_vectors[topical],
+                    ),
+                    embedder,
+                    branch=branch,
+                )
+            except Exception:  # noqa: BLE001 - best-effort
+                logger.debug("below-gate semantic read failed", exc_info=True)
+                pairs = []
+            for entry, sim in pairs:
+                if getattr(entry, "discredited_at", None) is None or entry.entry_key in candidates:
+                    continue
+                below_gate[entry.entry_key] = {"entry": entry, "sim": sim, "keyword": 0.0}
+        # Lexical, always: the channel the ranked list itself always runs, and
+        # the only one a store without vectors has.
+        below_lex = SearchQuery(
+            query=topical,
+            entity_path=req.entity_path,
+            min_confidence=0.0,
+            max_confidence=gate_ceiling,
+            limit=BELOW_GATE_LIMIT,
+            sort_by="recency",
+            depth=3,
+            include_artifacts=req.include_artifacts,
+        )
+        lex_below: list[MemoryEntry] = []
+        try:
+            if _async_adapter is not None:
+                lex_below = await _async_adapter.search(below_lex, branch=branch)
+            else:
+                lex_below = await _offload(
+                    _db_executor, _search_sync, _get_memory()._adapter, below_lex, branch
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug("below-gate lexical read failed", exc_info=True)
+        for entry in lex_below:
+            if getattr(entry, "discredited_at", None) is None or entry.entry_key in candidates:
+                continue
+            slot = below_gate.get(entry.entry_key)
+            if slot is None:
+                below_gate[entry.entry_key] = {"entry": entry, "sim": 0.0, "keyword": 1.0}
+            else:
+                slot["keyword"] = 1.0
+        candidates.update(below_gate)
+
     # 4. Drop benchmark/system scratch namespaces from user recall, and the
     #    system-written contrast lessons: those are consumed by the briefing
     #    (folded into the discredited section as "replaced by") and are not
@@ -2176,22 +2398,84 @@ async def retrieve_entries(
     if not req.include_artifacts:
         candidates = {k: v for k, v in candidates.items() if not _is_artifact(v["entry"])}
 
+    # 6a. Graded lexical term. The channels above mark a candidate 1.0 for
+    #     matching *any* query word, which under an OR-combined full-text query
+    #     is nearly every candidate; the blend then has no lexical signal at
+    #     all. ``keyword_coverage`` reads the pool once and scores each entry by
+    #     the rare query terms it carries — the service name, the error code —
+    #     so the entry the query is about outranks one that shares its
+    #     phrasing. "Rare" is judged against the entity's past tasks where it
+    #     can be: the words every task here shares are template, the words
+    #     that vary are the subject, and only the task history tells them
+    #     apart (``keyword_coverage`` for the measurement). Graded over the
+    #     lexical channel's own hits only: an entry the channel did not return
+    #     keeps 0, as before, rather than being handed lexical relevance for
+    #     an incidental word. Under the additive (rollback) form the flag
+    #     stays binary, so the switch restores the old ranking exactly.
+    anchored = _rank_anchored()
+    lexical_hits = {k: v for k, v in candidates.items() if v["keyword"] > 0.0}
+    if anchored and lexical_hits and topical.strip():
+        coverage = _keyword_coverage(
+            topical,
+            {k: _entry_text(v["entry"].key, v["entry"].value) for k, v in lexical_hits.items()},
+            background=await _task_corpus(req.entity_path),
+        )
+        for k, v in lexical_hits.items():
+            v["keyword"] = float(coverage.get(k, 0.0))
+
     # 6b. Discredited entries: a failure left them under the discredit
     #     threshold and no success has lifted them since. Out of the ranked
     #     list unless asked for; kept aside so ``include_avoid`` can hand them
     #     back flagged, because "this is what stopped working" is an answer.
+    #     Before the split, the local record: for the most relevant candidates,
+    #     what happened on tasks like this one. An entry's pooled evidence sums
+    #     every outcome it was credited with whatever the task; a rule that is
+    #     right for one class of task and wrong for another reads ``contested``
+    #     to both. The outcome rows carry the task embedding, so the record can
+    #     be conditioned on the query — and a discredited rule that still works
+    #     for tasks like this one is kept, labelled ``contested``, rather than
+    #     hidden from the one class that needs it.
+    local_evidence: dict[str, dict[str, Any]] = {}
+    if _local_evidence_enabled() and topical in query_vectors and candidates:
+        near_fn = getattr(_get_memory()._adapter, "evidence_near", None)
+        if callable(near_fn):
+            by_relevance = sorted(
+                candidates.values(), key=lambda v: (v["sim"], v["keyword"]), reverse=True
+            )
+            head_keys = [v["entry"].entry_key for v in by_relevance[:LOCAL_EVIDENCE_HEAD]]
+            try:
+                local_evidence = await _offload(
+                    _db_executor, near_fn, head_keys, query_vectors[topical]
+                )
+            except Exception:  # noqa: BLE001 - the pooled record stands
+                logger.debug("evidence_near failed", exc_info=True)
+                local_evidence = {}
+
     avoided: list[MemoryEntry] = []
+    # entry_key -> (similarity, keyword) for the query-scoped shift reading.
+    avoided_match: dict[str, tuple[float, float]] = {}
+    rescued: set[str] = set()
     if not req.include_discredited:
         kept_candidates: dict[str, dict[str, Any]] = {}
         for k, v in candidates.items():
             if getattr(v["entry"], "discredited_at", None) is not None:
-                if v["sim"] > 0.0 or v["keyword"] > 0.0:
+                if _locally_valid(local_evidence.get(k)):
+                    rescued.add(k)
+                    kept_candidates[k] = v
+                elif v["sim"] > 0.0 or v["keyword"] > 0.0:
                     avoided.append(v["entry"])
+                    avoided_match[k] = (float(v["sim"]), float(v["keyword"]))
             else:
                 kept_candidates[k] = v
         candidates = kept_candidates
+    else:
+        # Nothing hidden, so nothing to rescue; the below-gate rows join the
+        # ranked list like any other candidate.
+        pass
 
-    # 7. Blend semantic + recency + confidence + evidence + keyword.
+    # 7. Blend: relevance (semantic + keyword), modulated by trust (confidence
+    #    + evidence) and recency. See ``amfs_core.ranking`` for the form and
+    #    the measurement behind it.
     now = _dt.now(_tz.utc)
     half_life = 30.0
     keyword_weight = 0.15
@@ -2215,12 +2499,18 @@ async def retrieve_entries(
         0.9 that has been confirmed a dozen times, and what pushes an entry
         with a mixed record below both.
         """
-        score = (
-            req.semantic_weight * relevance
-            + recency_weight * recency
-            + req.confidence_weight * conf
-            + keyword_weight * keyword
-            + evidence_weight * evidence
+        score = composite_score(
+            relevance=relevance,
+            recency=recency,
+            confidence=conf,
+            evidence=evidence,
+            keyword=keyword,
+            semantic_weight=req.semantic_weight,
+            recency_weight=recency_weight,
+            confidence_weight=req.confidence_weight,
+            keyword_weight=keyword_weight,
+            evidence_weight=evidence_weight,
+            anchored=anchored,
         )
         return score * ARTIFACT_PENALTY if artifact else score
 
@@ -2239,18 +2529,36 @@ async def retrieve_entries(
             recency = 0.0
         conf = float(entry.confidence)
         artifact = _is_artifact(entry)
-        evidence = _evidence_signal(entry)
+        pooled = _evidence_signal(entry)
+        local = local_evidence.get(entry.entry_key)
+        evidence, local_w = _blend_local_evidence(pooled, local)
+        status = entry.evidence_status
+        if entry.entry_key in rescued:
+            # Discredited everywhere, working here: the label the pooled
+            # record would give a mixed history, and the one the agent should
+            # read as "check before you lean on it".
+            status = "contested"
+            conf = max(conf, DISCREDIT_THRESHOLD)
         # Components are kept unrounded so step 8 can rebuild the score
         # exactly; rounding happens once, on the way out.
-        scored.append((entry, _composite(sim, recency, conf, keyword, artifact, evidence), {
+        bd: dict[str, Any] = {
             "semantic": sim,
+            "relevance": req.semantic_weight * sim + keyword_weight * keyword,
             "recency": recency,
             "confidence": conf,
             "keyword": keyword,
             "evidence": evidence,
-            "evidence_status": entry.evidence_status,
+            "evidence_status": status,
             "is_artifact": artifact,
-        }))
+        }
+        if local_w > 0.0 and local is not None:
+            bd["evidence_local"] = {
+                "success": round(float(local.get("success", 0.0)), 3),
+                "failure": round(float(local.get("failure", 0.0)), 3),
+                "n": int(local.get("n", 0)),
+                "weight": round(local_w, 3),
+            }
+        scored.append((entry, _composite(sim, recency, conf, keyword, artifact, evidence), bd))
 
     scored.sort(key=lambda t: t[1], reverse=True)
 
@@ -2273,7 +2581,15 @@ async def retrieve_entries(
     if reranker is not None and getattr(reranker, "available", False) and scored:
         head = scored[:rerank_top_n]
         try:
-            rr_scores = reranker.rerank(topical, [_doc_text_for_rerank(e) for e, _, _ in head])
+            # Cross-encoder inference over up to thirty documents: the single
+            # most expensive thing on the read path, and it ran on the event
+            # loop until 2026-09-18.
+            rr_scores = await _offload(
+                _model_executor,
+                reranker.rerank,
+                topical,
+                [_doc_text_for_rerank(e) for e, _, _ in head],
+            )
         except Exception:  # noqa: BLE001 - rerank is best-effort
             logger.debug("rerank failed", exc_info=True)
             rr_scores = None
@@ -2292,7 +2608,8 @@ async def retrieve_entries(
                         bd["is_artifact"], bd.get("evidence", 0.0),
                     ),
                     {**bd, "rerank": rs, "rerank_normalised": norm,
-                     "rerank_absolute": absolute_score},
+                     "rerank_absolute": absolute_score,
+                     "relevance": req.semantic_weight * norm + keyword_weight * bd["keyword"]},
                 )
                 for (entry, _, bd), rs, norm, absolute_score in zip(
                     head, raw, normalised, absolute
@@ -2381,13 +2698,40 @@ async def retrieve_entries(
     #     within reach of it and drop the rest. Never below one result.
     if req.adaptive_k and head and head[0][0].evidence_status == "validated":
         top_score = head[0][1]
-        head = [t for t in head if t[1] >= top_score * ADAPTIVE_K_KEEP_RATIO] or head[:1]
+        if anchored:
+            # Under the anchored blend the score is relevance scaled by trust,
+            # so "within reach" is read on the two terms it is made of: a
+            # validated peer stays if its score is close; an entry the record
+            # has not confirmed stays if it is *more* relevant than the leader,
+            # or carries a rare query term the leader lacks (its lexical
+            # coverage ahead by ADAPTIVE_K_KEYWORD_GAP) — the cases where the
+            # leader's record, not its topic, put it first, and the agent
+            # should still see what the query was actually about.
+            top_rel = float(head[0][2].get("relevance") or 0.0)
+            top_kw = float(head[0][2].get("keyword") or 0.0)
+            head = [head[0]] + [
+                t for t in head[1:]
+                if (
+                    t[0].evidence_status == "validated"
+                    and t[1] >= top_score * ADAPTIVE_K_KEEP_RATIO
+                )
+                or float(t[2].get("relevance") or 0.0) > top_rel
+                or float(t[2].get("keyword") or 0.0) >= top_kw + ADAPTIVE_K_KEYWORD_GAP
+            ]
+        else:
+            head = [t for t in head if t[1] >= top_score * ADAPTIVE_K_KEEP_RATIO] or head[:1]
 
     render = _compact_entry_response if req.compact else _entry_to_response
     out: list[dict[str, Any]] = []
     for rank, (entry, score, breakdown) in enumerate(head):
         data = _compact_entry_response(entry, rank=rank) if req.compact else render(entry)
         data["_score"] = round(score, 4)
+        if entry.entry_key in rescued:
+            # The label the ranking used, not the pooled one the entry carries:
+            # to this query the rule is contested, not discredited, and the
+            # agent reads the top-level field.
+            data["evidence_status"] = breakdown.get("evidence_status")
+            data["_rescued"] = True
         if req.compact:
             data["_breakdown"] = {"evidence_status": breakdown.get("evidence_status")}
         else:
@@ -2399,7 +2743,14 @@ async def retrieve_entries(
     if req.include_avoid and avoided:
         avoided.sort(key=lambda e: (e.last_outcome_at or e.provenance.written_at), reverse=True)
         for entry in avoided[:AVOID_LIST_MAX]:
-            data = render(entry)
+            # A preview, in compact mode: an avoid row's work is to name what
+            # stopped working and how it failed, and a 120-character head is
+            # enough to recognise it. Rendering it at rank 0 carried the whole
+            # value, which for three avoided entries cost more than the hits.
+            data = (
+                _compact_entry_response(entry, rank=_COMPACT_FULL_HITS) if req.compact
+                else render(entry)
+            )
             data["_score"] = 0.0
             data["_avoid"] = True
             data["_breakdown"] = {
@@ -2416,15 +2767,33 @@ async def retrieve_entries(
     if req.include_priors and req.entity_path:
         from amfs_core.actions import recommend as _recommend
 
-        priors = _priors_for_retrieve(
+        priors_text = req.situation or topical
+        priors_vec = query_vectors.get(priors_text)
+        if priors_vec is None and embedder is not None and callable(getattr(embedder, "embed", None)):
+            try:
+                priors_vec = await _offload(_model_executor, embedder.embed, priors_text[:2000])
+            except Exception:  # noqa: BLE001
+                priors_vec = None
+        priors = await _offload(
+            _db_executor,
+            _priors_for_retrieve,
             entity_path=req.entity_path,
-            text=req.situation or topical,
+            text=priors_text,
             embedder=embedder,
             candidate_actions=req.candidate_actions,
+            query_vector=priors_vec,
         )
         top = head[0][0] if head else None
+        top_bd = head[0][2] if head else {}
+        # A rescued top hit is discredited by the pooled record and working
+        # on tasks like this one. The recommendation reads the local verdict
+        # — the status step 7 rendered ("contested"), no recent failure, no
+        # shift — or the rescue would be undone here by an ``explore`` for
+        # exactly the class of task the rule still works on.
+        top_rescued = bool(top is not None and top.entry_key in rescued)
         recent_failure = bool(
             top is not None
+            and not top_rescued
             and top.last_outcome is not None
             and not _evidence_is_success(top.last_outcome)
         )
@@ -2447,6 +2816,16 @@ async def retrieve_entries(
         # entity-wide, so it also brings in the rule that stopped working but
         # shares no words with this query — which the ranked list never held
         # whatever the gate.
+        #
+        # Two readings, two uses. The *entity-wide* one — head, avoided, and
+        # every discredited entry on the entity — is reported in ``_meta`` for
+        # the briefing-style "something on this entity changed" signal. The
+        # *query-scoped* one steers the recommendation: only the entries this
+        # query is about (a similarity within LOCAL_SIM_GAP of the best hit,
+        # or a keyword match), so a rule that stopped working for one class of
+        # task does not send every other class to explore past memory that is
+        # still right for it. Grid v3 measured that mistake at 14% success on
+        # the explores it produced.
         shift_pool: list[MemoryEntry] = [e for e, _, _ in head] + list(avoided)
         seen_keys = {e.entry_key for e in shift_pool}
         shift_pool.extend(
@@ -2461,29 +2840,65 @@ async def retrieve_entries(
         )
         shifted_entries = [e for e in shift_pool if _regime_shifted(e, now=now)]
         shifted = bool(shifted_entries)
-        shift_at = max(
-            (
-                at if at.tzinfo else at.replace(tzinfo=UTC)
-                for at in (e.last_outcome_at for e in shifted_entries)
-                if at is not None
-            ),
-            default=None,
+
+        def _shift_at(entries: list[MemoryEntry]) -> datetime | None:
+            return max(
+                (
+                    at if at.tzinfo else at.replace(tzinfo=UTC)
+                    for at in (e.last_outcome_at for e in entries)
+                    if at is not None
+                ),
+                default=None,
+            )
+
+        best_sim = max((float(bd.get("semantic") or 0.0) for _, _, bd in head), default=0.0)
+        local_floor = max(0.0, best_sim - LOCAL_SIM_GAP)
+
+        def _about_this_query(entry: MemoryEntry, sim: float, keyword: float) -> bool:
+            return keyword > 0.0 or (sim > 0.0 and sim >= local_floor)
+
+        local_pool: list[MemoryEntry] = [
+            e for e, _, bd in head
+            if _about_this_query(e, float(bd.get("semantic") or 0.0), float(bd.get("keyword") or 0.0))
+        ]
+        local_pool.extend(
+            e for e in avoided
+            if _about_this_query(e, *avoided_match.get(e.entry_key, (0.0, 0.0)))
+        )
+        shifted_local_entries = [
+            e for e in local_pool
+            if e.entry_key not in rescued and _regime_shifted(e, now=now)
+        ]
+        shifted_local = bool(shifted_local_entries)
+        top_shifted = bool(
+            top is not None and not top_rescued and _regime_shifted(top, now=now)
         )
         recommendation = _recommend(
             priors,
             agent_id=req.agent_id or "",
             candidate_actions=req.candidate_actions,
-            top_hit_status=top.evidence_status if top is not None else None,
+            top_hit_status=(
+                str(top_bd.get("evidence_status") or top.evidence_status)
+                if top is not None else None
+            ),
             top_hit_recent_failure=recent_failure,
-            regime_shift=shifted,
-            regime_shift_at=shift_at,
+            top_hit_shifted=top_shifted,
+            regime_shift=shifted_local,
+            regime_shift_at=_shift_at(shifted_local_entries),
+            # ``action_stats`` is every outcome on the entity, no similarity:
+            # a record that can name a winner but is not about this kind of
+            # task, so a shift read over it does not send the agent exploring.
+            priors_are_local=(priors or {}).get("source") != "action_stats",
         )
-        if priors is not None or recommendation is not None:
+        if priors is not None or recommendation is not None or shifted:
             out.append({
                 "_meta": True,
                 "priors": priors,
                 "recommendation": recommendation,
                 "regime_shift": shifted,
+                "regime_shift_scope": (
+                    "query" if shifted_local else ("entity" if shifted else None)
+                ),
             })
     return out
 
@@ -2513,11 +2928,11 @@ async def get_stats(
         # helper the adapter defaults use.
         from amfs_core.aggregates import extended_stats_from_entries
 
-        entries = vis.filter_entries(mem.list())
+        entries = vis.filter_entries(await _offload(_db_executor, mem.list))
         scoped = extended_stats_from_entries(entries)
         return json.loads(json.dumps(scoped, default=str))
 
-    stats = mem._adapter.stats_extended()
+    stats = await _offload(_db_executor, mem._adapter.stats_extended)
     return json.loads(json.dumps(stats, default=str))
 
 
@@ -3118,26 +3533,81 @@ _OUTCOME_TYPE_MAP = {
 }
 
 
-def _get_immutable_store():
-    """Lazily create the immutable trace store (Pro only)."""
-    global _immutable_trace_store
-    if _immutable_trace_store is not None:
-        return _immutable_trace_store
-    if not _HAS_PRO_TRACES:
-        return None
-    dsn = os.environ.get("AMFS_POSTGRES_DSN")
-    if not dsn:
-        return None
+# The trace store holds one psycopg connection for the life of the process
+# and a psycopg connection is not safe for concurrent use. Every seal, from
+# whichever thread, goes through this lock; it also guards the sequence
+# counter below and the reconnect.
+_seal_lock = threading.RLock()
+
+
+def _store_connection_closed(store: Any) -> bool:
+    """Whether the store's connection is known to be gone.
+
+    Cloud SQL closed the store's connection under load on 2026-09-18 (its
+    idle timeout, a failover, or the ``client_connection_check_interval``
+    reaper — the effect is the same) and every seal on the process failed
+    with ``the connection is closed`` from then on, because nothing ever
+    looked. A closed connection reports it; a broken-but-open one is caught
+    by the retry in :func:`_auto_seal_trace`.
+    """
+    conn = getattr(store, "_conn", None)
+    if conn is None:
+        return False
     try:
-        import psycopg
-        from psycopg.rows import dict_row
-        conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
-        _immutable_trace_store = PostgresImmutableTraceStore(conn)
-        logger.info("Immutable trace store initialized")
-        return _immutable_trace_store
-    except Exception:
-        logger.debug("Failed to init immutable trace store", exc_info=True)
-        return None
+        return bool(getattr(conn, "closed", False)) or bool(getattr(conn, "broken", False))
+    except Exception:  # noqa: BLE001 - a fake connection in tests
+        return False
+
+
+def _reset_immutable_store() -> None:
+    """Drop the cached store so the next call reconnects."""
+    global _immutable_trace_store
+    with _seal_lock:
+        store = _immutable_trace_store
+        _immutable_trace_store = None
+        conn = getattr(store, "_conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _get_immutable_store():
+    """Lazily create the immutable trace store (Pro only).
+
+    Rebuilt when the cached store's connection has closed under it. The
+    schema is not re-applied on reconnect: it was applied when the process
+    first opened the store, and re-running the DDL takes locks a busy
+    instance should not be asking for on the request path.
+    """
+    global _immutable_trace_store
+    with _seal_lock:
+        if _immutable_trace_store is not None:
+            if not _store_connection_closed(_immutable_trace_store):
+                return _immutable_trace_store
+            logger.warning("Immutable trace store connection closed — reconnecting")
+            _reset_immutable_store()
+            reconnect = True
+        else:
+            reconnect = False
+        if not _HAS_PRO_TRACES:
+            return None
+        dsn = os.environ.get("AMFS_POSTGRES_DSN")
+        if not dsn:
+            return None
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+            conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+            _immutable_trace_store = PostgresImmutableTraceStore(
+                conn, auto_schema=not reconnect
+            )
+            logger.info("Immutable trace store %s", "reconnected" if reconnect else "initialized")
+            return _immutable_trace_store
+        except Exception:
+            logger.debug("Failed to init immutable trace store", exc_info=True)
+            return None
 
 
 _seal_sequence: dict[str, int] = {}
@@ -3226,61 +3696,100 @@ def _auto_seal_trace(
         oss_trace = getattr(mem, "_last_trace", None)
     if oss_trace is None:
         return None
-    store = _get_immutable_store()
-    if store is None:
-        return None
-    try:
-        from uuid import UUID as _UUID
 
-        now = datetime.now(timezone.utc)
-        # The trace's own session when it has one: a trace posted by a remote
-        # client belongs to that client's session, not to the server handle's.
-        session_id = getattr(oss_trace, "session_id", None) or mem.session_id
-        seq = _seal_sequence.get(session_id, 0)
-        parent_hash = store.get_latest_hash(session_id)
-
-        account_id = None
+    def _is_connection_error(exc: BaseException) -> bool:
         try:
-            from amfs_postgres.tenant_context import get_request_tenant_account_id
-            tid = get_request_tenant_account_id()
-            if tid:
-                account_id = _UUID(tid)
-        except (ImportError, ValueError):
-            pass
+            import psycopg
+            return isinstance(exc, (psycopg.OperationalError, psycopg.InterfaceError))
+        except ImportError:  # pragma: no cover - psycopg absent means no store
+            return False
 
-        imm = _pro_immutable_from_oss_trace(
-            oss_trace,
-            session_id=session_id,
-            sequence_number=seq,
-            account_id=account_id,
-            # From the trace, not from ``mem``. ``mem`` is shared by every
-            # request: the caller's agent is written onto its tagger for the
-            # duration of the commit and restored in a ``finally``, and this runs
-            # after that restore — so reading it here sealed every trace under
-            # the server's own default agent. Tuning datasets are built from the
-            # sealed traces and selected by agent, so the loss is silent: the
-            # model trains on an empty set. The trace was built while the tagger
-            # still pointed at the caller.
-            agent_id=getattr(oss_trace, "agent_id", None) or mem.agent_id,
-            created_at=now,
-            session_metadata=session_metadata,
-        )
-        imm = _pro_finalize_spans(imm)
-        sealed = seal(
-            imm,
-            get_signing_key(),
-            parent_hash=parent_hash,
-            sequence_number=seq,
-            signing_key_id=get_signing_key_id(),
-        )
-        saved = store.save(sealed)
-        _seal_sequence[session_id] = seq + 1
-        logger.info("Auto-sealed immutable trace %s for outcome %s",
-                     saved.id, getattr(oss_trace, "outcome_ref", None))
-        return str(saved.id)
-    except Exception:
-        logger.warning("Failed to auto-seal immutable trace", exc_info=True)
-        return None
+    # One retry, and only for a dead connection: the first attempt may be the
+    # one that discovers the store's connection went away since the last seal.
+    # Anything else fails once, as before. The trace is not lost — the OSS
+    # ``decision_traces`` row was written by the commit; only the immutable
+    # copy is missing, and the warning names the outcome so it can be found.
+    for attempt in (1, 2):
+        store = _get_immutable_store()
+        if store is None:
+            return None
+        try:
+            with _seal_lock:
+                return _seal_with_store(
+                    store, mem, oss_trace, session_metadata=session_metadata
+                )
+        except Exception as exc:  # noqa: BLE001
+            if attempt == 1 and _is_connection_error(exc):
+                logger.warning(
+                    "Trace store connection failed on seal — reconnecting once",
+                    exc_info=True,
+                )
+                _reset_immutable_store()
+                continue
+            logger.warning(
+                "Failed to auto-seal immutable trace for outcome %s",
+                getattr(oss_trace, "outcome_ref", None), exc_info=True,
+            )
+            return None
+    return None
+
+
+def _seal_with_store(
+    store: Any,
+    mem: AgentMemory,
+    oss_trace: Any,
+    *,
+    session_metadata: Any | None,
+) -> str:
+    """The seal itself. Caller holds ``_seal_lock`` and handles failure."""
+    from uuid import UUID as _UUID
+
+    now = datetime.now(timezone.utc)
+    # The trace's own session when it has one: a trace posted by a remote
+    # client belongs to that client's session, not to the server handle's.
+    session_id = getattr(oss_trace, "session_id", None) or mem.session_id
+    seq = _seal_sequence.get(session_id, 0)
+    parent_hash = store.get_latest_hash(session_id)
+
+    account_id = None
+    try:
+        from amfs_postgres.tenant_context import get_request_tenant_account_id
+        tid = get_request_tenant_account_id()
+        if tid:
+            account_id = _UUID(tid)
+    except (ImportError, ValueError):
+        pass
+
+    imm = _pro_immutable_from_oss_trace(
+        oss_trace,
+        session_id=session_id,
+        sequence_number=seq,
+        account_id=account_id,
+        # From the trace, not from ``mem``. ``mem`` is shared by every
+        # request: the caller's agent is written onto its tagger for the
+        # duration of the commit and restored in a ``finally``, and this runs
+        # after that restore — so reading it here sealed every trace under
+        # the server's own default agent. Tuning datasets are built from the
+        # sealed traces and selected by agent, so the loss is silent: the
+        # model trains on an empty set. The trace was built while the tagger
+        # still pointed at the caller.
+        agent_id=getattr(oss_trace, "agent_id", None) or mem.agent_id,
+        created_at=now,
+        session_metadata=session_metadata,
+    )
+    imm = _pro_finalize_spans(imm)
+    sealed = seal(
+        imm,
+        get_signing_key(),
+        parent_hash=parent_hash,
+        sequence_number=seq,
+        signing_key_id=get_signing_key_id(),
+    )
+    saved = store.save(sealed)
+    _seal_sequence[session_id] = seq + 1
+    logger.info("Auto-sealed immutable trace %s for outcome %s",
+                 saved.id, getattr(oss_trace, "outcome_ref", None))
+    return str(saved.id)
 
 
 # The longest slice of a request used to look for matching memory. task_input is
@@ -3291,6 +3800,16 @@ def _auto_seal_trace(
 #: are dropped. 0.85 keeps near-ties (two confirmed approaches) and drops the
 #: long tail of alternatives the record has said nothing about.
 ADAPTIVE_K_KEEP_RATIO = 0.85
+#: ``adaptive_k`` under the anchored blend: an entry the record has not
+#: confirmed also stays behind a validated leader when its graded lexical
+#: coverage exceeds the leader's by this much — it carries a rare query term
+#: (the service name, the error code) the leader does not. Read on relevance
+#: alone the rule pruned the untested runbook for the task's own service
+#: behind a validated note about another service written in the query's
+#: phrasing: a hair less relevant, and gone from a one-row list. Three
+#: equally relevant fixes for the same symptom, one of them validated, still
+#: collapse to the validated one, which is what the option is for.
+ADAPTIVE_K_KEYWORD_GAP = 0.2
 #: Most discredited entries appended for ``include_avoid``.
 AVOID_LIST_MAX = 3
 _GAP_QUERY_CHARS = 2_000
@@ -3302,6 +3821,12 @@ _MAX_ATTEMPTS_PER_OUTCOME = 50
 # Named rather than inlined because it is the one number a reader will want to
 # argue with: enough keys to act on, few enough that the block stays a summary.
 _GAP_SAMPLE = 3
+#: Seconds the commit response waits for the gap report. It is the least
+#: valuable thing on the response and runs two 150-row searches plus an
+#: embedding; under load those were a visible share of commit latency. Past
+#: the budget the commit returns without it. ``AMFS_MEMORY_GAP_TIMEOUT``
+#: overrides; ``0`` turns the report off.
+_GAP_TIMEOUT_S = float(os.environ.get("AMFS_MEMORY_GAP_TIMEOUT", "2.0") or 0.0)
 
 
 async def _memories_matching_task(
@@ -3488,16 +4013,6 @@ async def commit_outcome(
         valid = ", ".join(_OUTCOME_TYPE_MAP.keys())
         return {"error": f"Invalid outcome_type '{req.outcome_type}'. Must be one of: {valid}"}
 
-    original_agent = mem._tagger.agent_id if req.agent_id else None
-    if req.agent_id:
-        # Ownership guard first: a 409 for a foreign-owned identity must not
-        # leave the process-wide tagger pointing at the requested agent.
-        _link_agent_owner_once(request, req.agent_id, mem.namespace)
-        mem._tagger.agent_id = req.agent_id
-        try:
-            mem._adapter.ensure_agent(req.agent_id, mem.namespace)
-        except Exception:
-            pass
     # The remote session's attribute bag and LLM calls, passed explicitly for
     # the same reason ``tool_calls`` is: ``mem`` is shared, so nothing may be
     # buffered on it between requests. Attributes are validated by
@@ -3539,74 +4054,100 @@ async def commit_outcome(
         raise HTTPException(
             status_code=422, detail="final_action_index must index into tool_calls"
         )
-    try:
-        entries = mem.commit_outcome(
-            req.outcome_ref,
-            otype,
-            causal_entry_keys=req.causal_entry_keys,
-            causal_confidence=req.causal_confidence,
-            attempts=attempts,
-            final_action_index=final_action_index,
-            # The client's read versions, never the server's shared tracker.
-            causal_entry_versions=req.causal_entry_versions or {},
-            # Action-level learning. Derived from the request's own tool calls
-            # and attempts when the client did not send them, never from the
-            # shared tracker; the keys are scanned inside commit_outcome.
-            actions_taken=(
-                req.actions_taken
-                if req.actions_taken is not None
-                else derive_actions_taken(
-                    req.tool_calls,
-                    [a.model_dump(mode="json") for a in attempts],
-                    final_action_index if final_action_index is not None
-                    else (len(req.tool_calls) - 1 if req.tool_calls else None),
-                    otype.value,
-                )
-            ),
-            entity_path=req.entity_path,
-            entity_paths=req.entity_paths,
-            situation=req.situation[:200] if req.situation else None,
-            # Not scanned here: commit_outcome scans at trace construction, so
-            # every caller gets it. Scanning again would be harmless but would
-            # imply this endpoint is where the guarantee lives, which is the
-            # assumption that left the MCP path unscanned.
-            task_input=req.task_input,
-            response_text=req.response_text,
-            # Passed explicitly, and never omitted: ``mem`` is shared across
-            # requests, so letting this fall through to its tracker would attribute
-            # whatever actions happen to be buffered there to this caller.
-            tool_calls=req.tool_calls,
-            attributes=client_attributes or None,
-            llm_calls=client_llm_calls or None,
-            # The same declaration that suppresses the seal below, applied one
-            # layer deeper. The trace this would write is assembled on the shared
-            # handle, so it carried this process's session and whatever the last
-            # request left on its tracker; the caller's own trace arrives on
-            # ``/traces`` moments later. Persisting both left two decision_traces
-            # rows per outcome, indistinguishable by agent because the tagger is
-            # pointed at the caller for exactly this block — so every count and
-            # ratio taken over that table was measured against a population
-            # roughly twice its true size, half of it untrue.
-            persist_trace=not req.trace_follows,
-        )
-    finally:
-        if original_agent is not None:
-            mem._tagger.agent_id = original_agent
-    _audit_log(
-        "outcome.commit",
-        resource=req.outcome_ref,
-        ip_address=request.client.host if request.client else None,
+    commit_kwargs: dict[str, Any] = dict(
+        causal_entry_keys=req.causal_entry_keys,
+        causal_confidence=req.causal_confidence,
+        attempts=attempts,
+        final_action_index=final_action_index,
+        # The client's read versions, never the server's shared tracker.
+        causal_entry_versions=req.causal_entry_versions or {},
+        # Action-level learning. Derived from the request's own tool calls
+        # and attempts when the client did not send them, never from the
+        # shared tracker; the keys are scanned inside commit_outcome.
+        actions_taken=(
+            req.actions_taken
+            if req.actions_taken is not None
+            else derive_actions_taken(
+                req.tool_calls,
+                [a.model_dump(mode="json") for a in attempts],
+                final_action_index if final_action_index is not None
+                else (len(req.tool_calls) - 1 if req.tool_calls else None),
+                otype.value,
+            )
+        ),
+        entity_path=req.entity_path,
+        entity_paths=req.entity_paths,
+        situation=req.situation[:200] if req.situation else None,
+        # Not scanned here: commit_outcome scans at trace construction, so
+        # every caller gets it. Scanning again would be harmless but would
+        # imply this endpoint is where the guarantee lives, which is the
+        # assumption that left the MCP path unscanned.
+        task_input=req.task_input,
+        response_text=req.response_text,
+        # Passed explicitly, and never omitted: ``mem`` is shared across
+        # requests, so letting this fall through to its tracker would attribute
+        # whatever actions happen to be buffered there to this caller.
+        tool_calls=req.tool_calls,
+        attributes=client_attributes or None,
+        llm_calls=client_llm_calls or None,
+        # The same declaration that suppresses the seal below, applied one
+        # layer deeper. The trace this would write is assembled on the shared
+        # handle, so it carried this process's session and whatever the last
+        # request left on its tracker; the caller's own trace arrives on
+        # ``/traces`` moments later. Persisting both left two decision_traces
+        # rows per outcome, indistinguishable by agent because the tagger is
+        # pointed at the caller for exactly this block — so every count and
+        # ratio taken over that table was measured against a population
+        # roughly twice its true size, half of it untrue.
+        persist_trace=not req.trace_follows,
     )
 
-    # Skipped when the caller's own trace is on its way. What would be sealed here
-    # is assembled on the shared handle: the caller's actions and attribute bag were
-    # passed in explicitly above, but the causal entries, query events, state diff
-    # and session window are read off that handle's tracker, so they belong to
-    # whichever requests last touched it. Sealing it as well as the caller's left two
-    # traces per outcome — doubling every count and average taken over them — and
-    # chained the fabricated one under this process's session id, a chain every
-    # account on the process shares.
-    immutable_trace_id = None if req.trace_follows else _auto_seal_trace(mem)
+    # The commit and the seal run on the DB executor rather than inline: the
+    # sync adapter's transaction, the outcome embedding, the trace insert and
+    # the immutable seal together held the event loop for seconds under load,
+    # and every other request on the instance waited behind them.
+    #
+    # They run on a per-request handle (``as_agent``), not the shared one.
+    # The commit reads the handle's identity throughout and leaves the trace
+    # it built on the handle for the seal to pick up; now that both sides of
+    # that hand-off are awaited, swapping the shared tagger and restoring it
+    # in a ``finally`` would stamp interleaved commits and writes with each
+    # other's agent — the corruption ``as_agent`` exists to end. The clone
+    # shares the adapter and nothing mutable, so commits no longer serialize
+    # on the process.
+    if req.agent_id:
+        # Ownership guard first: a 409 for a foreign-owned identity ends the
+        # request before anything is written as that agent.
+        _link_agent_owner_once(request, req.agent_id, mem.namespace)
+        try:
+            await _offload(_db_executor, mem._adapter.ensure_agent, req.agent_id, mem.namespace)
+        except Exception:
+            pass
+    # With no causal keys on the body the SDK falls back to the handle's read
+    # tracker; the clone's resolves to this request's scope exactly as the
+    # shared one does (``read_tracker_scope`` middleware), so that path is
+    # unchanged by the clone.
+    handle = mem.as_agent(req.agent_id or mem.agent_id)
+    entries = await _offload(
+        _db_executor, handle.commit_outcome, req.outcome_ref, otype, **commit_kwargs
+    )
+    # Skipped when the caller's own trace is on its way: the caller's actions
+    # and attribute bag were passed in explicitly above, but the causal
+    # entries, query events and session window on this handle are only what
+    # this request supplied. Sealing it as well as the caller's left two
+    # traces per outcome — doubling every count and average taken over them.
+    immutable_trace_id = (
+        None if req.trace_follows
+        else await _offload(_db_executor, _auto_seal_trace, handle)
+    )
+
+    _ip = request.client.host if request.client else None
+    _bg_executor.submit(
+        contextvars.copy_context().run,
+        functools.partial(
+            _audit_log, "outcome.commit", resource=req.outcome_ref, ip_address=_ip
+        ),
+    )
 
     result: dict[str, Any] = {
         "outcome_ref": req.outcome_ref,
@@ -3621,11 +4162,14 @@ async def commit_outcome(
     # order of those two should be visible in the code. The same reasoning put
     # the loose annotation on the MCP ``actions`` parameter — a defect in the
     # reporting half must never cost the seal.
-    try:
-        gap = await _memory_gap(req, request=request)
-    except Exception:  # noqa: BLE001
-        logger.debug("memory gap report failed", exc_info=True)
-        gap = None
+    gap = None
+    if _GAP_TIMEOUT_S > 0:
+        try:
+            gap = await asyncio.wait_for(_memory_gap(req, request=request), timeout=_GAP_TIMEOUT_S)
+        except TimeoutError:
+            logger.debug("memory gap report skipped: over %.1fs budget", _GAP_TIMEOUT_S)
+        except Exception:  # noqa: BLE001
+            logger.debug("memory gap report failed", exc_info=True)
     if gap is not None:
         result["memory_gap"] = gap
     return result
@@ -3793,7 +4337,10 @@ async def save_trace(
                 session_id=trace.session_id,
             ),
         })
-    saved = mem._adapter.save_trace(trace)
+    # Both DB round trips off the event loop; the seal takes its own lock on
+    # the trace store, and nothing here reads the shared handle's tracker, so
+    # unlike /outcomes this path needs no serialisation of its own.
+    saved = await _offload(_db_executor, mem._adapter.save_trace, trace)
     # Sealed like a trace committed through /outcomes. Until this call, a trace
     # arriving here — which is every trace an HttpAdapter client commits — was
     # never sealed, so it had no immutable copy at all. The saved trace is what
@@ -3801,7 +4348,9 @@ async def save_trace(
     # passed alongside because ``model_validate`` above dropped the
     # ``session_metadata`` keys the Pro recorder's spans travel in.
     raw_meta = body.get("session_metadata") if isinstance(body, dict) else None
-    immutable_trace_id = _auto_seal_trace(mem, saved, session_metadata=raw_meta)
+    immutable_trace_id = await _offload(
+        _db_executor, _auto_seal_trace, mem, saved, session_metadata=raw_meta
+    )
     result = saved.model_dump(mode="json")
     if immutable_trace_id:
         result["immutable_trace_id"] = immutable_trace_id

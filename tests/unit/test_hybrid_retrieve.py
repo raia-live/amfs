@@ -546,3 +546,50 @@ class TestSearchReuseAccounting:
 
         _run_search(_request(), SearchRequest(query="matches query", limit=20))
         assert fake.bumped == [("invoicehub", "deferred-decisions")]
+
+
+class TestAdaptiveKKeepsTheQuerysSubject:
+    def test_the_entry_carrying_the_rare_term_survives_a_validated_leader(self, monkeypatch):
+        """A validated note about checkout, written in the query's own phrasing,
+        leads on record for a *pricing* request. The untested pricing runbook is
+        a hair less relevant and would have been pruned behind it; it is the
+        only candidate carrying "pricing", so the graded lexical term keeps it.
+        A second checkout note with the leader's phrasing and none of the
+        query's rare terms is pruned, as adaptive_k intends."""
+        leader = _entry("acme/deploy", "checkout-deploy-order",
+                        "checkout service standard deploy correct step order: migrate, warm, roll",
+                        confidence=0.98)
+        leader = leader.model_copy(update={"success_count": 3, "last_outcome": "success"})
+        runbook = _entry("acme/deploy", "runbook-pricing-a",
+                         "pricing service standard deploy: warm, migrate, roll", confidence=0.7)
+        other = _entry("acme/deploy", "checkout-deploy-note",
+                       "checkout service deploy correct step order confirmed again", confidence=0.9)
+        # The rest of a store that has been learning: notes about other
+        # services in the same phrasing. This is what makes "correct step
+        # order" common and "pricing" rare — IDF is read over the pool.
+        crowd = [
+            _entry("acme/deploy", f"{svc}-standard-deploy-order",
+                   f"{svc} service standard deploy correct step order: warm, migrate, roll",
+                   confidence=0.9)
+            for svc in ("fraud", "shipping", "inventory", "notifications", "loyalty")
+        ]
+        fake = _FakeAdapter(
+            # The leader is semantically closest by a margin the bi-encoder
+            # does produce for a note phrased like the query; the runbook's
+            # relevance lands a hair under it once trust is left out.
+            semantic_hits=[(leader, 0.98), (runbook, 0.70), (other, 0.76)]
+            + [(e, 0.70 - i * 0.01) for i, e in enumerate(crowd)],
+            lexical_hits=[leader, runbook, other, *crowd],
+        )
+        monkeypatch.setattr(server, "_async_adapter", fake)
+        out = _run(_request(), RetrieveRequest(
+            query="pricing service standard deploy correct step order",
+            entity_path="acme/deploy", limit=10, adaptive_k=True,
+        ))
+        keys = [d["key"] for d in out if not d.get("_meta")]
+        assert keys[0] == "checkout-deploy-order", keys
+        assert "runbook-pricing-a" in keys, keys
+        assert "checkout-deploy-note" not in keys, keys
+        by_key = {d["key"]: d["_breakdown"] for d in out if not d.get("_meta")}
+        assert by_key["runbook-pricing-a"]["relevance"] < by_key["checkout-deploy-order"]["relevance"]
+        assert by_key["runbook-pricing-a"]["keyword"] > by_key["checkout-deploy-order"]["keyword"] + 0.2

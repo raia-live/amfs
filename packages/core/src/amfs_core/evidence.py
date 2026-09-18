@@ -363,6 +363,68 @@ def evidence_signal(entry: MemoryEntry) -> float:
     return (e_s - e_f) / (1.0 + e_s + e_f)
 
 
+#: Weighted outcomes on tasks like the query an entry needs before its local
+#: record says anything. Below this the pooled record stands alone.
+LOCAL_EVIDENCE_MIN_N = 2
+#: Local success rate at or above which a globally discredited entry is kept
+#: in the ranked list (labelled ``contested``) for the query it still works
+#: for, instead of going to the avoid list.
+LOCAL_RESCUE_MIN_P = 0.6
+
+
+def evidence_signal_from_counts(success: float, failure: float) -> float:
+    """:func:`evidence_signal` over explicit masses, for a record that is not
+    the entry's pooled one — the query-conditioned counts ``evidence_near``
+    returns, weighted by task similarity."""
+    e_s = max(0.0, float(success))
+    e_f = max(0.0, float(failure))
+    if e_s == 0.0 and e_f == 0.0:
+        return 0.0
+    return (e_s - e_f) / (1.0 + e_s + e_f)
+
+
+def blend_local_evidence(pooled: float, local: dict[str, Any] | None) -> tuple[float, float]:
+    """The evidence term for ranking, given the pooled signal and the local record.
+
+    Returns ``(evidence, local_weight)``. With no local record, or too thin a
+    one, the pooled signal stands and the weight is ``0``. Otherwise the local
+    signal is blended in with weight ``n / (n + LOCAL_EVIDENCE_MIN_N)`` — half
+    at the minimum, three quarters at three times it — so a rule's record on
+    *this kind of task* takes over from its record everywhere as the local
+    evidence accumulates, and a single nearby outcome never overturns a long
+    pooled record on its own.
+
+    Grid v3's diagnose scenario is the case: a rule validated on one class of
+    incident and discredited on another read ``contested`` to every query, so
+    the class it still worked for lost it. Pooled evidence answers "has this
+    entry been right"; this answers "has it been right for tasks like this".
+    """
+    if not local:
+        return pooled, 0.0
+    n = float(local.get("n", 0) or 0)
+    if n < LOCAL_EVIDENCE_MIN_N:
+        return pooled, 0.0
+    sig = evidence_signal_from_counts(local.get("success", 0.0), local.get("failure", 0.0))
+    w = n / (n + LOCAL_EVIDENCE_MIN_N)
+    return (1.0 - w) * pooled + w * sig, w
+
+
+def locally_valid(local: dict[str, Any] | None) -> bool:
+    """Whether the local record alone says the entry works for tasks like this:
+    at least ``LOCAL_EVIDENCE_MIN_N`` weighted outcomes and a success share at
+    or above ``LOCAL_RESCUE_MIN_P``."""
+    if not local:
+        return False
+    n = float(local.get("n", 0) or 0)
+    if n < LOCAL_EVIDENCE_MIN_N:
+        return False
+    s = max(0.0, float(local.get("success", 0.0) or 0.0))
+    f = max(0.0, float(local.get("failure", 0.0) or 0.0))
+    if s + f <= 0.0:
+        return False
+    return s / (s + f) >= LOCAL_RESCUE_MIN_P
+
+
 def _split_spec(spec: str) -> tuple[str, str] | None:
     parts = spec.rsplit("/", 1)
     if len(parts) != 2 or not parts[0] or not parts[1]:
