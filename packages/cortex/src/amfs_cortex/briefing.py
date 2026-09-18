@@ -15,6 +15,7 @@ from amfs_core.authority import rank_authors
 from amfs_core.evidence import DISCREDIT_THRESHOLD as _DISCREDIT_THRESHOLD
 from amfs_core.evidence import SYNTHETIC_KEY_PREFIXES as _SYNTHETIC_PREFIXES
 from amfs_core.evidence import is_synthetic_key as _is_synthetic
+from amfs_core.evidence import regime_shifted as _regime_shifted
 from amfs_core.models import Digest, DigestType, MemoryEntry, SearchQuery
 
 if TYPE_CHECKING:
@@ -26,11 +27,6 @@ _HOT_CONTEXT_LIMIT = 3
 #: Rows scanned per evidence query; the sections themselves are shorter.
 _EVIDENCE_SCAN_LIMIT = 40
 _EVIDENCE_SECTION_LIMIT = 5
-#: A rule counts toward a regime shift when it was confirmed this many times
-#: before it started failing, and its failure evidence has reached this
-#: fraction of its success evidence.
-_REGIME_MIN_SUCCESSES = 3
-_REGIME_FAILURE_RATIO = 0.5
 _COMPACT_NARRATIVE_CHARS = 400
 #: Outcomes scanned for the ``tried_here`` section and rows it shows.
 _ACTIONS_SCAN_LIMIT = 200
@@ -421,16 +417,12 @@ class BriefingService:
 
     @staticmethod
     def _regime_shift(entries: list[MemoryEntry]) -> list[MemoryEntry]:
-        """Entries that were validated repeatedly and whose latest outcomes are
-        failures: the signature of a rule that used to work."""
-        out = [
-            e for e in entries
-            if e.success_count >= _REGIME_MIN_SUCCESSES
-            and e.failure_count >= 1
-            and e.last_outcome is not None
-            and e.last_outcome not in ("success", "clean_deploy")
-            and e.evidence_failure >= e.evidence_success * _REGIME_FAILURE_RATIO
-        ]
+        """Entries that were validated repeatedly and whose record no longer
+        supports acting on them: the signature of a rule that used to work.
+        The predicate is ``amfs_core.evidence.regime_shifted``, shared with
+        retrieve's ``regime_shift`` flag so the two surfaces never disagree
+        about whether the world changed."""
+        out = [e for e in entries if _regime_shifted(e)]
         out.sort(key=lambda e: (e.failure_count, e.success_count), reverse=True)
         return out[:_EVIDENCE_SECTION_LIMIT]
 

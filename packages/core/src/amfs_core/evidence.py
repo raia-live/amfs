@@ -75,6 +75,13 @@ DISCREDIT_THRESHOLD = 0.5
 #: Successes an entry needs, with no failure yet, for its first failure to be
 #: weighed without the surprise term (see the module docstring).
 FIRST_STRIKE_MIN_WINS = 3
+#: A regime shift is a rule that was validated repeatedly and whose record no
+#: longer supports acting on it. ``REGIME_MIN_SUCCESSES`` is how validated it
+#: must have been; "no longer" is read from the evidence label, so the
+#: first-strike case (one failure against a long run, still ``validated``) is
+#: not a shift and the second failure in a row is. The briefing's
+#: ``regime_shift`` section and retrieve's ``regime_shift`` flag both read this.
+REGIME_MIN_SUCCESSES = 3
 #: Failures weigh more than successes: trust is easy to lose, slow to rebuild.
 SEVERITY: dict[str, float] = {
     OutcomeType.SUCCESS.value: 1.0,
@@ -104,6 +111,43 @@ def is_success(outcome_type: OutcomeType | str) -> bool:
 def is_known(outcome_type: OutcomeType | str) -> bool:
     """Whether the model has a verdict for this type. Unknown types are not evidence."""
     return _name(outcome_type) in SEVERITY
+
+
+def regime_shifted(entry: Any) -> bool:
+    """Whether *entry* looks like a rule that used to work and has stopped.
+
+    Validated at least ``REGIME_MIN_SUCCESSES`` times, the latest outcome a
+    failure, and the evidence label no longer ``validated`` — ``contested`` or
+    ``discredited``. Reading the label rather than a failure ratio is what
+    keeps this consistent with first-strike tolerance: the same failure that
+    the label forgives (one against a long run) is not a shift, and the second
+    failure in a row, which the label does not forgive, is. A ratio over the
+    evidence masses cannot draw that line — one failure carries severity 2
+    against a decayed run of successes and already reads as half the mass.
+
+    Works on anything with the evidence fields of ``MemoryEntry``, including the
+    discredited entries retrieve keeps aside: a long-validated rule that was
+    discredited by its recent failures is the strongest form of the signal.
+    """
+    successes = int(getattr(entry, "success_count", 0) or 0)
+    failures = int(getattr(entry, "failure_count", 0) or 0)
+    last = getattr(entry, "last_outcome", None)
+    if successes < REGIME_MIN_SUCCESSES or failures < 1 or last is None or is_success(last):
+        return False
+    status = getattr(entry, "evidence_status", None)
+    if not isinstance(status, str):
+        from .labels import evidence_label
+
+        status = evidence_label(
+            success_count=successes,
+            failure_count=failures,
+            evidence_success=float(getattr(entry, "evidence_success", 0.0) or 0.0),
+            evidence_failure=float(getattr(entry, "evidence_failure", 0.0) or 0.0),
+            discredited=getattr(entry, "discredited_at", None) is not None,
+            outcome_count=int(getattr(entry, "outcome_count", 0) or 0),
+            confidence=float(getattr(entry, "confidence", 1.0) or 0.0),
+        )
+    return status != "validated"
 
 
 def severity(outcome_type: OutcomeType | str) -> float:
@@ -565,5 +609,6 @@ __all__ = [
     "outcome_model",
     "outcome_steps",
     "posterior",
+    "regime_shifted",
     "severity",
 ]

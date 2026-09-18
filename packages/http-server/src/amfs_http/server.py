@@ -49,6 +49,7 @@ from amfs_core.actions import actions_taken as derive_actions_taken
 from amfs_core.engine import read_tracker_scope
 from amfs_core.evidence import evidence_signal as _evidence_signal
 from amfs_core.evidence import is_success as _evidence_is_success
+from amfs_core.evidence import regime_shifted as _regime_shifted
 from amfs_core.models import (
     AgentGroup,
     AMFSConfig,
@@ -2360,15 +2361,17 @@ async def retrieve_entries(
             and top.last_outcome is not None
             and not _evidence_is_success(top.last_outcome)
         )
-        # A validated rule that has just started failing, anywhere in the head,
-        # is the retrieve-time reading of a regime shift: the briefing's section
-        # of the same name is computed over the whole entity, this over the hits.
-        shifted = any(
-            e.success_count >= 3 and e.failure_count >= 1
-            and e.last_outcome is not None and not _evidence_is_success(e.last_outcome)
-            and e.last_outcome_at is not None
-            and (now - (e.last_outcome_at if e.last_outcome_at.tzinfo else e.last_outcome_at.replace(tzinfo=_tz.utc))).days <= 7
-            for e, _, _ in head
+        # A long-validated rule whose record no longer supports acting on it is
+        # the retrieve-time reading of a regime shift; the briefing's section of
+        # the same name applies the same predicate over the whole entity, this
+        # over the hits. Read over the head *and* the discredited entries kept
+        # aside: a rule that was validated eight times and then discredited by
+        # two failures has left the ranking, and it is the clearest case there
+        # is. The first-strike case — one failure, still ``validated`` — is not
+        # a shift, or the recommendation would skip a winning action on the
+        # same failure the label forgives.
+        shifted = any(_regime_shifted(e) for e, _, _ in head) or any(
+            _regime_shifted(e) for e in avoided
         )
         recommendation = _recommend(
             priors,

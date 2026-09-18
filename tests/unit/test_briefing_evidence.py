@@ -102,6 +102,22 @@ def test_regime_shift_when_a_long_validated_rule_starts_failing(world) -> None:
     assert "changed" in shift["message"]
 
 
+def test_one_failure_on_a_long_validated_rule_is_a_first_strike_not_a_shift(world) -> None:
+    """The label forgives one failure against a long run (first-strike
+    tolerance keeps it ``validated``); the regime-shift section has to agree,
+    or the briefing would tell agents the world changed on the same failure it
+    tells them to keep acting through."""
+    mem, service, _ = world
+    for i in range(6):
+        _outcome(mem, "fix-restart", OutcomeType.SUCCESS, f"ok-{i}")
+    _outcome(mem, "fix-restart", OutcomeType.FAILURE, "bad-1")
+
+    lead = _lead(service.briefing(entity_path="acme/support"))
+    assert "regime_shift" not in lead.summary
+    hot = {h["key"]: h for h in lead.summary["hot_context"]}
+    assert hot["fix-restart"]["evidence_status"] == "validated"
+
+
 def test_compact_returns_only_the_lead_with_evidence(world) -> None:
     mem, service, digests = world
     digests.append(

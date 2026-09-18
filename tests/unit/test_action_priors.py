@@ -285,6 +285,94 @@ def test_retrieve_priors_explore_when_all_tried_failed(client, server_mem) -> No
     assert meta["recommendation"]["suggested_action"] == "resolve:b"
 
 
+def _outcomes(mem: AgentMemory, key: str, *outcomes: OutcomeType) -> None:
+    for i, outcome in enumerate(outcomes):
+        mem.read("acme/support", key)
+        mem.commit_outcome(f"{key}-{i}", outcome)
+    mem._read_tracker.clear()
+
+
+def _priors_meta(client, **extra):
+    resp = client.post("/api/v1/retrieve", json={
+        "query": "card declined", "entity_path": "acme/support", "include_priors": True,
+        "agent_id": "a1", "candidate_actions": ["resolve:a", "resolve:b"], **extra,
+    })
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    return body, body[-1]
+
+
+def test_a_first_strike_on_a_long_validated_rule_is_not_a_regime_shift(client, server_mem) -> None:
+    """One failure against eight successes stays ``validated`` under first-strike
+    tolerance, so it must not flag a regime shift either — the flag overrides a
+    winning prior and forces ``explore``, which would skip the action that has
+    been winning here on the same failure the label forgives."""
+    _stub_stats(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _outcomes(server_mem, "fix-a", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE)
+
+    body, meta = _priors_meta(client)
+    hit = next(e for e in body if e.get("key") == "fix-a")
+    assert hit["evidence_status"] == "validated"
+    assert meta["regime_shift"] is False
+    assert meta["recommendation"]["mode"] == "act"
+    assert meta["recommendation"]["suggested_action"] == "resolve:a"
+
+
+def test_a_second_failure_flags_the_shift_even_after_the_rule_leaves_the_head(client, server_mem) -> None:
+    """Two failures in a row discredit the rule, which drops it out of the
+    ranked list. The flag reads the discredited entries kept aside as well, so
+    the clearest case of a regime shift — a rule validated eight times and then
+    discredited — is the one that fires it, and the winner is skipped for an
+    untried action."""
+    _stub_stats(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _outcomes(server_mem, "fix-a", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
+
+    body, meta = _priors_meta(client)
+    assert all(e.get("key") != "fix-a" for e in body if not e.get("_meta")), "discredited rule left the head"
+    assert meta["regime_shift"] is True
+    assert meta["recommendation"]["mode"] == "explore"
+    assert meta["recommendation"]["suggested_action"] == "resolve:b"
+    assert "regime shift" in meta["recommendation"]["why"]
+
+
+def test_regime_shifted_reads_the_label_not_a_failure_ratio() -> None:
+    """The predicate has to agree with first-strike tolerance, and a ratio over
+    the evidence masses cannot: after eight successes one failure already
+    carries about half the success mass (severity 2 against a decayed run)."""
+    from types import SimpleNamespace
+
+    from amfs_core.evidence import regime_shifted
+
+    def entry(**kw):
+        base = dict(success_count=0, failure_count=0, last_outcome=None,
+                    evidence_success=0.0, evidence_failure=0.0, discredited_at=None,
+                    outcome_count=0, confidence=0.8)
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    # 8 successes then 1 failure, with the masses the evidence model produces.
+    first_strike = entry(success_count=8, failure_count=1, last_outcome="failure",
+                         evidence_success=3.73, evidence_failure=2.0, outcome_count=9)
+    assert first_strike.evidence_failure >= first_strike.evidence_success * 0.5, "a ratio rule would fire here"
+    assert regime_shifted(first_strike) is False
+    # The second failure discredits it.
+    second = entry(success_count=8, failure_count=2, last_outcome="failure",
+                   evidence_success=2.98, evidence_failure=4.93, outcome_count=10,
+                   discredited_at=datetime.now(UTC))
+    assert regime_shifted(second) is True
+    # A failure buried under later successes is history, not a shift.
+    recovered = entry(success_count=9, failure_count=2, last_outcome="success",
+                      evidence_success=3.94, evidence_failure=3.94, outcome_count=11)
+    assert regime_shifted(recovered) is False
+    # Never validated enough to have a regime to shift from.
+    young = entry(success_count=1, failure_count=1, last_outcome="failure",
+                  evidence_success=1.3, evidence_failure=2.0, outcome_count=2)
+    assert regime_shifted(young) is False
+    # An entry that carries its own label is read through it.
+    labelled = entry(success_count=5, failure_count=3, last_outcome="failure", evidence_status="contested")
+    assert regime_shifted(labelled) is True
+
+
 def test_retrieve_priors_need_an_entity_path(client, server_mem) -> None:
     _stub_stats(server_mem._adapter, [_row([("resolve:a", False)])])
     resp = client.post("/api/v1/retrieve", json={"query": "card declined", "include_priors": True})

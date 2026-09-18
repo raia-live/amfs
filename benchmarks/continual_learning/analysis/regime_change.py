@@ -451,7 +451,14 @@ def _figures(rows: list[dict]) -> None:
     except Exception:  # noqa: BLE001
         return
     colors = {"none": "#999999", "pgvector": "#1f77b4", "pgvector-diy+outcomes": "#17becf", "mem0": "#ff7f0e",
-              "senselab-nofeedback": "#bcbd22", "senselab-episode": "#9467bd", "senselab": "#d62728"}
+              "senselab-nofeedback": "#bcbd22", "senselab-episode": "#9467bd", "senselab": "#d62728",
+              "senselab-nopriors": "#e377c2", "pgvector-diy": "#8c564b"}
+    # `use_runs` adds whatever arms the run directories hold to HEAD, so any arm
+    # without a colour above gets one from the cycle rather than a KeyError
+    # after the markdown report has already been written.
+    fallback = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for i, a in enumerate(a for a in HEAD if a not in colors):
+        colors[a] = fallback[i % len(fallback)]
     # Fig 1: first-attempt success by 5-episode block across the whole horizon, changed-class after 20
     fig, ax = plt.subplots(figsize=(9, 4.5))
     for a in HEAD:
@@ -476,14 +483,15 @@ def _figures(rows: list[dict]) -> None:
     fig.savefig(OUT / "fig1_learning_curve.png", dpi=150)
     # Fig 2: tokens per successful task, post-change changed-class
     fig, ax = plt.subplots(figsize=(7, 4))
-    names, vals = [], []
+    names, vals, bar_colors = [], [], []
     for a in HEAD:
         r = sel(rows, arm=a, fleet=1, pre=False, changed=True)
         if not r:
             continue
         names.append(LABEL[a])
         vals.append(sum(x["tokens"] for x in r) / max(1, sum(x["success"] for x in r)))
-    ax.barh(names, vals, color=[colors[a] for a in HEAD if sel(rows, arm=a, fleet=1, pre=False, changed=True)])
+        bar_colors.append(colors[a])
+    ax.barh(names, vals, color=bar_colors)
     ax.set_xlabel("tokens per successful changed-class task (post-change)")
     fig.tight_layout()
     fig.savefig(OUT / "fig2_tokens_per_success.png", dpi=150)
