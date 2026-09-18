@@ -44,10 +44,10 @@ Variants:
                            action-level learning buys.
 
 Env: ``CL_SENSELAB_PRIORS=0`` turns priors off for every senselab arm (same as
-``senselab-nopriors``); ``CL_SENSELAB_SINCE=1`` makes repeat briefings incremental
-(``since=<last briefing for this agent>``) — off by default because a since-diff drops
-standing discredited rows from the briefing and the retrieve avoid list is then the only
-place the agent sees them.
+``senselab-nopriors``); ``CL_SENSELAB_SINCE=0`` turns off incremental repeat briefings
+(``since=<last briefing for this agent>``). On by default since the server's since-delta
+keeps the standing warnings (discredited rows and losing actions) whatever their age, so
+the delta is safe to act on and pays only for what changed.
 """
 
 from __future__ import annotations
@@ -119,7 +119,19 @@ class _PacedTimer:
 
 class _ThrottledHttpAdapter(HttpAdapter):
     """HttpAdapter paced by the global limiter, with patient 429 handling (the SDK's own
-    retry gives up after four quick attempts, which is not enough under sustained load)."""
+    retry gives up after four quick attempts, which is not enough under sustained load).
+
+    ``CL_SENSELAB_TIMEOUT`` (seconds, default the SDK's 30) sets the read timeout of the
+    per-episode client. Under a capacity-capped API tier the 30 s default turned queueing
+    delay into lost reflection notes; a longer timeout keeps the write and the latency is
+    still measured in ``memory_ms``."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if "timeout" not in kwargs and os.environ.get("CL_SENSELAB_TIMEOUT"):
+            import httpx
+
+            kwargs["timeout"] = httpx.Timeout(float(os.environ["CL_SENSELAB_TIMEOUT"]), connect=10.0)
+        super().__init__(*args, **kwargs)
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         for attempt in range(10):
@@ -400,7 +412,7 @@ class SenseLabArm(MemoryArm):
     # action_key on the terminal record_action. CL_SENSELAB_PRIORS=0 turns it off.
     priors = os.environ.get("CL_SENSELAB_PRIORS", "1") not in ("0", "false", "no")
     # briefing(since=<last briefing this agent received>) — see the module docstring.
-    briefing_since = os.environ.get("CL_SENSELAB_SINCE", "0") in ("1", "true", "yes")
+    briefing_since = os.environ.get("CL_SENSELAB_SINCE", "1") not in ("0", "false", "no")
 
     def open(self, scope: str) -> None:
         super().open(scope)
