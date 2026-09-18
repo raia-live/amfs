@@ -57,8 +57,10 @@ def client(mem):
     return TestClient(server.app)
 
 
-def _outcome(mem: AgentMemory, key: str, outcome: OutcomeType, ref: str) -> None:
-    mem.read("acme/support", key)
+def _outcome(
+    mem: AgentMemory, key: str, outcome: OutcomeType, ref: str, entity_path: str = "acme/support"
+) -> None:
+    mem.read(entity_path, key)
     mem.commit_outcome(ref, outcome)
 
 
@@ -248,3 +250,4 @@ def test_mcp_retrieve_reports_avoid_separately(mem: AgentMemory, monkeypatch) ->
     assert payload["avoid"][0]["failure_count"] == 1
     assert "avoid_note" in payload
     assert payload["entries"][0]["evidence_status"] == "validated"
+

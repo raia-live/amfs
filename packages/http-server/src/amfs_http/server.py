@@ -2665,11 +2665,13 @@ async def retrieve_entries(
             # Under the anchored blend the score is relevance scaled by trust,
             # so "within reach" is read on the two terms it is made of: a
             # validated peer stays if its score is close; an entry the record
-            # has not confirmed stays only if it is *more* relevant than the
-            # leader — the one case where the leader's record, not its topic,
-            # put it first, and the agent should still see what the query was
-            # actually about.
+            # has not confirmed stays if it is *more* relevant than the leader,
+            # or carries a rare query term the leader lacks (its lexical
+            # coverage ahead by ADAPTIVE_K_KEYWORD_GAP) — the cases where the
+            # leader's record, not its topic, put it first, and the agent
+            # should still see what the query was actually about.
             top_rel = float(head[0][2].get("relevance") or 0.0)
+            top_kw = float(head[0][2].get("keyword") or 0.0)
             head = [head[0]] + [
                 t for t in head[1:]
                 if (
@@ -2677,6 +2679,7 @@ async def retrieve_entries(
                     and t[1] >= top_score * ADAPTIVE_K_KEEP_RATIO
                 )
                 or float(t[2].get("relevance") or 0.0) > top_rel
+                or float(t[2].get("keyword") or 0.0) >= top_kw + ADAPTIVE_K_KEYWORD_GAP
             ]
         else:
             head = [t for t in head if t[1] >= top_score * ADAPTIVE_K_KEEP_RATIO] or head[:1]
@@ -3737,6 +3740,16 @@ def _seal_with_store(
 #: are dropped. 0.85 keeps near-ties (two confirmed approaches) and drops the
 #: long tail of alternatives the record has said nothing about.
 ADAPTIVE_K_KEEP_RATIO = 0.85
+#: ``adaptive_k`` under the anchored blend: an entry the record has not
+#: confirmed also stays behind a validated leader when its graded lexical
+#: coverage exceeds the leader's by this much — it carries a rare query term
+#: (the service name, the error code) the leader does not. Read on relevance
+#: alone the rule pruned the untested runbook for the task's own service
+#: behind a validated note about another service written in the query's
+#: phrasing: a hair less relevant, and gone from a one-row list. Three
+#: equally relevant fixes for the same symptom, one of them validated, still
+#: collapse to the validated one, which is what the option is for.
+ADAPTIVE_K_KEYWORD_GAP = 0.2
 #: Most discredited entries appended for ``include_avoid``.
 AVOID_LIST_MAX = 3
 _GAP_QUERY_CHARS = 2_000
