@@ -1323,3 +1323,45 @@ def test_list_digests_relevant_to_keeps_what_the_briefing_would_score(adapter) -
     # No terms: the plain listing, unchanged.
     assert len(adapter.list_digests(namespace=ns, relevant_to=[], limit=None)) == 5
     assert len(adapter.list_digests(namespace=ns, digest_type=DigestType.ENTITY)) == 3
+
+
+def test_outcome_task_text_is_stored_and_read_back_per_entity(adapter) -> None:
+    """``task_input`` reaches the outcome row as ``task_text`` — the head of
+    it, and only when given — and ``recent_task_texts`` reads an entity's
+    corpus newest first, bounded, without the other entity's tasks. This is
+    the background the lexical term weights a query against."""
+    import uuid
+    from datetime import UTC, datetime, timedelta
+
+    from amfs_core.models import OutcomeRecord, OutcomeType
+    from amfs_postgres.adapter import TASK_TEXT_CHARS
+
+    ns = f"tt-{uuid.uuid4().hex[:8]}"
+    here, there = f"{ns}/deploy", f"{ns}/billing"
+    t0 = datetime.now(UTC)
+    for i, (path, text) in enumerate([
+        (here, "Deploy request #1 for the returns service"),
+        (here, "Deploy request #2 for the pricing service"),
+        (here, None),
+        (there, "Refund ticket for order 77"),
+        (here, "x" * (TASK_TEXT_CHARS + 500)),
+    ]):
+        adapter.commit_outcome(OutcomeRecord(
+            outcome_ref=f"TT-{i}",
+            outcome_type=OutcomeType.SUCCESS,
+            committed_at=t0 + timedelta(seconds=i),
+            causal_entry_keys=[f"{path}/k{i}"],
+            entity_paths=[path],
+            agent_id="a",
+            task_input=text,
+        ))
+    got = adapter.recent_task_texts(here)
+    assert len(got) == 3, got
+    assert len(got[0]) == TASK_TEXT_CHARS  # newest first, cut at the bound
+    assert got[1:] == [
+        "Deploy request #2 for the pricing service",
+        "Deploy request #1 for the returns service",
+    ]
+    assert adapter.recent_task_texts(here, limit=1) == [got[0]]
+    assert adapter.recent_task_texts(there) == ["Refund ticket for order 77"]
+    assert adapter.recent_task_texts(f"{ns}/nowhere") == []

@@ -121,27 +121,54 @@ def _terms(text: str) -> set[str]:
     return out
 
 
-def keyword_coverage(query: str, docs: dict[str, str]) -> dict[str, float]:
+def keyword_coverage(
+    query: str,
+    docs: dict[str, str],
+    background: list[str] | None = None,
+) -> dict[str, float]:
     """The lexical relevance of each document to *query*, in ``[0, 1]``.
 
     The share of the query's terms a document contains, each term weighted by
-    how rare it is across *docs* (``log((N+1)/(df+1))``): a term every
-    candidate carries says nothing about which one the query is about, a term
-    one in eight carries says almost everything. Terms no candidate contains
-    are left out of the denominator, since they cannot discriminate either.
+    how much it says about *which* document the query is about. Terms no
+    candidate contains are left out of the denominator, since they cannot
+    discriminate either.
+
+    A term's weight comes from one of two corpora:
+
+    * **The entity's past tasks** (*background*), when the term occurs in
+      them: ``log((M+1)/(df_tasks+1))``. An agent phrases its query like the
+      task in front of it, so the words it shares with an entry are of two
+      kinds — the template every task on this entity shares ("standard deploy
+      … correct step order") and the words that vary from task to task ("the
+      *returns* service"). Only the second kind says what this task is about,
+      and only the task history can tell them apart: a word in every past task
+      identifies nothing; a word in few of them is the subject. Statistics over
+      the candidate pool cannot make the distinction — early in an entity's
+      life a template word is as rare among the entries as the subject is,
+      and a pool of thirty notes has no signal at all — which is what left the
+      seeded runbook for the task's own service ranked below notes about other
+      services written in the query's phrasing.
+    * **The candidate pool** otherwise: ``log((N+1)/(df+1))`` over *docs*, for
+      a term the tasks never used (the agent's own vocabulary — "runbook",
+      "validated"), and for every term when there is no background at all.
+
+    Each weight is then divided by the term's *redundancy*, one plus the sum
+    of its Jaccard overlaps with the other query terms' document sets. Four
+    words that always appear together across the pool are one piece of
+    evidence, not four, and without this a doc matching the phrasing
+    outweighed one matching the subject on count alone.
 
     Replaces the binary "was a lexical hit" flag the retrieve blend used until
     2026-09-18. With an OR-combined full-text query almost every candidate is
     a lexical hit, so the flag was 1.0 across the board and the one word that
     separated *returns service standard deploy* from the same request for
     *checkout* carried no weight at all — the bi-encoder does not separate
-    service names either, and the seeded runbook for the task's own service
-    lost to notes about other services written in the query's own phrasing.
+    service names either.
 
-    Computed over the candidate pool, not the store: a few hundred short
-    documents per request, so it is a Python pass, not a query. When every
-    query term is in every document (or in none) the weights vanish, and the
-    result falls back to presence — the old flag.
+    Computed over the candidate pool and a bounded task corpus: a few hundred
+    short documents per request, so it is a Python pass, not a query. When the
+    weights vanish (every query term in every document, or in none) the result
+    falls back to presence — the old flag.
     """
     q = _terms(query or "")
     if not docs:
@@ -150,12 +177,29 @@ def keyword_coverage(query: str, docs: dict[str, str]) -> dict[str, float]:
     if not q:
         return {k: 0.0 for k in doc_terms}
     n = len(doc_terms)
-    df = {t: sum(1 for ts in doc_terms.values() if t in ts) for t in q}
-    idf = {t: math.log((n + 1) / (df[t] + 1)) for t in q if df[t] > 0}
-    total = sum(idf.values())
+    docsets = {t: {k for k, ts in doc_terms.items() if t in ts} for t in q}
+    docsets = {t: s for t, s in docsets.items() if s}
+    if not docsets:
+        return {k: 0.0 for k in doc_terms}
+    task_terms = [_terms(b[:KEYWORD_DOC_CHARS]) for b in (background or []) if b]
+    m = len(task_terms)
+    weights: dict[str, float] = {}
+    for t, s in docsets.items():
+        df_tasks = sum(1 for ts in task_terms if t in ts)
+        if df_tasks:
+            w = math.log((m + 1) / (df_tasks + 1))
+        else:
+            w = math.log((n + 1) / (len(s) + 1))
+        redundancy = 1.0 + sum(
+            len(s & o) / len(s | o) for u, o in docsets.items() if u != t
+        )
+        weights[t] = w / redundancy
+    total = sum(weights.values())
     if total <= 0.0:
-        return {k: (1.0 if any(t in ts for t in q) else 0.0) for k, ts in doc_terms.items()}
-    return {k: sum(w for t, w in idf.items() if t in ts) / total for k, ts in doc_terms.items()}
+        return {k: (1.0 if any(t in ts for t in docsets) else 0.0) for k, ts in doc_terms.items()}
+    return {
+        k: sum(w for t, w in weights.items() if t in ts) / total for k, ts in doc_terms.items()
+    }
 
 
 def entry_text(key: str, value: Any) -> str:

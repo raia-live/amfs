@@ -26,6 +26,7 @@ import os
 import re
 import secrets
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, timezone
@@ -372,6 +373,45 @@ def _local_evidence_enabled() -> bool:
 LOCAL_EVIDENCE_HEAD = 30
 #: Most below-gate (discredited) entries read near the query per retrieve.
 BELOW_GATE_LIMIT = 50
+#: Most recent task texts read as the lexical term's background corpus, and
+#: how long one read serves an entity. Tasks arrive far slower than retrieves,
+#: and a corpus a minute stale weights a query's words the same.
+TASK_CORPUS_LIMIT = 200
+TASK_CORPUS_TTL_S = 60.0
+_task_corpus_cache: dict[tuple[str, str, str], tuple[float, list[str]]] = {}
+_TASK_CORPUS_CACHE_MAX = 512
+
+
+async def _task_corpus(entity_path: str | None) -> list[str]:
+    """The entity's recent task texts (see ``keyword_coverage``), read off the
+    event loop and held for ``TASK_CORPUS_TTL_S``. Empty for an adapter without
+    the read, a store without the column, or an entity with no task history —
+    the lexical term then weights by the candidate pool alone."""
+    if not entity_path:
+        return []
+    mem = _get_memory()
+    fn = getattr(mem._adapter, "recent_task_texts", None)
+    if not callable(fn):
+        return []
+    # Keyed by tenant as well as namespace: the adapter scopes the read to the
+    # request's account through the tenant context, and two accounts naming the
+    # same entity path must not read each other's tasks from this cache.
+    account = getattr(mem._adapter, "_get_current_account_id", lambda: None)()
+    cache_key = (str(account or ""), str(mem.namespace), entity_path)
+    now = time.monotonic()
+    hit = _task_corpus_cache.get(cache_key)
+    if hit is not None and now - hit[0] < TASK_CORPUS_TTL_S:
+        return hit[1]
+    try:
+        texts = await _offload(_db_executor, fn, entity_path, limit=TASK_CORPUS_LIMIT)
+    except Exception:  # noqa: BLE001 - the pool statistics stand
+        logger.debug("recent_task_texts failed", exc_info=True)
+        texts = []
+    if len(_task_corpus_cache) >= _TASK_CORPUS_CACHE_MAX:
+        oldest = min(_task_corpus_cache, key=lambda k: _task_corpus_cache[k][0])
+        _task_corpus_cache.pop(oldest, None)
+    _task_corpus_cache[cache_key] = (now, list(texts))
+    return list(texts)
 #: An entry is "about this query" — for the query-scoped regime shift — when
 #: its similarity is within this of the best hit's, or it matched on keywords.
 LOCAL_SIM_GAP = 0.1
@@ -2371,17 +2411,21 @@ async def retrieve_entries(
     #     all. ``keyword_coverage`` reads the pool once and scores each entry by
     #     the rare query terms it carries — the service name, the error code —
     #     so the entry the query is about outranks one that shares its
-    #     phrasing. Graded over the lexical channel's own hits only: an entry
-    #     the channel did not return keeps 0, as before, rather than being
-    #     handed lexical relevance for an incidental word. Under the additive
-    #     (rollback) form the flag stays binary, so the switch restores the
-    #     old ranking exactly.
+    #     phrasing. "Rare" is judged against the entity's past tasks where it
+    #     can be: the words every task here shares are template, the words
+    #     that vary are the subject, and only the task history tells them
+    #     apart (``keyword_coverage`` for the measurement). Graded over the
+    #     lexical channel's own hits only: an entry the channel did not return
+    #     keeps 0, as before, rather than being handed lexical relevance for
+    #     an incidental word. Under the additive (rollback) form the flag
+    #     stays binary, so the switch restores the old ranking exactly.
     anchored = _rank_anchored()
     lexical_hits = {k: v for k, v in candidates.items() if v["keyword"] > 0.0}
     if anchored and lexical_hits and topical.strip():
         coverage = _keyword_coverage(
             topical,
             {k: _entry_text(v["entry"].key, v["entry"].value) for k, v in lexical_hits.items()},
+            background=await _task_corpus(req.entity_path),
         )
         for k, v in lexical_hits.items():
             v["keyword"] = float(coverage.get(k, 0.0))

@@ -159,6 +159,16 @@ _ACTION_PRIORS_SQL = (
 _LOCAL_EVIDENCE_SQL = (
     Path(__file__).parent / "migrations" / "010_local_evidence.sql"
 ).read_text(encoding="utf-8")
+#: Migration 011 — the task text on the outcome row, the background corpus
+#: retrieve weights query terms against. Same treatment as 008–010.
+_OUTCOME_TASK_TEXT_SQL = (
+    Path(__file__).parent / "migrations" / "011_outcome_task_text.sql"
+).read_text(encoding="utf-8")
+#: Characters of ``task_input`` kept on the outcome row. Read for word
+#: statistics — which of a query's words recur across this entity's tasks —
+#: so the head of the request is all that is needed, and a pasted log or
+#: transcript does not make every commit a large write.
+TASK_TEXT_CHARS = 2_000
 
 # Shared by the sync and async adapters so the two cannot drift apart. account_id
 # is omitted on purpose: the hosted product gives the column a default in a tenant
@@ -641,6 +651,7 @@ class PostgresAdapter(AdapterABC):
         self._has_validators_col = False
         self._has_action_cols = False
         self._has_outcome_embedding_col = False
+        self._has_task_text_col = False
         # When an embedder is provided, embeddings are computed at write time and
         # persisted, so ANN retrieval (semantic_search / pgvector HNSW) works
         # without a separate backfill pass. embedding_dim must match the column
@@ -785,7 +796,7 @@ class PostgresAdapter(AdapterABC):
         return hashlib.sha256(
             (
                 _SCHEMA_SQL + migrations + _OUTCOME_EVIDENCE_SQL + _ACTION_PRIORS_SQL
-                + _LOCAL_EVIDENCE_SQL
+                + _LOCAL_EVIDENCE_SQL + _OUTCOME_TASK_TEXT_SQL
             ).encode("utf-8")
         ).hexdigest()
 
@@ -1137,6 +1148,8 @@ class PostgresAdapter(AdapterABC):
         cur.execute(_ACTION_PRIORS_SQL)
         # Query-conditioned evidence: see migration 010.
         cur.execute(_LOCAL_EVIDENCE_SQL)
+        # The task text on outcomes: see migration 011.
+        cur.execute(_OUTCOME_TASK_TEXT_SQL)
         # task_embedding on outcomes follows the entries' embedding dimension,
         # so it is derived here rather than declared in the migration.
         cur.execute(
@@ -1560,12 +1573,13 @@ class PostgresAdapter(AdapterABC):
                     """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'amfs_outcomes'
-                      AND column_name IN ('actions_taken', 'task_embedding')
+                      AND column_name IN ('actions_taken', 'task_embedding', 'task_text')
                     """,
                 )
                 found = {row["column_name"] for row in cur.fetchall()}
                 self._has_action_cols = "actions_taken" in found
                 self._has_outcome_embedding_col = "task_embedding" in found
+                self._has_task_text_col = "task_text" in found
 
     # ------------------------------------------------------------------
     # read
@@ -3355,6 +3369,12 @@ class PostgresAdapter(AdapterABC):
                     columns.append("task_embedding")
                     placeholders.append("%s")
                     params.append(f"[{','.join(str(v) for v in task_embedding)}]")
+                # The head of the request, already redacted by the SDK before
+                # the record reached this adapter (see migration 011).
+                if self._has_task_text_col and record.task_input:
+                    columns.append("task_text")
+                    placeholders.append("%s")
+                    params.append(record.task_input[:TASK_TEXT_CHARS])
                 cur.execute(
                     f"INSERT INTO amfs_outcomes ({', '.join(columns)}) "
                     f"VALUES ({', '.join(placeholders)})",
@@ -3573,6 +3593,31 @@ class PostgresAdapter(AdapterABC):
                 "similarity": sim,
             })
         return out
+
+    def recent_task_texts(self, entity_path: str, *, limit: int = 200) -> list[str]:
+        """The task texts of the most recent outcomes about ``entity_path``,
+        newest first — the background corpus ``keyword_coverage`` weights a
+        query's terms against (see ``amfs_core.ranking``).
+
+        Bounded by ``limit`` and read through the GIN index on ``entity_paths``
+        (009). Empty when the column is not provisioned or nothing has been
+        committed with a ``task_input`` here, in which case the caller weights
+        by the candidate pool alone, as before 011.
+        """
+        if not self._has_task_text_col or not self._has_action_cols or not entity_path:
+            return []
+        sql = """
+            SELECT task_text
+            FROM amfs_outcomes
+            WHERE namespace = %s AND task_text IS NOT NULL AND %s = ANY(entity_paths)
+            ORDER BY committed_at DESC
+            LIMIT %s
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, [self._namespace, entity_path, int(limit)])
+                rows = cur.fetchall()
+        return [str(r["task_text"]) for r in rows if r.get("task_text")]
 
     def evidence_near(
         self,

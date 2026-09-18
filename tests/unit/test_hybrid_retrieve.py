@@ -577,7 +577,7 @@ class TestAdaptiveKKeepsTheQuerysSubject:
             # The leader is semantically closest by a margin the bi-encoder
             # does produce for a note phrased like the query; the runbook's
             # relevance lands a hair under it once trust is left out.
-            semantic_hits=[(leader, 0.92), (runbook, 0.74), (other, 0.76)]
+            semantic_hits=[(leader, 0.98), (runbook, 0.70), (other, 0.76)]
             + [(e, 0.70 - i * 0.01) for i, e in enumerate(crowd)],
             lexical_hits=[leader, runbook, other, *crowd],
         )

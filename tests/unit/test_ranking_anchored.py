@@ -118,3 +118,63 @@ def test_keyword_coverage_weights_the_rare_term_not_the_shared_phrasing() -> Non
     assert keyword_coverage("zzz", {"a": "deploy"}) == {"a": 0.0}
     assert keyword_coverage("", {"a": "deploy"}) == {"a": 0.0}
     assert keyword_coverage("deploy", {}) == {}
+
+
+def test_keyword_coverage_learns_the_template_from_the_entitys_past_tasks() -> None:
+    """Early in an entity's life the pool cannot tell the subject from the
+    phrasing: two notes and two runbooks, and "standard", "correct", "step",
+    "order" are each as rare among them as "pricing" is. Ranked by pool
+    statistics the checkout note — phrased like the query, about the wrong
+    service — beats the pricing runbook. The entity's past tasks all carry the
+    phrasing and none carry "pricing", so weighted against them the phrasing
+    is template and the service name is the subject: the pricing runbook
+    wins. Terms the tasks never used ("runbook") still fall back to pool
+    statistics, and with no background the result is the pool-only one."""
+    from amfs_core.ranking import entry_text, keyword_coverage
+
+    docs = {
+        "checkout-standard-deploy-order-validated":
+            "for checkout service standard deploys the correct step order is migrate warm roll",
+        "returns-deploy-conflict-standard-order":
+            "returns service: when the two runbooks conflict, the standard order is migrate flush warm",
+        "runbook-pricing-a": "Deploy runbook for the pricing service: warm the cache, then run "
+                             "database migrations, then roll the pods. Reference ticket OPS-4037.",
+        "runbook-fraud-a": "Deploy runbook for the fraud service: flush the CDN, then warm the cache, "
+                           "then run database migrations. Reference ticket OPS-4111.",
+    }
+    query = "pricing service standard deploy correct step order runbook"
+    texts = {k: entry_text(k, v) for k, v in docs.items()}
+    tasks = [
+        f"Deploy request #{1200 + i} for the {svc} service: please run the standard deploy now "
+        "using the correct step order for this service."
+        for i, svc in enumerate(["checkout", "returns", "fraud", "checkout", "notifications"])
+    ]
+    pool_only = keyword_coverage(query, texts)
+    with_tasks = keyword_coverage(query, texts, background=tasks)
+    assert pool_only["checkout-standard-deploy-order-validated"] > pool_only["runbook-pricing-a"]
+    assert with_tasks["runbook-pricing-a"] > with_tasks["checkout-standard-deploy-order-validated"]
+    assert with_tasks["runbook-pricing-a"] > with_tasks["runbook-fraud-a"]
+    # The pricing runbook carries the one word that varies across tasks; the
+    # checkout note carries only template words, and not much else.
+    assert with_tasks["runbook-pricing-a"] >= 0.8
+    assert with_tasks["checkout-standard-deploy-order-validated"] <= 0.3
+    assert keyword_coverage(query, texts, background=[]) == pool_only
+    assert keyword_coverage(query, texts, background=None) == pool_only
+
+
+def test_keyword_coverage_counts_words_that_always_co_occur_once() -> None:
+    """Four phrasing words that appear together in every note are one piece
+    of evidence, not four: a doc carrying them all must not outscore, on
+    count, a doc carrying the single word that partitions the pool."""
+    from amfs_core.ranking import keyword_coverage
+
+    docs = {
+        "note-1": "alpha beta gamma delta about shipping",
+        "note-2": "alpha beta gamma delta about checkout",
+        "note-3": "alpha beta gamma delta about fraud",
+        "subject": "the pricing runbook",
+        "other": "unrelated text",
+    }
+    cov = keyword_coverage("pricing alpha beta gamma delta", docs)
+    assert cov["subject"] > cov["note-1"] == cov["note-2"] == cov["note-3"]
+    assert cov["other"] == 0.0
