@@ -116,3 +116,67 @@ def test_real_tiny_qwen_dynamic_cache_matches_batched_and_sequential():
     sequential=engine.score('owned state',questions(4),parallel=False)
     for key in parallel.distributions:
         assert parallel.distributions[key]==pytest.approx(sequential.distributions[key],abs=1e-6)
+
+
+def test_explicit_fp32_recipe_scopes_and_restores_precision_on_success_and_failure():
+    class PrecisionModel(Model):
+        def forward(self, *args, **kwargs):
+            assert torch.get_float32_matmul_precision() == 'highest'
+            return super().forward(*args, **kwargs)
+    previous = torch.get_float32_matmul_precision()
+    try:
+        torch.set_float32_matmul_precision('medium')
+        engine = scorer(PrecisionModel(), execution_mode='fp32_math')
+        result = engine.score('exposed fixture', questions(4))
+        assert result.diagnostics['execution_mode'] == 'fp32_math'
+        assert result.diagnostics['weight_dtype'] == 'torch.float32'
+        assert torch.get_float32_matmul_precision() == 'medium'
+        with pytest.raises(ValueError, match='token bound'):
+            scorer(PrecisionModel(), execution_mode='fp32_math', max_context_tokens=2).score('exposed', questions(1))
+        assert torch.get_float32_matmul_precision() == 'medium'
+        with pytest.raises(ValueError, match='float32'):
+            scorer(PrecisionModel().to(dtype=torch.bfloat16), execution_mode='fp32_math')
+    finally:
+        torch.set_float32_matmul_precision(previous)
+
+
+def test_loader_fp32_is_explicit_and_does_not_change_default_recipe(monkeypatch):
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    loaded = []
+    def load_model(*args, **kwargs):
+        loaded.append(kwargs)
+        return Model().to(dtype=kwargs['torch_dtype'])
+    monkeypatch.setattr(AutoTokenizer, 'from_pretrained', lambda *a, **k: Tokenizer())
+    monkeypatch.setattr(AutoModelForCausalLM, 'from_pretrained', load_model)
+    default = PretrainedChoiceScorer.from_pretrained('fixture', revision='a'*40, device='cpu')
+    explicit = PretrainedChoiceScorer.from_pretrained('fixture', revision='a'*40, device='cpu', dtype='fp32')
+    assert default.execution_mode == 'default'
+    assert explicit.execution_mode == 'fp32_math'
+    assert all(k['trust_remote_code'] is False and k['revision'] == 'a'*40 for k in loaded)
+    assert all(k['attn_implementation'] == 'sdpa' for k in loaded)
+    with pytest.raises(ValueError, match='determined'):
+        PretrainedChoiceScorer.from_pretrained('fixture', revision='a'*40, device='cpu', dtype='bf16', execution_mode='fp32_math')
+
+
+def test_real_tiny_fp32_math_matches_uncached_full_prompt():
+    from transformers import Qwen2Config, Qwen2ForCausalLM
+    torch.set_num_threads(1)
+    with torch.random.fork_rng():
+        torch.manual_seed(116)
+        config = Qwen2Config(vocab_size=258, hidden_size=16, intermediate_size=32,
+                            num_hidden_layers=2, num_attention_heads=2, num_key_value_heads=1,
+                            max_position_embeddings=4096, pad_token_id=0, eos_token_id=1)
+        config._attn_implementation = 'sdpa'
+        model = Qwen2ForCausalLM(config)
+    engine = scorer(model, execution_mode='fp32_math')
+    parallel = engine.score('exposed fixture', questions(4))
+    sequential = engine.score('exposed fixture', questions(4), parallel=False)
+    from amfs_decision_runtime.pretrained import _execution_context
+    _, fields = engine._compile('exposed fixture', questions(4))
+    with _execution_context('fp32_math'), torch.inference_mode():
+        for field in fields:
+            ids = torch.tensor([field['tokens']])
+            output = model(input_ids=ids, attention_mask=torch.ones_like(ids), use_cache=False, logits_to_keep=1)
+            reference = torch.softmax(output.logits[0,-1,field['labels']].float(), -1).tolist()
+            assert list(parallel.distributions[field['name']].values()) == pytest.approx(reference, abs=1e-6)
+            assert parallel.distributions[field['name']] == pytest.approx(sequential.distributions[field['name']], abs=1e-6)

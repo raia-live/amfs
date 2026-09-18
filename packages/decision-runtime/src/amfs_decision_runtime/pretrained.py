@@ -2,12 +2,16 @@
 
 Every field is independent and receives the same state/policy plus its own full
 candidate catalog. Shared prefix KV reuse is an optimization, not a learned
-architecture or calibration method. Scores normalize only the declared label
+architecture or calibration method. An explicit fp32 loader option uses math
+attention and highest float32 matmul precision; the default recipe is unchanged.
+FP32 changes memory/latency and must be reported when comparing models.
+Scores normalize only the declared label
 logits; they are not calibrated correctness/safety probabilities.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
 import copy
 import gc
 import itertools
@@ -63,16 +67,43 @@ def _repeat_cache(cache, count):
     raise ValueError('cache does not support independent batch replication')
 
 
+# PyTorch matmul precision is process-global. Serialize scorer calls while an
+# explicit diagnostic precision recipe temporarily overrides it.
+_PRECISION_LOCK = threading.RLock()
+
+
+@contextmanager
+def _execution_context(mode):
+    with _PRECISION_LOCK:
+        if mode == 'default':
+            yield
+            return
+        from torch.nn.attention import sdpa_kernel, SDPBackend
+        previous = torch.get_float32_matmul_precision()
+        try:
+            torch.set_float32_matmul_precision('highest')
+            with sdpa_kernel(SDPBackend.MATH):
+                yield
+        finally:
+            torch.set_float32_matmul_precision(previous)
+
+
 class PretrainedChoiceScorer:
     def __init__(self, model, tokenizer, *, model_id: str, revision: str,
                  policy: str = DEFAULT_POLICY, max_fields: int = 16,
-                 max_context_tokens: int = 8192, max_cache_bytes: int = 3 * 1024**3):
+                 max_context_tokens: int = 8192, max_cache_bytes: int = 3 * 1024**3,
+                 execution_mode: str = 'default'):
         if not re.fullmatch(r'[0-9a-f]{40}', revision):
             raise ValueError('immutable 40-hex model revision required')
         if not policy or type(max_fields) is not int or not 1 <= max_fields <= 64:
             raise ValueError('bounded fields and explicit policy required')
         if max_context_tokens < 2 or max_cache_bytes < 1:
             raise ValueError('positive token/cache limits required')
+        if execution_mode not in ('default', 'fp32_math'):
+            raise ValueError('unknown execution mode')
+        if execution_mode == 'fp32_math' and any(p.is_floating_point() and p.dtype != torch.float32 for p in model.parameters()):
+            raise ValueError('fp32_math requires explicit float32 model weights')
+        self.execution_mode = execution_mode
         self.model, self.tokenizer = model.eval(), tokenizer
         self.model_id, self.revision, self.policy = model_id, revision, policy
         self.max_fields, self.max_context_tokens, self.max_cache_bytes = max_fields, max_context_tokens, max_cache_bytes
@@ -81,19 +112,26 @@ class PretrainedChoiceScorer:
 
     @classmethod
     def from_pretrained(cls, model_id, *, revision, device='cuda', dtype='bf16', local_files_only=False, **kwargs):
-        """No unpinned weights, remote model code, fallback model or fine-tuning."""
+        """Pinned inference; explicit fp32 selects math attention, never silent fallback.
+
+        Upcasting a BF16 checkpoint does not add weight information. FP32 doubles
+        weight/cache storage and its performance is not a BF16 speed comparison.
+        """
         if not re.fullmatch(r'[0-9a-f]{40}', revision):
             raise ValueError('immutable 40-hex model revision required')
-        if dtype != 'bf16':
-            raise ValueError('bf16 recipe required; CPU validation uses float32')
-        if str(device).startswith('cuda') and (not torch.cuda.is_available() or not torch.cuda.is_bf16_supported()):
+        if dtype not in ('bf16', 'fp32'):
+            raise ValueError('explicit bf16 or fp32 recipe required')
+        mode = 'fp32_math' if dtype == 'fp32' else 'default'
+        if 'execution_mode' in kwargs:
+            raise ValueError('loader execution mode is determined by explicit dtype')
+        if str(device).startswith('cuda') and (not torch.cuda.is_available() or (dtype == 'bf16' and not torch.cuda.is_bf16_supported())):
             raise ValueError('CUDA bf16 support required; no silent precision fallback')
         from transformers import AutoModelForCausalLM, AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision, trust_remote_code=False, local_files_only=local_files_only)
         model = AutoModelForCausalLM.from_pretrained(model_id, revision=revision, trust_remote_code=False, local_files_only=local_files_only,
-                    torch_dtype=torch.bfloat16 if str(device).startswith('cuda') else torch.float32,
+                    torch_dtype=torch.bfloat16 if dtype == 'bf16' and str(device).startswith('cuda') else torch.float32,
                     attn_implementation='sdpa').to(device)
-        return cls(model, tokenizer, model_id=model_id, revision=revision, **kwargs)
+        return cls(model, tokenizer, model_id=model_id, revision=revision, execution_mode=mode, **kwargs)
 
     def _labels(self):
         alphabet = string.ascii_uppercase + string.ascii_lowercase + string.digits
@@ -160,7 +198,7 @@ class PretrainedChoiceScorer:
         return prefix_ids[:common], compiled
 
     def score(self, state, questions, *, parallel=True):
-        with self.lock, torch.inference_mode():
+        with self.lock, _execution_context(self.execution_mode), torch.inference_mode():
             if self.model is None:
                 raise RuntimeError('scorer is closed')
             prefix, fields = self._compile(state, questions)
@@ -207,7 +245,7 @@ class PretrainedChoiceScorer:
                 del output
             return ChoiceScores(distributions, f'{self.model_id}@{self.revision}',
                 len(prefix) + sum(map(len, suffixes)), 0,
-                {'calibrated':False, 'parallel':parallel, 'fields':len(fields), 'shared_prefix_tokens':len(prefix),
+                {'calibrated':False, 'execution_mode':self.execution_mode, 'weight_dtype':str(next(self.model.parameters()).dtype), 'parallel':parallel, 'fields':len(fields), 'shared_prefix_tokens':len(prefix),
                  'suffix_tokens':list(map(len,suffixes)), 'logical_unshared_input_tokens':sum(len(row['tokens']) for row in fields), 'prefix_cache_bytes':prefix_bytes,
                  'estimated_peak_cache_bytes':estimate, 'actual_prefill_tokens':len(prefix),
                  'label_scoring':'softmax over distinct full-context single-token choice codes only'})
