@@ -32,6 +32,9 @@ _EVIDENCE_SECTION_LIMIT = 5
 _REGIME_MIN_SUCCESSES = 3
 _REGIME_FAILURE_RATIO = 0.5
 _COMPACT_NARRATIVE_CHARS = 400
+#: Outcomes scanned for the ``tried_here`` section and rows it shows.
+_ACTIONS_SCAN_LIMIT = 200
+_ACTIONS_SECTION_LIMIT = 8
 
 
 def _preview(value: Any, limit: int = 160) -> str:
@@ -87,6 +90,7 @@ class BriefingService:
         limit: int = 10,
         branch: str = "main",
         compact: bool = False,
+        since: datetime | None = None,
     ) -> list[Digest]:
         """Get a ranked list of relevant digests for the given context.
 
@@ -104,9 +108,17 @@ class BriefingService:
         entries that have recently started failing, which is what a changed
         environment looks like from inside the memory).
 
+        The lead digest also carries ``tried_here`` — what agents *did* on this
+        entity and how it went, per action, from the outcome record — when the
+        adapter keeps one.
+
         *compact* returns only that lead digest with the evidence sections and
         hot context, narrative trimmed: the shape an agent needs at the top of
         every task, at a fraction of the tokens of the full briefing.
+
+        *since* keeps only what changed after that moment in the list sections
+        (hot context, validated, discredited, tried_here): an agent that was
+        briefed an hour ago pays for the delta, not the whole scope again.
         """
         if compact:
             limit = 1
@@ -132,12 +144,99 @@ class BriefingService:
             else:
                 self._inject_standalone_hot_context(digests, entity_path, branch)
             self._inject_evidence_sections(digests, entity_path, branch)
+            self._inject_action_sections(digests, entity_path)
             if not compact:
                 self._inject_who_to_ask(digests, entity_path, agent_id, branch)
             if compact:
                 digests = self._compact(digests, entity_path)
+            if since is not None:
+                self._since(digests, entity_path, since)
 
         return digests
+
+    def _inject_action_sections(self, digests: list[Digest], entity_path: str) -> None:
+        """Attach ``tried_here`` to the lead digest: per-action won/lost on this
+        entity from the outcome record (``amfs_core.actions``), plus ``explore``
+        — the actions with a thin record, where another try is information.
+        Nothing is attached when the adapter keeps no outcome record."""
+        lead = self._lead_digest(digests, entity_path)
+        if lead is None:
+            return
+        stats = getattr(self._adapter, "action_stats", None)
+        if not callable(stats):
+            return
+        try:
+            rows = stats(entity_path, limit=_ACTIONS_SCAN_LIMIT)
+        except Exception:
+            logger.debug("action_stats failed for %s", entity_path, exc_info=True)
+            return
+        if not rows:
+            return
+        from amfs_core.actions import aggregate_priors
+
+        priors = aggregate_priors(rows)
+        tried = priors.get("tried") or []
+        if not tried:
+            return
+        lead.summary["tried_here"] = [
+            {
+                "action": t["action_key"],
+                "won": t["won"],
+                "n": t["n"],
+                "p": t["p"],
+                "agents": t["agents"],
+                "last_3": t["last_3"],
+                "last_at": t["last_at"],
+            }
+            for t in tried[:_ACTIONS_SECTION_LIMIT]
+        ]
+        losing = [t for t in tried if t["n"] >= 2 and t["p"] < 0.4]
+        thin = [t for t in tried if t["n"] < 2]
+        if losing or thin:
+            lead.summary["explore"] = {
+                "avoid": [t["action_key"] for t in losing[:_ACTIONS_SECTION_LIMIT]],
+                "thin_evidence": [t["action_key"] for t in thin[:_ACTIONS_SECTION_LIMIT]],
+                "message": (
+                    "tried_here is what agents did on this entity and how it went. "
+                    "Do not repeat an action in `avoid` without a reason; prefer an "
+                    "action with wins, or one not listed here at all."
+                ),
+            }
+
+    @staticmethod
+    def _since(digests: list[Digest], entity_path: str, since: datetime) -> None:
+        """Trim the lead digest's list sections to what changed after ``since``."""
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        for d in digests:
+            if d.digest_type != DigestType.ENTITY or d.scope != entity_path:
+                continue
+            for section in ("hot_context", "validated", "discredited", "tried_here"):
+                rows = d.summary.get(section)
+                if not isinstance(rows, list):
+                    continue
+                kept = []
+                for row in rows:
+                    stamps = []
+                    for field in ("last_outcome_at", "discredited_at", "last_at", "written_at"):
+                        raw = row.get(field)
+                        if not raw:
+                            continue
+                        try:
+                            at = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                        except ValueError:
+                            continue
+                        stamps.append(at if at.tzinfo else at.replace(tzinfo=timezone.utc))
+                    if not stamps:
+                        # No timestamp on the row: the section cannot say whether
+                        # it changed, so keep it rather than hide it.
+                        kept.append(row)
+                        continue
+                    if max(stamps) >= since:
+                        kept.append(row)
+                d.summary[section] = kept
+            d.summary["since"] = since.isoformat()
+            break
 
     def _search(self, query: SearchQuery, branch: str) -> list[MemoryEntry]:
         """``adapter.search`` with the branch when the adapter takes one.
@@ -189,6 +288,13 @@ class BriefingService:
             "failure_count": e.failure_count,
             "last_outcome": e.last_outcome,
             "last_outcome_at": e.last_outcome_at.isoformat() if e.last_outcome_at else None,
+            "written_at": e.provenance.written_at.isoformat() if e.provenance.written_at else None,
+            # The record behind the label — ``p`` is the posterior success over
+            # ``n`` outcomes — and how many distinct agents' successes stand
+            # behind this claim. "Validated by 3 agents" outranks one agent's
+            # repeated success.
+            "posterior": {"p": e.posterior[0], "n": e.posterior[1]},
+            "validators": len(e.validators or []),
         }
 
     def _lead_digest(self, digests: list[Digest], entity_path: str) -> Digest | None:
@@ -350,7 +456,7 @@ class BriefingService:
         lead = self._lead_digest(digests, entity_path)
         if lead is None:
             return digests[:1]
-        keep = ("narrative", "hot_context", "validated", "discredited", "regime_shift")
+        keep = ("narrative", "hot_context", "validated", "discredited", "regime_shift", "tried_here", "explore")
         summary = {k: lead.summary[k] for k in keep if k in lead.summary}
         narrative = summary.get("narrative")
         if isinstance(narrative, str) and len(narrative) > _COMPACT_NARRATIVE_CHARS:

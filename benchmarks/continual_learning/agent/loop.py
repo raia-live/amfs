@@ -100,6 +100,20 @@ def _tool_result_text(hits: list[MemoryHit]) -> str:
     return render_hits(hits)
 
 
+def candidate_actions(scenario: Scenario) -> list[str] | None:
+    """The terminal tool's ``action`` enum as ``<tool>:<action>`` keys — the same key the
+    SDK derives from a recorded tool call — or ``None`` when the scenario's terminal tool
+    has no such enum (free-form answers, multi-step runbooks)."""
+    for t in scenario.tools:
+        if not t.terminal:
+            continue
+        props = (t.parameters or {}).get("properties") or {}
+        enum = (props.get("action") or {}).get("enum")
+        if isinstance(enum, list) and enum:
+            return [f"{t.name}:{a}" for a in enum]
+    return None
+
+
 def _mentions_stale(hit: MemoryHit, task: Task) -> bool:
     """Does a served (non-avoid) entry recommend the action that *used to* be right for this
     task? Only defined after a regime change (``truth.old_fix``)."""
@@ -133,6 +147,7 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
     transcript: list[dict[str, Any]] = []
     terminal_names = {t.name for t in scenario.tools if t.terminal}
     tools = [t.schema() for t in scenario.tools] + (MEMORY_TOOLS if arm.has_memory else [])
+    session.candidate_actions = candidate_actions(scenario)
 
     messages: list[dict[str, Any]] = [{"role": "system", "content": scenario.system_prompt(arm.has_memory)}]
     try:
@@ -160,8 +175,15 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
                     q = str(args.get("query", ""))
                     hits = session.search(q, TOP_K)
                     all_hits.extend(hits)
-                    searches_log.append({"attempt": attempts + 1, "query": q[:200], "hits": [h.as_log() for h in hits]})
+                    entry = {"attempt": attempts + 1, "query": q[:200], "hits": [h.as_log() for h in hits]}
                     content = _tool_result_text(hits)
+                    footer = session.search_footer()
+                    if footer:
+                        content += "\n\n" + footer
+                        session.acct.retrieved_bytes += len(footer)
+                    if session.last_recommendation:
+                        entry["recommendation"] = session.last_recommendation
+                    searches_log.append(entry)
                 elif name == "memory_write":
                     writes += 1
                     wkey = str(args.get("key", f"note-ep{task.episode}"))[:80]

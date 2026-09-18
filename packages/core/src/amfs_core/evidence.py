@@ -27,13 +27,22 @@ the agent trusted at 0.95 counts nearly twice as much as one on an entry at
 ``n_causal`` is the *credit split*: an outcome that cited eight entries cannot
 hand each of them a full unit of evidence.
 
+One exception to the surprise term: the *first* failure of an entry that has
+at least ``FIRST_STRIKE_MIN_WINS`` successes and no failure yet is weighed
+without surprise. A single failure on a four-times-validated rule is more often
+the agent's slip or a noisy environment than a change in the world, and with
+full surprise it discredited the rule outright (0.89 -> 0.49) and pulled it out
+of retrieval. Without it the same failure leaves the rule contested at ~0.62; a
+second failure still discredits it (~0.40), so a regime change is unlearned in
+two strikes exactly as before.
+
 With the defaults below a fresh 0.7 entry drops to ~0.26 on its first failure
 and lifts to ~0.82 on its first success; a long-validated entry survives one
-failure (contested, ~0.57) and is discredited on the second. Those are the
+failure (contested, ~0.62) and is discredited on the second. Those are the
 timescales a regime change in a live system plays out on.
 
-The same arithmetic is implemented in PL/pgSQL in ``amfs_postgres`` migration
-008 and must be kept identical; ``tests/unit/test_evidence.py`` pins the
+The same arithmetic is implemented in PL/pgSQL in ``amfs_postgres`` migrations
+008 and 009 and must be kept identical; ``tests/unit/test_evidence.py`` pins the
 numbers both implementations have to produce.
 
 ``AMFS_OUTCOME_MODEL=multiplicative`` restores the constant-multiplier model
@@ -63,6 +72,9 @@ PRIOR_STRENGTH = 2.0
 EVIDENCE_DECAY = 0.8
 #: Posterior below which a failing entry is marked discredited.
 DISCREDIT_THRESHOLD = 0.5
+#: Successes an entry needs, with no failure yet, for its first failure to be
+#: weighed without the surprise term (see the module docstring).
+FIRST_STRIKE_MIN_WINS = 3
 #: Failures weigh more than successes: trust is easy to lose, slow to rebuild.
 SEVERITY: dict[str, float] = {
     OutcomeType.SUCCESS.value: 1.0,
@@ -132,16 +144,29 @@ class EvidenceUpdate:
         }
 
 
+def first_strike(outcome_type: OutcomeType | str, success_count: int, failure_count: int) -> bool:
+    """Is this the first failure of an entry with a clean, sufficiently long record?"""
+    return (
+        not is_success(outcome_type)
+        and int(failure_count) == 0
+        and int(success_count) >= FIRST_STRIKE_MIN_WINS
+    )
+
+
 def evidence_weight(
     outcome_type: OutcomeType | str,
     *,
     current_confidence: float,
     causal_confidence: float = 1.0,
     n_causal: int = 1,
+    success_count: int = 0,
+    failure_count: int = 0,
 ) -> float:
     """The evidence mass one outcome adds to one of its causal entries."""
     target = 1.0 if is_success(outcome_type) else 0.0
     surprise = 1.0 + abs(target - clamp_confidence(current_confidence))
+    if first_strike(outcome_type, success_count, failure_count):
+        surprise = 1.0
     share = 1.0 / max(1, n_causal)
     return severity(outcome_type) * max(0.0, causal_confidence) * share * surprise
 
@@ -176,6 +201,8 @@ def apply_outcome(
         current_confidence=entry.confidence,
         causal_confidence=causal_confidence,
         n_causal=n_causal,
+        success_count=entry.success_count,
+        failure_count=entry.failure_count,
     )
     success = is_success(outcome_type)
     e_s = entry.evidence_success * EVIDENCE_DECAY + (w if success else 0.0)
@@ -367,9 +394,31 @@ def apply_record_to_entry(
         if upd.discredited and current.discredited_at is not None:
             # Still discredited: keep the moment it happened, not the latest hit.
             fields["discredited_at"] = current.discredited_at
+        fields["validators"] = validators_after(
+            current.validators, record.agent_id, is_success(outcome_type)
+        )
         current = current.model_copy(update={**fields, "outcome_count": current.outcome_count + 1})
         updates.append(upd)
     return current, updates
+
+
+#: Most distinct validators kept on an entry; the list is a signal, not a log.
+MAX_VALIDATORS = 10
+
+
+def validators_after(current: list[str] | None, agent_id: str | None, success: bool) -> list[str]:
+    """The entry's validators once ``agent_id`` committed this outcome.
+
+    A success adds the agent (moved to the end if already present); a failure
+    leaves the list alone — the record of who stood behind the claim is still
+    true, and the counts say what happened since. Capped at ``MAX_VALIDATORS``,
+    dropping the oldest.
+    """
+    out = [v for v in (current or []) if v]
+    if not success or not agent_id:
+        return out
+    out = [v for v in out if v != agent_id] + [agent_id]
+    return out[-MAX_VALIDATORS:]
 
 
 def cited_entries(record: OutcomeRecord) -> list[tuple[str, str]]:
@@ -478,6 +527,7 @@ def inherit_evidence(new: MemoryEntry, current: MemoryEntry | None) -> MemoryEnt
         return new
     update: dict[str, Any] = {f: getattr(current, f) for f in EVIDENCE_FIELDS}
     update["confidence"] = current.confidence
+    update["validators"] = list(current.validators or [])
     return new.model_copy(update=update)
 
 

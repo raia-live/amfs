@@ -17,6 +17,12 @@ Every headline delta carries a cell-level bootstrap 95% interval (a cell = one a
 scenario x seed store; episodes inside a cell are not independent).
 
     python -m benchmarks.continual_learning.analysis.regime_change
+    python -m benchmarks.continual_learning.analysis.regime_change --runs gridv3
+
+With ``--runs <prefix>`` every arm is read from every ``results/<prefix>*/episodes.jsonl``
+(the grid v3 layout, one launcher per arm family) and the report goes to
+``results/<prefix>-report``; two tables are added that only grid v3 records carry — the
+actions each fleet tried per changed class, and the recommendation / outcome cross-tab.
 """
 
 from __future__ import annotations
@@ -24,11 +30,13 @@ from __future__ import annotations
 import json
 import random
 import statistics as st
-from collections import defaultdict
+import sys
+from collections import Counter, defaultdict
 from pathlib import Path
 
 RESULTS = Path(__file__).resolve().parents[1] / "results"
 OUT = RESULTS / "gridv2-report"
+RUNS_PREFIX: str | None = None
 
 # Where each arm's episodes come from. The SenseLab outcome-learning arms were rerun as
 # gridv2b with precise blame (cited keys, else top hit since the last attempt boundary);
@@ -49,7 +57,30 @@ LABEL = {
     "none": "no memory", "pgvector": "pgvector RAG", "pgvector-diy": "pgvector + reflection + consolidation",
     "pgvector-diy+outcomes": "pgvector DIY + outcome counter", "mem0": "Mem0", "senselab-nofeedback": "SenseLab, no outcomes",
     "senselab-episode": "SenseLab, episode-level outcomes", "senselab": "SenseLab, continual learning",
+    "senselab-nopriors": "SenseLab, no action priors",
 }
+
+
+def use_runs(prefix: str) -> None:
+    """Read every arm from every run directory starting with *prefix* (grid v3 layout)."""
+    global SOURCES, ARMS, HEAD, OUT, RUNS_PREFIX
+    RUNS_PREFIX = prefix
+    runs = sorted(p.name for p in RESULTS.glob(f"{prefix}*") if (p / "episodes.jsonl").exists()
+                  and not p.name.endswith("-report"))
+    arms: list[str] = []
+    for run in runs:
+        for line in (RESULTS / run / "episodes.jsonl").read_text().splitlines():
+            a = json.loads(line)["arm"]
+            if a not in arms:
+                arms.append(a)
+    SOURCES = {a: runs for a in arms}
+    ARMS = list(SOURCES)
+    order = ["none", "pgvector", "pgvector-diy", "pgvector-diy+outcomes", "mem0", "senselab-nofeedback",
+             "senselab-episode", "senselab-nopriors", "senselab"]
+    HEAD = [a for a in order if a in arms] + [a for a in arms if a not in order]
+    for a in arms:
+        LABEL.setdefault(a, a)
+    OUT = RESULTS / f"{prefix}-report"
 
 
 def load() -> list[dict]:
@@ -63,6 +94,8 @@ def load() -> list[dict]:
                 x = json.loads(line)
                 if x["arm"] != arm:
                     continue
+                if RUNS_PREFIX and x.get("fleet_mode", "rr") != "rr":
+                    continue  # transfer-protocol cells belong to analysis/transfer.py
                 x["run"] = run
                 x["tokens"] = x["usage"]["prompt_tokens"] + x["usage"]["completion_tokens"] + sum(
                     (x.get("reflection_usage") or {}).get(k, 0) for k in ("prompt_tokens", "completion_tokens"))
@@ -146,9 +179,11 @@ def flip_rate(cell_rows) -> float:
 
 
 def main() -> None:
+    if "--runs" in sys.argv:
+        use_runs(sys.argv[sys.argv.index("--runs") + 1])
     rows = load()
     OUT.mkdir(parents=True, exist_ok=True)
-    md: list[str] = ["# Grid v2: continual learning vs memory under regime change\n"]
+    md: list[str] = [f"# {RUNS_PREFIX or 'Grid v2'}: continual learning vs memory under regime change\n"]
     n_by = {a: len(sel(rows, arm=a)) for a in ARMS}
     md.append("Episodes per arm: " + ", ".join(f"{a} {n}" for a, n in n_by.items() if n) + ".\n")
     mem0_scen = sorted({x["scenario"] for x in sel(rows, arm="mem0")})
@@ -274,7 +309,9 @@ def main() -> None:
     # ---- 7. mechanism ---------------------------------------------------------------
     md.append("## 7. Mechanism: what the loop did to the entries (SenseLab arms)\n")
     lines = []
-    for a, run in (("senselab", "gridv2b"), ("senselab-episode", "gridv2b"), ("senselab-nofeedback", "gridv2")):
+    mech = [(a, run) for a in HEAD if a.startswith("senselab") for run in SOURCES.get(a, [])] if RUNS_PREFIX else \
+        [("senselab", "gridv2b"), ("senselab-episode", "gridv2b"), ("senselab-nofeedback", "gridv2")]
+    for a, run in mech:
         p = RESULTS / run / "confidence_traces.jsonl"
         if not p.exists():
             continue
@@ -308,10 +345,102 @@ def main() -> None:
                               mean(x["first_attempt_success"] for x in post), mean(x["escalated"] for x in post)])
         md.append(table(["arm — blame rule", "n", "pre 1st", "post-change 1st", "post esc"], lines) + "\n")
 
+    # ---- 9. actions tried per changed class per fleet ----------------------------------
+    # The grid-v2 finding this plan set out to fix: every fleet spent its attempts on the
+    # same two failing actions and never tried the new one. Per arm: over (cell, changed
+    # class) pairs after the change, how many attempts went to the pre-change fix, how
+    # many distinct actions were tried, and how many pairs ever tried the action that
+    # turned out to work (the modal final answer of successful post-change episodes on
+    # that class, across every arm).
+    md.append("## 9. Actions tried per changed class, after the change (all fleet sizes)\n")
+    post_changed = [x for x in rows if x["post"] and x["changed"] and x.get("answers")]
+    winning: dict[tuple[str, str], str] = {}
+    for (scen, cls), grp in _group(post_changed, lambda x: (x["scenario"], _task_class(x))).items():
+        wins = Counter(x["final_answer"] for x in grp if x["success"] and x["final_answer"])
+        if wins:
+            winning[(scen, cls)] = wins.most_common(1)[0][0]
+    lines = []
+    for a in HEAD:
+        pairs = _group([x for x in post_changed if x["arm"] == a], lambda x: (x["cell"], _task_class(x)))
+        if not pairs:
+            continue
+        stale_attempts = tried_new = solved = 0
+        distinct, attempts_per = [], []
+        for (cell, cls), grp in pairs.items():
+            scen = grp[0]["scenario"]
+            new = winning.get((scen, cls))
+            acts = [ans for x in grp for ans in x["answers"]]
+            attempts_per.append(len(acts))
+            distinct.append(len(set(acts)))
+            stale_attempts += sum(1 for x in grp if x["stale"])
+            tried_new += bool(new and new in acts)
+            solved += any(x["success"] for x in grp)
+        n = len(pairs)
+        lines.append([LABEL[a], n, mean(attempts_per, 1), mean(distinct, 1), f"{stale_attempts / n:.1f}",
+                      f"{tried_new}/{n}", f"{solved}/{n}"])
+    md.append(table(["arm", "(cell, class) pairs", "attempts / pair", "distinct actions / pair",
+                     "stale final picks / pair", "pairs that ever tried the new fix", "pairs solved at least once"],
+                    lines) + "\n")
+
+    # ---- 10. recommendation followed / outcome ----------------------------------------
+    # Only arms that return a recommendation log one per search. The last recommendation
+    # before the first terminal action is what the agent had in hand; "followed" means the
+    # first answer equals the suggested action (act / explore) or the agent escalated on the
+    # first attempt (escalate).
+    recs = [x for x in rows if any(sl.get("recommendation") for sl in x.get("searches_log") or [])]
+    if recs:
+        md.append("## 10. Recommendation in hand vs what the agent did (first attempt)\n")
+        lines = []
+        for a in HEAD:
+            r = [x for x in recs if x["arm"] == a]
+            if not r:
+                continue
+            cross: dict[tuple[str, bool], list[bool]] = defaultdict(list)
+            for x in r:
+                first = [sl["recommendation"] for sl in x["searches_log"] if sl.get("recommendation") and sl.get("attempt", 1) == 1]
+                if not first or not x["answers"]:
+                    continue
+                rec = first[-1]
+                mode, sug = rec.get("mode"), rec.get("suggested_action")
+                first_ans = x["answers"][0]
+                if mode == "escalate":
+                    followed = x["escalated"] and x["attempts"] <= 1
+                else:
+                    followed = bool(sug) and sug.split(":", 1)[-1] == first_ans
+                cross[(mode, followed)].append(bool(x["first_attempt_success"]))
+            for (mode, followed), v in sorted(cross.items(), key=lambda kv: (str(kv[0][0]), not kv[0][1])):
+                lines.append([LABEL[a], mode, "followed" if followed else "deviated", len(v), mean(v)])
+        md.append(table(["arm", "recommendation", "agent", "n", "1st-attempt success"], lines) + "\n")
+        lines = []
+        for a in HEAD:
+            r = [x for x in recs if x["arm"] == a and x["post"] and x["changed"]]
+            if not r:
+                continue
+            modes = Counter(sl["recommendation"]["mode"] for x in r for sl in x["searches_log"] if sl.get("recommendation"))
+            tot = sum(modes.values()) or 1
+            lines.append([LABEL[a], tot, *(f"{100 * modes[m] / tot:.0f}%" for m in ("act", "explore", "escalate"))])
+        md.append("### 10b. Recommendation mix on changed-class tasks after the change\n")
+        md.append(table(["arm", "searches", "act", "explore", "escalate"], lines) + "\n")
+
     (OUT / "REPORT.md").write_text("\n".join(md))
     print("\n".join(md))
     _figures(rows)
     print(f"\nwritten: {OUT}")
+
+
+def _task_class(x: dict) -> str:
+    t = x.get("tags") or {}
+    for k in ("issue", "failure", "request", "expected"):
+        if t.get(k):
+            return str(t[k])
+    return "?"
+
+
+def _group(rows, key):
+    d = defaultdict(list)
+    for x in rows:
+        d[key(x)].append(x)
+    return d
 
 
 def _figures(rows: list[dict]) -> None:

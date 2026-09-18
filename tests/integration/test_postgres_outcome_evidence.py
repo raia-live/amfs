@@ -121,7 +121,10 @@ def test_long_validated_rule_survives_one_failure_not_two(adapter, monkeypatch) 
     assert adapter.read("svc/mod", "rule").confidence > 0.9
     adapter.commit_outcome(_record(OutcomeType.FAILURE, ["svc/mod/rule"]))
     first = adapter.read("svc/mod", "rule")
-    assert first.discredited_at is None and first.evidence_status == "contested"
+    # Not discredited, and — under the posterior label rule — still worth
+    # acting on: 8/9 with a first strike weighed without surprise.
+    assert first.discredited_at is None and first.evidence_status == "validated"
+    assert first.confidence > 0.6
     adapter.commit_outcome(_record(OutcomeType.FAILURE, ["svc/mod/rule"]))
     second = adapter.read("svc/mod", "rule")
     assert second.discredited_at is not None

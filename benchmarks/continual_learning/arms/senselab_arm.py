@@ -4,12 +4,24 @@ Per episode, from a FRESH connection (so the causal read set is this episode's a
   1. ``briefing(entity_path=scope, compact=True)``   — the lead digest with its hot context and
                                                        the outcome-derived sections (validated /
                                                        discredited / regime_shift)
-  2. ``retrieve(query, include_avoid, adaptive_k)``   — ranked recall with the evidence signal in
+  2. ``retrieve(query, include_avoid, adaptive_k,
+                include_priors, candidate_actions, compact)``
+                                                     — ranked recall with the evidence signal in
                                                        the score; discredited knowledge is
                                                        served as an explicit avoid list, not as
-                                                       a candidate
+                                                       a candidate; after the hits, the action
+                                                       priors (what was tried on similar tasks
+                                                       here and how it went, what is untried)
+                                                       and an act / explore / escalate
+                                                       recommendation. ``compact`` keeps the
+                                                       first two hits whole and the rest as
+                                                       one-liners.
   3. ``write(...)``                                   — notes / heuristics with a type
-  4. ``record_action(...)``                           — domain tool calls, sealed in the trace
+  4. ``record_action(..., action_key=)``              — domain tool calls, sealed in the trace;
+                                                       the terminal call carries its
+                                                       ``<tool>:<action>`` key so the outcome is
+                                                       credited to the action as well as to the
+                                                       entries
   5. ``record_attempt(...)``  (local, no round trip)  — when a remembered approach failed and
                                                        the agent is about to try another, so
                                                        the failure lands on what that attempt
@@ -27,6 +39,15 @@ Variants:
                            "good retrieval" from "learning from outcomes".
   ``senselab-attempts``    legacy: per-attempt failures committed as separate outcomes (one
                            HTTP round trip each). Kept so the grid-v1 rows stay interpretable.
+  ``senselab-nopriors``    the full protocol without action priors / recommendation / compact
+                           payload (the grid-v2 wiring). The gap to ``senselab`` is what
+                           action-level learning buys.
+
+Env: ``CL_SENSELAB_PRIORS=0`` turns priors off for every senselab arm (same as
+``senselab-nopriors``); ``CL_SENSELAB_SINCE=1`` makes repeat briefings incremental
+(``since=<last briefing for this agent>``) — off by default because a since-diff drops
+standing discredited rows from the briefing and the retrieve avoid list is then the only
+place the agent sees them.
 """
 
 from __future__ import annotations
@@ -40,6 +61,7 @@ from typing import Any
 
 from amfs import AgentMemory
 from amfs_adapter_http import HttpAdapter
+from amfs_core.actions import render_priors
 from amfs_core.models import MemoryType, OutcomeType, RecallConfig
 
 from .. import config
@@ -157,6 +179,14 @@ def _render_briefing(digests: list[Any]) -> str | None:
         if isinstance(val, list) and val:
             lines.append("Validated by outcomes: " + ", ".join(
                 f"[{it.get('key')}] ({int(it.get('success_count') or 0)} won)" for it in val[:8] if isinstance(it, dict)))
+        tried = summary.get("tried_here")
+        if isinstance(tried, list) and tried:
+            lines.append("Actions tried here: " + "; ".join(
+                f"{it.get('action_key')} {int(it.get('won') or 0)}/{int(it.get('n') or 0)}"
+                for it in tried[:6] if isinstance(it, dict)))
+        explore = summary.get("explore")
+        if isinstance(explore, dict) and explore.get("suggested_action"):
+            lines.append(f"Explore: try {explore['suggested_action']} first. {explore.get('why', '')}".rstrip())
         for k in ("hot_context", "entries", "facts", "patterns", "key_facts", "risks"):
             items = summary.get(k)
             if isinstance(items, list) and items:
@@ -187,18 +217,27 @@ class _SenseLabSession(EpisodeSession):
         )
 
         self._attempts_marked = 0
+        self._footer: str | None = None
 
     def _timed(self):
         return _PacedTimer(self.acct)
 
     def briefing(self) -> str | None:
+        since = self.arm.last_briefing_at(self.agent_id) if self.arm.briefing_since else None
         with self._timed():
             try:
+                kwargs: dict[str, Any] = {}
+                if since is not None:
+                    kwargs["since"] = since
                 digests = self.mem.briefing(entity_path=self.arm.scope, limit=8,
-                                            compact=self.arm.compact_briefing)
+                                            compact=self.arm.compact_briefing, **kwargs)
             except Exception as e:  # noqa: BLE001
                 self.acct.notes["briefing_error"] = str(e)[:200]
                 return None
+        if self.arm.briefing_since:
+            self.arm.mark_briefed(self.agent_id)
+            if since is not None:
+                self.acct.notes["briefing_since"] = True
         # Hard cell-isolation guard. The server's briefing is agent-centric and may include
         # digests for other entities the same agent identity touched; keep only this cell's
         # entity digest and this cell's own agent brief. Dropped digests are counted so the
@@ -219,10 +258,22 @@ class _SenseLabSession(EpisodeSession):
 
     def search(self, query: str, top_k: int) -> list[MemoryHit]:
         cfg = RecallConfig(include_avoid=self.arm.evidence_aware, adaptive_k=self.arm.evidence_aware)
+        extra: dict[str, Any] = {}
+        if self.arm.priors:
+            extra = {"include_priors": True, "candidate_actions": self.candidate_actions, "compact": True}
+        self._footer, self.last_recommendation = None, None
         with self._timed():
             rows = self.mem.retrieve(query, entity_path=self.arm.scope,
                                      min_confidence=config.STUDY.min_confidence_gate, limit=top_k,
-                                     recall_config=cfg)
+                                     recall_config=cfg, **extra)
+        if self.arm.priors:
+            meta = self.mem.last_priors or {}
+            rec = meta.get("recommendation")
+            self._footer = render_priors(meta.get("priors"), rec) or None
+            if isinstance(rec, dict) and rec.get("mode"):
+                self.last_recommendation = {"mode": rec.get("mode"), "suggested_action": rec.get("suggested_action"),
+                                            "regime_shift": bool(meta.get("regime_shift"))}
+                self.acct.notes[f"rec_{rec['mode']}"] = self.acct.notes.get(f"rec_{rec['mode']}", 0) + 1
         hits = []
         for r in rows:
             e = r.entry
@@ -239,6 +290,9 @@ class _SenseLabSession(EpisodeSession):
         self.read_keys.extend(h.key for h in kept[:1])
         return hits
 
+    def search_footer(self) -> str | None:
+        return self._footer
+
     def write(self, key: str, text: str, *, confidence: float = 0.7, kind: str = "experience") -> None:
         with self._timed():
             self.mem.write(self.arm.scope, key, text, confidence=confidence,
@@ -247,8 +301,15 @@ class _SenseLabSession(EpisodeSession):
     def record_action(self, tool: str, arguments: dict[str, Any], result: str, success: bool) -> None:
         # Local: the SDK buffers actions and ships them as ``tool_calls`` on the commit.
         # Not timed and not an op — there is no round-trip to count.
+        kwargs: dict[str, Any] = {}
+        action = arguments.get("action") if isinstance(arguments, dict) else None
+        key = f"{tool}:{action}" if isinstance(action, str) else None
+        if self.arm.priors and key is not None and key in (self.candidate_actions or ()):
+            # The terminal call: name the action so the outcome is credited to it. Same key
+            # the SDK would derive; explicit so a schema change cannot silently unname it.
+            kwargs["action_key"] = key
         try:
-            self.mem.record_action(tool, arguments, result=result[:500], success=success)
+            self.mem.record_action(tool, arguments, result=result[:500], success=success, **kwargs)
         except Exception as e:  # noqa: BLE001
             self.acct.notes["record_action_error"] = str(e)[:200]
 
@@ -335,6 +396,23 @@ class SenseLabArm(MemoryArm):
     compact_briefing = True      # briefing(compact=True): lead digest + evidence sections
     evidence_aware = True        # retrieve(include_avoid=True, adaptive_k=True)
     attempt_boundaries = True    # record_attempt on each failed non-final attempt
+    # retrieve(include_priors=True, candidate_actions=<terminal enum>, compact=True) and
+    # action_key on the terminal record_action. CL_SENSELAB_PRIORS=0 turns it off.
+    priors = os.environ.get("CL_SENSELAB_PRIORS", "1") not in ("0", "false", "no")
+    # briefing(since=<last briefing this agent received>) — see the module docstring.
+    briefing_since = os.environ.get("CL_SENSELAB_SINCE", "0") in ("1", "true", "yes")
+
+    def open(self, scope: str) -> None:
+        super().open(scope)
+        self._briefed_at: dict[str, Any] = {}
+
+    def last_briefing_at(self, agent_id: str):
+        return getattr(self, "_briefed_at", {}).get(agent_id)
+
+    def mark_briefed(self, agent_id: str) -> None:
+        from datetime import datetime, timezone
+
+        getattr(self, "_briefed_at", {})[agent_id] = datetime.now(timezone.utc)
 
     def session(self, agent_id: str, episode: int) -> EpisodeSession:
         return _SenseLabSession(self, agent_id, episode)
@@ -424,3 +502,13 @@ class SenseLabAttemptsArm(SenseLabArm):
     name = "senselab-attempts"
     attempt_boundaries = False
     per_attempt_outcomes = True
+
+
+class SenseLabNoPriorsArm(SenseLabArm):
+    """Ablation: the ``senselab`` protocol as wired for grid v2 — no action priors, no
+    recommendation, full (non-compact) retrieve payload, no ``action_key``. The gap to
+    ``senselab`` is what action-level learning buys on top of entry-level evidence."""
+
+    name = "senselab-nopriors"
+    priors = False
+    briefing_since = False

@@ -36,11 +36,18 @@ Use `amfs_whoami()` to check the active identity. Use `amfs_reset_identity()` to
   amfs_briefing(entity_path="<repo>/<module>")
   ```
 - **Read the evidence sections first.** The lead digest carries `validated` (entries every outcome confirmed — act on these), `discredited` (entries a failure gated, with `replaced_by` where known — avoid these) and `regime_shift` (long-validated entries that recently started failing — something changed; verify before reusing anything in the scope). Each `hot_context` row has an `evidence_status`: `untested`, `validated`, `contested` or `discredited`. `compact=True` returns just the lead digest with these sections.
+- The briefing also carries `tried_here` (actions taken on this entity and how each fared) and, under a regime shift, an `explore` line with the untried action assigned to you. Pass `since=<iso timestamp>` on a repeat call to get only what changed.
 - Then recall your own specific memories and search for details:
   ```
   amfs_recall("<repo>/<module>", "<relevant-key>")
   amfs_search(entity_path="<repo>/<service-or-module>")
   ```
+- **Before choosing among a fixed set of actions** (a tool with an enum `action`, a runbook with numbered fixes): retrieve with the candidates and follow the recommendation.
+  ```
+  amfs_retrieve(query="<the task>", entity_path="<repo>/<module>", include_priors=True,
+                candidate_actions=["resolve:resend_email", "resolve:update_payment_method"], compact=True)
+  ```
+  `action_priors` lists each action's won/lost here on similar tasks; `recommendation.mode` is `act` (take `suggested_action`), `explore` (everything tried here failed or a regime shift is flagged — try `suggested_action` first; it is assigned per agent so peers explore different actions), or `escalate` (every candidate has been tried and failed — escalate on the first attempt). `compact=True` keeps the first two hits full and the rest as one-liners; priors and recommendation are always complete.
 - **Before making architectural decisions**: Get a briefing first, then check specific patterns.
   ```
   amfs_briefing(entity_path="<repo>/<module>")
@@ -109,7 +116,7 @@ Use `amfs_whoami()` to check the active identity. Use `amfs_reset_identity()` to
   ```
 - **Record failures too** — pass `success=False`. A trace committed as a failure is far more useful when it shows what was attempted.
 - **Not for reads or searches.** Use `amfs_record_context` for what you *learned*; this is for what you *did*.
-- **Use the real tool name, consistently.** The same action should always be recorded under the same name.
+- **Use the real tool name, consistently.** The same action should always be recorded under the same name. When the action is one of a fixed set, pass `action_key="<tool>:<action>"` (derived from an `action` argument otherwise) — it is what the outcome is credited to and what the next agent's `action_priors` count over. Never put free text in an action key.
 - AMFS cannot observe this by itself — it sees only its own tools, so a call to your deploy or refund tool is invisible unless you record it. Together with `task_input` below it forms a complete record: what you were asked, and what you did about it.
 
 ## When an APPROACH FAILS (mark the attempt before trying another)

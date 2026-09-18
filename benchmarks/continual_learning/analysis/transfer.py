@@ -21,21 +21,38 @@ Both protocols also report how much each episode leaned on peer-authored entries
 cited keys written by a different agent, using ``written_keys`` for authorship.
 
     python -m benchmarks.continual_learning.analysis.transfer
+    python -m benchmarks.continual_learning.analysis.transfer --runs gridv3
+
+``--runs <prefix>`` reads the protocol cells (``fleet_mode`` pioneer / newcomer) from every
+``results/<prefix>*/episodes.jsonl`` and writes to ``results/<prefix>-report``.
 """
 
 from __future__ import annotations
 
 import json
 import random
+import sys
 from collections import defaultdict
 from pathlib import Path
 
-from .regime_change import HEAD, LABEL, RESULTS, boot_ci, mean, sel, table
+from . import regime_change as rc
+from .regime_change import LABEL, RESULTS, boot_ci, mean, sel, table
 
 OUT = RESULTS / "gridv2-report"
 RUNS = {"pioneer": ["gridv2-xfer-pioneer", "gridv2-xfer-pioneer-mem0"], "newcomer": ["gridv2-xfer-newcomer"]}
 CLASS_TAG = {"support": "issue", "ci-fix": "failure", "order-ops": "request", "retention": "expected", "diagnose": "rule"}
 ARMS = ["none", "pgvector", "pgvector-diy+outcomes", "mem0", "senselab-nofeedback", "senselab"]
+
+
+def use_runs(prefix: str) -> None:
+    global OUT, ARMS
+    rc.use_runs(prefix)
+    OUT = rc.OUT
+    runs = sorted(p.name for p in RESULTS.glob(f"{prefix}*") if (p / "episodes.jsonl").exists()
+                  and not p.name.endswith("-report"))
+    RUNS["pioneer"] = runs
+    RUNS["newcomer"] = runs
+    ARMS = list(rc.HEAD)
 
 
 def load(protocol: str) -> list[dict]:
@@ -46,6 +63,8 @@ def load(protocol: str) -> list[dict]:
             continue
         for line in p.read_text().splitlines():
             x = json.loads(line)
+            if x.get("fleet_mode", "rr") != protocol:
+                continue
             x["run"] = run
             x["cls"] = (x.get("tags") or {}).get(CLASS_TAG.get(x["scenario"], "issue"))
             x["agent"] = x["agent_id"].rsplit("-", 1)[-1]
@@ -220,6 +239,8 @@ def newcomer_tables(md: list[str]) -> None:
 
 
 def main() -> None:
+    if "--runs" in sys.argv:
+        use_runs(sys.argv[sys.argv.index("--runs") + 1])
     OUT.mkdir(parents=True, exist_ok=True)
     md = ["# Knowledge transfer between agents: pioneer and newcomer protocols\n"]
     for proto in ("pioneer", "newcomer"):

@@ -121,6 +121,13 @@ class EpisodeSession:
         self.episode = episode
         self.acct = ArmAccounting()
         self.read_keys: list[str] = []
+        # The actions the terminal tool accepts, as ``<tool>:<action>`` keys, set by the
+        # harness from the scenario's tool schema before the first search. Arms that keep
+        # an action record use it to name what has *not* been tried here.
+        self.candidate_actions: list[str] | None = None
+        # What the arm recommended on the last search, for the analysis cross-tab
+        # (recommendation followed / outcome). ``None`` for arms without one.
+        self.last_recommendation: dict[str, Any] | None = None
 
     # -- verbs the agent can use -------------------------------------------------
     def briefing(self) -> str | None:
@@ -128,6 +135,12 @@ class EpisodeSession:
 
     def search(self, query: str, top_k: int) -> list[MemoryHit]:
         raise NotImplementedError
+
+    def search_footer(self) -> str | None:
+        """Text appended to the last search's result, after the hits: what was tried on
+        similar tasks in this scope and how it went, and a recommendation. Only arms that
+        keep an action record return anything; the harness counts it as retrieved bytes."""
+        return None
 
     def write(self, key: str, text: str, *, confidence: float = 0.7, kind: str = "experience") -> None:
         raise NotImplementedError

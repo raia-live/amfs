@@ -45,8 +45,10 @@ from amfs_core.aggregates import (
 )
 from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
+from amfs_core.actions import actions_taken as derive_actions_taken
 from amfs_core.engine import read_tracker_scope
 from amfs_core.evidence import evidence_signal as _evidence_signal
+from amfs_core.evidence import is_success as _evidence_is_success
 from amfs_core.models import (
     AgentGroup,
     AMFSConfig,
@@ -657,10 +659,109 @@ def _entry_to_response(entry: MemoryEntry) -> dict[str, Any]:
     """Convert a MemoryEntry to a JSON-safe dict, stripping embeddings."""
     data = entry.model_dump(mode="json")
     data.pop("embedding", None)
-    # A property, so not in the dump; the one word an agent needs next to the
-    # confidence number (untested / validated / contested / discredited).
+    # Properties, so not in the dump; the one word an agent needs next to the
+    # confidence number (untested / validated / contested / discredited) and
+    # the record behind it: ``{"p": posterior success, "n": outcomes}``. A 0.9
+    # over twelve outcomes and a 0.9 over one are different things to act on.
     data["evidence_status"] = entry.evidence_status
+    p, n = entry.posterior
+    data["posterior"] = {"p": p, "n": n}
     return data
+
+
+#: Fields a compact payload keeps. Enough to rebuild a MemoryEntry client-side
+#: (entity_path, key, value, provenance, confidence, version) plus the evidence
+#: an agent acts on; none of the bookkeeping (importance dimensions, integrity
+#: fields, tiering, TTL) that made a ten-hit retrieve cost 3-4k tokens.
+_COMPACT_ENTRY_FIELDS = (
+    "entity_path", "key", "version", "value", "provenance", "confidence",
+    "memory_type", "evidence_status", "posterior", "success_count",
+    "failure_count", "last_outcome", "discredited_at", "validators",
+)
+_COMPACT_VALUE_MAX_CHARS = 1200
+#: In compact mode the first hits are carried whole (up to the cap above) and
+#: the rest as one-liners: an agent acts on the top one or two and skims the
+#: others for a contradiction, and a 120-character preview is enough to spot
+#: one. Together with the field trim this is what keeps a seven-hit retrieve
+#: near what a plain vector store costs in prompt tokens.
+_COMPACT_FULL_HITS = 2
+_COMPACT_TAIL_CHARS = 120
+
+
+def _compact_entry_response(entry: MemoryEntry, *, rank: int = 0) -> dict[str, Any]:
+    """The fields an agent acts on, and nothing else (``compact=True``).
+
+    ``rank`` is the hit's position; from :data:`_COMPACT_FULL_HITS` on, the
+    value is a preview.
+    """
+    full = _entry_to_response(entry)
+    data = {k: full[k] for k in _COMPACT_ENTRY_FIELDS if k in full}
+    prov = data.get("provenance") or {}
+    data["provenance"] = {
+        k: prov.get(k) for k in ("agent_id", "session_id", "written_at") if k in prov
+    }
+    value = data.get("value")
+    cap = _COMPACT_VALUE_MAX_CHARS if rank < _COMPACT_FULL_HITS else _COMPACT_TAIL_CHARS
+    if not isinstance(value, str) and rank >= _COMPACT_FULL_HITS:
+        value = json.dumps(value, default=str)
+    if isinstance(value, str) and len(value) > cap:
+        data["value"] = value[:cap] + " …[truncated]"
+        data["value_truncated"] = True
+    elif value is not data.get("value"):
+        data["value"] = value
+    return data
+
+
+def _priors_for_retrieve(
+    *,
+    entity_path: str,
+    text: str,
+    embedder: Any,
+    candidate_actions: list[str] | None,
+) -> dict[str, Any] | None:
+    """Action priors for ``entity_path`` on tasks like ``text``.
+
+    Nearest committed outcomes by task embedding when the store can do that;
+    otherwise the most recent outcomes about the entity. ``None`` when the
+    adapter has no outcome record at all (filesystem, S3), so the caller sends
+    nothing rather than an empty block.
+    """
+    from amfs_core.actions import (
+        PRIORS_K,
+        PRIORS_MIN_SIMILARITY,
+        aggregate_priors,
+    )
+
+    adapter = _get_memory()._adapter
+    similar = getattr(adapter, "similar_outcomes", None)
+    stats = getattr(adapter, "action_stats", None)
+    rows: list[dict[str, Any]] = []
+    source = "none"
+    if callable(similar) and embedder is not None and text.strip():
+        try:
+            rows = similar(
+                entity_path,
+                embedder.embed(text[:2000]),
+                k=PRIORS_K,
+                min_similarity=PRIORS_MIN_SIMILARITY,
+            )
+            source = "similar_outcomes"
+        except Exception:  # noqa: BLE001 - priors are best-effort
+            logger.debug("similar_outcomes failed", exc_info=True)
+            rows = []
+    if not rows and callable(stats):
+        try:
+            rows = stats(entity_path, limit=PRIORS_K * 5)
+            source = "action_stats" if rows else source
+        except Exception:  # noqa: BLE001
+            logger.debug("action_stats failed", exc_info=True)
+            rows = []
+    if not rows and not candidate_actions:
+        return None
+    block = aggregate_priors(rows, candidate_actions=candidate_actions)
+    block["source"] = source
+    block["entity_path"] = entity_path
+    return block
 
 
 def _get_visibility_filter(request: Request):
@@ -2214,19 +2315,23 @@ async def retrieve_entries(
         top_score = head[0][1]
         head = [t for t in head if t[1] >= top_score * ADAPTIVE_K_KEEP_RATIO] or head[:1]
 
+    render = _compact_entry_response if req.compact else _entry_to_response
     out: list[dict[str, Any]] = []
-    for entry, score, breakdown in head:
-        data = _entry_to_response(entry)
+    for rank, (entry, score, breakdown) in enumerate(head):
+        data = _compact_entry_response(entry, rank=rank) if req.compact else render(entry)
         data["_score"] = round(score, 4)
-        data["_breakdown"] = {
-            k: round(v, 4) if isinstance(v, float) else v
-            for k, v in breakdown.items()
-        }
+        if req.compact:
+            data["_breakdown"] = {"evidence_status": breakdown.get("evidence_status")}
+        else:
+            data["_breakdown"] = {
+                k: round(v, 4) if isinstance(v, float) else v
+                for k, v in breakdown.items()
+            }
         out.append(data)
     if req.include_avoid and avoided:
         avoided.sort(key=lambda e: (e.last_outcome_at or e.provenance.written_at), reverse=True)
         for entry in avoided[:AVOID_LIST_MAX]:
-            data = _entry_to_response(entry)
+            data = render(entry)
             data["_score"] = 0.0
             data["_avoid"] = True
             data["_breakdown"] = {
@@ -2236,6 +2341,50 @@ async def retrieve_entries(
                 "last_outcome": entry.last_outcome,
             }
             out.append(data)
+
+    # 12. Action priors and a recommendation, as one trailing element the client
+    #     asked for. What the entries cannot say — "tried here and failed",
+    #     "nobody has tried X" — comes from the outcome record, not from memory.
+    if req.include_priors and req.entity_path:
+        from amfs_core.actions import recommend as _recommend
+
+        priors = _priors_for_retrieve(
+            entity_path=req.entity_path,
+            text=req.situation or topical,
+            embedder=embedder,
+            candidate_actions=req.candidate_actions,
+        )
+        top = head[0][0] if head else None
+        recent_failure = bool(
+            top is not None
+            and top.last_outcome is not None
+            and not _evidence_is_success(top.last_outcome)
+        )
+        # A validated rule that has just started failing, anywhere in the head,
+        # is the retrieve-time reading of a regime shift: the briefing's section
+        # of the same name is computed over the whole entity, this over the hits.
+        shifted = any(
+            e.success_count >= 3 and e.failure_count >= 1
+            and e.last_outcome is not None and not _evidence_is_success(e.last_outcome)
+            and e.last_outcome_at is not None
+            and (now - (e.last_outcome_at if e.last_outcome_at.tzinfo else e.last_outcome_at.replace(tzinfo=_tz.utc))).days <= 7
+            for e, _, _ in head
+        )
+        recommendation = _recommend(
+            priors,
+            agent_id=req.agent_id or "",
+            candidate_actions=req.candidate_actions,
+            top_hit_status=top.evidence_status if top is not None else None,
+            top_hit_recent_failure=recent_failure,
+            regime_shift=shifted,
+        )
+        if priors is not None or recommendation is not None:
+            out.append({
+                "_meta": True,
+                "priors": priors,
+                "recommendation": recommendation,
+                "regime_shift": shifted,
+            })
     return out
 
 
@@ -3300,6 +3449,23 @@ async def commit_outcome(
             final_action_index=final_action_index,
             # The client's read versions, never the server's shared tracker.
             causal_entry_versions=req.causal_entry_versions or {},
+            # Action-level learning. Derived from the request's own tool calls
+            # and attempts when the client did not send them, never from the
+            # shared tracker; the keys are scanned inside commit_outcome.
+            actions_taken=(
+                req.actions_taken
+                if req.actions_taken is not None
+                else derive_actions_taken(
+                    req.tool_calls,
+                    [a.model_dump(mode="json") for a in attempts],
+                    final_action_index if final_action_index is not None
+                    else (len(req.tool_calls) - 1 if req.tool_calls else None),
+                    otype.value,
+                )
+            ),
+            entity_path=req.entity_path,
+            entity_paths=req.entity_paths,
+            situation=req.situation[:200] if req.situation else None,
             # Not scanned here: commit_outcome scans at trace construction, so
             # every caller gets it. Scanning again would be harmless but would
             # imply this endpoint is where the guarantee lives, which is the
@@ -6838,6 +7004,7 @@ async def get_briefing(
     limit: int = Query(10, ge=1, le=100),
     credit_reuse: bool = Query(False),
     compact: bool = Query(False),
+    since: datetime | None = Query(None),
     # See retrieve_entries: injected on the type, defaulted so the handler stays
     # callable in-process without one.
     response: Response = None,
@@ -6846,7 +7013,8 @@ async def get_briefing(
     """Get a ranked briefing of compiled knowledge digests.
 
     *compact* returns only the lead entity digest with its hot context and
-    evidence sections, narrative trimmed.
+    evidence sections, narrative trimmed. *since* trims the list sections to
+    what changed after that moment — the delta since the last briefing.
 
     *credit_reuse* books the briefing as a real read of the knowledge it
     surfaces. It is off by default and has to be asked for, because the same
@@ -6856,12 +7024,15 @@ async def get_briefing(
     the shape of a bug this codebase has already had.
     """
     mem = _get_memory()
-    digests = mem.briefing(
-        entity_path=entity_path,
-        agent_id=agent_id,
-        limit=limit,
-        compact=compact,
-    )
+    briefing_kwargs: dict[str, Any] = {
+        "entity_path": entity_path,
+        "agent_id": agent_id,
+        "limit": limit,
+        "compact": compact,
+    }
+    if since is not None:
+        briefing_kwargs["since"] = since
+    digests = mem.briefing(**briefing_kwargs)
 
     vis = _get_visibility_filter(request)
     if vis is not None and vis.should_filter():

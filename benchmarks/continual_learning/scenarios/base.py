@@ -168,7 +168,10 @@ class Scenario:
                "entries with outcome evidence (validated / contested / discredited, wins and losses) or "
                "list entries to avoid: trust validated entries over untested ones, do not act on "
                "discredited ones, and if the only evidence you have is contested or discredited and the "
-               "action is costly, escalate on the first attempt rather than guess. When you finish, list "
+               "action is costly, escalate on the first attempt rather than guess. Some memory systems "
+               "also report which actions were tried on similar tasks here and how they went, and a "
+               "recommendation: on 'act' take the suggested action; on 'explore' try the suggested "
+               "untried action first; on 'escalate' escalate on the first attempt. When you finish, list "
                "the memory keys you actually relied on in used_memory_keys." if has_memory else
                "\nYou have no long-term memory; use only the information in this conversation.")
         return (f"{self.role} Work through tools only: every turn must be a tool call. Be decisive and "

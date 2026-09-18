@@ -64,6 +64,12 @@ _LAST_REUSE_VALUE: ContextVar[dict[str, Any] | None] = ContextVar(
 _LAST_MEMORY_GAP: ContextVar[dict[str, Any] | None] = ContextVar(
     "amfs_last_memory_gap", default=None
 )
+#: The priors / recommendation element the last retrieve came back with, when
+#: the caller asked for it. Same reason as the others: ``retrieve`` returns
+#: entries, so the block rides beside them.
+_LAST_RETRIEVE_META: ContextVar[dict[str, Any] | None] = ContextVar(
+    "amfs_last_retrieve_meta", default=None
+)
 #: The scope facts the last write came back with, for the same reason as the two
 #: above: ``write()`` has to return a MemoryEntry, so anything else the server
 #: said travels beside it rather than in it.
@@ -310,6 +316,16 @@ class HttpAdapter(AdapterABC):
             body["final_action_index"] = record.final_action_index
         if record.causal_entry_versions:
             body["causal_entry_versions"] = dict(record.causal_entry_versions)
+        # Action-level learning: what happened to each decisive action, and the
+        # entities the outcome is about. Both are derived client-side by the SDK
+        # (it has the unscanned action list, so the indices line up) and stored
+        # on the outcome row for priors.
+        if record.actions_taken:
+            body["actions_taken"] = list(record.actions_taken)
+        if record.entity_paths:
+            body["entity_paths"] = list(record.entity_paths)
+        if record.situation:
+            body["situation"] = record.situation
         data = self._post("/api/v1/outcomes", body)
         # The ABC returns entries, so anything else the server computed for this
         # commit has nowhere to go in the signature and would be dropped here.
@@ -331,6 +347,11 @@ class HttpAdapter(AdapterABC):
     def _last_memory_gap(self) -> dict[str, Any] | None:
         """Gap report from the commit most recently made in this context."""
         return _LAST_MEMORY_GAP.get()
+
+    @property
+    def _last_retrieve_meta(self) -> dict[str, Any] | None:
+        """Priors / recommendation from the retrieve most recently made here."""
+        return _LAST_RETRIEVE_META.get()
 
     def _capture_reuse_value(self) -> None:
         """Take the reuse block off the last response, or clear it.
@@ -407,6 +428,11 @@ class HttpAdapter(AdapterABC):
         include_discredited: bool | None = None,
         include_avoid: bool | None = None,
         adaptive_k: bool | None = None,
+        agent_id: str | None = None,
+        include_priors: bool | None = None,
+        candidate_actions: list[str] | None = None,
+        situation: str | None = None,
+        compact: bool | None = None,
     ) -> list[tuple[MemoryEntry, float, dict[str, Any]]]:
         """Server-side semantic retrieval via POST /api/v1/retrieve.
 
@@ -438,9 +464,26 @@ class HttpAdapter(AdapterABC):
             body["include_avoid"] = include_avoid
         if adaptive_k is not None:
             body["adaptive_k"] = adaptive_k
+        if agent_id:
+            body["agent_id"] = agent_id
+        if include_priors is not None:
+            body["include_priors"] = include_priors
+        if candidate_actions is not None:
+            body["candidate_actions"] = list(candidate_actions)
+        if situation:
+            body["situation"] = situation
+        if compact is not None:
+            body["compact"] = compact
         data = self._post("/api/v1/retrieve", body)
         self._capture_reuse_value()
         rows = data if isinstance(data, list) else data.get("entries", [])
+        # The priors / recommendation element is not a hit; lift it out.
+        meta = None
+        for e in rows:
+            if isinstance(e, dict) and e.get("_meta"):
+                meta = {k: v for k, v in e.items() if k != "_meta"}
+        _LAST_RETRIEVE_META.set(meta)
+        rows = [e for e in rows if not (isinstance(e, dict) and e.get("_meta"))]
         out: list[tuple[MemoryEntry, float, dict[str, Any]]] = []
         for e in rows:
             score = float(e.get("_score", 0.0)) if isinstance(e, dict) else 0.0
@@ -911,9 +954,12 @@ class HttpAdapter(AdapterABC):
         limit: int = 10,
         credit_reuse: bool = False,
         compact: bool = False,
+        since: datetime | None = None,
     ) -> list[Digest]:
         """Proxy briefing to the HTTP server which has full Cortex access."""
         params: dict[str, Any] = {"limit": limit}
+        if since is not None:
+            params["since"] = since.isoformat()
         if entity_path:
             params["entity_path"] = entity_path
         if agent_id:
