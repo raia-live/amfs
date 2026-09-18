@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS amfs_memory_entries (
     last_outcome TEXT,
     last_outcome_at TIMESTAMPTZ,
     discredited_at TIMESTAMPTZ,
+    validators JSONB NOT NULL DEFAULT '[]',
     recall_count INTEGER DEFAULT 0,
     priority_score NUMERIC(10,6),
     tier SMALLINT DEFAULT 3,
@@ -58,7 +59,10 @@ CREATE TABLE IF NOT EXISTS amfs_outcomes (
     account_id UUID,
     attempts JSONB NOT NULL DEFAULT '[]',
     causal_entry_versions JSONB NOT NULL DEFAULT '{}',
-    final_action_index INTEGER
+    final_action_index INTEGER,
+    actions_taken JSONB NOT NULL DEFAULT '[]',
+    entity_paths TEXT[] NOT NULL DEFAULT '{}',
+    situation TEXT
 );
 
 -- Range-partitioned by month on created_at. Traces are append-only and read by
@@ -427,6 +431,10 @@ CREATE INDEX IF NOT EXISTS idx_pr_reviews_pr
 CREATE INDEX IF NOT EXISTS idx_entries_discredited
     ON amfs_memory_entries (namespace, entity_path, discredited_at)
     WHERE discredited_at IS NOT NULL AND superseded_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_outcomes_entity_paths
+    ON amfs_outcomes USING gin (entity_paths);
+CREATE INDEX IF NOT EXISTS idx_outcomes_ns_committed
+    ON amfs_outcomes (namespace, committed_at DESC);
 
 CREATE OR REPLACE FUNCTION amfs_outcome_is_success(t TEXT) RETURNS BOOLEAN AS $$
     SELECT t IN ('success', 'clean_deploy');
@@ -470,6 +478,7 @@ $$ LANGUAGE sql IMMUTABLE;
 -- credit-split over those keys. The trigger calls this once per failed
 -- attempt and once for the terminal outcome.
 DROP FUNCTION IF EXISTS amfs_apply_outcome_step(TEXT, UUID, TEXT[], TEXT, NUMERIC, TEXT);
+DROP FUNCTION IF EXISTS amfs_apply_outcome_step(TEXT, UUID, TEXT[], TEXT, NUMERIC, TEXT, JSONB);
 
 CREATE OR REPLACE FUNCTION amfs_apply_outcome_step(
     p_namespace TEXT,
@@ -478,7 +487,8 @@ CREATE OR REPLACE FUNCTION amfs_apply_outcome_step(
     p_outcome_type TEXT,
     p_causal_confidence NUMERIC,
     p_model TEXT,
-    p_versions JSONB
+    p_versions JSONB,
+    p_agent TEXT
 ) RETURNS INTEGER AS $$
 DECLARE
     keys TEXT[];
@@ -497,6 +507,8 @@ DECLARE
     e_f NUMERIC;
     new_conf NUMERIC;
     disc TIMESTAMPTZ;
+    surprise NUMERIC;
+    vals JSONB;
     touched INTEGER := 0;
 BEGIN
     -- Distinct, well-formed specs only; a key cited twice is one citation.
@@ -558,10 +570,19 @@ BEGIN
             e_s := COALESCE(cur.evidence_success, 0) + CASE WHEN is_ok THEN 1 ELSE 0 END;
             e_f := COALESCE(cur.evidence_failure, 0) + CASE WHEN is_ok THEN 0 ELSE 1 END;
         ELSE
+            -- First strike: the first failure of an entry with a clean record
+            -- of at least three successes is weighed without the surprise
+            -- term (amfs_core.evidence.first_strike). One slip on a validated
+            -- rule leaves it contested; the second still discredits it.
+            surprise := 1.0 + abs(target - LEAST(1.0, GREATEST(0.0, cur.confidence)));
+            IF NOT is_ok AND COALESCE(cur.failure_count, 0) = 0
+               AND COALESCE(cur.success_count, 0) >= 3 THEN
+                surprise := 1.0;
+            END IF;
             w := amfs_outcome_severity(p_outcome_type)
                  * GREATEST(0.0, p_causal_confidence)
                  / n_keys
-                 * (1.0 + abs(target - LEAST(1.0, GREATEST(0.0, cur.confidence))));
+                 * surprise;
             e_s := COALESCE(cur.evidence_success, 0) * 0.8 + CASE WHEN is_ok THEN w ELSE 0 END;
             e_f := COALESCE(cur.evidence_failure, 0) * 0.8 + CASE WHEN is_ok THEN 0 ELSE w END;
             new_conf := LEAST(1.0, GREATEST(0.0, (2.0 * prior + e_s) / (2.0 + e_s + e_f)));
@@ -573,6 +594,21 @@ BEGIN
             disc := NULL;
         ELSE
             disc := cur.discredited_at;
+        END IF;
+
+        -- Validators: distinct agents whose successes credited this claim,
+        -- most recent last, capped at ten (amfs_core.evidence.validators_after).
+        vals := COALESCE(cur.validators, '[]'::jsonb);
+        IF is_ok AND COALESCE(p_agent, '') <> '' THEN
+            vals := vals - p_agent;
+            vals := vals || to_jsonb(ARRAY[p_agent]);
+            IF jsonb_array_length(vals) > 10 THEN
+                SELECT COALESCE(jsonb_agg(v), '[]'::jsonb) INTO vals
+                FROM (
+                    SELECT v FROM jsonb_array_elements(vals) WITH ORDINALITY AS t(v, ord)
+                    ORDER BY ord OFFSET jsonb_array_length(vals) - 10
+                ) s;
+            END IF;
         END IF;
 
         UPDATE amfs_memory_entries
@@ -596,6 +632,7 @@ BEGIN
                 'last_outcome', p_outcome_type,
                 'last_outcome_at', NOW(),
                 'discredited_at', disc,
+                'validators', vals,
                 'superseded_at', NULL
             )
         );
@@ -625,7 +662,8 @@ BEGIN
             NEW.namespace, NEW.account_id, att_keys,
             COALESCE(att->>'outcome_type', 'minor_failure'),
             NEW.causal_confidence, model,
-            COALESCE(att->'causal_entry_versions', '{}'::jsonb)
+            COALESCE(att->'causal_entry_versions', '{}'::jsonb),
+            NEW.agent_id
         );
     END LOOP;
 
@@ -633,7 +671,8 @@ BEGIN
     PERFORM amfs_apply_outcome_step(
         NEW.namespace, NEW.account_id, NEW.causal_entry_keys,
         NEW.outcome_type, NEW.causal_confidence, model,
-        COALESCE(NEW.causal_entry_versions, '{}'::jsonb)
+        COALESCE(NEW.causal_entry_versions, '{}'::jsonb),
+        NEW.agent_id
     );
 
     PERFORM pg_notify('amfs_outcome', json_build_object(

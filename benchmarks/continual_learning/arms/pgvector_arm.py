@@ -16,6 +16,12 @@
                     to "couldn't I just add a success column?" — and what it does *not*
                     do (credit split, surprise-scaled updates, contrast lessons, regime
                     detection, briefing sections, sealed traces) is the product's claim.
+                    It also keeps the DIY answer to action priors: a per-scope counter of
+                    terminal actions (``<tool>:<action>`` -> wins / losses) rendered after
+                    the hits as "tried here" / "untried", so the comparison with SenseLab is
+                    "k-NN priors over the outcome record with a per-agent exploration
+                    assignment" against "a counter a weekend build would add", not
+                    "priors against nothing".
 
 Both use a local in-process embedder (fastembed, bge-small-en-v1.5) so embedding cost
 and latency are identical and near zero; the comparison is about what happens around
@@ -69,6 +75,14 @@ CREATE TABLE IF NOT EXISTS cl_outcomes (
   last_failed BOOLEAN NOT NULL DEFAULT FALSE,
   PRIMARY KEY (scope, key)
 );
+CREATE TABLE IF NOT EXISTS cl_actions (
+  scope TEXT NOT NULL,
+  action_key TEXT NOT NULL,
+  wins INTEGER NOT NULL DEFAULT 0,
+  losses INTEGER NOT NULL DEFAULT 0,
+  last_failed BOOLEAN NOT NULL DEFAULT FALSE,
+  PRIMARY KEY (scope, action_key)
+);
 """
 
 
@@ -115,9 +129,53 @@ class _PgSession(EpisodeSession):
         hits = [MemoryHit(key=r[0], text=r[1], score=float(r[2])) for r in rows]
         if self.arm.track_outcomes:
             hits = self._with_outcomes(hits, top_k)
+            self._footer = self._action_footer()
         self.acct.retrieved_bytes += sum(len(h.text) for h in hits)
         self.read_keys.extend(h.key for h in hits[:1])
         return hits
+
+    def search_footer(self) -> str | None:
+        return getattr(self, "_footer", None)
+
+    # -- DIY action counter (pgvector-diy+outcomes only) ----------------------------------
+    def _action_footer(self) -> str | None:
+        """What a success column per action looks like: scope-wide tallies (no similarity to
+        the task at hand, no recency, no per-agent exploration assignment), rendered in the
+        same shape SenseLab's priors take so the model reads both the same way."""
+        with self.arm.conn.cursor() as cur:
+            cur.execute("SELECT action_key, wins, losses FROM cl_actions WHERE scope = %s "
+                        "ORDER BY wins + losses DESC LIMIT 8", (self.arm.scope,))
+            rows = cur.fetchall()
+        tried = {k: (w, l) for k, w, l in rows}
+        lines = []
+        if tried:
+            lines.append("Tried in this scope: " + "; ".join(f"{k} {w}/{w + l}" for k, (w, l) in tried.items()))
+        if self.candidate_actions:
+            untried = [a for a in self.candidate_actions if a not in tried]
+            if untried:
+                lines.append("Not yet tried in this scope: " + ", ".join(untried[:8]))
+        return "\n".join(lines) or None
+
+    def record_action(self, tool: str, arguments: dict[str, Any], result: str, success: bool) -> None:
+        if not self.arm.track_outcomes:
+            return
+        action = arguments.get("action") if isinstance(arguments, dict) else None
+        key = f"{tool}:{action}" if isinstance(action, str) else None
+        if key is None or key not in (self.candidate_actions or ()):
+            return  # not the terminal tool's action (a diagnostic call)
+        with self._timed(), self.arm.conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO cl_actions (scope, action_key, wins, losses, last_failed)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (scope, action_key) DO UPDATE
+                  SET wins = cl_actions.wins + EXCLUDED.wins,
+                      losses = cl_actions.losses + EXCLUDED.losses,
+                      last_failed = EXCLUDED.last_failed
+                """,
+                (self.arm.scope, key, int(success), int(not success), not success),
+            )
+            self.arm.conn.commit()
 
     # -- DIY outcome counter (pgvector-diy+outcomes only) ---------------------------------
     def _with_outcomes(self, hits: list[MemoryHit], top_k: int) -> list[MemoryHit]:
@@ -204,8 +262,14 @@ class PgVectorArm(MemoryArm):
 
         self.conn = psycopg.connect(config.PG_DSN)
         with self.conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            cur.execute(DDL)
+            # Cells open concurrently; two CREATE ... IF NOT EXISTS racing on the same
+            # catalog row raise UniqueViolation (pg_type_typname). Serialise the DDL.
+            cur.execute("SELECT pg_advisory_lock(7431001)")
+            try:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                cur.execute(DDL)
+            finally:
+                cur.execute("SELECT pg_advisory_unlock(7431001)")
         self.conn.commit()
 
     def open(self, scope: str) -> None:
@@ -213,6 +277,7 @@ class PgVectorArm(MemoryArm):
         with self.conn.cursor() as cur:
             cur.execute("DELETE FROM cl_entries WHERE scope = %s", (scope,))
             cur.execute("DELETE FROM cl_outcomes WHERE scope = %s", (scope,))
+            cur.execute("DELETE FROM cl_actions WHERE scope = %s", (scope,))
         self.conn.commit()
 
     def session(self, agent_id: str, episode: int) -> EpisodeSession:

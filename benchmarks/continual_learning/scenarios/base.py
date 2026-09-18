@@ -67,7 +67,8 @@ class Scenario:
 
     def __init__(self, seed: int, episodes: int, *, distractors: int = 0,
                  label_noise: float = 0.0, feedback_delay: int = 0, fleet: int = 0,
-                 change_at: int = 0, change_focus: float = 0.0, **_: Any) -> None:
+                 change_at: int = 0, change_focus: float = 0.0, fleet_mode: str = "rr",
+                 join_at: int = 0, **_: Any) -> None:
         self.seed = seed
         self.episodes = episodes
         self.rng = random.Random(f"{self.name}-{seed}")
@@ -86,6 +87,17 @@ class Scenario:
         self.change_focus = change_focus
         if fleet and fleet > 1:
             self.fleet_size = fleet
+        # Knowledge-transfer protocols (only meaningful with a fleet):
+        #   rr        every episode goes to the next agent round-robin (default)
+        #   pioneer   agent 1 works alone until ``join_at``; then all N share the queue.
+        #             Measures whether what one agent learned transfers to peers who never
+        #             saw those tasks: the followers' FIRST exposure to each class.
+        #   newcomer  agents 1..N-1 share the queue until ``join_at``; from then agent N, who has
+        #             never worked here, takes every episode. With a regime change before
+        #             ``join_at`` this measures whether the newcomer inherits the fleet's
+        #             *unlearning* or repeats the stale fix its peers already burned on.
+        self.fleet_mode = fleet_mode if self.fleet_size > 1 else "rr"
+        self.join_at = join_at
         self._noise_rng = random.Random(f"noise-{self.name}-{seed}")
         self.build()
         self._apply_change_focus()
@@ -98,7 +110,16 @@ class Scenario:
         so an agent only ever sees a fraction of the episodes directly; the rest it must learn
         from what its peers left in the shared store."""
         if self.fleet_size > 1:
-            return f"{self.agent_base}-{ep % self.fleet_size + 1}"
+            n = self.fleet_size
+            if self.fleet_mode == "pioneer":
+                if ep < self.join_at:
+                    return f"{self.agent_base}-1"
+                return f"{self.agent_base}-{(ep - self.join_at + 1) % n + 1}"  # ep == join_at -> agent 2
+            if self.fleet_mode == "newcomer":
+                if ep < self.join_at:
+                    return f"{self.agent_base}-{ep % (n - 1) + 1}"
+                return f"{self.agent_base}-{n}"
+            return f"{self.agent_base}-{ep % n + 1}"
         return self.agent_base
 
     def regenerate(self, ep: int, salt: int) -> None:
@@ -147,7 +168,10 @@ class Scenario:
                "entries with outcome evidence (validated / contested / discredited, wins and losses) or "
                "list entries to avoid: trust validated entries over untested ones, do not act on "
                "discredited ones, and if the only evidence you have is contested or discredited and the "
-               "action is costly, escalate on the first attempt rather than guess. When you finish, list "
+               "action is costly, escalate on the first attempt rather than guess. Some memory systems "
+               "also report which actions were tried on similar tasks here and how they went, and a "
+               "recommendation: on 'act' take the suggested action; on 'explore' try the suggested "
+               "untried action first; on 'escalate' escalate on the first attempt. When you finish, list "
                "the memory keys you actually relied on in used_memory_keys." if has_memory else
                "\nYou have no long-term memory; use only the information in this conversation.")
         return (f"{self.role} Work through tools only: every turn must be a tool call. Be decisive and "

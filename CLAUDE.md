@@ -62,11 +62,29 @@ amfs_briefing(entity_path="<repo>/<module>")
 ```
 The lead digest carries the state of knowledge from the outcome record: `validated` (entries every outcome confirmed — act on these), `discredited` (entries a failure gated, with `replaced_by` where a later success is known — avoid these), and `regime_shift` (long-validated entries that recently started failing — something changed; verify before reusing anything in the scope). Every `hot_context` row carries an `evidence_status` of `untested`, `validated`, `contested` or `discredited`; an untested 0.9 and a validated 0.9 are different things to act on. Pass `compact=True` for just the lead digest with these sections, at a fraction of the tokens.
 
+The briefing also carries `tried_here` — the actions taken on this entity and how each fared (`resolve:resend_email 6/6`, `resolve:update_payment_method 0/8`) — and, when a regime shift is flagged, an `explore` line naming the untried action assigned to you. Pass `since=<iso timestamp>` on a repeat call to receive only what changed.
+
 Then check your own specific memories:
 ```
 amfs_recall("<repo>/<module>", "task-summary-<area>")
 amfs_search(entity_path="<repo>/<service-or-module>")
 ```
+
+### Before choosing an action (ask for priors)
+When the task ends in a choice among a fixed set of actions — a tool with an enum
+`action` parameter, a runbook with numbered fixes — retrieve with the candidates
+and follow the recommendation:
+```
+amfs_retrieve(query="<the task>", entity_path="<repo>/<module>", include_priors=True,
+              candidate_actions=["resolve:resend_email", "resolve:update_payment_method", "resolve:refund"],
+              compact=True)
+```
+The response ends with `action_priors` (per action: won/lost here on similar
+tasks, who tried it, when) and a `recommendation`:
+- `act` — the top hit is validated or an action has a good record here; take `suggested_action`.
+- `explore` — everything tried here has failed or a regime shift is flagged; try `suggested_action` first. It is assigned per agent, so peers on the same problem explore different actions instead of the same one. The full `untried` list is included if you have reason to deviate.
+- `escalate` — every candidate has been tried here and failed; escalate on the first attempt rather than after three.
+`compact=True` returns the first two hits in full and the rest as one-liners; the priors and recommendation are always complete.
 
 ### After completing a task
 Form a memory of what was done and key decisions:
@@ -116,7 +134,10 @@ amfs_record_action("refund_payment", {"charge_id": "ch_123"}, result="refunded")
 amfs_record_action("deploy", {"service": "api"}, result="timed out", success=False)
 ```
 Not for reads or searches — `record_context` covers what you learned, this covers
-what you did. Use the real tool name, and use it consistently.
+what you did. Use the real tool name, and use it consistently. When the action is one
+of a fixed set, pass `action_key="<tool>:<action>"` (derived from an `action` argument
+when you do not); it is what the outcome is credited to, and what the next agent's
+`action_priors` are counted over. Never put free text in an action key.
 
 ### When an approach fails (mark the attempt, then try another)
 The moment a remembered fix, runbook step or pattern did **not** work and you are

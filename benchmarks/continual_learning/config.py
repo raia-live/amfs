@@ -100,8 +100,11 @@ class Study:
     max_tokens_per_turn: int = 700
     diy_consolidate_every: int = 5
     budget_usd: float = 0.0  # 0 = no ceiling (owner decision 2026-09-16; was 600)
+    # Zep dropped from the study 2026-09-18 (owner decision): the account exhausted its
+    # episode credits after the main run (403 "over the episode credit usage limit"), so no
+    # regime-change cells could be produced. The arm implementation stays for reproduction.
     arms: tuple[str, ...] = (
-        "none", "pgvector", "pgvector-diy", "pgvector-diy+outcomes", "mem0", "zep",
+        "none", "pgvector", "pgvector-diy", "pgvector-diy+outcomes", "mem0",
         "senselab", "senselab-episode", "senselab-nofeedback",
     )
     # Real-world families (what teams deploy today) — full seed count

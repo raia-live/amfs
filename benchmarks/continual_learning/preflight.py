@@ -24,6 +24,19 @@ before grid v2 — they are the plan's section-5 gates 3-6 plus the claim check)
   briefing   two validated entries failing -> Discredited + Regime-shift sections.
   claim      an outcome credits the claim read, not a rewritten one under the same key.
 
+Action-level gates (``cl`` includes them; they need the action record — OSS migration 009,
+Pro 097 — on the API under test):
+  priors     three failures on resolve:A and one success on resolve:B for similar tasks;
+             a paraphrased retrieve with candidate_actions [A, B, C] returns tried A 0/3,
+             B 1/1 and untried [C].
+  explore    with A and B both failed and five candidates, six agents retrieving the same
+             task get ``explore`` with at least three distinct suggested actions.
+  posterior  4 successes then 1 failure stays validated with p above 0.5; 5 successes then
+             3 failures is discredited.
+  compact    retrieve(compact=True, limit=7) is at most 55% of the full payload's chars.
+  provenance successes committed by two agent ids give validators_n == 2, and the author
+             is the writer.
+
 Run:  .bench-venv/bin/python -m benchmarks.continual_learning.preflight [gate ...]
 """
 
@@ -117,9 +130,13 @@ def gate_prod_loop() -> bool:
                 detail.setdefault("miscredits", []).append([h.entry.key for h in hits])
                 # fall back to an explicit read so the round still credits the target
                 m.read(scope, target_key)
+            # Blame/credit the target alone: once it is discredited, retrieve stops
+            # returning it and the sibling becomes the top hit, so leaving the
+            # causal set implicit would charge the sibling for the target's rounds.
             affected = m.commit_outcome(f"preflight-success-{i}", OutcomeType.SUCCESS,
                                         task_input="preflight reinforcement round",
-                                        response_text=f"followed {target_key}")
+                                        response_text=f"followed {target_key}",
+                                        causal_entry_keys=[f"{scope}/{target_key}"])
             if any(e.key == target_key for e in affected):
                 credited += 1
         finally:
@@ -142,7 +159,8 @@ def gate_prod_loop() -> bool:
                 m.read(scope, target_key)
             affected = m.commit_outcome(f"preflight-failure-{i}", OutcomeType.CRITICAL_FAILURE,
                                         task_input="preflight discredit round",
-                                        response_text=f"followed {target_key}; outage")
+                                        response_text=f"followed {target_key}; outage",
+                                        causal_entry_keys=[f"{scope}/{target_key}"])
             if any(e.key == target_key for e in affected):
                 discredited += 1
         finally:
@@ -153,9 +171,21 @@ def gate_prod_loop() -> bool:
     detail["credited_failure_rounds"] = discredited
     detail["after_failure"] = after_failure
     detail["after_failure_gated"] = gated
-    conf_final = next((c for k, _, c in after_failure if k == target_key), None)
+    # A discredited entry is excluded from retrieve by default (I5), so its
+    # confidence is read from the entry itself rather than looked for in the hits.
+    obs = _amfs("cl-preflight-observer")
+    try:
+        target_entry = obs.read(scope, target_key)
+    finally:
+        obs.close()
+    conf_final = round(target_entry.confidence, 4) if target_entry else None
     detail["target_conf_after_failure"] = conf_final
-    flipped_down = after_failure[0][0] != target_key
+    detail["target_after_failure"] = {
+        "failure_count": getattr(target_entry, "failure_count", None),
+        "discredited": bool(getattr(target_entry, "discredited_at", None)),
+        "excluded_from_retrieve": all(k != target_key for k, _, _ in after_failure),
+    }
+    flipped_down = bool(after_failure) and after_failure[0][0] != target_key
     excluded = all(k != target_key for k, _, _ in gated)
 
     ok = (
@@ -494,12 +524,215 @@ def gate_claim_check() -> bool:
     return ok
 
 
+# ---------------------------------------------------------------------------
+# Action-level gates — the outcome record as a replay buffer
+# ---------------------------------------------------------------------------
+
+def _act(scope: str, action: str, ok: bool, task_input: str, *, agent: str = "cl-preflight-worker",
+         keys: list[str] | None = None) -> None:
+    """One episode: read *keys*, take ``resolve:<action>`` and commit its verdict with the
+    task text, so the outcome row carries the action and a task embedding."""
+    from amfs_core.models import OutcomeType
+
+    m = _amfs(agent)
+    try:
+        for k in keys or []:
+            m.read(scope, k)
+        m.record_action("resolve", {"action": action}, result="ok" if ok else "failed", success=ok,
+                        action_key=f"resolve:{action}")
+        m.commit_outcome(f"pf-act-{uuid.uuid4().hex[:6]}", OutcomeType.SUCCESS if ok else OutcomeType.FAILURE,
+                         task_input=task_input, response_text=f"took {action}", entity_path=scope)
+    finally:
+        m.close()
+
+
+def _priors(scope: str, query: str, candidates: list[str], *, agent: str = "cl-preflight-observer"):
+    m = _amfs(agent)
+    try:
+        m.retrieve(query, entity_path=scope, limit=5, include_priors=True, candidate_actions=candidates)
+        return m.last_priors or {}
+    finally:
+        m.close()
+
+
+_DECLINED = [
+    "customer's card is declined at checkout but works in other shops",
+    "card declined on our site, the customer says it works elsewhere",
+    "payment card refused during checkout although it is fine at other merchants",
+    "checkout says card declined; the same card works at other stores",
+]
+
+
+def gate_action_priors() -> bool:
+    """(8) the outcome record answers "what was tried here and how did it go" for a task
+    like this one, and names what nobody has tried."""
+    scope = _scope("priors")
+    seeder = _amfs("cl-preflight-seeder")
+    try:
+        seeder.write(scope, "card-declined", "Card declined but works elsewhere: see the payments runbook.", confidence=0.7)
+    finally:
+        seeder.close()
+    time.sleep(1.0)
+    for i in range(3):
+        _act(scope, "update_payment_method", False, _DECLINED[i], keys=["card-declined"], agent=f"cl-preflight-w{i}")
+    _act(scope, "resend_email", True, _DECLINED[3], keys=["card-declined"], agent="cl-preflight-w3")
+    time.sleep(1.0)
+    cands = ["resolve:update_payment_method", "resolve:resend_email", "resolve:refund"]
+    meta = _priors(scope, "card declined at checkout, works at other merchants", cands)
+    priors = meta.get("priors") or {}
+    tried = {t.get("action_key"): t for t in (priors.get("tried") or []) if isinstance(t, dict)}
+    rec = meta.get("recommendation") or {}
+    detail = {"scope": scope, "tried": {k: {"won": v.get("won"), "lost": v.get("lost"), "agents": v.get("agents")}
+                                      for k, v in tried.items()},
+              "untried": priors.get("untried"), "recommendation": rec}
+    ok = tried.get("resolve:update_payment_method", {}).get("lost") == 3 \
+        and tried.get("resolve:update_payment_method", {}).get("won") == 0 \
+        and tried.get("resolve:resend_email", {}).get("won") == 1 \
+        and tried.get("resolve:resend_email", {}).get("lost") == 0 \
+        and priors.get("untried") == ["resolve:refund"] \
+        and tried.get("resolve:update_payment_method", {}).get("agents") == 3
+    _gate("action_priors", bool(ok), detail)
+    return bool(ok)
+
+
+def gate_explore_assignment() -> bool:
+    """(9) when everything tried here has failed, six agents are pointed at different
+    untried actions rather than the same one."""
+    scope = _scope("explore")
+    seeder = _amfs("cl-preflight-seeder")
+    try:
+        seeder.write(scope, "card-declined", "Card declined but works elsewhere: see the payments runbook.", confidence=0.7)
+    finally:
+        seeder.close()
+    time.sleep(1.0)
+    for i, action in enumerate(["a", "b", "a", "b"]):
+        _act(scope, action, False, _DECLINED[i], keys=["card-declined"], agent=f"cl-preflight-w{i}")
+    time.sleep(1.0)
+    cands = [f"resolve:{x}" for x in "abcde"]
+    modes, picks = [], []
+    for i in range(6):
+        meta = _priors(scope, "card declined at checkout, works at other merchants", cands, agent=f"cl-preflight-x{i}")
+        rec = meta.get("recommendation") or {}
+        modes.append(rec.get("mode"))
+        picks.append(rec.get("suggested_action"))
+    detail = {"scope": scope, "modes": modes, "suggested": picks}
+    ok = all(m == "explore" for m in modes) and len({p for p in picks if p}) >= 3 \
+        and all(p in cands[2:] for p in picks if p)
+    _gate("explore_assignment", bool(ok), detail)
+    return bool(ok)
+
+
+def gate_posterior_tolerance() -> bool:
+    """(10) one loss on a proven rule does not flip its label; three on a row still gate it."""
+    from amfs_core.models import OutcomeType
+
+    scope = _scope("posterior")
+    seeder = _amfs("cl-preflight-seeder")
+    try:
+        seeder.write(scope, "steady", "Steady rule: restart the indexer when search lags.", confidence=0.7)
+        seeder.write(scope, "shifted", "Shifted rule: rotate the key when uploads 401.", confidence=0.7)
+    finally:
+        seeder.close()
+    time.sleep(1.0)
+    for i in range(4):
+        _outcome(scope, ["steady"], OutcomeType.SUCCESS, f"pf-post-ok-{i}-{uuid.uuid4().hex[:4]}")
+    _outcome(scope, ["steady"], OutcomeType.FAILURE, f"pf-post-bad-{uuid.uuid4().hex[:4]}")
+    steady = _read(scope, "steady")
+    p, n = steady.posterior
+    for i in range(5):
+        _outcome(scope, ["shifted"], OutcomeType.SUCCESS, f"pf-shift-ok-{i}-{uuid.uuid4().hex[:4]}")
+    traj = []
+    for i in range(3):
+        _outcome(scope, ["shifted"], OutcomeType.FAILURE, f"pf-shift-bad-{i}-{uuid.uuid4().hex[:4]}")
+        e = _read(scope, "shifted")
+        traj.append({"confidence": round(e.confidence, 4), "status": e.evidence_status})
+    detail = {"scope": scope,
+              "steady_4w_1l": {"status": steady.evidence_status, "p": round(p, 3), "n": n,
+                               "confidence": round(steady.confidence, 4), "discredited_at": steady.discredited_at},
+              "shifted_5w_then_3l": traj}
+    # p is the posterior over *weighted* evidence (a failure carries severity 2.0 and decays
+    # the wins it contradicts), so 4W 1L sits near 0.56, not the 0.71 of a raw count; the
+    # label rule's win-count clause is what keeps it validated. The bound checks the record
+    # still leans to success without asserting the raw-count number.
+    ok = steady.evidence_status == "validated" and steady.discredited_at is None and 0.5 < p < 0.9 and n == 5 \
+        and traj[-1]["status"] == "discredited" and traj[-1]["confidence"] < 0.5
+    _gate("posterior_tolerance", bool(ok), detail)
+    return bool(ok)
+
+
+def gate_compact_budget() -> bool:
+    """(11) the compact retrieve payload is at most 55% of the full one on the same query."""
+    from amfs_adapter_http import HttpAdapter
+
+    scope = _scope("compact")
+    seeder = _amfs("cl-preflight-seeder")
+    try:
+        for i in range(8):
+            seeder.write(scope, f"note-{i}", f"Note {i} on card declines: " + (
+                "when the issuer returns do-not-honor, resend the receipt email and ask the customer "
+                "to retry after ten minutes; do not open a refund. " * 4), confidence=0.7)
+    finally:
+        seeder.close()
+    time.sleep(1.5)
+    adapter = HttpAdapter(base_url=config.AMFS_HTTP_URL, api_key=config.env("AMFS_API_KEY", required=True))
+    try:
+        body = {"query": "card declined do not honor", "entity_path": scope, "limit": 7}
+        full = adapter._post("/api/v1/retrieve", body)
+        compact = adapter._post("/api/v1/retrieve", {**body, "compact": True})
+    finally:
+        adapter.close()
+    rows_full = full if isinstance(full, list) else full.get("entries", [])
+    rows_c = [e for e in (compact if isinstance(compact, list) else compact.get("entries", [])) if not e.get("_meta")]
+    f_chars, c_chars = len(json.dumps(rows_full)), len(json.dumps(rows_c))
+    detail = {"scope": scope, "full_hits": len(rows_full), "compact_hits": len(rows_c), "full_chars": f_chars,
+              "compact_chars": c_chars, "ratio": round(c_chars / max(f_chars, 1), 3),
+              "truncated_tail": sum(1 for e in rows_c[2:] if e.get("value_truncated"))}
+    ok = len(rows_full) >= 5 and len(rows_c) == len(rows_full) and c_chars <= 0.55 * f_chars \
+        and all(e.get("value_truncated") for e in rows_c[2:]) and not any(e.get("value_truncated") for e in rows_c[:2])
+    _gate("compact_budget", bool(ok), detail)
+    return bool(ok)
+
+
+def gate_provenance() -> bool:
+    """(12) who wrote it and who confirmed it travel with the entry."""
+    from amfs_core.models import OutcomeType
+
+    scope = _scope("provenance")
+    seeder = _amfs("cl-preflight-author")
+    try:
+        seeder.write(scope, "rule", "Rule: clear the queue before restarting the worker.", confidence=0.7)
+    finally:
+        seeder.close()
+    time.sleep(1.0)
+    _outcome(scope, ["rule"], OutcomeType.SUCCESS, f"pf-prov-1-{uuid.uuid4().hex[:4]}", agent="cl-preflight-v1")
+    _outcome(scope, ["rule"], OutcomeType.SUCCESS, f"pf-prov-2-{uuid.uuid4().hex[:4]}", agent="cl-preflight-v2")
+    _outcome(scope, ["rule"], OutcomeType.SUCCESS, f"pf-prov-3-{uuid.uuid4().hex[:4]}", agent="cl-preflight-v1")
+    e = _read(scope, "rule")
+    m = _amfs("cl-preflight-observer")
+    try:
+        hit = next((r.entry for r in m.retrieve("clear the queue before restarting", entity_path=scope, limit=3)
+                    if r.entry.key == "rule"), None)
+    finally:
+        m.close()
+    detail = {"scope": scope, "author": e.provenance.agent_id, "validators": list(e.validators),
+              "hit_validators": list(hit.validators) if hit else None}
+    ok = e.provenance.agent_id == "cl-preflight-author" and sorted(e.validators) == ["cl-preflight-v1", "cl-preflight-v2"] \
+        and hit is not None and sorted(hit.validators) == ["cl-preflight-v1", "cl-preflight-v2"]
+    _gate("provenance", bool(ok), detail)
+    return bool(ok)
+
+
 LOOP_GATES = {
     "evidence": gate_evidence_model,
     "embedding": gate_embedding_survives_outcome,
     "payload": gate_evidence_payload,
     "briefing": gate_briefing_sections,
     "claim": gate_claim_check,
+    "priors": gate_action_priors,
+    "explore": gate_explore_assignment,
+    "posterior": gate_posterior_tolerance,
+    "compact": gate_compact_budget,
+    "provenance": gate_provenance,
 }
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Callable
+from typing import Any, Callable
 
 from amfs_core.embedder import EmbedderABC, cosine_similarity
 from amfs_core.models import (
@@ -128,6 +128,38 @@ class AdapterABC(ABC):
         *outcome_ref* narrows to records with that reference. It exists so a
         caller resolving one outcome does not have to page through all of
         them to find it.
+        """
+        return []
+
+    def similar_outcomes(
+        self,
+        entity_path: str,
+        embedding: list[float],
+        *,
+        k: int = 20,
+        min_similarity: float = 0.75,
+        since: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Outcomes about *entity_path* whose task was most like the one embedded.
+
+        Each row carries ``actions_taken``, ``committed_at``, ``agent_id`` and
+        ``similarity`` in ``[0, 1]``; ``amfs_core.actions.aggregate_priors``
+        folds them into per-action priors. Optional capability: the default is
+        an empty list, which callers treat as "no priors here" and fall back to
+        :meth:`action_stats`. Postgres (with pgvector and an embedder) overrides.
+        """
+        return []
+
+    def action_stats(
+        self,
+        entity_path: str,
+        *,
+        since: datetime | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """The most recent outcomes about *entity_path* with their ``actions_taken``,
+        without similarity — the fallback when :meth:`similar_outcomes` cannot
+        run. Same row shape, ``similarity`` fixed at 1.0. Optional; default empty.
         """
         return []
 

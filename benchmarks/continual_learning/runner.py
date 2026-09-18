@@ -31,7 +31,7 @@ from .scenarios import make_scenario
 # until the instance is resized; the client-side limiter (AMFS_RPM) caps total request rate.
 _SL = int(os.environ.get("CL_SENSELAB_CONCURRENCY", "2"))
 _ARM_CONCURRENCY = {"mem0": 6, "zep": 8, "senselab": _SL, "senselab-episode": _SL,
-                    "senselab-nofeedback": _SL, "senselab-attempts": _SL}
+                    "senselab-nofeedback": _SL, "senselab-attempts": _SL, "senselab-nopriors": _SL}
 _sems: dict[str, threading.Semaphore] = {}
 _write_lock = threading.Lock()
 
@@ -55,10 +55,16 @@ class Cell:
     fleet: int = 1
     change_at: int = 0
     change_focus: float = 0.0
+    fleet_mode: str = "rr"     # rr | pioneer | newcomer (see Scenario)
+    join_at: int = 0
+
+    @property
+    def _transfer(self) -> str:
+        return f"-{self.fleet_mode}{self.join_at}" if self.fleet > 1 and self.fleet_mode != "rr" else ""
 
     @property
     def id(self) -> str:
-        sweep = f"-d{self.distractors}-n{self.label_noise}-f{self.feedback_delay}-a{self.fleet}"
+        sweep = f"-d{self.distractors}-n{self.label_noise}-f{self.feedback_delay}-a{self.fleet}{self._transfer}"
         if self.change_at:
             sweep += f"-c{self.change_at}"
             if self.change_focus:
@@ -68,7 +74,7 @@ class Cell:
     @property
     def scope(self) -> str:
         raw = (f"{self.scenario}-{self.arm}-{self.model}-s{self.seed}-d{self.distractors}"
-               f"-n{int(self.label_noise * 100)}-f{self.feedback_delay}-a{self.fleet}"
+               f"-n{int(self.label_noise * 100)}-f{self.feedback_delay}-a{self.fleet}{self._transfer}"
                + (f"-c{self.change_at}" if self.change_at else "")
                + (f"-x{int(self.change_focus * 100)}" if self.change_at and self.change_focus else ""))
         slug = re.sub(r"[^a-z0-9-]", "-", raw.lower())
@@ -103,7 +109,8 @@ def run_cell(cell: Cell, out_path: Path, *, keep_transcript: bool, retry_budget:
     t0 = time.perf_counter()
     scenario = make_scenario(cell.scenario, cell.seed, cell.episodes, distractors=cell.distractors,
                              label_noise=cell.label_noise, feedback_delay=cell.feedback_delay, fleet=cell.fleet,
-                             change_at=cell.change_at, change_focus=cell.change_focus)
+                             change_at=cell.change_at, change_focus=cell.change_focus,
+                             fleet_mode=cell.fleet_mode, join_at=cell.join_at)
     arm = make_arm(cell.arm)
     llm = get_llm(cell.model)
     n_ok = 0
@@ -135,7 +142,7 @@ def run_cell(cell: Cell, out_path: Path, *, keep_transcript: bool, retry_budget:
                 d.update({"cell": cell.id, "scope": scope, "distractors": cell.distractors,
                           "label_noise": cell.label_noise, "feedback_delay": cell.feedback_delay,
                           "fleet": cell.fleet, "change_at": cell.change_at, "change_focus": cell.change_focus,
-                          "ts": time.time()})
+                          "fleet_mode": scenario.fleet_mode, "join_at": cell.join_at, "ts": time.time()})
                 for sl in rec.searches_log:
                     for h in sl["hits"]:
                         read_keys.setdefault(h["key"], None)
@@ -207,7 +214,9 @@ def build_cells(args) -> list[Cell]:
                                     for ch in changes:
                                         focus = (args.change_focus if args.change_focus is not None
                                                  else S.core_change_focus) if ch else 0.0
-                                        cells.append(Cell(sc, arm, model, seed, eps, d, n, f, a, ch, focus))
+                                        mode = args.fleet_mode if a > 1 else "rr"
+                                        cells.append(Cell(sc, arm, model, seed, eps, d, n, f, a, ch, focus,
+                                                          mode, args.join_at if mode != "rr" else 0))
     # interleave arms so slow hosted arms never monopolise the worker pool
     by_arm: dict[str, list[Cell]] = {}
     for c in cells:
@@ -234,6 +243,10 @@ def main() -> None:
                    help="regime change episode (0 = none); default: core scenarios 20, probes 0")
     p.add_argument("--change-focus", type=float, default=None,
                    help="share of post-change tasks drawn from changed classes; default 0.5 when a change is set")
+    p.add_argument("--fleet-mode", choices=["rr", "pioneer", "newcomer"], default="rr",
+                   help="knowledge-transfer protocol for fleet cells (see Scenario.fleet_mode)")
+    p.add_argument("--join-at", type=int, default=0,
+                   help="pioneer: episode the other agents join; newcomer: episode the new agent takes over")
     p.add_argument("--label-noise", nargs="+", type=float, default=[0.0])
     p.add_argument("--feedback-delay", nargs="+", type=int, default=[0])
     p.add_argument("--retry-budget", type=int, default=config.STUDY.retry_budget)

@@ -119,12 +119,18 @@ class OutcomeBackPropagator:
         attempts: list[Any] | None = None,
         final_action_index: int | None = None,
         causal_entry_versions: dict[str, int] | None = None,
+        actions_taken: list[dict[str, Any]] | None = None,
+        entity_paths: list[str] | None = None,
+        situation: str | None = None,
     ) -> OutcomeRecord:
         """Convenience factory for creating OutcomeRecord instances."""
         return OutcomeRecord(
             attempts=attempts or [],
             final_action_index=final_action_index,
             causal_entry_versions=dict(causal_entry_versions or {}),
+            actions_taken=list(actions_taken or []),
+            entity_paths=list(entity_paths or []),
+            situation=situation,
             outcome_ref=outcome_ref,
             outcome_type=outcome_type,
             causal_confidence=causal_confidence,
