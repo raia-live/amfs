@@ -351,6 +351,43 @@ def test_the_shift_still_fires_when_the_confidence_gate_hid_the_discredited_rule
     assert meta["recommendation"]["mode"] == "explore"
 
 
+def test_the_below_gate_read_is_entity_wide_not_a_rerun_of_the_query(client, server_mem) -> None:
+    """The rule that stopped working need not share a word with this query, and
+    a rule validated over months is old by write time. The below-gate read is
+    the entity's discredited rows, whatever they say and whenever they were
+    written — the same scope priors and the briefing use."""
+    server_mem.write("acme/support", "fix-old", "rotate the ingest worker on a stuck queue", confidence=0.8)
+    server_mem._read_tracker.clear()
+    _stub_stats(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _outcomes(server_mem, "fix-old", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
+    assert server_mem._adapter.read("acme/support", "fix-old").discredited_at is not None
+
+    _, meta = _priors_meta(client, min_confidence=0.5)  # query: "card declined" — no overlap with fix-old
+    assert meta["regime_shift"] is True
+    assert meta["recommendation"]["mode"] == "explore"
+
+
+def test_the_below_gate_read_respects_the_callers_visibility(client, server_mem, monkeypatch) -> None:
+    """Rows the caller cannot see must not steer the recommendation either. The
+    rows are not returned, but the policy decision they drive is."""
+    from amfs_http import server as http_server
+
+    _stub_stats(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _outcomes(server_mem, "fix-a", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
+
+    class _HideFixA:
+        def should_filter(self) -> bool:
+            return True
+
+        def filter_entries(self, entries):
+            return [e for e in entries if e.key != "fix-a"]
+
+    monkeypatch.setattr(http_server, "_get_visibility_filter", lambda request: _HideFixA())
+    _, meta = _priors_meta(client, min_confidence=0.5)
+    assert meta["regime_shift"] is False
+    assert meta["recommendation"]["mode"] == "act"
+
+
 def test_the_shift_clears_after_the_window(client, server_mem, monkeypatch) -> None:
     """A shift is an event. A rule discredited two weeks ago is history the
     discredited section covers, not a standing reason to skip the action that

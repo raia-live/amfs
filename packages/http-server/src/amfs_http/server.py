@@ -306,6 +306,7 @@ from amfs_core.exclusions import (  # noqa: E402
     is_excluded_entity as _is_excluded_entity,
 )
 from amfs_core.evidence import (  # noqa: E402
+    DISCREDIT_THRESHOLD,
     is_synthetic_key as _is_synthetic_key,
 )
 
@@ -714,36 +715,65 @@ def _compact_entry_response(entry: MemoryEntry, *, rank: int = 0) -> dict[str, A
 
 
 async def _discredited_below_gate(
-    sq_lex: SearchQuery, *, branch: Any, seen: set[str]
+    entity_path: str,
+    *,
+    branch: Any,
+    seen: set[str],
+    vis: Any,
+    include_artifacts: bool,
+    limit: int,
 ) -> list[MemoryEntry]:
-    """Query-matched discredited entries the confidence gate kept out.
+    """The entity's discredited entries the confidence gate kept out.
 
-    Same lexical query as the candidate fetch with ``min_confidence`` lifted,
-    kept to entries that are discredited and not already in hand. Read only for
-    the regime-shift flag: a rule that was validated many times and then failed
-    twice has a confidence under the discredit threshold, so a retrieve gated at
-    that threshold — the benchmark's setting, and a reasonable production one —
-    never saw the very rows that carry the signal. Best-effort; a store that
-    cannot answer contributes nothing rather than failing the retrieve.
+    Read only for the regime-shift flag: a rule that was validated many times
+    and then failed twice has a confidence under the discredit threshold, so a
+    retrieve gated at that threshold — the benchmark's setting, and a reasonable
+    production one — never saw the very rows that carry the signal.
+
+    Not a re-run of the lexical query. The rule that stopped working need not
+    share words with this query (it may have matched semantically, or not at
+    all), and a rule validated over months is old by write time, so a text
+    search sorted by recency and truncated at the pool could miss it. Priors
+    are kept per entity and the briefing's section of the same name is read
+    over the whole entity, so this is too: every entry on *entity_path* with
+    confidence at or under the discredit threshold — a small set, since that is
+    what discrediting means — then the discredited ones among them.
+
+    Filtered by the same visibility rules as the ranked list. The rows are not
+    returned, but the recommendation they steer is, and a policy decision
+    driven by memory the caller cannot see is a leak by another name.
+    Best-effort; a store that cannot answer contributes nothing rather than
+    failing the retrieve.
     """
-    ungated = sq_lex.model_copy(update={"min_confidence": 0.0, "sort_by": "recency"})
+    below = SearchQuery(
+        entity_path=entity_path,
+        min_confidence=0.0,
+        max_confidence=DISCREDIT_THRESHOLD,
+        limit=limit,
+        sort_by="recency",
+        depth=3,
+        include_artifacts=include_artifacts,
+    )
     rows: list[MemoryEntry] = []
     try:
         if _async_adapter is not None:
-            rows = await _async_adapter.search(ungated, branch=branch)
+            rows = await _async_adapter.search(below, branch=branch)
         else:
             adapter = _get_memory()._adapter
             try:
-                rows = adapter.search(ungated, branch=branch)
+                rows = adapter.search(below, branch=branch)
             except TypeError:
-                rows = adapter.search(ungated)
+                rows = adapter.search(below)
     except Exception:
-        logger.debug("ungated discredited fetch failed", exc_info=True)
+        logger.debug("below-gate discredited fetch failed", exc_info=True)
         return []
+    if vis is not None and vis.should_filter():
+        rows = vis.filter_entries(rows)
     return [
         e for e in rows
         if getattr(e, "discredited_at", None) is not None
         and e.entry_key not in seen
+        and not _is_excluded_entity(getattr(e, "entity_path", ""))
         and not _is_synthetic_key(getattr(e, "key", ""))
     ]
 
@@ -2415,7 +2445,14 @@ async def retrieve_entries(
         if req.min_confidence > 0.0:
             seen_keys = {e.entry_key for e in shift_pool}
             shift_pool.extend(
-                await _discredited_below_gate(sq_lex, branch=branch, seen=seen_keys)
+                await _discredited_below_gate(
+                    req.entity_path,
+                    branch=branch,
+                    seen=seen_keys,
+                    vis=vis,
+                    include_artifacts=req.include_artifacts,
+                    limit=pool,
+                )
             )
         shifted_entries = [e for e in shift_pool if _regime_shifted(e, now=now)]
         shifted = bool(shifted_entries)
