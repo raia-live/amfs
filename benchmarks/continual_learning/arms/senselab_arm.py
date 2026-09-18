@@ -192,7 +192,7 @@ def _render_briefing(digests: list[Any], *, hot_context: bool = True) -> str | N
                     continue
                 rep = it.get("replaced_by") or []
                 rep_s = f" Replaced by: {', '.join(map(str, rep[:3]))}." if rep else ""
-                lines.append(f"  - [{it.get('key')}]{_ev(it)}: {str(it.get('value_preview') or '')[:200]}{rep_s}")
+                lines.append(f"  - [{it.get('key')}]{_ev(it)}: {str(it.get('value_preview') or '')[:120]}{rep_s}")
         val = summary.get("validated")
         if isinstance(val, list) and val:
             lines.append("Validated by outcomes: " + ", ".join(
@@ -238,6 +238,10 @@ class _SenseLabSession(EpisodeSession):
 
         self._attempts_marked = 0
         self._footer: str | None = None
+        # Entries the briefing already named as discredited. A retrieve's avoid list names
+        # them again; those rows are rendered as a reference to the briefing rather than
+        # carried twice in every call of the episode.
+        self._briefed_discredited: set[str] = set()
 
     def _timed(self):
         return _PacedTimer(self.acct)
@@ -271,6 +275,14 @@ class _SenseLabSession(EpisodeSession):
                 dropped += 1
         if dropped:
             self.acct.notes["briefing_digests_dropped"] = self.acct.notes.get("briefing_digests_dropped", 0) + dropped
+        for d in kept:
+            summary = getattr(d, "summary", None)
+            if summary is None and isinstance(d, dict):
+                summary = d.get("summary")
+            disc = summary.get("discredited") if isinstance(summary, dict) else None
+            for it in (disc or [])[:6]:
+                if isinstance(it, dict) and it.get("key"):
+                    self._briefed_discredited.add(str(it["key"]))
         text = _render_briefing(kept, hot_context=self.arm.briefing_hot_context)
         if text:
             self.acct.retrieved_bytes += len(text)
@@ -298,8 +310,11 @@ class _SenseLabSession(EpisodeSession):
         for r in rows:
             e = r.entry
             avoid = bool((r.breakdown or {}).get("_avoid"))
+            text = str(e.value)
+            if avoid and e.key in self._briefed_discredited:
+                text = "(discredited — see briefing above)"
             hits.append(MemoryHit(
-                key=e.key, text=str(e.value), score=float(r.score), confidence=float(e.confidence),
+                key=e.key, text=text, score=float(r.score), confidence=float(e.confidence),
                 evidence_status=getattr(e, "evidence_status", None) or "untested",
                 success_count=int(getattr(e, "success_count", 0) or 0),
                 failure_count=int(getattr(e, "failure_count", 0) or 0), avoid=avoid))
