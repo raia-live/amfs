@@ -20,7 +20,7 @@ from amfs_core.actions import actions_taken as derive_actions_taken, entity_path
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
 from amfs_core.content import embedding_input
 from amfs_core.embedder import EmbedderABC
-from amfs_core.ranking import composite_score
+from amfs_core.ranking import composite_score, entry_text, keyword_coverage
 from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker
 from amfs_core.exceptions import StaleWriteError
 from amfs_core.lifecycle import LifecycleManager
@@ -758,6 +758,13 @@ class AgentMemory:
         query_vec: list[float] | None = None
         if query and self._embedder is not None:
             query_vec = self._embedder.embed(query)
+        # The server's graded lexical term, over the same pool it scores: the
+        # rare query words an entry carries, so a local ranking separates the
+        # entry the query is about from one that shares its phrasing.
+        coverage: dict[str, float] = (
+            keyword_coverage(query, {e.entry_key: entry_text(e.key, e.value) for e in entries})
+            if query else {}
+        )
 
         now = datetime.now(timezone.utc)
         scored: list[ScoredEntry] = []
@@ -780,22 +787,25 @@ class AgentMemory:
             # the hosted retrieve would. When there is no query there is no
             # relevance to anchor on, and the additive form orders by recency
             # and trust alone, as before.
+            keyword = float(coverage.get(entry.entry_key, 0.0))
             composite = composite_score(
                 relevance=semantic_score,
                 recency=recency_score,
                 confidence=confidence_score,
                 evidence=evidence,
+                keyword=keyword,
                 semantic_weight=recall_config.semantic_weight,
                 recency_weight=recall_config.recency_weight,
                 confidence_weight=recall_config.confidence_weight,
                 evidence_weight=recall_config.evidence_weight,
-                anchored=query_vec is not None,
+                anchored=bool(query),
             )
             scored.append(ScoredEntry(
                 entry=entry,
                 score=composite,
                 breakdown={
                     "semantic": recall_config.semantic_weight * semantic_score,
+                    "keyword": keyword,
                     "recency": recall_config.recency_weight * recency_score,
                     "confidence": recall_config.confidence_weight * confidence_score,
                     "evidence": recall_config.evidence_weight * evidence,

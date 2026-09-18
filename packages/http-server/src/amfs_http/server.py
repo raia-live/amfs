@@ -47,6 +47,8 @@ from amfs_core.aggregates import (
     recall_tokens_for_chars,
 )
 from amfs_core.ranking import composite_score
+from amfs_core.ranking import entry_text as _entry_text
+from amfs_core.ranking import keyword_coverage as _keyword_coverage
 from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
 from amfs_core.actions import actions_taken as derive_actions_taken
@@ -2363,6 +2365,27 @@ async def retrieve_entries(
     if not req.include_artifacts:
         candidates = {k: v for k, v in candidates.items() if not _is_artifact(v["entry"])}
 
+    # 6a. Graded lexical term. The channels above mark a candidate 1.0 for
+    #     matching *any* query word, which under an OR-combined full-text query
+    #     is nearly every candidate; the blend then has no lexical signal at
+    #     all. ``keyword_coverage`` reads the pool once and scores each entry by
+    #     the rare query terms it carries — the service name, the error code —
+    #     so the entry the query is about outranks one that shares its
+    #     phrasing. Graded over the lexical channel's own hits only: an entry
+    #     the channel did not return keeps 0, as before, rather than being
+    #     handed lexical relevance for an incidental word. Under the additive
+    #     (rollback) form the flag stays binary, so the switch restores the
+    #     old ranking exactly.
+    anchored = _rank_anchored()
+    lexical_hits = {k: v for k, v in candidates.items() if v["keyword"] > 0.0}
+    if anchored and lexical_hits and topical.strip():
+        coverage = _keyword_coverage(
+            topical,
+            {k: _entry_text(v["entry"].key, v["entry"].value) for k, v in lexical_hits.items()},
+        )
+        for k, v in lexical_hits.items():
+            v["keyword"] = float(coverage.get(k, 0.0))
+
     # 6b. Discredited entries: a failure left them under the discredit
     #     threshold and no success has lifted them since. Out of the ranked
     #     list unless asked for; kept aside so ``include_avoid`` can hand them
@@ -2420,7 +2443,6 @@ async def retrieve_entries(
     half_life = 30.0
     keyword_weight = 0.15
     evidence_weight = req.evidence_weight
-    anchored = _rank_anchored()
 
     def _composite(
         relevance: float, recency: float, conf: float, keyword: float, artifact: bool,

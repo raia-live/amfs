@@ -30,6 +30,10 @@ back without a deploy of code.
 
 from __future__ import annotations
 
+import math
+import re
+from typing import Any
+
 #: The most a perfect record (confidence 1.0, evidence +1) can scale relevance
 #: by, above an entry with no confidence and no record. 0.5 keeps trust
 #: decisive between entries of similar relevance (a validated 1.0 outranks an
@@ -96,3 +100,64 @@ def composite_score(
     )
     trust = max(-1.0, min(1.0, trust))
     return rel * (1.0 + TRUST_MODULATION * trust + recency_weight * recency)
+
+
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+#: Characters of a value the lexical term reads. Enough for any note; a bound
+#: so a pasted log does not make this pass the cost of the request.
+KEYWORD_DOC_CHARS = 4_000
+
+
+def _terms(text: str) -> set[str]:
+    """Lower-cased word tokens with a plural-stripping stem: ``returns`` and
+    ``return``, ``migrations`` and ``migration`` are the same term. Keys are
+    split on ``-`` and ``_`` by the same regex, so ``runbook-returns-a``
+    contributes ``runbook`` and ``return``."""
+    out: set[str] = set()
+    for w in _WORD_RE.findall(text.lower()):
+        if len(w) > 3 and w.endswith("s"):
+            w = w[:-1]
+        out.add(w)
+    return out
+
+
+def keyword_coverage(query: str, docs: dict[str, str]) -> dict[str, float]:
+    """The lexical relevance of each document to *query*, in ``[0, 1]``.
+
+    The share of the query's terms a document contains, each term weighted by
+    how rare it is across *docs* (``log((N+1)/(df+1))``): a term every
+    candidate carries says nothing about which one the query is about, a term
+    one in eight carries says almost everything. Terms no candidate contains
+    are left out of the denominator, since they cannot discriminate either.
+
+    Replaces the binary "was a lexical hit" flag the retrieve blend used until
+    2026-09-18. With an OR-combined full-text query almost every candidate is
+    a lexical hit, so the flag was 1.0 across the board and the one word that
+    separated *returns service standard deploy* from the same request for
+    *checkout* carried no weight at all — the bi-encoder does not separate
+    service names either, and the seeded runbook for the task's own service
+    lost to notes about other services written in the query's own phrasing.
+
+    Computed over the candidate pool, not the store: a few hundred short
+    documents per request, so it is a Python pass, not a query. When every
+    query term is in every document (or in none) the weights vanish, and the
+    result falls back to presence — the old flag.
+    """
+    q = _terms(query or "")
+    if not docs:
+        return {}
+    doc_terms = {k: _terms(t[:KEYWORD_DOC_CHARS]) for k, t in docs.items()}
+    if not q:
+        return {k: 0.0 for k in doc_terms}
+    n = len(doc_terms)
+    df = {t: sum(1 for ts in doc_terms.values() if t in ts) for t in q}
+    idf = {t: math.log((n + 1) / (df[t] + 1)) for t in q if df[t] > 0}
+    total = sum(idf.values())
+    if total <= 0.0:
+        return {k: (1.0 if any(t in ts for t in q) else 0.0) for k, ts in doc_terms.items()}
+    return {k: sum(w for t, w in idf.items() if t in ts) / total for k, ts in doc_terms.items()}
+
+
+def entry_text(key: str, value: Any) -> str:
+    """The text the lexical term reads for an entry: its key and its value."""
+    return f"{key} {value if isinstance(value, str) else str(value)}"

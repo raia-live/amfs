@@ -85,3 +85,36 @@ def test_server_switch_restores_the_additive_form(monkeypatch):
     monkeypatch.setenv("AMFS_RANK_ADDITIVE_TRUST", "1")
     assert server._rank_anchored() is False
     assert "AMFS_RANK_ADDITIVE_TRUST" in os.environ
+
+
+def test_keyword_coverage_weights_the_rare_term_not_the_shared_phrasing() -> None:
+    """Every candidate says 'standard deploy step order'; only one says
+    'returns'. The shared words carry no weight, the service name carries it
+    all, so the returns runbook scores highest for the returns request and a
+    note about checkout does not — and plurals stem, so 'returns' finds
+    'return'."""
+    from amfs_core.ranking import entry_text, keyword_coverage
+
+    docs = {
+        "runbook-returns-a": "returns service standard deploy: migrate, warm, roll. step order matters",
+        "runbook-checkout-a": "checkout service standard deploy: warm, migrate, roll. step order matters",
+        "checkout-note": "for checkout service standard deploys the step order is migrate warm roll",
+        "fraud-note": "fraud service standard deploy order: warm flush migrate",
+    }
+    cov = keyword_coverage(
+        "return service standard deploy correct step order runbook",
+        {k: entry_text(k, v) for k, v in docs.items()},
+    )
+    assert cov["runbook-returns-a"] > cov["runbook-checkout-a"] > cov["fraud-note"]
+    assert cov["runbook-returns-a"] > cov["checkout-note"]
+    # The key counts as text: "runbook-checkout-a" carries "runbook", the note does not.
+    assert cov["runbook-checkout-a"] > cov["checkout-note"]
+    assert 0.0 <= min(cov.values()) and max(cov.values()) <= 1.0
+    # Every query term in every document: no term discriminates, presence is
+    # all that is left — the old flag.
+    flat = keyword_coverage("deploy", {"a": "a deploy", "b": "b deploy"})
+    assert flat == {"a": 1.0, "b": 1.0}
+    # A term no document has does not deflate everyone.
+    assert keyword_coverage("zzz", {"a": "deploy"}) == {"a": 0.0}
+    assert keyword_coverage("", {"a": "deploy"}) == {"a": 0.0}
+    assert keyword_coverage("deploy", {}) == {}
