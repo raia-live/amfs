@@ -187,5 +187,40 @@ def test_briefing_tried_here_and_since(world) -> None:
     from datetime import timedelta
 
     later = svc.briefing(entity_path="acme/support", since=now + timedelta(hours=1))[0]
-    assert later.summary["hot_context"] == [] and later.summary["tried_here"] == []
+    assert later.summary["hot_context"] == []
+    # ...except the standing warning: the action that keeps losing here stays
+    # in the delta however old its last try, the winner with a thin record goes.
+    assert [t["action"] for t in later.summary["tried_here"]] == ["resolve:a"]
     assert later.summary["since"]
+
+
+def test_since_keeps_discredited_rows_and_compact_cuts_long_values(world) -> None:
+    """A since-delta drops what did not change, but not the warnings: a
+    discredited entry stays listed with its replacement whatever its age.
+    ``compact`` cuts each hot-context value to its head and marks the cut."""
+    from datetime import timedelta
+
+    adapter, mems = world
+    mems["a1"].write("acme/support", "long-note", "x" * 2000, confidence=0.8)
+    mems["a2"].read("acme/support", "rule")
+    mems["a2"].commit_outcome("t-fail", OutcomeType.FAILURE)
+    assert adapter.read("acme/support", "rule").discredited_at is not None
+    adapter.list_digests = lambda **kw: []  # type: ignore[attr-defined]
+    adapter.list_branches = lambda **kw: []  # type: ignore[attr-defined]
+    svc = BriefingService(adapter=adapter, namespace="test")
+
+    later = svc.briefing(
+        entity_path="acme/support", since=datetime.now(UTC) + timedelta(hours=1),
+    )[0]
+    assert later.summary["hot_context"] == [] and later.summary["validated"] == []
+    assert [r["key"] for r in later.summary["discredited"]] == ["rule"]
+
+    lead = svc.briefing(entity_path="acme/support", compact=True)[0]
+    row = next(r for r in lead.summary["hot_context"] if r["key"] == "long-note")
+    assert row["value_truncated"] is True and len(row["value"]) <= 480
+    assert "recall_count" not in row and "posterior" not in row
+    # What lineage books the row with is still there.
+    assert row["version"] == 1 and row["entity_path"] == "acme/support" and row["memory_type"] == "fact"
+    full = svc.briefing(entity_path="acme/support")[0]
+    row = next(r for r in full.summary["hot_context"] if r["key"] == "long-note")
+    assert len(row["value"]) == 2000 and "value_truncated" not in row

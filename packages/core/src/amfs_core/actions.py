@@ -22,6 +22,7 @@ actions and never once tried the one that worked.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -35,7 +36,19 @@ ACTION_VALUE_MAX_CHARS = 40
 #: Nearest outcomes considered for priors.
 PRIORS_K = 20
 #: Cosine similarity below which a past task is not "the same kind of task".
+#: A floor, not a neighbourhood: see :func:`neighbourhood_weights`.
 PRIORS_MIN_SIMILARITY = 0.75
+#: How fast an outcome's weight in the priors falls with its similarity gap
+#: to the nearest outcome. Calibrated on grid v3's logged task prompts under
+#: the production embedder (bge-small): same-class pairs sit at 0.91-0.98,
+#: cross-class pairs at 0.81-0.96, and the two overlap on any absolute
+#: threshold — but within one query the nearest outcomes are the same class
+#: and the cross-class ones trail by 0.05-0.11. exp(-gap/0.03) puts a task
+#: 0.05 behind the best at a fifth of its weight and 0.1 behind at 4%.
+PRIORS_NEIGHBOURHOOD_TAU = 0.03
+#: Outcomes whose neighbourhood weight falls under this are dropped rather
+#: than counted: they would inflate ``n`` while barely moving ``p``.
+PRIORS_NEIGHBOURHOOD_MIN_W = 0.1
 #: Per-day decay of an outcome's weight in the priors.
 PRIORS_DAILY_DECAY = 0.9
 #: Recommendation thresholds.
@@ -241,6 +254,54 @@ def aggregate_priors(
     }
 
 
+def neighbourhood_weights(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    tau: float = PRIORS_NEIGHBOURHOOD_TAU,
+    min_weight: float = PRIORS_NEIGHBOURHOOD_MIN_W,
+) -> list[dict[str, Any]]:
+    """Re-weight similar outcomes relative to the nearest one.
+
+    ``similar_outcomes`` returns rows above an absolute similarity floor, and
+    under a retrieval embedder that floor admits every task on the entity:
+    the priors were pooled over classes of task that share a vocabulary, and
+    a "tried and failed here" read over the wrong class sent agents to
+    explore actions that were winning for the class they were on (grid v3:
+    an ``explore`` recommendation, when followed, succeeded 14% of the time
+    against 67% when ignored). Absolute thresholds cannot fix that — the
+    same-class and cross-class similarity ranges overlap — but the *gap* to
+    the best match can: within one query the nearest outcomes are the same
+    kind of task, and the rest trail.
+
+    Each row's ``similarity`` becomes ``exp(-(best - sim) / tau)``, which
+    :func:`aggregate_priors` multiplies into its weight; rows under
+    *min_weight* are dropped so they do not count toward ``n``. Rows without a
+    similarity are returned unchanged. Where classes are indistinguishable by
+    task text (grid v3's diagnose: the prompt is a template and the class is
+    in the diagnostic findings) the weights flatten and the priors are pooled
+    as before — the caller should then pass ``situation`` so the outcome is
+    embedded with what distinguished it.
+    """
+    sims = [float(r.get("similarity") or 0.0) for r in rows if r.get("similarity") is not None]
+    if not sims:
+        return [dict(r) for r in rows]
+    best = max(sims)
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if r.get("similarity") is None:
+            out.append(dict(r))
+            continue
+        gap = max(0.0, best - float(r["similarity"]))
+        w = math.exp(-gap / tau) if tau > 0 else (1.0 if gap == 0.0 else 0.0)
+        if w < min_weight:
+            continue
+        row = dict(r)
+        row["task_similarity"] = float(r["similarity"])
+        row["similarity"] = w
+        out.append(row)
+    return out
+
+
 def _as_dt(value: Any) -> datetime | None:
     if value is None:
         return None
@@ -303,8 +364,10 @@ def recommend(
     candidate_actions: Sequence[str] | None = None,
     top_hit_status: str | None = None,
     top_hit_recent_failure: bool = False,
+    top_hit_shifted: bool = False,
     regime_shift: bool = False,
     regime_shift_at: datetime | None = None,
+    priors_are_local: bool = True,
 ) -> dict[str, Any] | None:
     """Decide ``act`` / ``explore`` / ``escalate`` from priors and the top hit.
 
@@ -315,12 +378,37 @@ def recommend(
     failed" cannot be asserted, and a false escalate costs a task a retry
     would have won.
 
+    Everything here is meant to be read over *this kind of task*: the priors
+    over the outcomes nearest the query (:func:`neighbourhood_weights`) and
+    ``regime_shift`` over the entries the query is about. Grid v3 measured
+    what happens otherwise — an entity-wide shift and pooled priors sent
+    agents to explore past memory that was right for their task, and the
+    ``explore`` they followed won 14% of the time.
+
     A regime shift skips the winning priors, because their wins may predate the
     change — except a winner whose latest take was *after* the shift and won
     (``regime_shift_at`` against the prior's ``last_at``, and its newest
     ``last_3`` entry). That is the replacement the shift called for, already
     found; sending the agent to explore past it would re-learn what the record
     already knows.
+
+    A validated top hit with no recent failure is acted on even under a shift,
+    unless the top hit is itself the rule that shifted (``top_hit_shifted``).
+    The shift says *something* on the entity stopped working; the hit's own
+    record says this did not, and the record of the thing in hand outranks a
+    flag about its neighbours.
+
+    ``explore`` needs a record to explore *from*: everything tried on tasks
+    like this has failed, or a shift, and in either case at least one action
+    tried. With nothing tried the "untried" list is every candidate and the
+    pick is a hash of the agent's name — advice with no information in it.
+
+    ``priors_are_local=False`` says the priors are the entity's whole record
+    (the ``action_stats`` fallback of a store without task embeddings). Such
+    a record can still name a winner, and "every action tried here failed"
+    still means something when it is every action; but a shift read over it
+    does not send the agent exploring, since neither the shift nor the record
+    is known to be about this kind of task.
     """
     tried: list[Mapping[str, Any]] = list((priors or {}).get("tried") or [])
     untried: list[str] = list((priors or {}).get("untried") or [])
@@ -348,17 +436,22 @@ def recommend(
             "why": f"{best['action_key']} won {best['won']}/{best['n']} on similar tasks here"
                    + (f" ({best['agents']} agents)" if int(best.get("agents", 0)) > 1 else ""),
         }
-    if top_hit_status == "validated" and not top_hit_recent_failure and not regime_shift and not all_tried_failed:
-        return {
-            "mode": "act",
-            "suggested_action": None,
-            "why": "top memory hit is validated by outcomes and has no recent failure",
-        }
-    if (all_tried_failed or regime_shift) and untried:
+    if (
+        top_hit_status == "validated"
+        and not top_hit_recent_failure
+        and not top_hit_shifted
+        and not all_tried_failed
+    ):
+        why = "top memory hit is validated by outcomes and has no recent failure"
+        if regime_shift:
+            why += "; a shift is suspected elsewhere on this entity, not in this hit's record"
+        return {"mode": "act", "suggested_action": None, "why": why}
+    shift_explores = regime_shift and priors_are_local
+    if (all_tried_failed or shift_explores) and untried and tried:
         pick = untried[stable_bucket(agent_id, len(untried))]
         failed = ", ".join(f"{t['action_key']} {t['won']}/{t['n']}" for t in losers[:4])
-        why = "regime shift suspected for this entity; " if regime_shift else ""
-        why += (f"tried and failed here: {failed}; " if failed else "")
+        why = "regime shift suspected for tasks like this; " if shift_explores else ""
+        why += (f"tried and failed on similar tasks here: {failed}; " if failed else "")
         why += f"{len(untried)} untried — try {pick}"
         return {"mode": "explore", "suggested_action": pick, "untried": untried, "why": why}
     if have_candidates and all_tried_failed and not untried:
@@ -366,7 +459,10 @@ def recommend(
         return {
             "mode": "escalate",
             "suggested_action": None,
-            "why": f"every candidate action has failed on similar tasks here: {failed}",
+            "why": (
+                f"every known action has failed on tasks like this: {failed}. "
+                "If you have attempts left, try an action not listed; otherwise hand off"
+            ),
         }
     if have_candidates and top_hit_status == "discredited" and not untried and tried:
         return {
@@ -399,6 +495,9 @@ def render_priors(priors: Mapping[str, Any] | None, recommendation: Mapping[str,
 
 __all__ = [
     "ACTION_VALUE_MAX_CHARS",
+    "PRIORS_NEIGHBOURHOOD_MIN_W",
+    "PRIORS_NEIGHBOURHOOD_TAU",
+    "neighbourhood_weights",
     "PRIORS_K",
     "PRIORS_MIN_SIMILARITY",
     "PRIORS_DAILY_DECAY",

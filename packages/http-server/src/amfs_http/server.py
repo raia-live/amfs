@@ -46,6 +46,7 @@ from amfs_core.aggregates import (
     entry_content_chars,
     recall_tokens_for_chars,
 )
+from amfs_core.ranking import composite_score
 from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
 from amfs_core.actions import actions_taken as derive_actions_taken
@@ -349,8 +350,41 @@ from amfs_core.exclusions import (  # noqa: E402
 )
 from amfs_core.evidence import (  # noqa: E402
     DISCREDIT_THRESHOLD,
+    blend_local_evidence as _blend_local_evidence,
     is_synthetic_key as _is_synthetic_key,
+    locally_valid as _locally_valid,
 )
+
+
+def _local_evidence_enabled() -> bool:
+    """Whether retrieve conditions evidence on the query (default) or uses the
+    entry's pooled record alone. ``AMFS_LOCAL_EVIDENCE=0`` switches it off."""
+    return os.environ.get("AMFS_LOCAL_EVIDENCE", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+#: Entries whose local record is read per retrieve: the most relevant ones.
+#: Thirty matches the rerank window; the record of the long tail does not
+#: change what the agent is shown.
+LOCAL_EVIDENCE_HEAD = 30
+#: Most below-gate (discredited) entries read near the query per retrieve.
+BELOW_GATE_LIMIT = 50
+#: An entry is "about this query" — for the query-scoped regime shift — when
+#: its similarity is within this of the best hit's, or it matched on keywords.
+LOCAL_SIM_GAP = 0.1
+
+
+def _rank_anchored() -> bool:
+    """Whether trust modulates relevance (default) or is added to it.
+
+    ``AMFS_RANK_ADDITIVE_TRUST=1`` restores the pre-2026-09-18 weighted sum
+    without a code deploy. See ``amfs_core.ranking`` for why the default
+    changed.
+    """
+    return os.environ.get("AMFS_RANK_ADDITIVE_TRUST", "").strip().lower() not in (
+        "1", "true", "yes", "on",
+    )
 
 
 def _retrieve_min_semantic() -> float:
@@ -756,6 +790,14 @@ def _compact_entry_response(entry: MemoryEntry, *, rank: int = 0) -> dict[str, A
     return data
 
 
+def _search_sync(adapter: Any, query: SearchQuery, branch: Any) -> list[MemoryEntry]:
+    """``adapter.search`` with or without the branch keyword, whichever it takes."""
+    try:
+        return adapter.search(query, branch=branch)
+    except TypeError:
+        return adapter.search(query)
+
+
 async def _discredited_below_gate(
     entity_path: str,
     *,
@@ -828,18 +870,28 @@ def _priors_for_retrieve(
     text: str,
     embedder: Any,
     candidate_actions: list[str] | None,
+    query_vector: list[float] | None = None,
 ) -> dict[str, Any] | None:
     """Action priors for ``entity_path`` on tasks like ``text``.
 
-    Nearest committed outcomes by task embedding when the store can do that;
-    otherwise the most recent outcomes about the entity. ``None`` when the
-    adapter has no outcome record at all (filesystem, S3), so the caller sends
-    nothing rather than an empty block.
+    Nearest committed outcomes by task embedding when the store can do that,
+    re-weighted relative to the nearest one (``neighbourhood_weights``) so the
+    priors are about this kind of task and not every task on the entity;
+    otherwise the most recent outcomes about the entity. ``None`` when there
+    is no outcome record to report — the adapter keeps none (filesystem, S3)
+    or nothing has been committed on the entity yet — so the caller sends
+    nothing rather than a block whose only content is the candidate list the
+    agent itself supplied.
+
+    Synchronous, and blocking on the sync adapter: callers on the event loop
+    run it through ``_offload``. ``query_vector`` is the caller's embedding of
+    ``text`` when it has one, so the model is not run a second time.
     """
     from amfs_core.actions import (
         PRIORS_K,
         PRIORS_MIN_SIMILARITY,
         aggregate_priors,
+        neighbourhood_weights,
     )
 
     adapter = _get_memory()._adapter
@@ -847,14 +899,19 @@ def _priors_for_retrieve(
     stats = getattr(adapter, "action_stats", None)
     rows: list[dict[str, Any]] = []
     source = "none"
-    if callable(similar) and embedder is not None and text.strip():
+    if callable(similar) and text.strip() and (query_vector is not None or embedder is not None):
         try:
+            vec = query_vector if query_vector is not None else embedder.embed(text[:2000])
+            # Over-fetch, then keep the neighbourhood: the floor admits every
+            # task on the entity under a retrieval embedder, and the cut that
+            # matters is relative to the best match.
             rows = similar(
                 entity_path,
-                embedder.embed(text[:2000]),
-                k=PRIORS_K,
+                vec,
+                k=PRIORS_K * 3,
                 min_similarity=PRIORS_MIN_SIMILARITY,
             )
+            rows = neighbourhood_weights(rows)[:PRIORS_K]
             source = "similar_outcomes"
         except Exception:  # noqa: BLE001 - priors are best-effort
             logger.debug("similar_outcomes failed", exc_info=True)
@@ -866,11 +923,16 @@ def _priors_for_retrieve(
         except Exception:  # noqa: BLE001
             logger.debug("action_stats failed", exc_info=True)
             rows = []
-    if not rows and not candidate_actions:
+    if not rows:
         return None
     block = aggregate_priors(rows, candidate_actions=candidate_actions)
     block["source"] = source
     block["entity_path"] = entity_path
+    if source == "similar_outcomes" and rows:
+        block["neighbourhood"] = {
+            "best_similarity": round(max(float(r.get("task_similarity") or 0.0) for r in rows), 3),
+            "outcomes": len(rows),
+        }
     return block
 
 
@@ -2204,6 +2266,73 @@ async def retrieve_entries(
                 entry.entry_key, {"entry": entry, "sim": 0.0, "keyword": 1.0}
             )
 
+    # 3d. Below-gate read, scoped to this query. A discredited entry sits under
+    #     the discredit threshold by definition, so a caller gating at or above
+    #     it (the benchmark's setting, and a reasonable production one) never
+    #     sees the rule that stopped working — nor, until now, the rule that
+    #     stopped working *elsewhere* but still works for tasks like this one.
+    #     Read semantically with the query vector already in hand, so each row
+    #     arrives with its similarity: only the discredited ones are kept, and
+    #     only as candidates for the avoid list, the local-evidence rescue in
+    #     6b, and the query-scoped regime-shift reading in 12. Entries that are
+    #     merely low-confidence stay hidden, as the caller's gate asks.
+    below_gate: dict[str, dict[str, Any]] = {}
+    if req.entity_path and req.min_confidence > 0.0:
+        gate_ceiling = min(req.min_confidence, DISCREDIT_THRESHOLD)
+        # Semantic, with the vector already in hand.
+        if _async_adapter is not None and embedder is not None and topical in query_vectors:
+            try:
+                pairs = await _async_adapter.semantic_search(
+                    SemanticQuery(
+                        text=topical,
+                        entity_path=req.entity_path,
+                        min_confidence=0.0,
+                        max_confidence=gate_ceiling,
+                        limit=BELOW_GATE_LIMIT,
+                        embedding=query_vectors[topical],
+                    ),
+                    embedder,
+                    branch=branch,
+                )
+            except Exception:  # noqa: BLE001 - best-effort
+                logger.debug("below-gate semantic read failed", exc_info=True)
+                pairs = []
+            for entry, sim in pairs:
+                if getattr(entry, "discredited_at", None) is None or entry.entry_key in candidates:
+                    continue
+                below_gate[entry.entry_key] = {"entry": entry, "sim": sim, "keyword": 0.0}
+        # Lexical, always: the channel the ranked list itself always runs, and
+        # the only one a store without vectors has.
+        below_lex = SearchQuery(
+            query=topical,
+            entity_path=req.entity_path,
+            min_confidence=0.0,
+            max_confidence=gate_ceiling,
+            limit=BELOW_GATE_LIMIT,
+            sort_by="recency",
+            depth=3,
+            include_artifacts=req.include_artifacts,
+        )
+        lex_below: list[MemoryEntry] = []
+        try:
+            if _async_adapter is not None:
+                lex_below = await _async_adapter.search(below_lex, branch=branch)
+            else:
+                lex_below = await _offload(
+                    _db_executor, _search_sync, _get_memory()._adapter, below_lex, branch
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug("below-gate lexical read failed", exc_info=True)
+        for entry in lex_below:
+            if getattr(entry, "discredited_at", None) is None or entry.entry_key in candidates:
+                continue
+            slot = below_gate.get(entry.entry_key)
+            if slot is None:
+                below_gate[entry.entry_key] = {"entry": entry, "sim": 0.0, "keyword": 1.0}
+            else:
+                slot["keyword"] = 1.0
+        candidates.update(below_gate)
+
     # 4. Drop benchmark/system scratch namespaces from user recall, and the
     #    system-written contrast lessons: those are consumed by the briefing
     #    (folded into the discredited section as "replaced by") and are not
@@ -2238,22 +2367,60 @@ async def retrieve_entries(
     #     threshold and no success has lifted them since. Out of the ranked
     #     list unless asked for; kept aside so ``include_avoid`` can hand them
     #     back flagged, because "this is what stopped working" is an answer.
+    #     Before the split, the local record: for the most relevant candidates,
+    #     what happened on tasks like this one. An entry's pooled evidence sums
+    #     every outcome it was credited with whatever the task; a rule that is
+    #     right for one class of task and wrong for another reads ``contested``
+    #     to both. The outcome rows carry the task embedding, so the record can
+    #     be conditioned on the query — and a discredited rule that still works
+    #     for tasks like this one is kept, labelled ``contested``, rather than
+    #     hidden from the one class that needs it.
+    local_evidence: dict[str, dict[str, Any]] = {}
+    if _local_evidence_enabled() and topical in query_vectors and candidates:
+        near_fn = getattr(_get_memory()._adapter, "evidence_near", None)
+        if callable(near_fn):
+            by_relevance = sorted(
+                candidates.values(), key=lambda v: (v["sim"], v["keyword"]), reverse=True
+            )
+            head_keys = [v["entry"].entry_key for v in by_relevance[:LOCAL_EVIDENCE_HEAD]]
+            try:
+                local_evidence = await _offload(
+                    _db_executor, near_fn, head_keys, query_vectors[topical]
+                )
+            except Exception:  # noqa: BLE001 - the pooled record stands
+                logger.debug("evidence_near failed", exc_info=True)
+                local_evidence = {}
+
     avoided: list[MemoryEntry] = []
+    # entry_key -> (similarity, keyword) for the query-scoped shift reading.
+    avoided_match: dict[str, tuple[float, float]] = {}
+    rescued: set[str] = set()
     if not req.include_discredited:
         kept_candidates: dict[str, dict[str, Any]] = {}
         for k, v in candidates.items():
             if getattr(v["entry"], "discredited_at", None) is not None:
-                if v["sim"] > 0.0 or v["keyword"] > 0.0:
+                if _locally_valid(local_evidence.get(k)):
+                    rescued.add(k)
+                    kept_candidates[k] = v
+                elif v["sim"] > 0.0 or v["keyword"] > 0.0:
                     avoided.append(v["entry"])
+                    avoided_match[k] = (float(v["sim"]), float(v["keyword"]))
             else:
                 kept_candidates[k] = v
         candidates = kept_candidates
+    else:
+        # Nothing hidden, so nothing to rescue; the below-gate rows join the
+        # ranked list like any other candidate.
+        pass
 
-    # 7. Blend semantic + recency + confidence + evidence + keyword.
+    # 7. Blend: relevance (semantic + keyword), modulated by trust (confidence
+    #    + evidence) and recency. See ``amfs_core.ranking`` for the form and
+    #    the measurement behind it.
     now = _dt.now(_tz.utc)
     half_life = 30.0
     keyword_weight = 0.15
     evidence_weight = req.evidence_weight
+    anchored = _rank_anchored()
 
     def _composite(
         relevance: float, recency: float, conf: float, keyword: float, artifact: bool,
@@ -2273,12 +2440,18 @@ async def retrieve_entries(
         0.9 that has been confirmed a dozen times, and what pushes an entry
         with a mixed record below both.
         """
-        score = (
-            req.semantic_weight * relevance
-            + recency_weight * recency
-            + req.confidence_weight * conf
-            + keyword_weight * keyword
-            + evidence_weight * evidence
+        score = composite_score(
+            relevance=relevance,
+            recency=recency,
+            confidence=conf,
+            evidence=evidence,
+            keyword=keyword,
+            semantic_weight=req.semantic_weight,
+            recency_weight=recency_weight,
+            confidence_weight=req.confidence_weight,
+            keyword_weight=keyword_weight,
+            evidence_weight=evidence_weight,
+            anchored=anchored,
         )
         return score * ARTIFACT_PENALTY if artifact else score
 
@@ -2297,18 +2470,36 @@ async def retrieve_entries(
             recency = 0.0
         conf = float(entry.confidence)
         artifact = _is_artifact(entry)
-        evidence = _evidence_signal(entry)
+        pooled = _evidence_signal(entry)
+        local = local_evidence.get(entry.entry_key)
+        evidence, local_w = _blend_local_evidence(pooled, local)
+        status = entry.evidence_status
+        if entry.entry_key in rescued:
+            # Discredited everywhere, working here: the label the pooled
+            # record would give a mixed history, and the one the agent should
+            # read as "check before you lean on it".
+            status = "contested"
+            conf = max(conf, DISCREDIT_THRESHOLD)
         # Components are kept unrounded so step 8 can rebuild the score
         # exactly; rounding happens once, on the way out.
-        scored.append((entry, _composite(sim, recency, conf, keyword, artifact, evidence), {
+        bd: dict[str, Any] = {
             "semantic": sim,
+            "relevance": req.semantic_weight * sim + keyword_weight * keyword,
             "recency": recency,
             "confidence": conf,
             "keyword": keyword,
             "evidence": evidence,
-            "evidence_status": entry.evidence_status,
+            "evidence_status": status,
             "is_artifact": artifact,
-        }))
+        }
+        if local_w > 0.0 and local is not None:
+            bd["evidence_local"] = {
+                "success": round(float(local.get("success", 0.0)), 3),
+                "failure": round(float(local.get("failure", 0.0)), 3),
+                "n": int(local.get("n", 0)),
+                "weight": round(local_w, 3),
+            }
+        scored.append((entry, _composite(sim, recency, conf, keyword, artifact, evidence), bd))
 
     scored.sort(key=lambda t: t[1], reverse=True)
 
@@ -2358,7 +2549,8 @@ async def retrieve_entries(
                         bd["is_artifact"], bd.get("evidence", 0.0),
                     ),
                     {**bd, "rerank": rs, "rerank_normalised": norm,
-                     "rerank_absolute": absolute_score},
+                     "rerank_absolute": absolute_score,
+                     "relevance": req.semantic_weight * norm + keyword_weight * bd["keyword"]},
                 )
                 for (entry, _, bd), rs, norm, absolute_score in zip(
                     head, raw, normalised, absolute
@@ -2447,13 +2639,37 @@ async def retrieve_entries(
     #     within reach of it and drop the rest. Never below one result.
     if req.adaptive_k and head and head[0][0].evidence_status == "validated":
         top_score = head[0][1]
-        head = [t for t in head if t[1] >= top_score * ADAPTIVE_K_KEEP_RATIO] or head[:1]
+        if anchored:
+            # Under the anchored blend the score is relevance scaled by trust,
+            # so "within reach" is read on the two terms it is made of: a
+            # validated peer stays if its score is close; an entry the record
+            # has not confirmed stays only if it is *more* relevant than the
+            # leader — the one case where the leader's record, not its topic,
+            # put it first, and the agent should still see what the query was
+            # actually about.
+            top_rel = float(head[0][2].get("relevance") or 0.0)
+            head = [head[0]] + [
+                t for t in head[1:]
+                if (
+                    t[0].evidence_status == "validated"
+                    and t[1] >= top_score * ADAPTIVE_K_KEEP_RATIO
+                )
+                or float(t[2].get("relevance") or 0.0) > top_rel
+            ]
+        else:
+            head = [t for t in head if t[1] >= top_score * ADAPTIVE_K_KEEP_RATIO] or head[:1]
 
     render = _compact_entry_response if req.compact else _entry_to_response
     out: list[dict[str, Any]] = []
     for rank, (entry, score, breakdown) in enumerate(head):
         data = _compact_entry_response(entry, rank=rank) if req.compact else render(entry)
         data["_score"] = round(score, 4)
+        if entry.entry_key in rescued:
+            # The label the ranking used, not the pooled one the entry carries:
+            # to this query the rule is contested, not discredited, and the
+            # agent reads the top-level field.
+            data["evidence_status"] = breakdown.get("evidence_status")
+            data["_rescued"] = True
         if req.compact:
             data["_breakdown"] = {"evidence_status": breakdown.get("evidence_status")}
         else:
@@ -2482,11 +2698,21 @@ async def retrieve_entries(
     if req.include_priors and req.entity_path:
         from amfs_core.actions import recommend as _recommend
 
-        priors = _priors_for_retrieve(
+        priors_text = req.situation or topical
+        priors_vec = query_vectors.get(priors_text)
+        if priors_vec is None and embedder is not None and callable(getattr(embedder, "embed", None)):
+            try:
+                priors_vec = await _offload(_model_executor, embedder.embed, priors_text[:2000])
+            except Exception:  # noqa: BLE001
+                priors_vec = None
+        priors = await _offload(
+            _db_executor,
+            _priors_for_retrieve,
             entity_path=req.entity_path,
-            text=req.situation or topical,
+            text=priors_text,
             embedder=embedder,
             candidate_actions=req.candidate_actions,
+            query_vector=priors_vec,
         )
         top = head[0][0] if head else None
         recent_failure = bool(
@@ -2513,6 +2739,16 @@ async def retrieve_entries(
         # entity-wide, so it also brings in the rule that stopped working but
         # shares no words with this query — which the ranked list never held
         # whatever the gate.
+        #
+        # Two readings, two uses. The *entity-wide* one — head, avoided, and
+        # every discredited entry on the entity — is reported in ``_meta`` for
+        # the briefing-style "something on this entity changed" signal. The
+        # *query-scoped* one steers the recommendation: only the entries this
+        # query is about (a similarity within LOCAL_SIM_GAP of the best hit,
+        # or a keyword match), so a rule that stopped working for one class of
+        # task does not send every other class to explore past memory that is
+        # still right for it. Grid v3 measured that mistake at 14% success on
+        # the explores it produced.
         shift_pool: list[MemoryEntry] = [e for e, _, _ in head] + list(avoided)
         seen_keys = {e.entry_key for e in shift_pool}
         shift_pool.extend(
@@ -2527,29 +2763,57 @@ async def retrieve_entries(
         )
         shifted_entries = [e for e in shift_pool if _regime_shifted(e, now=now)]
         shifted = bool(shifted_entries)
-        shift_at = max(
-            (
-                at if at.tzinfo else at.replace(tzinfo=UTC)
-                for at in (e.last_outcome_at for e in shifted_entries)
-                if at is not None
-            ),
-            default=None,
+
+        def _shift_at(entries: list[MemoryEntry]) -> datetime | None:
+            return max(
+                (
+                    at if at.tzinfo else at.replace(tzinfo=UTC)
+                    for at in (e.last_outcome_at for e in entries)
+                    if at is not None
+                ),
+                default=None,
+            )
+
+        best_sim = max((float(bd.get("semantic") or 0.0) for _, _, bd in head), default=0.0)
+        local_floor = max(0.0, best_sim - LOCAL_SIM_GAP)
+
+        def _about_this_query(entry: MemoryEntry, sim: float, keyword: float) -> bool:
+            return keyword > 0.0 or (sim > 0.0 and sim >= local_floor)
+
+        local_pool: list[MemoryEntry] = [
+            e for e, _, bd in head
+            if _about_this_query(e, float(bd.get("semantic") or 0.0), float(bd.get("keyword") or 0.0))
+        ]
+        local_pool.extend(
+            e for e in avoided
+            if _about_this_query(e, *avoided_match.get(e.entry_key, (0.0, 0.0)))
         )
+        shifted_local_entries = [e for e in local_pool if _regime_shifted(e, now=now)]
+        shifted_local = bool(shifted_local_entries)
+        top_shifted = bool(top is not None and _regime_shifted(top, now=now))
         recommendation = _recommend(
             priors,
             agent_id=req.agent_id or "",
             candidate_actions=req.candidate_actions,
             top_hit_status=top.evidence_status if top is not None else None,
             top_hit_recent_failure=recent_failure,
-            regime_shift=shifted,
-            regime_shift_at=shift_at,
+            top_hit_shifted=top_shifted,
+            regime_shift=shifted_local,
+            regime_shift_at=_shift_at(shifted_local_entries),
+            # ``action_stats`` is every outcome on the entity, no similarity:
+            # a record that can name a winner but is not about this kind of
+            # task, so a shift read over it does not send the agent exploring.
+            priors_are_local=(priors or {}).get("source") != "action_stats",
         )
-        if priors is not None or recommendation is not None:
+        if priors is not None or recommendation is not None or shifted:
             out.append({
                 "_meta": True,
                 "priors": priors,
                 "recommendation": recommendation,
                 "regime_shift": shifted,
+                "regime_shift_scope": (
+                    "query" if shifted_local else ("entity" if shifted else None)
+                ),
             })
     return out
 
@@ -3462,6 +3726,12 @@ _MAX_ATTEMPTS_PER_OUTCOME = 50
 # Named rather than inlined because it is the one number a reader will want to
 # argue with: enough keys to act on, few enough that the block stays a summary.
 _GAP_SAMPLE = 3
+#: Seconds the commit response waits for the gap report. It is the least
+#: valuable thing on the response and runs two 150-row searches plus an
+#: embedding; under load those were a visible share of commit latency. Past
+#: the budget the commit returns without it. ``AMFS_MEMORY_GAP_TIMEOUT``
+#: overrides; ``0`` turns the report off.
+_GAP_TIMEOUT_S = float(os.environ.get("AMFS_MEMORY_GAP_TIMEOUT", "2.0") or 0.0)
 
 
 async def _memories_matching_task(
@@ -3798,11 +4068,14 @@ async def commit_outcome(
     # order of those two should be visible in the code. The same reasoning put
     # the loose annotation on the MCP ``actions`` parameter — a defect in the
     # reporting half must never cost the seal.
-    try:
-        gap = await _memory_gap(req, request=request)
-    except Exception:  # noqa: BLE001
-        logger.debug("memory gap report failed", exc_info=True)
-        gap = None
+    gap = None
+    if _GAP_TIMEOUT_S > 0:
+        try:
+            gap = await asyncio.wait_for(_memory_gap(req, request=request), timeout=_GAP_TIMEOUT_S)
+        except TimeoutError:
+            logger.debug("memory gap report skipped: over %.1fs budget", _GAP_TIMEOUT_S)
+        except Exception:  # noqa: BLE001
+            logger.debug("memory gap report failed", exc_info=True)
     if gap is not None:
         result["memory_gap"] = gap
     return result

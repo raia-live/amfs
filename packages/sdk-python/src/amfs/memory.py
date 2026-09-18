@@ -20,6 +20,7 @@ from amfs_core.actions import actions_taken as derive_actions_taken, entity_path
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
 from amfs_core.content import embedding_input
 from amfs_core.embedder import EmbedderABC
+from amfs_core.ranking import composite_score
 from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker
 from amfs_core.exceptions import StaleWriteError
 from amfs_core.lifecycle import LifecycleManager
@@ -775,11 +776,20 @@ class AgentMemory:
             if entry.discredited_at is not None and not recall_config.include_discredited:
                 continue
             evidence = _evidence.evidence_signal(entry)
-            composite = (
-                recall_config.semantic_weight * semantic_score
-                + recall_config.recency_weight * recency_score
-                + recall_config.confidence_weight * confidence_score
-                + recall_config.evidence_weight * evidence
+            # The server's blend, so an agent scoring locally ranks the way
+            # the hosted retrieve would. When there is no query there is no
+            # relevance to anchor on, and the additive form orders by recency
+            # and trust alone, as before.
+            composite = composite_score(
+                relevance=semantic_score,
+                recency=recency_score,
+                confidence=confidence_score,
+                evidence=evidence,
+                semantic_weight=recall_config.semantic_weight,
+                recency_weight=recall_config.recency_weight,
+                confidence_weight=recall_config.confidence_weight,
+                evidence_weight=recall_config.evidence_weight,
+                anchored=query_vec is not None,
             )
             scored.append(ScoredEntry(
                 entry=entry,
