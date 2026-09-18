@@ -1098,12 +1098,14 @@ class AdapterABC(ABC):
         Returns (entry, similarity) tuples sorted by similarity descending.
         Adapters may override with vector-index implementations (e.g. pgvector).
         """
-        query_vec = embedder.embed(query.text)
+        query_vec = query.embedding if query.embedding is not None else embedder.embed(query.text)
         entries = self.list(query.entity_path)
 
         scored: list[tuple[MemoryEntry, float]] = []
         for entry in entries:
             if entry.confidence < query.min_confidence:
+                continue
+            if query.max_confidence is not None and entry.confidence > query.max_confidence:
                 continue
             if entry.embedding is None:
                 continue

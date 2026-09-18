@@ -680,13 +680,26 @@ class ConflictPolicy(str, Enum):
 
 
 class SemanticQuery(BaseModel):
-    """Query for semantic (embedding-based) search."""
+    """Query for semantic (embedding-based) search.
+
+    ``max_confidence`` bounds the search from above: it is how a caller asks
+    for the entries a confidence gate would otherwise hide — the discredited
+    rules near this query — without giving up the similarity ordering. Left
+    ``None`` there is no upper bound.
+
+    ``embedding`` is the query vector when the caller has already computed
+    it. An adapter given one must use it instead of embedding ``text`` again:
+    the server embeds once, off its event loop, and reuses the vector across
+    the variant and below-gate reads of a single retrieve.
+    """
 
     text: str
     entity_path: str | None = None
     min_confidence: float = 0.0
+    max_confidence: float | None = None
     limit: int = 10
     min_similarity: float = 0.0
+    embedding: list[float] | None = None
 
 
 # ── Knowledge graph models ────────────────────────────────────────────

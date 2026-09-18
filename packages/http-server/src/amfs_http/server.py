@@ -17,12 +17,15 @@ import argparse
 import asyncio
 import hashlib
 import inspect
+import contextvars
+import functools
 import json
 import logging
 import math
 import os
 import re
 import secrets
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, timezone
@@ -205,7 +208,46 @@ _sse_manager = SSEManager()
 # broadcasts aimed at it are dropped in silence — which is how it behaved.
 app.state.sse_manager = _sse_manager
 
-_bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="amfs-bg")
+_bg_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="amfs-bg")
+
+# ── Keeping the event loop free ────────────────────────────────────────
+# This server is one uvicorn process per instance, so everything that runs
+# synchronously inside an ``async def`` route stalls every other request on
+# the instance for as long as it takes. Three things did, and together they
+# were the production bottleneck measured on 2026-09-18 (a bare ``/stats``
+# at 27 s while the database sat at 3% CPU): the ONNX embedder on every write
+# and retrieve, the Pro cross-encoder rerank over up to thirty documents on
+# every retrieve, and ``commit_outcome`` calling the sync adapter end to end.
+#
+# Model work goes to ``_model_executor``, sized to the CPUs because ONNX
+# releases the GIL and more threads than cores only thrash. Sync adapter
+# work goes to ``_db_executor``; its size is a ceiling on concurrent
+# checkouts from the sync pool, not a throughput target. ``_offload`` copies
+# the calling context into the thread so the tenant ContextVars the RLS pool
+# reads are the request's, not the thread's leftovers.
+_model_executor = ThreadPoolExecutor(
+    max_workers=max(1, os.cpu_count() or 2), thread_name_prefix="amfs-model"
+)
+_db_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="amfs-db")
+
+
+async def _offload(executor: ThreadPoolExecutor, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+    """Run ``fn(*args, **kwargs)`` on ``executor`` with the current context."""
+    loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
+    return await loop.run_in_executor(
+        executor, functools.partial(ctx.run, functools.partial(fn, *args, **kwargs))
+    )
+
+
+# ``commit_outcome`` mutates the shared memory handle (its tagger and the
+# trace it just built) for the length of the commit. While the commit ran
+# inline on the loop nothing could interleave; now that it runs in a thread
+# and is awaited, two commits on one process must not overlap or each would
+# be attributed to the other's agent. Commits are a small share of traffic,
+# so serialising them costs little; everything else on the instance keeps
+# being served while one is in flight.
+_outcome_lock = asyncio.Lock()
 _known_agents: set[str] = set()
 # Tracks (agent, namespace, user) triples whose owner linkage was already
 # upserted, so the hot write path doesn't repeat the DB call. Kept separate
@@ -1452,7 +1494,11 @@ async def write_entry(
             if _embedder is not None:
                 try:
                     entry_obj = entry_obj.model_copy(
-                        update={"embedding": _embedder.embed(_embed_text)}
+                        update={
+                            "embedding": await _offload(
+                                _model_executor, _embedder.embed, _embed_text
+                            )
+                        }
                     )
                 except Exception:  # noqa: BLE001 - never fail a write on embedding
                     logger.warning(
@@ -2087,13 +2133,25 @@ async def retrieve_entries(
     candidates: dict[str, dict[str, Any]] = {}
 
     # 3a. Semantic channel (per query variant), keep best similarity per entry.
+    #     Each variant is embedded once, off the event loop, and the vector is
+    #     reused by the below-gate read further down.
+    query_vectors: dict[str, list[float]] = {}
     if embedder is not None and _async_adapter is not None:
         for qtext in queries:
+            # Best-effort: an embedder that cannot be driven from here (a test
+            # stub, an unexpected model failure) leaves the adapter to embed
+            # the text itself, exactly as it did before the vector was shared.
+            if callable(getattr(embedder, "embed", None)):
+                try:
+                    query_vectors[qtext] = await _offload(_model_executor, embedder.embed, qtext)
+                except Exception:  # noqa: BLE001
+                    logger.debug("query embedding failed — adapter will embed", exc_info=True)
             sq = SemanticQuery(
                 text=qtext,
                 entity_path=req.entity_path,
                 min_confidence=req.min_confidence,
                 limit=pool,
+                embedding=query_vectors.get(qtext),
             )
             try:
                 pairs = await _async_adapter.semantic_search(sq, embedder, branch=branch)
@@ -2273,7 +2331,15 @@ async def retrieve_entries(
     if reranker is not None and getattr(reranker, "available", False) and scored:
         head = scored[:rerank_top_n]
         try:
-            rr_scores = reranker.rerank(topical, [_doc_text_for_rerank(e) for e, _, _ in head])
+            # Cross-encoder inference over up to thirty documents: the single
+            # most expensive thing on the read path, and it ran on the event
+            # loop until 2026-09-18.
+            rr_scores = await _offload(
+                _model_executor,
+                reranker.rerank,
+                topical,
+                [_doc_text_for_rerank(e) for e, _, _ in head],
+            )
         except Exception:  # noqa: BLE001 - rerank is best-effort
             logger.debug("rerank failed", exc_info=True)
             rr_scores = None
@@ -2513,11 +2579,11 @@ async def get_stats(
         # helper the adapter defaults use.
         from amfs_core.aggregates import extended_stats_from_entries
 
-        entries = vis.filter_entries(mem.list())
+        entries = vis.filter_entries(await _offload(_db_executor, mem.list))
         scoped = extended_stats_from_entries(entries)
         return json.loads(json.dumps(scoped, default=str))
 
-    stats = mem._adapter.stats_extended()
+    stats = await _offload(_db_executor, mem._adapter.stats_extended)
     return json.loads(json.dumps(stats, default=str))
 
 
@@ -3118,26 +3184,81 @@ _OUTCOME_TYPE_MAP = {
 }
 
 
-def _get_immutable_store():
-    """Lazily create the immutable trace store (Pro only)."""
-    global _immutable_trace_store
-    if _immutable_trace_store is not None:
-        return _immutable_trace_store
-    if not _HAS_PRO_TRACES:
-        return None
-    dsn = os.environ.get("AMFS_POSTGRES_DSN")
-    if not dsn:
-        return None
+# The trace store holds one psycopg connection for the life of the process
+# and a psycopg connection is not safe for concurrent use. Every seal, from
+# whichever thread, goes through this lock; it also guards the sequence
+# counter below and the reconnect.
+_seal_lock = threading.RLock()
+
+
+def _store_connection_closed(store: Any) -> bool:
+    """Whether the store's connection is known to be gone.
+
+    Cloud SQL closed the store's connection under load on 2026-09-18 (its
+    idle timeout, a failover, or the ``client_connection_check_interval``
+    reaper — the effect is the same) and every seal on the process failed
+    with ``the connection is closed`` from then on, because nothing ever
+    looked. A closed connection reports it; a broken-but-open one is caught
+    by the retry in :func:`_auto_seal_trace`.
+    """
+    conn = getattr(store, "_conn", None)
+    if conn is None:
+        return False
     try:
-        import psycopg
-        from psycopg.rows import dict_row
-        conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
-        _immutable_trace_store = PostgresImmutableTraceStore(conn)
-        logger.info("Immutable trace store initialized")
-        return _immutable_trace_store
-    except Exception:
-        logger.debug("Failed to init immutable trace store", exc_info=True)
-        return None
+        return bool(getattr(conn, "closed", False)) or bool(getattr(conn, "broken", False))
+    except Exception:  # noqa: BLE001 - a fake connection in tests
+        return False
+
+
+def _reset_immutable_store() -> None:
+    """Drop the cached store so the next call reconnects."""
+    global _immutable_trace_store
+    with _seal_lock:
+        store = _immutable_trace_store
+        _immutable_trace_store = None
+        conn = getattr(store, "_conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _get_immutable_store():
+    """Lazily create the immutable trace store (Pro only).
+
+    Rebuilt when the cached store's connection has closed under it. The
+    schema is not re-applied on reconnect: it was applied when the process
+    first opened the store, and re-running the DDL takes locks a busy
+    instance should not be asking for on the request path.
+    """
+    global _immutable_trace_store
+    with _seal_lock:
+        if _immutable_trace_store is not None:
+            if not _store_connection_closed(_immutable_trace_store):
+                return _immutable_trace_store
+            logger.warning("Immutable trace store connection closed — reconnecting")
+            _reset_immutable_store()
+            reconnect = True
+        else:
+            reconnect = False
+        if not _HAS_PRO_TRACES:
+            return None
+        dsn = os.environ.get("AMFS_POSTGRES_DSN")
+        if not dsn:
+            return None
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+            conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+            _immutable_trace_store = PostgresImmutableTraceStore(
+                conn, auto_schema=not reconnect
+            )
+            logger.info("Immutable trace store %s", "reconnected" if reconnect else "initialized")
+            return _immutable_trace_store
+        except Exception:
+            logger.debug("Failed to init immutable trace store", exc_info=True)
+            return None
 
 
 _seal_sequence: dict[str, int] = {}
@@ -3226,61 +3347,100 @@ def _auto_seal_trace(
         oss_trace = getattr(mem, "_last_trace", None)
     if oss_trace is None:
         return None
-    store = _get_immutable_store()
-    if store is None:
-        return None
-    try:
-        from uuid import UUID as _UUID
 
-        now = datetime.now(timezone.utc)
-        # The trace's own session when it has one: a trace posted by a remote
-        # client belongs to that client's session, not to the server handle's.
-        session_id = getattr(oss_trace, "session_id", None) or mem.session_id
-        seq = _seal_sequence.get(session_id, 0)
-        parent_hash = store.get_latest_hash(session_id)
-
-        account_id = None
+    def _is_connection_error(exc: BaseException) -> bool:
         try:
-            from amfs_postgres.tenant_context import get_request_tenant_account_id
-            tid = get_request_tenant_account_id()
-            if tid:
-                account_id = _UUID(tid)
-        except (ImportError, ValueError):
-            pass
+            import psycopg
+            return isinstance(exc, (psycopg.OperationalError, psycopg.InterfaceError))
+        except ImportError:  # pragma: no cover - psycopg absent means no store
+            return False
 
-        imm = _pro_immutable_from_oss_trace(
-            oss_trace,
-            session_id=session_id,
-            sequence_number=seq,
-            account_id=account_id,
-            # From the trace, not from ``mem``. ``mem`` is shared by every
-            # request: the caller's agent is written onto its tagger for the
-            # duration of the commit and restored in a ``finally``, and this runs
-            # after that restore — so reading it here sealed every trace under
-            # the server's own default agent. Tuning datasets are built from the
-            # sealed traces and selected by agent, so the loss is silent: the
-            # model trains on an empty set. The trace was built while the tagger
-            # still pointed at the caller.
-            agent_id=getattr(oss_trace, "agent_id", None) or mem.agent_id,
-            created_at=now,
-            session_metadata=session_metadata,
-        )
-        imm = _pro_finalize_spans(imm)
-        sealed = seal(
-            imm,
-            get_signing_key(),
-            parent_hash=parent_hash,
-            sequence_number=seq,
-            signing_key_id=get_signing_key_id(),
-        )
-        saved = store.save(sealed)
-        _seal_sequence[session_id] = seq + 1
-        logger.info("Auto-sealed immutable trace %s for outcome %s",
-                     saved.id, getattr(oss_trace, "outcome_ref", None))
-        return str(saved.id)
-    except Exception:
-        logger.warning("Failed to auto-seal immutable trace", exc_info=True)
-        return None
+    # One retry, and only for a dead connection: the first attempt may be the
+    # one that discovers the store's connection went away since the last seal.
+    # Anything else fails once, as before. The trace is not lost — the OSS
+    # ``decision_traces`` row was written by the commit; only the immutable
+    # copy is missing, and the warning names the outcome so it can be found.
+    for attempt in (1, 2):
+        store = _get_immutable_store()
+        if store is None:
+            return None
+        try:
+            with _seal_lock:
+                return _seal_with_store(
+                    store, mem, oss_trace, session_metadata=session_metadata
+                )
+        except Exception as exc:  # noqa: BLE001
+            if attempt == 1 and _is_connection_error(exc):
+                logger.warning(
+                    "Trace store connection failed on seal — reconnecting once",
+                    exc_info=True,
+                )
+                _reset_immutable_store()
+                continue
+            logger.warning(
+                "Failed to auto-seal immutable trace for outcome %s",
+                getattr(oss_trace, "outcome_ref", None), exc_info=True,
+            )
+            return None
+    return None
+
+
+def _seal_with_store(
+    store: Any,
+    mem: AgentMemory,
+    oss_trace: Any,
+    *,
+    session_metadata: Any | None,
+) -> str:
+    """The seal itself. Caller holds ``_seal_lock`` and handles failure."""
+    from uuid import UUID as _UUID
+
+    now = datetime.now(timezone.utc)
+    # The trace's own session when it has one: a trace posted by a remote
+    # client belongs to that client's session, not to the server handle's.
+    session_id = getattr(oss_trace, "session_id", None) or mem.session_id
+    seq = _seal_sequence.get(session_id, 0)
+    parent_hash = store.get_latest_hash(session_id)
+
+    account_id = None
+    try:
+        from amfs_postgres.tenant_context import get_request_tenant_account_id
+        tid = get_request_tenant_account_id()
+        if tid:
+            account_id = _UUID(tid)
+    except (ImportError, ValueError):
+        pass
+
+    imm = _pro_immutable_from_oss_trace(
+        oss_trace,
+        session_id=session_id,
+        sequence_number=seq,
+        account_id=account_id,
+        # From the trace, not from ``mem``. ``mem`` is shared by every
+        # request: the caller's agent is written onto its tagger for the
+        # duration of the commit and restored in a ``finally``, and this runs
+        # after that restore — so reading it here sealed every trace under
+        # the server's own default agent. Tuning datasets are built from the
+        # sealed traces and selected by agent, so the loss is silent: the
+        # model trains on an empty set. The trace was built while the tagger
+        # still pointed at the caller.
+        agent_id=getattr(oss_trace, "agent_id", None) or mem.agent_id,
+        created_at=now,
+        session_metadata=session_metadata,
+    )
+    imm = _pro_finalize_spans(imm)
+    sealed = seal(
+        imm,
+        get_signing_key(),
+        parent_hash=parent_hash,
+        sequence_number=seq,
+        signing_key_id=get_signing_key_id(),
+    )
+    saved = store.save(sealed)
+    _seal_sequence[session_id] = seq + 1
+    logger.info("Auto-sealed immutable trace %s for outcome %s",
+                 saved.id, getattr(oss_trace, "outcome_ref", None))
+    return str(saved.id)
 
 
 # The longest slice of a request used to look for matching memory. task_input is
@@ -3488,16 +3648,6 @@ async def commit_outcome(
         valid = ", ".join(_OUTCOME_TYPE_MAP.keys())
         return {"error": f"Invalid outcome_type '{req.outcome_type}'. Must be one of: {valid}"}
 
-    original_agent = mem._tagger.agent_id if req.agent_id else None
-    if req.agent_id:
-        # Ownership guard first: a 409 for a foreign-owned identity must not
-        # leave the process-wide tagger pointing at the requested agent.
-        _link_agent_owner_once(request, req.agent_id, mem.namespace)
-        mem._tagger.agent_id = req.agent_id
-        try:
-            mem._adapter.ensure_agent(req.agent_id, mem.namespace)
-        except Exception:
-            pass
     # The remote session's attribute bag and LLM calls, passed explicitly for
     # the same reason ``tool_calls`` is: ``mem`` is shared, so nothing may be
     # buffered on it between requests. Attributes are validated by
@@ -3539,74 +3689,101 @@ async def commit_outcome(
         raise HTTPException(
             status_code=422, detail="final_action_index must index into tool_calls"
         )
-    try:
-        entries = mem.commit_outcome(
-            req.outcome_ref,
-            otype,
-            causal_entry_keys=req.causal_entry_keys,
-            causal_confidence=req.causal_confidence,
-            attempts=attempts,
-            final_action_index=final_action_index,
-            # The client's read versions, never the server's shared tracker.
-            causal_entry_versions=req.causal_entry_versions or {},
-            # Action-level learning. Derived from the request's own tool calls
-            # and attempts when the client did not send them, never from the
-            # shared tracker; the keys are scanned inside commit_outcome.
-            actions_taken=(
-                req.actions_taken
-                if req.actions_taken is not None
-                else derive_actions_taken(
-                    req.tool_calls,
-                    [a.model_dump(mode="json") for a in attempts],
-                    final_action_index if final_action_index is not None
-                    else (len(req.tool_calls) - 1 if req.tool_calls else None),
-                    otype.value,
-                )
-            ),
-            entity_path=req.entity_path,
-            entity_paths=req.entity_paths,
-            situation=req.situation[:200] if req.situation else None,
-            # Not scanned here: commit_outcome scans at trace construction, so
-            # every caller gets it. Scanning again would be harmless but would
-            # imply this endpoint is where the guarantee lives, which is the
-            # assumption that left the MCP path unscanned.
-            task_input=req.task_input,
-            response_text=req.response_text,
-            # Passed explicitly, and never omitted: ``mem`` is shared across
-            # requests, so letting this fall through to its tracker would attribute
-            # whatever actions happen to be buffered there to this caller.
-            tool_calls=req.tool_calls,
-            attributes=client_attributes or None,
-            llm_calls=client_llm_calls or None,
-            # The same declaration that suppresses the seal below, applied one
-            # layer deeper. The trace this would write is assembled on the shared
-            # handle, so it carried this process's session and whatever the last
-            # request left on its tracker; the caller's own trace arrives on
-            # ``/traces`` moments later. Persisting both left two decision_traces
-            # rows per outcome, indistinguishable by agent because the tagger is
-            # pointed at the caller for exactly this block — so every count and
-            # ratio taken over that table was measured against a population
-            # roughly twice its true size, half of it untrue.
-            persist_trace=not req.trace_follows,
-        )
-    finally:
-        if original_agent is not None:
-            mem._tagger.agent_id = original_agent
-    _audit_log(
-        "outcome.commit",
-        resource=req.outcome_ref,
-        ip_address=request.client.host if request.client else None,
+    commit_kwargs: dict[str, Any] = dict(
+        causal_entry_keys=req.causal_entry_keys,
+        causal_confidence=req.causal_confidence,
+        attempts=attempts,
+        final_action_index=final_action_index,
+        # The client's read versions, never the server's shared tracker.
+        causal_entry_versions=req.causal_entry_versions or {},
+        # Action-level learning. Derived from the request's own tool calls
+        # and attempts when the client did not send them, never from the
+        # shared tracker; the keys are scanned inside commit_outcome.
+        actions_taken=(
+            req.actions_taken
+            if req.actions_taken is not None
+            else derive_actions_taken(
+                req.tool_calls,
+                [a.model_dump(mode="json") for a in attempts],
+                final_action_index if final_action_index is not None
+                else (len(req.tool_calls) - 1 if req.tool_calls else None),
+                otype.value,
+            )
+        ),
+        entity_path=req.entity_path,
+        entity_paths=req.entity_paths,
+        situation=req.situation[:200] if req.situation else None,
+        # Not scanned here: commit_outcome scans at trace construction, so
+        # every caller gets it. Scanning again would be harmless but would
+        # imply this endpoint is where the guarantee lives, which is the
+        # assumption that left the MCP path unscanned.
+        task_input=req.task_input,
+        response_text=req.response_text,
+        # Passed explicitly, and never omitted: ``mem`` is shared across
+        # requests, so letting this fall through to its tracker would attribute
+        # whatever actions happen to be buffered there to this caller.
+        tool_calls=req.tool_calls,
+        attributes=client_attributes or None,
+        llm_calls=client_llm_calls or None,
+        # The same declaration that suppresses the seal below, applied one
+        # layer deeper. The trace this would write is assembled on the shared
+        # handle, so it carried this process's session and whatever the last
+        # request left on its tracker; the caller's own trace arrives on
+        # ``/traces`` moments later. Persisting both left two decision_traces
+        # rows per outcome, indistinguishable by agent because the tagger is
+        # pointed at the caller for exactly this block — so every count and
+        # ratio taken over that table was measured against a population
+        # roughly twice its true size, half of it untrue.
+        persist_trace=not req.trace_follows,
     )
 
-    # Skipped when the caller's own trace is on its way. What would be sealed here
-    # is assembled on the shared handle: the caller's actions and attribute bag were
-    # passed in explicitly above, but the causal entries, query events, state diff
-    # and session window are read off that handle's tracker, so they belong to
-    # whichever requests last touched it. Sealing it as well as the caller's left two
-    # traces per outcome — doubling every count and average taken over them — and
-    # chained the fabricated one under this process's session id, a chain every
-    # account on the process shares.
-    immutable_trace_id = None if req.trace_follows else _auto_seal_trace(mem)
+    # The commit and the seal run on the DB executor rather than inline: the
+    # sync adapter's transaction, the outcome embedding, the trace insert and
+    # the immutable seal together held the event loop for seconds under load,
+    # and every other request on the instance waited behind them. They are
+    # awaited under ``_outcome_lock`` because both read state the shared
+    # handle carries for exactly this block — the tagger's agent and the
+    # trace the commit just built — and an interleaved commit would attribute
+    # each to the other's caller.
+    async with _outcome_lock:
+        original_agent = mem._tagger.agent_id if req.agent_id else None
+        if req.agent_id:
+            # Ownership guard first: a 409 for a foreign-owned identity must not
+            # leave the process-wide tagger pointing at the requested agent.
+            _link_agent_owner_once(request, req.agent_id, mem.namespace)
+            mem._tagger.agent_id = req.agent_id
+            try:
+                await _offload(_db_executor, mem._adapter.ensure_agent, req.agent_id, mem.namespace)
+            except Exception:
+                pass
+        try:
+            entries = await _offload(
+                _db_executor, mem.commit_outcome, req.outcome_ref, otype, **commit_kwargs
+            )
+            # Skipped when the caller's own trace is on its way. What would be
+            # sealed here is assembled on the shared handle: the caller's actions
+            # and attribute bag were passed in explicitly above, but the causal
+            # entries, query events, state diff and session window are read off
+            # that handle's tracker, so they belong to whichever requests last
+            # touched it. Sealing it as well as the caller's left two traces per
+            # outcome — doubling every count and average taken over them — and
+            # chained the fabricated one under this process's session id, a
+            # chain every account on the process shares.
+            immutable_trace_id = (
+                None if req.trace_follows
+                else await _offload(_db_executor, _auto_seal_trace, mem)
+            )
+        finally:
+            if original_agent is not None:
+                mem._tagger.agent_id = original_agent
+
+    _ip = request.client.host if request.client else None
+    _bg_executor.submit(
+        contextvars.copy_context().run,
+        functools.partial(
+            _audit_log, "outcome.commit", resource=req.outcome_ref, ip_address=_ip
+        ),
+    )
 
     result: dict[str, Any] = {
         "outcome_ref": req.outcome_ref,
@@ -3793,7 +3970,10 @@ async def save_trace(
                 session_id=trace.session_id,
             ),
         })
-    saved = mem._adapter.save_trace(trace)
+    # Both DB round trips off the event loop; the seal takes its own lock on
+    # the trace store, and nothing here reads the shared handle's tracker, so
+    # unlike /outcomes this path needs no serialisation of its own.
+    saved = await _offload(_db_executor, mem._adapter.save_trace, trace)
     # Sealed like a trace committed through /outcomes. Until this call, a trace
     # arriving here — which is every trace an HttpAdapter client commits — was
     # never sealed, so it had no immutable copy at all. The saved trace is what
@@ -3801,7 +3981,9 @@ async def save_trace(
     # passed alongside because ``model_validate`` above dropped the
     # ``session_metadata`` keys the Pro recorder's spans travel in.
     raw_meta = body.get("session_metadata") if isinstance(body, dict) else None
-    immutable_trace_id = _auto_seal_trace(mem, saved, session_metadata=raw_meta)
+    immutable_trace_id = await _offload(
+        _db_executor, _auto_seal_trace, mem, saved, session_metadata=raw_meta
+    )
     result = saved.model_dump(mode="json")
     if immutable_trace_id:
         result["immutable_trace_id"] = immutable_trace_id

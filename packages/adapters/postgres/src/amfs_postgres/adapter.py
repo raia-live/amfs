@@ -2205,7 +2205,7 @@ class PostgresAdapter(AdapterABC):
         if not self._has_embedding_col:
             return super().semantic_search(query, embedder)
 
-        query_vec = embedder.embed(query.text)
+        query_vec = query.embedding if query.embedding is not None else embedder.embed(query.text)
 
         conditions = ["namespace = %s", "superseded_at IS NULL", "embedding IS NOT NULL"]
         params: list[Any] = [self._namespace]
@@ -2218,6 +2218,9 @@ class PostgresAdapter(AdapterABC):
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
+        if query.max_confidence is not None:
+            conditions.append("confidence <= %s")
+            params.append(query.max_confidence)
 
         where = " AND ".join(conditions)
         vec_str = f"[{','.join(str(v) for v in query_vec)}]"
