@@ -44,7 +44,7 @@ from amfs_core.aggregates import (
     recall_tokens_for_chars,
 )
 from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
-from amfs_core.capture import scan_captured_arguments, scan_captured_text
+from amfs_core.capture import scan_captured_arguments, scan_captured_text, scan_choice_metadata
 from amfs_core.engine import read_tracker_scope
 from amfs_core.evidence import evidence_signal as _evidence_signal
 from amfs_core.models import (
@@ -2944,9 +2944,13 @@ def _scan_captured_actions(
         arguments = scan_captured_arguments(action.arguments, **scan_identity)
         if arguments is None:
             continue
+        metadata = scan_choice_metadata(action.model_dump(), **scan_identity)
+        if metadata is None:
+            continue
         summary = scan_captured_text(action.result_summary, **scan_identity)
         kept.append(action.model_copy(update={
             "arguments": arguments,
+            **metadata,
             "result_summary": summary or "",
         }))
     return kept

@@ -28,8 +28,14 @@ from amfs_core.models import (
 from amfs_core.exceptions import StaleWriteError
 
 from amfs.memory import AgentMemory, MemoryScope
+from amfs.decisions import DecisionClient
+from amfs.decision_types import (DecisionModelSpec, DecisionModel, DecisionVersion, DecisionDataset,
+    DecisionTrainingJob, DecisionUsage, DecisionHistory, DecisionSummary, DecisionDetail, ServingMode)
 
 __all__ = [
+    "DecisionClient",
+    "DecisionModelSpec", "DecisionModel", "DecisionVersion", "DecisionDataset",
+    "DecisionTrainingJob", "DecisionUsage", "DecisionHistory", "DecisionSummary", "DecisionDetail", "ServingMode",
     "AgentMemory",
     "AMFSConfig",
     "ConflictPolicy",

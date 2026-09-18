@@ -1842,6 +1842,8 @@ def amfs_record_action(
     arguments: dict[str, Any] | None = None,
     result: str = "",
     success: bool = True,
+    choices: list[str] | None = None,
+    decision_type: str | None = None,
 ) -> str:
     """Record an action you took — the tool you called and what you passed it.
 
@@ -1849,6 +1851,9 @@ def amfs_record_action(
     rolling back, editing a file, refunding, sending, opening a PR, changing a
     setting. Not for reading or searching — record what you *did*, not what you
     looked at. Use amfs_record_context for what you learned.
+
+    Optional choices lists up to 32 labels (128 chars each); decision_type is
+    a bounded identifier, e.g. next_tool. These are unverified caller reports.
 
     This is the counterpart to task_input on amfs_commit_outcome. Together they
     form a complete record of the decision: what you were asked, and what you did
@@ -1876,6 +1881,8 @@ def amfs_record_action(
         arguments or {},
         result=result,
         success=success,
+        **({"choices": choices} if choices is not None else {}),
+        **({"decision_type": decision_type} if decision_type is not None else {}),
     )
     return json.dumps({"recorded_action": tool_name, "success": success})
 

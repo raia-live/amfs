@@ -185,3 +185,19 @@ def scan_captured_arguments(
         logger.info("Action arguments blocked by SafetyGate; dropping the action")
         return None
     return result  # type: ignore[return-value]
+
+
+def scan_choice_metadata(action: dict[str, Any], **identity: Any) -> dict[str, Any] | None:
+    """Validate/bound before scanning; never silently relabel a candidate set."""
+    from pydantic import ValidationError
+    from amfs_core.models import ToolCall
+    try:
+        value = ToolCall(tool_name="capture", choices=action.get("choices"),
+                         decision_type=action.get("decision_type"))
+    except ValidationError:
+        return None
+    metadata = {k: v for k, v in value.model_dump().items()
+                if k in ("choices", "decision_type")}
+    scanned = scan_captured_arguments(metadata, **identity)
+    # A redacted or blocked label changes the available action's meaning.
+    return metadata if scanned == metadata else None

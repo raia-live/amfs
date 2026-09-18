@@ -16,7 +16,7 @@ from typing import Any, Callable
 from pydantic import ValidationError
 
 from amfs_core.abc import AdapterABC, WatchHandle
-from amfs_core.capture import scan_captured_arguments, scan_captured_text
+from amfs_core.capture import scan_captured_arguments, scan_captured_text, scan_choice_metadata
 from amfs_core.content import embedding_input
 from amfs_core.embedder import EmbedderABC
 from amfs_core.engine import CausalTagger, CoWEngine, ReadTracker
@@ -1225,6 +1225,10 @@ class AgentMemory:
             )
             if arguments is None:
                 continue
+            choice_metadata = scan_choice_metadata(action, adapter=self._adapter,
+                agent_id=self.agent_id, session_id=self.session_id)
+            if choice_metadata is None:
+                continue
             # The result is caller text exactly as much as the arguments are — a
             # tool that mints a credential echoes it back here. Unlike a dropped
             # argument, a dropped result costs nothing: the training target is the
@@ -1239,6 +1243,7 @@ class AgentMemory:
             fields = {
                 **action,
                 "arguments": arguments,
+                **choice_metadata,
                 "result_summary": summary or "",
             }
             # A JSON caller sending an explicit null means "not told", which for a
@@ -1935,6 +1940,8 @@ class AgentMemory:
         source: str | None = None,
         duration_ms: int = 0,
         success: bool = True,
+        choices: list[str] | None = None,
+        decision_type: str | None = None,
     ) -> None:
         """Record an action taken during this session, sealed into the trace on commit.
 
@@ -1946,6 +1953,10 @@ class AgentMemory:
         supervised example: the request in, the action out. Arguments are scanned
         for secrets when the trace is built, and an action whose arguments cannot
         be cleared is dropped whole.
+
+        ``choices`` records up to 32 available labels (128 characters each).
+        ``decision_type`` is a bounded identifier, e.g. next_tool. These are caller
+        claims, not verified alternatives or outcomes. Omitted fields stay absent.
 
         Example::
 
@@ -1963,6 +1974,8 @@ class AgentMemory:
             source=source,
             duration_ms=duration_ms,
             success=success,
+            **({"choices": choices} if choices is not None else {}),
+            **({"decision_type": decision_type} if decision_type is not None else {}),
         )
 
     def explain(self, outcome_ref: str | None = None) -> dict[str, Any]:

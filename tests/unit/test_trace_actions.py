@@ -436,3 +436,50 @@ def test_the_http_adapter_forwards_actions_to_the_server() -> None:
     assert sent["body"]["tool_calls"] == [
         {"tool_name": "deploy_rollback", "arguments": {}}
     ]
+
+
+def test_choice_metadata_round_trip_and_legacy_shape(tmp_path):
+    from amfs_core.models import ToolCall, DecisionTrace
+    legacy = ToolCall(tool_name='legacy').model_dump(mode='json')
+    assert 'choices' not in legacy and 'decision_type' not in legacy
+    choices = ['retry', 'escalate']
+    mem = AgentMemory(agent_id='a', adapter=FilesystemAdapter(root=tmp_path / '.amfs', namespace='test'))
+    mem.record_action('retry', choices=choices, decision_type='workflow.retry')
+    choices.append('mutated')
+    mem.commit_outcome('choices-1', OutcomeType.SUCCESS)
+    _flush_bg()
+    trace = DecisionTrace.model_validate_json(mem._last_trace.model_dump_json())
+    assert trace.tool_calls[0].choices == ['retry', 'escalate']
+    assert trace.tool_calls[0].decision_type == 'workflow.retry'
+
+
+@pytest.mark.parametrize('metadata', [
+    {'choices': ['']}, {'choices': ['  ']}, {'choices': ['a', 'a']},
+    {'choices': ['a'] * 33}, {'choices': ['x' * 129]},
+    {'decision_type': 'spaces invalid'}, {'decision_type': 'x' * 129},
+])
+def test_invalid_choice_metadata_rejected_before_recording(metadata):
+    from amfs_core.engine import ReadTracker
+    tracker = ReadTracker()
+    with pytest.raises(ValueError):
+        tracker.record_action('retry', **metadata)
+    assert tracker.actions == []
+
+
+def test_redacted_choice_metadata_drops_action(monkeypatch, tmp_path):
+    monkeypatch.setattr(capture, 'scan_captured_text', lambda value, **kwargs: '[REDACTED]' if value == 'sensitive' else value)
+    mem = AgentMemory(agent_id='a', adapter=FilesystemAdapter(root=tmp_path / '.amfs', namespace='test'))
+    mem.record_action('retry', choices=['retry', 'sensitive'], decision_type='next_tool')
+    mem.commit_outcome('choices-2', OutcomeType.SUCCESS)
+    _flush_bg()
+    assert mem._last_trace.tool_calls == []
+
+
+def test_direct_http_trace_scans_choice_labels(monkeypatch):
+    from types import SimpleNamespace
+    from amfs_core.models import ToolCall
+    _scan_captured_actions = pytest.importorskip("amfs_http.server")._scan_captured_actions
+    monkeypatch.setattr(capture, 'scan_captured_text', lambda value, **kwargs: None if value == 'sensitive' else value)
+    mem = SimpleNamespace(_adapter=None, agent_id='a', session_id='s')
+    actions = [ToolCall(tool_name='retry', choices=['retry', 'sensitive'])]
+    assert _scan_captured_actions(mem, actions) == []
