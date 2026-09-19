@@ -24,6 +24,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _HOT_CONTEXT_LIMIT = 3
+#: Priority rows fetched for ``hot_context``. More than the section shows,
+#: because discredited, synthetic and procedure entries are dropped after the
+#: fetch; without headroom each one would cost the section a slot.
+_HOT_CONTEXT_SCAN_LIMIT = 12
 #: Rows scanned per evidence query; the sections themselves are shorter.
 _EVIDENCE_SCAN_LIMIT = 40
 _EVIDENCE_SECTION_LIMIT = 5
@@ -49,6 +53,26 @@ def _procedure_goal(value: Any) -> str | None:
         goal = value.get("goal")
         return _preview(goal, 120) if isinstance(goal, str) and goal.strip() else None
     return None
+
+
+def _hot_context_entries(entries: list[MemoryEntry]) -> list[MemoryEntry]:
+    """The priority rows that belong in ``hot_context``, in fetch order, capped
+    at the section's size.
+
+    Discredited entries are not "top priority" whatever their score says; they
+    go in the discredited section with what replaced them. Synthetic lessons
+    are folded into that section's ``replaced_by`` rather than shown as
+    knowledge in their own right. Procedures have the ``procedures`` section:
+    listing one here too would spend a slot meant for facts on a value that
+    is already shown in full a few lines down.
+    """
+    kept = [
+        e for e in entries
+        if e.discredited_at is None
+        and not _is_synthetic(e.key)
+        and _memory_type(e) != "procedure"
+    ]
+    return kept[:_HOT_CONTEXT_LIMIT]
 
 # Three authors, three keys each. This rides along on the one call every agent
 # is told to make first, so it is paying for itself in context window on every
@@ -383,9 +407,9 @@ class BriefingService:
         shifted = [e for e in self._regime_shift(entries) if not _is_synthetic(e.key)]
 
         # Procedures are how to do the task, not facts about it, so they get a
-        # section of their own rather than competing with facts for the hot
-        # context. Validated first, then by confidence; discredited ones are
-        # already in the section above and are not repeated here.
+        # section of their own and ``_hot_context_entries`` keeps them out of
+        # the hot context. Validated first, then by confidence; discredited
+        # ones are already in the section above and are not repeated here.
         procedures = sorted(
             (
                 e for e in entries
@@ -655,7 +679,7 @@ class BriefingService:
                 SearchQuery(
                     entity_path=entity_path,
                     sort_by="priority",
-                    limit=_HOT_CONTEXT_LIMIT,
+                    limit=_HOT_CONTEXT_SCAN_LIMIT,
                     # Working files shouldn't dominate the "what you know" context
                     # an agent reads at task start.
                     include_artifacts=False,
@@ -671,14 +695,9 @@ class BriefingService:
             logger.debug("Hot-context injection failed for %s", entity_path, exc_info=True)
             return
 
+        entries = _hot_context_entries(entries)
         if not entries:
             return
-
-        # Discredited entries are not "top priority" whatever their score says;
-        # they go in the discredited section with what replaced them. Synthetic
-        # lessons are folded into that section's ``replaced_by`` rather than
-        # shown as knowledge in their own right.
-        entries = [e for e in entries if e.discredited_at is None and not _is_synthetic(e.key)]
         hot_entries = [self._entry_brief(e) for e in entries]
 
         for d in digests:
@@ -702,7 +721,7 @@ class BriefingService:
                 SearchQuery(
                     entity_path=entity_path,
                     sort_by="priority",
-                    limit=_HOT_CONTEXT_LIMIT,
+                    limit=_HOT_CONTEXT_SCAN_LIMIT,
                     # Working files shouldn't dominate the "what you know" context
                     # an agent reads at task start.
                     include_artifacts=False,
@@ -716,14 +735,9 @@ class BriefingService:
         except Exception:
             return
 
+        entries = _hot_context_entries(entries)
         if not entries:
             return
-
-        # Discredited entries are not "top priority" whatever their score says;
-        # they go in the discredited section with what replaced them. Synthetic
-        # lessons are folded into that section's ``replaced_by`` rather than
-        # shown as knowledge in their own right.
-        entries = [e for e in entries if e.discredited_at is None and not _is_synthetic(e.key)]
         hot_entries = [self._entry_brief(e) for e in entries]
 
         digests.append(Digest(

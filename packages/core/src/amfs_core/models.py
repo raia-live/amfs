@@ -118,10 +118,11 @@ def procedure_issues(value: Any) -> list[str]:
     """What a procedure value is missing, as short issue codes.
 
     A procedure is a dict with a ``goal`` and a non-empty ``steps`` list (each
-    step a string or a dict with an ``action``), optionally ``preconditions``,
-    ``on_failure`` and ``verify``. A plain string is accepted when it reads as
-    a numbered or bulleted list of at least two steps; anything else is
-    ``not_structured``. Pure; used by ``amfs_core.quality``.
+    step a non-blank string or a dict with a non-blank ``action``), optionally
+    ``preconditions``, ``on_failure`` and ``verify``. A plain string is
+    accepted when it reads as a numbered or bulleted list of at least two
+    steps; anything else is ``not_structured``. Pure; used by
+    ``amfs_core.quality``.
     """
     if isinstance(value, dict):
         out: list[str] = []
@@ -133,9 +134,8 @@ def procedure_issues(value: Any) -> list[str]:
             out.append("missing_steps")
         else:
             for step in steps:
-                if isinstance(step, str) and step.strip():
-                    continue
-                if isinstance(step, dict) and isinstance(step.get("action"), str):
+                text = step.get("action") if isinstance(step, dict) else step
+                if isinstance(text, str) and text.strip():
                     continue
                 out.append("malformed_step")
                 break

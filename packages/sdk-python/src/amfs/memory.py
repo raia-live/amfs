@@ -224,6 +224,34 @@ def _metadata_to_dict(meta: Any) -> dict[str, Any]:
     return {}
 
 
+def _call_shedding_unknown_keywords(
+    fn: Callable[..., Any], kwargs: dict[str, Any], *, optional: tuple[str, ...]
+) -> Any:
+    """Call *fn* with *kwargs*, dropping one *optional* keyword per ``TypeError``
+    until the call is accepted.
+
+    Adapters are pluggable and versioned separately, so an older one rejects a
+    keyword a newer SDK sends. Dropping every optional keyword on the first
+    ``TypeError`` would answer a request for a compact delta briefing on a
+    branch with a full briefing of ``main``; dropping only what the adapter
+    does not know keeps the rest of the request intact. A ``TypeError`` that
+    names none of the optional keywords still present is the adapter's own
+    and is re-raised.
+    """
+    present = [name for name in optional if name in kwargs]
+    while True:
+        try:
+            return fn(**kwargs)
+        except TypeError as exc:
+            if not present:
+                raise
+            message = str(exc)
+            named = [name for name in present if f"'{name}'" in message]
+            drop = named[0] if named else present[0]
+            present.remove(drop)
+            kwargs = {k: v for k, v in kwargs.items() if k != drop}
+
+
 # ---------------------------------------------------------------------------
 # Lightweight digest scoring — used when amfs_cortex is not installed but the
 # adapter supports list_digests (e.g. PostgresAdapter used directly by the MCP
@@ -2485,14 +2513,13 @@ class AgentMemory:
             # that had checked out a branch was briefed from main.
             if resolved_branch and resolved_branch != "main":
                 kwargs["branch"] = resolved_branch
-            try:
-                digests = adapter_briefing(**kwargs)
-            except TypeError:
-                kwargs.pop("credit_reuse", None)
-                kwargs.pop("compact", None)
-                kwargs.pop("since", None)
-                kwargs.pop("branch", None)
-                digests = adapter_briefing(**kwargs)
+            digests = _call_shedding_unknown_keywords(
+                adapter_briefing, kwargs,
+                # Newest keyword first: an adapter that predates ``branch`` is
+                # far more likely to know ``compact`` and ``since`` than the
+                # other way round, and each retry costs one round-trip.
+                optional=("branch", "since", "compact", "credit_reuse"),
+            )
             return self._book_briefing_lineage(digests, credit_reuse)
 
         try:

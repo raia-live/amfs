@@ -76,6 +76,10 @@ class TestProcedureType:
             ({"goal": "x"}, ["missing_steps"]),
             ({"goal": "x", "steps": []}, ["missing_steps"]),
             ({"goal": "x", "steps": [{"tool": "no action key"}]}, ["malformed_step"]),
+            # A blank action is no more a step than a blank string is.
+            ({"goal": "x", "steps": [{"action": "  "}]}, ["malformed_step"]),
+            ({"goal": "x", "steps": [{"action": ""}]}, ["malformed_step"]),
+            ({"goal": "x", "steps": ["   "]}, ["malformed_step"]),
             ("1. issue new key\n2. deploy readers\n3. revoke old key", []),
             ("- issue new key\n- revoke old key", []),
             ("restart the worker", ["not_structured"]),
@@ -202,6 +206,29 @@ class TestBriefingProcedures:
         # Facts stay out of it.
         assert "fix-restart" not in {r["key"] for r in rows}
 
+    def test_procedures_do_not_take_hot_context_slots(self, world) -> None:
+        """The section exists so methods stop competing with facts for the
+        three hot-context rows. A procedure that outranks every fact on
+        priority must still leave those rows to the facts — and not cost one
+        of them a slot by being fetched and then dropped."""
+        mem, service, _ = world
+        for i in range(3):
+            mem.write("acme/support", f"procedure-{i}", {**PROCEDURE, "goal": f"method {i}"},
+                      confidence=0.99, memory_type=MemoryType.PROCEDURE)
+        mem.write("acme/support", "fix-scale", "add consumers when lag grows", confidence=0.6)
+        mem._read_tracker.clear()
+        for i in range(3):
+            mem.read("acme/support", f"procedure-{i}")
+        mem.commit_outcome("ok-2", OutcomeType.SUCCESS)
+
+        lead = _lead(service.briefing(entity_path="acme/support"))
+        hot = [h["key"] for h in lead.summary["hot_context"]]
+        assert not any(k.startswith("procedure-") for k in hot)
+        assert set(hot) == {"fix-restart", "fix-rotate", "fix-scale"}
+        assert {r["key"] for r in lead.summary["procedures"]} == {
+            "procedure-0", "procedure-1", "procedure-2",
+        }
+
     def test_discredited_procedure_is_not_repeated(self, world) -> None:
         mem, service, _ = world
         mem.write("acme/support", "procedure-rotate", PROCEDURE, confidence=0.7,
@@ -296,6 +323,48 @@ class TestBranchPlumbing:
         assert ("briefing", "repair/fix-1") in adapter.calls
         mem.briefing(entity_path="svc", branch="main")
         assert ("briefing", None) in adapter.calls
+
+    def test_briefing_sheds_only_the_keyword_an_old_adapter_rejects(self, tmp_path) -> None:
+        """An adapter that predates ``branch`` but knows ``compact`` / ``since``
+        must still be asked for the compact delta — not for a full briefing
+        of everything, which is what dropping every optional keyword at the
+        first TypeError produced."""
+        calls: list[dict[str, Any]] = []
+
+        class _PreBranchAdapter(FilesystemAdapter):
+            def briefing(self, *, entity_path=None, agent_id=None, limit=10,
+                         compact=False, since=None, credit_reuse=False):
+                calls.append({"compact": compact, "since": since, "credit_reuse": credit_reuse})
+                return []
+
+        adapter = _PreBranchAdapter(root=tmp_path / ".amfs", namespace="test")
+        mem = AgentMemory(agent_id="a", adapter=adapter, branch="repair/fix-1")
+        moment = datetime.now(UTC)
+        mem.briefing(entity_path="svc", compact=True, since=moment, credit_reuse=True)
+        assert calls == [{"compact": True, "since": moment, "credit_reuse": True}]
+
+    def test_briefing_survives_an_adapter_that_knows_none_of_the_options(self, tmp_path) -> None:
+        calls: list[dict[str, Any]] = []
+
+        class _OldAdapter(FilesystemAdapter):
+            def briefing(self, *, entity_path=None, agent_id=None, limit=10):
+                calls.append({"entity_path": entity_path, "limit": limit})
+                return []
+
+        adapter = _OldAdapter(root=tmp_path / ".amfs", namespace="test")
+        mem = AgentMemory(agent_id="a", adapter=adapter, branch="repair/fix-1")
+        mem.briefing(entity_path="svc", compact=True, since=datetime.now(UTC))
+        assert calls == [{"entity_path": "svc", "limit": 10}]
+
+    def test_briefing_reraises_an_adapter_s_own_type_error(self, tmp_path) -> None:
+        class _BrokenAdapter(FilesystemAdapter):
+            def briefing(self, **kw: Any):
+                raise TypeError("digest scoring got a str where a datetime was expected")
+
+        adapter = _BrokenAdapter(root=tmp_path / ".amfs", namespace="test")
+        mem = AgentMemory(agent_id="a", adapter=adapter)
+        with pytest.raises(TypeError, match="digest scoring"):
+            mem.briefing(entity_path="svc")
 
     def test_env_starts_the_memory_on_a_branch(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("AMFS_BRANCH", "canary/fix-7")
