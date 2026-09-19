@@ -504,11 +504,20 @@ def recommend(
                    + (f" ({best['agents']} agents)" if int(best.get("agents", 0)) > 1 else ""),
         }
     if (
-        top_hit_status == "validated"
+        have_candidates
+        and top_hit_status == "validated"
         and not top_hit_recent_failure
         and not top_hit_shifted
         and not all_tried_failed
     ):
+        # Only for a caller choosing among a fixed set of actions. Without
+        # candidates there is no action to act *with*, and ``act`` on a bare
+        # validated hit reads as "follow the top hit": grid v5 (2026-09-20)
+        # measured it on a task whose terminal tool has no action enum —
+        # ``act`` on 92% of episodes, and the agent followed the top hit over
+        # the task's own constraints, 42% first-attempt failures against 6%
+        # for the same protocol without the recommendation. The hit's
+        # ``evidence_status`` already tells the agent it is validated.
         why = "top memory hit is validated by outcomes and has no recent failure"
         if regime_shift:
             why += "; a shift is suspected elsewhere on this entity, not in this hit's record"
