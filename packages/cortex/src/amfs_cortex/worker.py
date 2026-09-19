@@ -334,6 +334,8 @@ class CortexWorker:
             total_agents = 0
             total_entities = 0
 
+            total_expired = 0
+
             for tid in tenant_ids:
                 self._set_tenant_context(tid)
                 try:
@@ -341,8 +343,11 @@ class CortexWorker:
                     total_queued += queued
                     total_agents += n_agents
                     total_entities += n_entities
+                    total_expired += self._sweep_expired_for_current_tenant()
                 finally:
                     self._set_tenant_context(None)
+            if total_expired:
+                logger.info("Catchup: archived %d expired entries", total_expired)
 
             self._last_catchup = time.monotonic()
 
@@ -362,6 +367,30 @@ class CortexWorker:
             })
         except Exception:
             logger.exception("Catchup scan failed")
+
+    def _sweep_expired_for_current_tenant(self) -> int:
+        """Archive the tenant's expired entries; the number archived.
+
+        The server-side half of TTL: with the MCP server no longer sweeping
+        over HTTP, a hosted tenant's expired entries are archived here, on
+        the catch-up cadence, through ``list_expired`` — an indexed read of
+        the rows that actually carry a ``ttl_at``. Adapters without it are
+        left alone: a listing-based sweep is what this replaces, and the
+        embedded deployments that use such adapters run their own
+        ``LifecycleManager``. Archiving writes a new version (confidence 0,
+        no TTL), so a second instance sweeping the same tenant a moment later
+        finds nothing.
+        """
+        adapter = self._compiler._adapter
+        if not callable(getattr(adapter, "list_expired", None)):
+            return 0
+        try:
+            from amfs_core.lifecycle import LifecycleManager
+
+            return len(LifecycleManager(adapter).sweep())
+        except Exception:
+            logger.exception("TTL sweep failed for tenant %s", self._get_tenant_context())
+            return 0
 
     def _catchup_for_current_tenant(self) -> tuple[int, int, int]:
         """Scan for missing digests under the currently-set tenant context.

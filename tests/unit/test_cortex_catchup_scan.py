@@ -86,3 +86,31 @@ def test_both_paths_queue_the_same_scopes() -> None:
     assert set(slow._pending) == set(fast._pending) == {
         "entity:a/x@main", "entity:a/y@main", "entity:b/z@main", "agent:ag2@main",
     }
+
+
+def test_scan_archives_expired_entries_where_the_adapter_can_find_them() -> None:
+    """The catch-up pass is the server-side TTL sweep: it archives what
+    ``list_expired`` returns (confidence 0, TTL cleared) and leaves adapters
+    without that query alone — those deployments run their own sweeper."""
+    from datetime import timedelta
+
+    expired = _entry("acme/support", "support-agent")
+    expired.ttl_at = datetime.now(UTC) - timedelta(hours=1)
+
+    adapter = MagicMock()
+    adapter.list_scopes.return_value = (set(), set())
+    adapter.list_digest_scopes.return_value = set()
+    adapter.list_expired.return_value = [expired]
+    adapter.write.side_effect = lambda e: e
+
+    worker = _worker(adapter)
+    assert worker._sweep_expired_for_current_tenant() == 1
+    written = adapter.write.call_args.args[0]
+    assert written.key == "k" and written.confidence == 0.0 and written.ttl_at is None
+    adapter.list.assert_not_called()
+
+    class Plain:
+        def list(self, branch="main"):
+            raise AssertionError("a listing-based sweep is what this replaces")
+
+    assert _worker(Plain())._sweep_expired_for_current_tenant() == 0
