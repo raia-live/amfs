@@ -140,18 +140,35 @@ def test_recommend_escalates_only_when_candidates_were_given() -> None:
 
 
 def test_recommend_acts_on_a_validated_top_hit_and_not_on_a_shifted_one() -> None:
-    assert act.recommend(None, top_hit_status="validated")["mode"] == "act"
-    assert act.recommend(None, top_hit_status="validated", top_hit_recent_failure=True) is None
+    cands = ["resolve:a", "resolve:c"]
+    assert act.recommend(None, top_hit_status="validated", candidate_actions=cands)["mode"] == "act"
+    assert act.recommend(None, top_hit_status="validated", top_hit_recent_failure=True,
+                         candidate_actions=cands) is None
     # A shift elsewhere on the entity does not override the hit's own record...
     mixed = {"tried": [{"action_key": "resolve:a", "won": 1, "lost": 1, "p": 0.5, "n": 2,
                         "agents": 1, "last_3": ["lost", "won"], "last_at": None}],
              "untried": ["resolve:c"]}
-    rec = act.recommend(mixed, top_hit_status="validated", regime_shift=True)
+    rec = act.recommend(mixed, top_hit_status="validated", regime_shift=True, candidate_actions=cands)
     assert rec["mode"] == "act" and rec["suggested_action"] is None
     assert "elsewhere" in rec["why"]
     # ...but the hit being the rule that shifted does.
-    rec = act.recommend(mixed, top_hit_status="validated", regime_shift=True, top_hit_shifted=True)
+    rec = act.recommend(mixed, top_hit_status="validated", regime_shift=True, top_hit_shifted=True,
+                        candidate_actions=cands)
     assert rec["mode"] == "explore" and rec["suggested_action"] == "resolve:c"
+
+
+def test_a_validated_top_hit_alone_is_not_an_act_without_candidate_actions() -> None:
+    """No candidates, no action to act with. A caller whose task is not a choice
+    among a fixed set of actions gets no ``act`` off a bare validated hit — the
+    hit's own ``evidence_status`` already says it is validated, and grid v5
+    measured what the extra ``act`` costs such a caller (42% vs 6% failures)."""
+    assert act.recommend(None, top_hit_status="validated") is None
+    assert act.recommend(None, top_hit_status="validated", candidate_actions=[]) is None
+    # A real winner among candidates still acts, with or without a validated hit.
+    won = {"tried": [{"action_key": "resolve:a", "won": 3, "lost": 0, "p": 1.0, "n": 3,
+                      "agents": 1, "last_3": ["won", "won", "won"], "last_at": None}],
+           "untried": []}
+    assert act.recommend(won, top_hit_status="untested")["suggested_action"] == "resolve:a"
 
 
 def test_explore_needs_something_tried_to_explore_from() -> None:
