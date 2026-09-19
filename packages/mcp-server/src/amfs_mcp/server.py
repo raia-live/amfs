@@ -1227,7 +1227,8 @@ def amfs_retrieve(
     for scored, data in zip(results, _serialize_entries(s.entry for s in results)):
         if is_avoid(scored):
             e = scored.entry
-            avoid.append({
+            bd = scored.breakdown or {}
+            row: dict[str, Any] = {
                 "entity_path": e.entity_path,
                 "key": e.key,
                 "value": data.get("value"),
@@ -1236,7 +1237,17 @@ def amfs_retrieve(
                 "success_count": e.success_count,
                 "last_outcome": e.last_outcome,
                 "discredited_at": e.discredited_at.isoformat() if e.discredited_at else None,
-            })
+            }
+            # What replaced it, when the server knows (entries a contrast
+            # lesson names; the action the nearest contrast pair resolved
+            # with) and whether it is avoided for this query only.
+            if bd.get("replaced_by"):
+                row["replaced_by"] = list(bd["replaced_by"])
+            if bd.get("resolved_with_action"):
+                row["resolved_with_action"] = bd["resolved_with_action"]
+            if bd.get("locally_discredited"):
+                row["locally_discredited"] = True
+            avoid.append(row)
             continue
         data["_score"] = round(scored.score, 4)
         if compact:
@@ -1301,6 +1312,12 @@ def _attach_priors(payload: dict[str, Any], meta: dict[str, Any] | None) -> None
             "untried": list(priors.get("untried") or [])[:10],
             "n_outcomes": priors.get("n_outcomes", 0),
         }
+        contrasts = [
+            {k: c.get(k) for k in ("failed", "resolved_with", "weight", "outcome_ref")}
+            for c in (priors.get("contrasts") or [])[:3]
+        ]
+        if contrasts:
+            payload["priors"]["contrasts"] = contrasts
     if rec:
         payload["recommendation"] = rec
     if meta.get("regime_shift"):

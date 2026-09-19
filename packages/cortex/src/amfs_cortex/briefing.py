@@ -13,9 +13,9 @@ from typing import TYPE_CHECKING, Any
 
 from amfs_core.authority import rank_authors
 from amfs_core.evidence import DISCREDIT_THRESHOLD as _DISCREDIT_THRESHOLD
-from amfs_core.evidence import SYNTHETIC_KEY_PREFIXES as _SYNTHETIC_PREFIXES
 from amfs_core.evidence import is_synthetic_key as _is_synthetic
 from amfs_core.evidence import regime_shifted as _regime_shifted
+from amfs_core.evidence import replacements_from_lessons as _replacements_from_lessons
 from amfs_core.models import Digest, DigestType, MemoryEntry, SearchQuery
 
 if TYPE_CHECKING:
@@ -496,20 +496,10 @@ class BriefingService:
 
     @staticmethod
     def _replacements_from_lessons(entries: list[MemoryEntry]) -> dict[str, list[str]]:
-        out: dict[str, list[str]] = {}
-        for e in entries:
-            if not e.key.startswith(_SYNTHETIC_PREFIXES) or not isinstance(e.value, dict):
-                continue
-            avoid = e.value.get("avoid") or []
-            resolved = e.value.get("resolved_with") or []
-            if not isinstance(avoid, list) or not isinstance(resolved, list):
-                continue
-            for spec in avoid:
-                bucket = out.setdefault(str(spec), [])
-                for r in resolved:
-                    if r not in bucket:
-                        bucket.append(str(r))
-        return out
+        # Kept as a method for callers that patch or call it here; the logic
+        # lives in amfs_core.evidence so the retrieve avoid list reads the
+        # same lessons the same way.
+        return _replacements_from_lessons(entries)
 
     def _compact(self, digests: list[Digest], entity_path: str) -> list[Digest]:
         """The lead digest only, with the sections an agent acts on."""

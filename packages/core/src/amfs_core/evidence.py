@@ -54,7 +54,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
@@ -364,12 +364,28 @@ def evidence_signal(entry: MemoryEntry) -> float:
 
 
 #: Weighted outcomes on tasks like the query an entry needs before its local
-#: record says anything. Below this the pooled record stands alone.
+#: record can *rescue* it (``locally_valid``). Below this the pooled record
+#: stands alone for that decision.
 LOCAL_EVIDENCE_MIN_N = 2
+#: Nearby outcomes an entry needs before its local record enters the ranking
+#: blend at all. One: a single outcome on a task like this one is worth half
+#: the pooled record's say in the evidence term (``n / (n + 1)``), which is
+#: what lets the first failure of a long-validated rule on a new class of
+#: task move it *before* the second failure on the same class arrives. Grid
+#: v4 measured the cost of waiting: the same quirk failed 4-7 times per store
+#: while the pooled record stayed ``validated``.
+LOCAL_EVIDENCE_BLEND_MIN_N = 1
 #: Local success rate at or above which a globally discredited entry is kept
 #: in the ranked list (labelled ``contested``) for the query it still works
 #: for, instead of going to the avoid list.
 LOCAL_RESCUE_MIN_P = 0.6
+#: Consecutive most-recent failures on tasks like the query after which a
+#: globally validated entry is treated as discredited *for this query*
+#: (``locally_discredited``): out of the ranked list and into the avoid list,
+#: with what replaced it. Two, not one — a single failure may be the agent's,
+#: not the rule's; two in a row on the same kind of task with no success
+#: between them is the rule.
+LOCAL_DISCREDIT_MIN_N = 2
 
 
 def evidence_signal_from_counts(success: float, failure: float) -> float:
@@ -386,13 +402,18 @@ def evidence_signal_from_counts(success: float, failure: float) -> float:
 def blend_local_evidence(pooled: float, local: dict[str, Any] | None) -> tuple[float, float]:
     """The evidence term for ranking, given the pooled signal and the local record.
 
-    Returns ``(evidence, local_weight)``. With no local record, or too thin a
-    one, the pooled signal stands and the weight is ``0``. Otherwise the local
-    signal is blended in with weight ``n / (n + LOCAL_EVIDENCE_MIN_N)`` — half
-    at the minimum, three quarters at three times it — so a rule's record on
-    *this kind of task* takes over from its record everywhere as the local
-    evidence accumulates, and a single nearby outcome never overturns a long
-    pooled record on its own.
+    Returns ``(evidence, local_weight)``. With no local record, or none on a
+    task near enough to count, the pooled signal stands and the weight is
+    ``0``. Otherwise the local signal is blended in with weight
+    ``n / (n + LOCAL_EVIDENCE_MIN_N)`` — a third at one nearby outcome, half
+    at two, three quarters at six — so a rule's record on *this kind of task*
+    takes over from its record everywhere as the local evidence accumulates.
+    The curve is the one the rescue threshold was calibrated on; only the
+    gate moved, from two nearby outcomes to one. A single nearby outcome
+    moves the ranking but cannot on its own flip a long pooled record's
+    sign: ``locally_valid`` and ``locally_discredited`` — the decisions that
+    move an entry between the ranked list and the avoid list — keep their
+    own, stricter minimums.
 
     Grid v3's diagnose scenario is the case: a rule validated on one class of
     incident and discredited on another read ``contested`` to every query, so
@@ -402,7 +423,7 @@ def blend_local_evidence(pooled: float, local: dict[str, Any] | None) -> tuple[f
     if not local:
         return pooled, 0.0
     n = float(local.get("n", 0) or 0)
-    if n < LOCAL_EVIDENCE_MIN_N:
+    if n < LOCAL_EVIDENCE_BLEND_MIN_N:
         return pooled, 0.0
     sig = evidence_signal_from_counts(local.get("success", 0.0), local.get("failure", 0.0))
     w = n / (n + LOCAL_EVIDENCE_MIN_N)
@@ -423,6 +444,35 @@ def locally_valid(local: dict[str, Any] | None) -> bool:
     if s + f <= 0.0:
         return False
     return s / (s + f) >= LOCAL_RESCUE_MIN_P
+
+
+def locally_discredited(local: dict[str, Any] | None) -> bool:
+    """Whether the local record alone says the entry has stopped working for
+    tasks like this: its ``LOCAL_DISCREDIT_MIN_N`` most recent nearby outcomes
+    are all failures.
+
+    The mirror of :func:`locally_valid`. That one reads the local record to
+    keep a globally discredited entry for the class of task it still works
+    on; this reads it to set aside a globally *validated* entry for the class
+    it has stopped working on. Pooled evidence cannot see the difference — a
+    rule validated twenty times on one class and failed twice on another is
+    still ``validated`` — and grid v4 put the cost at 4-7 repeated failures
+    per store before the pooled label moved.
+
+    Reads ``local["recent"]``: the nearby outcomes newest first, each
+    ``{"success": bool, ...}``, as ``evidence_near`` returns them. Any success
+    among the newest ``LOCAL_DISCREDIT_MIN_N`` clears it — the rule worked
+    again, or the failures were the agent's. A record without ``recent`` (an
+    adapter predating it) never discredits: the sums cannot say which came
+    last.
+    """
+    if not local:
+        return False
+    recent = local.get("recent")
+    if not isinstance(recent, list) or len(recent) < LOCAL_DISCREDIT_MIN_N:
+        return False
+    newest = recent[:LOCAL_DISCREDIT_MIN_N]
+    return all(isinstance(r, dict) and not bool(r.get("success")) for r in newest)
 
 
 def _split_spec(spec: str) -> tuple[str, str] | None:
@@ -588,6 +638,24 @@ def contrast_lesson(record: OutcomeRecord) -> dict[str, Any] | None:
     resolved_with = [k for k in record.causal_entry_keys if k not in failed_keys]
     if not failed_keys:
         return None
+    # The actions, when the record labelled them (``actions_taken``): what the
+    # failed attempts *did* and what the terminal success did instead. The
+    # entry keys above say which memory misled; these say which action to take
+    # instead, which is what the next agent on a near-identical task needs.
+    # Optional and additive — a lesson written without them (a repair-loop
+    # pointer carries only ``avoid``/``resolved_with``) reads the same.
+    failed_actions: list[str] = []
+    resolved_action: str | None = None
+    for act in record.actions_taken or ():
+        key = str(act.get("action_key") or "")
+        if not key:
+            continue
+        if act.get("attempt") is not None and not act.get("success"):
+            if key not in failed_actions:
+                failed_actions.append(key)
+        elif act.get("attempt") is None and act.get("success"):
+            resolved_action = key
+    excerpt = (record.situation or record.task_input or "").strip()
     return {
         "kind": "contrast",
         "outcome_ref": record.outcome_ref,
@@ -595,6 +663,9 @@ def contrast_lesson(record: OutcomeRecord) -> dict[str, Any] | None:
         "avoid": failed_keys,
         "resolved_with": resolved_with,
         "attempt_summaries": summaries,
+        "failed_actions": failed_actions,
+        "resolved_action": resolved_action,
+        "task_excerpt": excerpt[:200] if excerpt else None,
         "lesson": (
             f"{len(failed_keys)} remembered entr{'y' if len(failed_keys) == 1 else 'ies'} "
             f"led to a failed attempt before this task was resolved"
@@ -677,6 +748,34 @@ def contrast_lesson_key(outcome_ref: str) -> str:
     return f"{SYNTHETIC_KEY_PREFIXES[0]}{safe}"
 
 
+def replacements_from_lessons(entries: Iterable[MemoryEntry]) -> dict[str, list[str]]:
+    """``entry_key -> [entry_key, ...]``: for each entry a contrast lesson
+    names under ``avoid``, the entries the same lesson says the task was
+    resolved with, in first-seen order.
+
+    Reads only the ``{avoid, resolved_with}`` shape every lesson writer
+    shares — :func:`contrast_lesson` here and the repair loop's pointer — so
+    a lesson with or without the optional action fields resolves the same.
+    Entries that are not lessons are skipped, so callers can pass a mixed
+    list. Shared by the briefing's ``discredited[].replaced_by`` and the
+    retrieve avoid list.
+    """
+    out: dict[str, list[str]] = {}
+    for e in entries:
+        if not is_synthetic_key(e.key) or not isinstance(e.value, dict):
+            continue
+        avoid = e.value.get("avoid") or []
+        resolved = e.value.get("resolved_with") or []
+        if not isinstance(avoid, list) or not isinstance(resolved, list):
+            continue
+        for spec in avoid:
+            bucket = out.setdefault(str(spec), [])
+            for r in resolved:
+                if str(r) not in bucket:
+                    bucket.append(str(r))
+    return out
+
+
 __all__ = [
     "DISCREDIT_THRESHOLD",
     "EVIDENCE_DECAY",
@@ -696,9 +795,17 @@ __all__ = [
     "evidence_weight",
     "is_success",
     "is_synthetic_key",
+    "LOCAL_DISCREDIT_MIN_N",
+    "LOCAL_EVIDENCE_BLEND_MIN_N",
+    "LOCAL_EVIDENCE_MIN_N",
+    "LOCAL_RESCUE_MIN_P",
+    "blend_local_evidence",
+    "locally_discredited",
+    "locally_valid",
     "outcome_model",
     "outcome_steps",
     "posterior",
     "regime_shifted",
+    "replacements_from_lessons",
     "severity",
 ]

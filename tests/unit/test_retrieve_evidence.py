@@ -119,22 +119,105 @@ def test_avoid_list_is_flagged_and_appended(client, mem: AgentMemory) -> None:
     assert rows.index(avoid[0]) == len(rows) - 1
 
 
-def test_compact_avoid_rows_are_previews(client, mem: AgentMemory) -> None:
-    """In compact mode an avoided entry is carried as a one-liner, like a
-    tail hit: its job is to name what stopped working, not to be read in
-    full. It keeps the fields the agent and lineage need."""
+def test_compact_avoid_rows_are_one_liners_that_name_the_replacement(client, mem: AgentMemory) -> None:
+    """In compact mode an avoided entry does not restate the rule at all: the
+    value is a one-liner saying it is discredited, when it last failed and
+    what replaced it. Grid v4 found the avoided text was what failing agents
+    were still acting on. It keeps the fields the agent and lineage need, and
+    the full row is unchanged outside compact mode."""
     long_value = "queue stuck: restart the worker. " + "then check the consumer lag; " * 30
     mem.write("acme/support", "fix-restart", long_value, confidence=0.9)
     _outcome(mem, "fix-restart", OutcomeType.FAILURE, "t1")
+    # A contrast lesson on this kind of task: the restart misled, rotate resolved.
+    mem.write(
+        "acme/support", ev.contrast_lesson_key("t1"),
+        {"kind": "contrast", "avoid": ["acme/support/fix-restart"],
+         "resolved_with": ["acme/support/fix-rotate"], "task_excerpt": "queue stuck on ingest"},
+        confidence=0.8,
+    )
+    mem._read_tracker.clear()
     rows = client.post(
         "/api/v1/retrieve",
         json={"query": "queue stuck", "limit": 10, "include_avoid": True, "compact": True},
     ).json()
+    assert all(not e["key"].startswith("lesson-") for e in rows), "lessons are read, not served"
     avoid = [e for e in rows if e.get("_avoid")]
     assert [e["key"] for e in avoid] == ["fix-restart"]
-    assert avoid[0]["value_truncated"] is True and len(avoid[0]["value"]) < 200
+    assert "value_truncated" not in avoid[0]
+    assert "restart the worker" not in avoid[0]["value"]
+    assert avoid[0]["value"].startswith("discredited; last failure ")
+    assert avoid[0]["value"].endswith("; replaced by fix-rotate")
     assert avoid[0]["_breakdown"]["evidence_status"] == "discredited"
+    assert avoid[0]["_breakdown"]["replaced_by"] == ["acme/support/fix-rotate"]
+    assert avoid[0]["_breakdown"]["locally_discredited"] is False
     assert avoid[0]["evidence_status"] == "discredited" and "version" in avoid[0]
+
+    full = client.post(
+        "/api/v1/retrieve", json={"query": "queue stuck", "limit": 10, "include_avoid": True},
+    ).json()
+    row = next(e for e in full if e.get("_avoid"))
+    assert row["value"] == long_value
+    assert row["_breakdown"]["replaced_by"] == ["acme/support/fix-rotate"]
+
+
+def test_a_validated_rule_that_failed_the_last_two_tasks_like_this_is_avoided(
+    client, mem: AgentMemory, monkeypatch
+) -> None:
+    """Validated by the pooled record, failed on the two most recent tasks like
+    this one: out of the hits and onto the avoid list for this query, flagged
+    as locally discredited. The pooled label is untouched — on another class
+    of task the rule still leads."""
+    from amfs_http import server
+
+    class _Embedder:
+        def embed(self, text):
+            return [1.0, 0.0, 0.0]
+
+    monkeypatch.setattr(server, "_get_server_embedder", lambda: _Embedder())
+    monkeypatch.setattr(server, "_async_adapter", _AsyncShim(mem._adapter))
+    seen: dict = {}
+
+    def _near(keys, vec, **kw):
+        seen.update(kw)
+        return {
+            "acme/support/fix-restart": {
+                "success": 0.0, "failure": 2.0, "n": 2, "best_similarity": 0.97,
+                "recent": [{"success": False}, {"success": False}],
+            },
+            # One nearby failure on fix-scale: enters the blend, is not discredited.
+            "acme/support/fix-scale": {
+                "success": 0.0, "failure": 1.0, "n": 1, "best_similarity": 0.95,
+                "recent": [{"success": False}],
+            },
+        }
+
+    monkeypatch.setattr(mem._adapter, "evidence_near", _near, raising=False)
+    for i in range(6):
+        _outcome(mem, "fix-restart", OutcomeType.SUCCESS, f"ok-{i}")
+    assert mem._adapter.read("acme/support", "fix-restart").evidence_status == "validated"
+
+    rows = client.post(
+        "/api/v1/retrieve",
+        json={"query": "queue stuck", "entity_path": "acme/support", "limit": 10, "include_avoid": True},
+    ).json()
+    assert seen.get("min_similarity") is not None, "the priors' absolute floor is passed"
+    hits = [e for e in rows if not e.get("_avoid") and not e.get("_meta")]
+    assert "fix-restart" not in [e["key"] for e in hits]
+    avoid = [e for e in rows if e.get("_avoid")]
+    assert [e["key"] for e in avoid] == ["fix-restart"]
+    assert avoid[0]["_breakdown"]["locally_discredited"] is True
+    assert avoid[0]["evidence_status"] == "validated", "the pooled label is reported as it stands"
+    scale = next(e for e in hits if e["key"] == "fix-scale")
+    assert scale["_breakdown"]["evidence_local"]["n"] == 1
+    assert scale["_breakdown"]["evidence"] < 0
+
+    # With the discredited rows asked for, nothing is hidden and nothing demoted.
+    rows = client.post(
+        "/api/v1/retrieve",
+        json={"query": "queue stuck", "entity_path": "acme/support", "limit": 10,
+              "include_discredited": True},
+    ).json()
+    assert "fix-restart" in [e["key"] for e in rows if not e.get("_meta")]
 
 
 def test_adaptive_k_shrinks_behind_a_validated_leader(client, mem: AgentMemory) -> None:
