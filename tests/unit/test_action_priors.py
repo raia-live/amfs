@@ -171,6 +171,58 @@ def test_a_validated_top_hit_alone_is_not_an_act_without_candidate_actions() -> 
     assert act.recommend(won, top_hit_status="untested")["suggested_action"] == "resolve:a"
 
 
+def _prior(key: str, won: int, n: int, last_3: list[str], p: float | None = None) -> dict:
+    return {"action_key": key, "won": won, "lost": n - won, "n": n, "agents": 1,
+            "p": (won / n) if p is None else p, "last_3": last_3, "last_at": None}
+
+
+def test_a_winner_that_lost_its_last_three_is_not_acted_on() -> None:
+    """Grid v5, ci-fix after the change: rerun_job had won every flaky-integration
+    task, then lost every one since. Its lifetime ratio kept it a winner for a
+    dozen more episodes; the record's newest takes say the rule has turned."""
+    cands = ["fix:rerun_job", "fix:fix_code", "fix:edit_generated_file", "fix:add_audit_exception"]
+    stale = {"tried": [_prior("fix:rerun_job", 8, 11, ["lost", "lost", "lost"]),
+                       _prior("fix:fix_code", 0, 4, ["lost", "lost", "lost"])],
+             "untried": ["fix:edit_generated_file", "fix:add_audit_exception"]}
+    rec = act.recommend(stale, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "explore"
+    assert rec["suggested_action"] in stale["untried"]
+    assert rec["stopped_working"] == ["fix:rerun_job"]
+    assert "stopped working" in rec["why"] and "8/11" in rec["why"]
+    # Two losses are not a streak: the lifetime record still stands.
+    fresh = {"tried": [_prior("fix:rerun_job", 8, 10, ["lost", "lost", "won"])], "untried": ["fix:fix_code"]}
+    assert act.recommend(fresh, candidate_actions=cands)["mode"] == "act"
+    # The streak shows in the rendered line, so the agent reads it without the recommendation.
+    assert "fix:rerun_job 8/11, lost last 3" in act.render_priors(stale, None)
+    assert "lost last" not in act.render_priors(fresh, None)
+
+
+def test_an_action_tried_once_and_lost_does_not_block_explore() -> None:
+    """The flaky-integration record at the end of grid v5: six actions tried, none
+    winning, one of them 0/1 — and no recommendation, because a single loss
+    was not a firm failure. The agent kept cycling the same three actions and
+    never reached the two untried ones."""
+    cands = ["fix:" + a for a in ("run_formatter", "fix_code", "rerun_job", "update_snapshots",
+                                  "regen_migrations", "bump_dependency", "add_audit_exception",
+                                  "edit_generated_file")]
+    record = {"tried": [_prior("fix:update_snapshots", 0, 1, ["lost"]),
+                        _prior("fix:run_formatter", 5, 8, ["won", "won", "lost"], p=0.37),
+                        _prior("fix:regen_migrations", 0, 2, ["lost", "lost"]),
+                        _prior("fix:rerun_job", 3, 13, ["lost", "lost", "lost"]),
+                        _prior("fix:bump_dependency", 0, 6, ["lost", "lost", "lost"]),
+                        _prior("fix:fix_code", 0, 12, ["lost", "lost", "lost"])],
+              "untried": ["fix:add_audit_exception", "fix:edit_generated_file"]}
+    rec = act.recommend(record, agent_id="ci-agent-3", candidate_actions=cands)
+    assert rec["mode"] == "explore" and rec["suggested_action"] in record["untried"]
+    # ...but a 0/1 is not firm enough to *escalate* on when nothing is untried.
+    exhausted = {"tried": [_prior("fix:a", 0, 1, ["lost"]), _prior("fix:b", 0, 3, ["lost", "lost", "lost"])],
+                 "untried": []}
+    assert act.recommend(exhausted, candidate_actions=["fix:a", "fix:b"]) is None
+    firm = {"tried": [_prior("fix:a", 0, 2, ["lost", "lost"]), _prior("fix:b", 0, 3, ["lost", "lost", "lost"])],
+            "untried": []}
+    assert act.recommend(firm, candidate_actions=["fix:a", "fix:b"])["mode"] == "escalate"
+
+
 def test_explore_needs_something_tried_to_explore_from() -> None:
     """With nothing tried, "untried" is every candidate and the pick is a hash
     of the agent's name: no information, so no advice."""
