@@ -156,6 +156,12 @@ class BriefingService:
         if compact:
             limit = 1
         all_digests = self._adapter.list_digests(namespace=self._namespace, branch=branch)
+        if not all_digests and branch != "main":
+            # Digests are compiled per branch and a short-lived branch (a repair
+            # under review, a canary) rarely has its own. It reads memory as an
+            # overlay on main, so main's digests describe what it sees; the
+            # sections injected below are then re-read on the branch itself.
+            all_digests = self._adapter.list_digests(namespace=self._namespace, branch="main")
 
         scored: list[tuple[float, Digest]] = []
         now = datetime.now(timezone.utc)

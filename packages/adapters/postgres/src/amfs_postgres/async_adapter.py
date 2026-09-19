@@ -39,12 +39,14 @@ from amfs_core.scope import descendants_sql
 
 from amfs_postgres.adapter import (
     PostgresAdapter,
+    _BRANCH_SCOPE,
     _EVIDENCE_COLUMNS,
     _EVIDENCE_SELECT,
     _EXCLUDE_SHARED_PATHS,
     _REUSE_EVENT_INSERT_SQL,
     _evidence_params,
     _inherit_from_row,
+    branch_scope_sql,
     connection_options,
     entry_select,
     pool_bounds,
@@ -236,6 +238,30 @@ class AsyncPostgresAdapter:
         except ImportError:
             return None
 
+    # ── branches as overlays ────────────────────────────────────────
+
+    async def _parent_branch(self, cur: Any, branch: str) -> str | None:
+        """The parent a non-main *branch* overlays, or ``None`` for ``main``
+        and for a branch the adapter has no record of. The async twin of
+        ``PostgresAdapter._parent_branch``."""
+        if branch == "main":
+            return None
+        await cur.execute(
+            "SELECT parent_branch FROM amfs_branches WHERE namespace = %s AND name = %s",
+            (self._namespace, branch),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        return str(row["parent_branch"] or "main")
+
+    async def _branch_scope(self, cur: Any, branch: str) -> tuple[str, list[Any]]:
+        """The ``WHERE`` fragment reading *branch* as an overlay on its live
+        parent — the same fragment the sync adapter builds, from the same
+        helper, so ``/search``, ``/retrieve`` and ``/entries`` (which run here)
+        see exactly what a sync ``list`` or ``search`` on the branch sees."""
+        return branch_scope_sql(branch, await self._parent_branch(cur, branch))
+
     # ──────────────────────────────────────────────────────────────
     # 1. read
     # ──────────────────────────────────────────────────────────────
@@ -262,29 +288,21 @@ class AsyncPostgresAdapter:
                 )
                 row = await cur.fetchone()
 
-                if row is None and branch != "main":
-                    await cur.execute(
-                        "SELECT parent_branch, branched_at FROM amfs_branches WHERE namespace = %s AND name = %s",
-                        (self._namespace, branch),
-                    )
-                    branch_info = await cur.fetchone()
-                    if branch_info:
+                if row is None:
+                    # Not on the branch: the parent's *live* row. A branch is a
+                    # delta over its parent, not a snapshot of it — see
+                    # ``PostgresAdapter._branch_scope``.
+                    parent = await self._parent_branch(cur, branch)
+                    if parent is not None:
                         await cur.execute(
                             """
                             SELECT * FROM amfs_memory_entries
                             WHERE namespace = %s AND branch = %s
                               AND entity_path = %s AND key = %s
                               AND superseded_at IS NULL
-                              AND written_at <= %s
                             ORDER BY version DESC LIMIT 1
                             """,
-                            (
-                                self._namespace,
-                                branch_info["parent_branch"],
-                                entity_path,
-                                key,
-                                branch_info["branched_at"],
-                            ),
+                            (self._namespace, parent, entity_path, key),
                         )
                         row = await cur.fetchone()
 
@@ -441,8 +459,10 @@ class AsyncPostgresAdapter:
         include_superseded: bool = False,
         branch: str = "main",
     ) -> list[MemoryEntry]:
-        conditions = ["namespace = %s", "branch = %s"]
-        params: list[Any] = [self._namespace, branch]
+        # The branch condition is resolved once a connection is open (it may
+        # need the branch's parent); its params go right after the namespace.
+        conditions = ["namespace = %s"]
+        params: list[Any] = [self._namespace]
 
         if entity_path is not None:
             conditions.append("entity_path = %s")
@@ -453,15 +473,15 @@ class AsyncPostgresAdapter:
         if not include_superseded:
             conditions.append("superseded_at IS NULL")
 
-        where = " AND ".join(conditions)
-        query = (
-            f"SELECT {entry_select(self._has_is_artifact_col)} FROM amfs_memory_entries "
-            f"WHERE {where} ORDER BY entity_path, key, version"
-        )
-
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(query, params)
+                scope_sql, scope_params = await self._branch_scope(cur, branch)
+                where = " AND ".join([conditions[0], scope_sql, *conditions[1:]])
+                query = (
+                    f"SELECT {entry_select(self._has_is_artifact_col)} FROM amfs_memory_entries "
+                    f"WHERE {where} ORDER BY entity_path, key, version"
+                )
+                await cur.execute(query, [params[0], *scope_params, *params[1:]])
                 rows = await cur.fetchall()
 
         return [self._row_to_entry(r) for r in rows]
@@ -475,8 +495,10 @@ class AsyncPostgresAdapter:
         col_ready = self._has_is_artifact_col
         tsq_sql, tsq_params = or_tsquery(query.query) if use_fts else ("", [])
 
-        conditions = ["namespace = %s", "branch = %s", "superseded_at IS NULL"]
-        params: list[Any] = [self._namespace, branch]
+        # ``_BRANCH_SCOPE`` is swapped for the real branch condition once a
+        # connection is open; its params are spliced in after the namespace.
+        conditions = ["namespace = %s", _BRANCH_SCOPE, "superseded_at IS NULL"]
+        params: list[Any] = [self._namespace]
 
         if query.depth < 3:
             conditions.append("tier <= %s")
@@ -541,18 +563,21 @@ class AsyncPostgresAdapter:
         elif not col_ready:
             fetch_limit = min(query.limit * 3, 1000)
 
-        where = " AND ".join(conditions)
-        sql = f"""
-            SELECT {entry_select(col_ready)} FROM amfs_memory_entries
-            WHERE {where}
-            ORDER BY {order}
-            LIMIT %s
-        """
         params.append(fetch_limit)
 
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(sql, params)
+                scope_sql, scope_params = await self._branch_scope(cur, branch)
+                where = " AND ".join(
+                    scope_sql if c is _BRANCH_SCOPE else c for c in conditions
+                )
+                sql = f"""
+                    SELECT {entry_select(col_ready)} FROM amfs_memory_entries
+                    WHERE {where}
+                    ORDER BY {order}
+                    LIMIT %s
+                """
+                await cur.execute(sql, [params[0], *scope_params, *params[1:]])
                 rows = await cur.fetchall()
 
         entries = [self._row_to_entry(r) for r in rows]
@@ -591,13 +616,15 @@ class AsyncPostgresAdapter:
         query_vec = embedder.embed(query.text)
         vec_str = f"[{','.join(str(v) for v in query_vec)}]"
 
+        # The branch condition is resolved once a connection is open; its
+        # params follow the namespace, after the leading query vector.
         conditions = [
             "namespace = %s",
-            "branch = %s",
+            _BRANCH_SCOPE,
             "superseded_at IS NULL",
             "embedding IS NOT NULL",
         ]
-        params: list[Any] = [self._namespace, branch]
+        params: list[Any] = [self._namespace]
         if query.entity_path is not None:
             conditions.append("entity_path = %s")
             params.append(query.entity_path)
@@ -607,18 +634,23 @@ class AsyncPostgresAdapter:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
 
-        where = " AND ".join(conditions)
-        sql = f"""
-            SELECT *, 1 - (embedding <=> %s::vector) AS similarity
-            FROM amfs_memory_entries
-            WHERE {where}
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
-        """
-
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(sql, [vec_str] + params + [vec_str, query.limit])
+                scope_sql, scope_params = await self._branch_scope(cur, branch)
+                where = " AND ".join(
+                    scope_sql if c is _BRANCH_SCOPE else c for c in conditions
+                )
+                sql = f"""
+                    SELECT *, 1 - (embedding <=> %s::vector) AS similarity
+                    FROM amfs_memory_entries
+                    WHERE {where}
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                """
+                await cur.execute(
+                    sql,
+                    [vec_str, params[0], *scope_params, *params[1:], vec_str, query.limit],
+                )
                 rows = await cur.fetchall()
 
         results: list[tuple[MemoryEntry, float]] = []
