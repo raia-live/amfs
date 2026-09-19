@@ -56,6 +56,14 @@ ACT_MIN_P = 0.6
 ACT_MIN_N = 2
 EXPLORE_MAX_P = 0.4
 EXPLORE_MIN_N = 2
+#: Consecutive newest losses after which an action's lifetime record no
+#: longer makes it a winner. ``last_3`` is all the record keeps, so this is
+#: its full length: a win-then-three-losses is the shape of a rule that has
+#: stopped working, and grid v5 measured the alternative — ``act`` kept
+#: naming an action that had won 8/8 before a change and 0/5 since, for as
+#: long as it took the lifetime ratio to fall under ``ACT_MIN_P`` (a fifth
+#: of the episodes of that task class never found the new fix).
+RECENT_FAIL_STREAK = 3
 #: Neighbourhood weight (``neighbourhood_weights``) a contrast pair needs
 #: before one fail-then-succeed outcome is enough to recommend the action
 #: that resolved it. ``exp(-gap/tau)`` at 0.25 is a task within ~0.04 of the
@@ -449,6 +457,20 @@ def recommend(
     tried. With nothing tried the "untried" list is every candidate and the
     pick is a hash of the agent's name — advice with no information in it.
 
+    A winner is also read against its newest takes. An action that lost its
+    last ``RECENT_FAIL_STREAK`` outcomes is not acted on whatever its
+    lifetime ratio, and one that had won before counts as a shift at the
+    action level: the explore that follows names it ("won 8/11, lost its
+    last 3 — what worked here has stopped working"). Grid v5 measured the
+    alternative: after a change, ``act`` kept naming the old fix for as long
+    as its lifetime ratio stayed over ``ACT_MIN_P``, and an action tried once
+    and lost kept "everything tried has failed" from ever becoming true —
+    17 of 24 agent groups never found the new fix in 40 episodes. Firm
+    failures (a low ratio over ``EXPLORE_MIN_N`` takes, or a streak) are what
+    ``escalate`` asserts; for ``explore`` an action never seen to win is
+    failed enough, since holding an agent on a 0/1 while candidates sit
+    untried is the worse bet.
+
     ``priors_are_local=False`` says the priors are the entity's whole record
     (the ``action_stats`` fallback of a store without task embeddings). Such
     a record can still name a winner, and "every action tried here failed"
@@ -470,9 +492,29 @@ def recommend(
     untried: list[str] = list((priors or {}).get("untried") or [])
     have_candidates = bool(candidate_actions)
 
-    winners = [t for t in tried if float(t.get("p", 0)) >= ACT_MIN_P and int(t.get("n", 0)) >= ACT_MIN_N]
-    losers = [t for t in tried if float(t.get("p", 1)) < EXPLORE_MAX_P and int(t.get("n", 0)) >= EXPLORE_MIN_N]
-    all_tried_failed = bool(tried) and len(losers) == len(tried)
+    # A winner is read from its record *and* its recent takes: an action that
+    # lost its newest RECENT_FAIL_STREAK outcomes is not one, however long it
+    # won before. Those with a real record behind them are what a shift looks
+    # like at the action level ("what worked here has stopped working"), and
+    # they are named in the explore that follows.
+    winners = [
+        t for t in tried
+        if float(t.get("p", 0)) >= ACT_MIN_P and int(t.get("n", 0)) >= ACT_MIN_N and not _recently_failing(t)
+    ]
+    stopped = [t for t in tried if _recently_failing(t) and int(t.get("won", 0)) >= ACT_MIN_N]
+    # Two readings of "failed". ``losers`` is the firm one — a low ratio over
+    # at least EXPLORE_MIN_N takes, or a streak — and is what ``escalate``
+    # asserts. ``failed_now`` also counts an action never seen to win: a 0/1
+    # is weak evidence *for* the action, but it is no reason to hold an agent
+    # on it when candidates are untried, and grid v5 found the explore it
+    # blocked was the one that would have found the new fix.
+    losers = [
+        t for t in tried
+        if (float(t.get("p", 1)) < EXPLORE_MAX_P and int(t.get("n", 0)) >= EXPLORE_MIN_N) or _recently_failing(t)
+    ]
+    failed_now = [t for t in tried if t in losers or int(t.get("won", 0)) == 0]
+    all_tried_failed = bool(tried) and len(failed_now) == len(tried)
+    all_tried_failed_firm = bool(tried) and len(losers) == len(tried)
 
     if priors_are_local:
         from_contrast = _act_from_contrast(
@@ -525,12 +567,20 @@ def recommend(
     shift_explores = regime_shift and priors_are_local
     if (all_tried_failed or shift_explores) and untried and tried:
         pick = untried[stable_bucket(agent_id, len(untried))]
-        failed = ", ".join(f"{t['action_key']} {t['won']}/{t['n']}" for t in losers[:4])
+        failed = ", ".join(f"{t['action_key']} {t['won']}/{t['n']}" for t in failed_now[:4])
         why = "regime shift suspected for tasks like this; " if shift_explores else ""
-        why += (f"tried and failed on similar tasks here: {failed}; " if failed else "")
+        if stopped:
+            s = stopped[0]
+            why += (f"{s['action_key']} won {s['won']}/{s['n']} on tasks like this but lost its last "
+                    f"{len(s.get('last_3') or [])} — what worked here has stopped working; ")
+        elif failed:
+            why += f"tried and failed on similar tasks here: {failed}; "
         why += f"{len(untried)} untried — try {pick}"
-        return {"mode": "explore", "suggested_action": pick, "untried": untried, "why": why}
-    if have_candidates and all_tried_failed and not untried:
+        out: dict[str, Any] = {"mode": "explore", "suggested_action": pick, "untried": untried, "why": why}
+        if stopped:
+            out["stopped_working"] = [str(s["action_key"]) for s in stopped]
+        return out
+    if have_candidates and all_tried_failed_firm and not untried:
         failed = ", ".join(f"{t['action_key']} {t['won']}/{t['n']}" for t in losers[:6])
         return {
             "mode": "escalate",
@@ -547,6 +597,12 @@ def recommend(
             "why": "the only memory evidence is discredited and no candidate action is untried",
         }
     return None
+
+
+def _recently_failing(prior: Mapping[str, Any]) -> bool:
+    """The action lost its newest ``RECENT_FAIL_STREAK`` outcomes (all the record keeps)."""
+    last = list(prior.get("last_3") or [])
+    return len(last) >= RECENT_FAIL_STREAK and all(x == "lost" for x in last[:RECENT_FAIL_STREAK])
 
 
 def _act_from_contrast(
@@ -620,8 +676,12 @@ def render_priors(priors: Mapping[str, Any] | None, recommendation: Mapping[str,
     lines: list[str] = []
     tried = (priors or {}).get("tried") or []
     if tried:
-        parts = [f"{t['action_key']} {t['won']}/{t['n']}" + ("" if int(t.get('agents', 0)) <= 1 else f" ({t['agents']} agents)")
-                 for t in tried[:6]]
+        parts = [
+            f"{t['action_key']} {t['won']}/{t['n']}"
+            + ("" if int(t.get('agents', 0)) <= 1 else f" ({t['agents']} agents)")
+            + (f", lost last {len(t.get('last_3') or [])}" if _recently_failing(t) and int(t.get("won", 0)) else "")
+            for t in tried[:6]
+        ]
         lines.append("Tried on similar tasks here: " + "; ".join(parts))
     contrasts = [
         c for c in ((priors or {}).get("contrasts") or [])

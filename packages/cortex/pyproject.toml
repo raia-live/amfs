@@ -5,7 +5,7 @@ description = "Memory Cortex — streaming digest compiler and briefing service 
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-    "amfs-core>=0.3.35",
+    "amfs-core>=0.3.36",
     "amfs-adapter-postgres",
     "amfs",
     "networkx>=3.0",
