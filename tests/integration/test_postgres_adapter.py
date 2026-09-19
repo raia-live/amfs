@@ -1276,3 +1276,106 @@ def test_the_python_and_sql_totals_report_the_same_thing(adapter) -> None:
     )
     for field in ("total_entries", "total_entities", "total_agents"):
         assert in_sql[field] == in_python[field], field
+
+
+# ---------------------------------------------------------------------------
+# Branch reads overlay the live parent
+# ---------------------------------------------------------------------------
+
+
+def _branch_world(adapter):
+    """``main`` with two entries, and ``repair/x`` branched off it that then
+    rewrites one of them and adds a third. Returns the branch name."""
+    from datetime import UTC, datetime
+
+    from amfs_core.models import Branch, MemoryEntry, Provenance
+
+    def entry(key, value, *, branch="main", version=1):
+        return MemoryEntry(
+            entity_path="acme/pricing", key=key, value=value, version=version,
+            branch=branch, confidence=0.9,
+            provenance=Provenance(agent_id="a", session_id="s", written_at=datetime.now(UTC)),
+        )
+
+    adapter.write(entry("rate-limit", {"rpm": 30}))
+    adapter.write(entry("plans", {"tiers": ["starter", "team"]}))
+    adapter.create_branch(Branch(
+        namespace="test", name="repair/x", parent_branch="main",
+        branched_at=datetime.now(UTC), created_by="repair-agent",
+    ))
+    adapter.write(entry("rate-limit", {"rpm": 60}, branch="repair/x"))
+    adapter.write(entry("risk-stale-limit", {"note": "30 rpm was the old plan"}, branch="repair/x"))
+    return "repair/x"
+
+
+def _keys(entries):
+    return sorted((e.key, e.value) for e in entries)
+
+
+def test_a_branch_lists_its_own_rows_over_the_parents_live_ones(adapter) -> None:
+    """A branch is a delta over its parent: its own rows where it wrote, the
+    parent's rows everywhere else, and never both for one key."""
+    branch = _branch_world(adapter)
+
+    assert _keys(adapter.list("acme/pricing", branch=branch)) == [
+        ("plans", {"tiers": ["starter", "team"]}),
+        ("rate-limit", {"rpm": 60}),
+        ("risk-stale-limit", {"note": "30 rpm was the old plan"}),
+    ]
+    # main is untouched by what the branch did.
+    assert _keys(adapter.list("acme/pricing")) == [
+        ("plans", {"tiers": ["starter", "team"]}),
+        ("rate-limit", {"rpm": 30}),
+    ]
+
+
+def test_a_branch_search_sees_the_parent_through_the_same_overlay(adapter) -> None:
+    from amfs_core.models import SearchQuery
+
+    branch = _branch_world(adapter)
+
+    hits = adapter.search(SearchQuery(entity_path="acme/pricing", limit=10), branch=branch)
+    assert _keys(hits) == [
+        ("plans", {"tiers": ["starter", "team"]}),
+        ("rate-limit", {"rpm": 60}),
+        ("risk-stale-limit", {"note": "30 rpm was the old plan"}),
+    ]
+    # And a filter applies to the union, not only to the branch's own rows.
+    by_key = adapter.search(SearchQuery(query="plans", entity_path="acme/pricing"), branch=branch)
+    assert [e.key for e in by_key] == ["plans"]
+
+
+def test_a_branch_reads_the_parent_live_not_as_of_the_branch_point(adapter) -> None:
+    """What main learns after the branch point is visible on the branch. A
+    session on a repair branch or a canary must see the same memory as one on
+    main except for the entries the branch changed — a snapshot would drift."""
+    from datetime import UTC, datetime
+
+    from amfs_core.models import MemoryEntry, Provenance
+
+    branch = _branch_world(adapter)
+    adapter.write(MemoryEntry(
+        entity_path="acme/pricing", key="plans", version=2,
+        value={"tiers": ["starter", "team", "enterprise"]}, confidence=0.9,
+        provenance=Provenance(agent_id="a", session_id="s2", written_at=datetime.now(UTC)),
+    ))
+
+    on_branch = adapter.read("acme/pricing", "plans", branch=branch)
+    assert on_branch is not None and on_branch.value["tiers"][-1] == "enterprise"
+    assert on_branch.version == 2
+    assert [e.value for e in adapter.list("acme/pricing", branch=branch) if e.key == "plans"] == [
+        {"tiers": ["starter", "team", "enterprise"]}
+    ]
+    # The branch's own change still shadows main's version of that key.
+    assert adapter.read("acme/pricing", "rate-limit", branch=branch).value == {"rpm": 60}
+    assert adapter.read("acme/pricing", "rate-limit").value == {"rpm": 30}
+
+
+def test_a_branch_the_adapter_never_recorded_reads_only_itself(adapter) -> None:
+    """No branch row means no parent to overlay; nothing is invented."""
+    from amfs_core.models import SearchQuery
+
+    _branch_world(adapter)
+    assert adapter.list("acme/pricing", branch="ghost") == []
+    assert adapter.search(SearchQuery(entity_path="acme/pricing"), branch="ghost") == []
+    assert adapter.read("acme/pricing", "plans", branch="ghost") is None

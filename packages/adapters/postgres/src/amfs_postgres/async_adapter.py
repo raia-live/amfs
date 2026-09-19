@@ -263,8 +263,11 @@ class AsyncPostgresAdapter:
                 row = await cur.fetchone()
 
                 if row is None and branch != "main":
+                    # Not on the branch: the parent's *live* row. A branch is a
+                    # delta over its parent, not a snapshot of it — see
+                    # ``PostgresAdapter._branch_scope``.
                     await cur.execute(
-                        "SELECT parent_branch, branched_at FROM amfs_branches WHERE namespace = %s AND name = %s",
+                        "SELECT parent_branch FROM amfs_branches WHERE namespace = %s AND name = %s",
                         (self._namespace, branch),
                     )
                     branch_info = await cur.fetchone()
@@ -275,15 +278,13 @@ class AsyncPostgresAdapter:
                             WHERE namespace = %s AND branch = %s
                               AND entity_path = %s AND key = %s
                               AND superseded_at IS NULL
-                              AND written_at <= %s
                             ORDER BY version DESC LIMIT 1
                             """,
                             (
                                 self._namespace,
-                                branch_info["parent_branch"],
+                                branch_info["parent_branch"] or "main",
                                 entity_path,
                                 key,
-                                branch_info["branched_at"],
                             ),
                         )
                         row = await cur.fetchone()
