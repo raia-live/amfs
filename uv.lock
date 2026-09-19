@@ -354,7 +354,7 @@ provides-extras = ["embedder", "embedder-st"]
 
 [[package]]
 name = "amfs-cortex"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "packages/cortex" }
 dependencies = [
     { name = "amfs" },
