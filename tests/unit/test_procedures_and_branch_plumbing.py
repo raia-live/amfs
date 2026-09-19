@@ -398,6 +398,28 @@ class TestBranchPlumbing:
         monkeypatch.setenv("AMFS_BRANCH", "   ")
         assert AgentMemory(agent_id="a", adapter=adapter).branch == "main"
 
+    def test_checkout_moves_a_live_memory_between_branches(self, tmp_path) -> None:
+        """What a hosted gateway does to a cached session when a canary starts
+        and again when it ends: the same memory, its causal chain intact,
+        reading another branch from the next call on."""
+        adapter = _BranchAwareAdapter(root=tmp_path / ".amfs", namespace="test")
+        mem = AgentMemory(agent_id="a", adapter=adapter)
+        mem.write("acme/billing", "k", "the limit is 60 rpm")
+        mem.read("acme/billing", "k")  # on the chain before the checkout
+        assert mem.read_log
+        assert mem.checkout("repair/fix-9") == "repair/fix-9"
+        assert mem.branch == "repair/fix-9"
+        mem.retrieve("anything")
+        assert ("retrieve", "repair/fix-9") in adapter.calls
+        # Back to main: None and blank both mean main.
+        assert mem.checkout(None) == "main" and mem.branch == "main"
+        mem.checkout("repair/fix-9")
+        assert mem.checkout("  ") == "main"
+        mem.retrieve("anything else")
+        assert adapter.calls[-1] == ("retrieve", None)
+        # The chain survived the moves.
+        assert mem.read_log  # the read before the checkout is still on it
+
 
 class TestHttpAdapterBriefingBranch:
     def test_branch_is_a_query_param_only_off_main(self) -> None:

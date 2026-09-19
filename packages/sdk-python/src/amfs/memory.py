@@ -417,6 +417,20 @@ class AgentMemory:
         """The branch reads and writes go to unless a call names another."""
         return self._branch
 
+    def checkout(self, branch: str | None) -> str:
+        """Point this memory at *branch* for every later read and write that
+        does not name one; ``None`` or blank means ``main``. Returns the
+        branch now active.
+
+        The same thing ``branch=`` does at construction, for a memory that
+        already exists: a hosted gateway moves a long-lived session onto a
+        repair branch while a canary runs and back to ``main`` when it ends,
+        without rebuilding the session and losing its causal chain. Nothing
+        is read or written by the call itself.
+        """
+        self._branch = (branch or "main").strip() or "main"
+        return self._branch
+
     @property
     def adapter(self) -> AdapterABC:
         return self._adapter
