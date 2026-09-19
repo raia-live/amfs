@@ -906,6 +906,51 @@ async def _discredited_below_gate(
     ]
 
 
+def _as_utc(value: Any) -> datetime | None:
+    """A datetime or ISO string as an aware UTC datetime; ``None`` otherwise."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return None
+
+
+def _resolved_actions_from_lessons(
+    lessons: list[MemoryEntry], contrasts: list[dict[str, Any]]
+) -> dict[str, str]:
+    """``entry_key -> action_key``: for each entry a contrast lesson names
+    under ``avoid``, the action that resolved that task instead.
+
+    The lesson's own ``resolved_action`` where it carries one (written by
+    ``amfs_core.evidence.contrast_lesson`` from the record's actions); else
+    the priors contrast for the same ``outcome_ref`` — the lesson and the
+    contrast are two readings of one outcome, joined on its ref. Neither the
+    nearest contrast nor any other is applied to an entry no lesson ties it
+    to: the entry keys are the lesson's, the action is the outcome's, and an
+    avoided rule that no fail-then-succeed outcome named gets nothing.
+    """
+    by_ref = {
+        str(c.get("outcome_ref")): str(c["resolved_with"])
+        for c in contrasts
+        if c.get("outcome_ref") and c.get("resolved_with")
+    }
+    out: dict[str, str] = {}
+    for e in lessons:
+        value = e.value if isinstance(e.value, dict) else None
+        if not value or not isinstance(value.get("avoid"), list):
+            continue
+        action = value.get("resolved_action") or by_ref.get(str(value.get("outcome_ref")))
+        if not action:
+            continue
+        for spec in value["avoid"]:
+            out.setdefault(str(spec), str(action))
+    return out
+
+
 def _priors_for_retrieve(
     *,
     entity_path: str,
@@ -2550,10 +2595,13 @@ async def retrieve_entries(
 
     # 5. Visibility (account RLS already scoped the fetch; this adds per-user +
     #    room scoping) applied ONCE over the full merged set so lexical-only
-    #    hits are filtered exactly like semantic ones — no leak path.
+    #    hits are filtered exactly like semantic ones — no leak path. The
+    #    lessons kept aside are filtered the same way: a replacement link
+    #    read from a lesson the caller cannot see is a leak by another name.
     if vis is not None and vis.should_filter():
         allowed = {e.entry_key for e in vis.filter_entries([v["entry"] for v in candidates.values()])}
         candidates = {k: v for k, v in candidates.items() if k in allowed}
+        lessons = vis.filter_entries(lessons) if lessons else lessons
 
     # 6. Artifact awareness (column authoritative once backfilled; classify on
     #    the fly otherwise so demotion works immediately).
@@ -2898,13 +2946,16 @@ async def retrieve_entries(
             # or carries a rare query term the leader lacks (its lexical
             # coverage ahead by ADAPTIVE_K_KEYWORD_GAP) — the cases where the
             # leader's record, not its topic, put it first, and the agent
-            # should still see what the query was actually about.
+            # should still see what the query was actually about. A rescued
+            # peer — discredited by the pooled record, confirmed on tasks
+            # like this one — is read as validated here: the record that
+            # kept it is the local one.
             top_rel = float(head[0][2].get("relevance") or 0.0)
             top_kw = float(head[0][2].get("keyword") or 0.0)
             head = [head[0]] + [
                 t for t in head[1:]
                 if (
-                    t[0].evidence_status == "validated"
+                    (t[0].evidence_status == "validated" or t[0].entry_key in rescued)
                     and t[1] >= top_score * ADAPTIVE_K_KEEP_RATIO
                 )
                 or float(t[2].get("relevance") or 0.0) > top_rel
@@ -3067,9 +3118,14 @@ async def retrieve_entries(
     #      hits whose status is ``contested`` or whose local record on this
     #      kind of task is more failure than success. Never below one hit,
     #      and the leader itself is never dropped here: what to do about the
-    #      leader is the recommendation's call.
+    #      leader is the recommendation's call. A rescued hit is never weak:
+    #      it carries the ``contested`` label too, but it is in the list
+    #      because its local record says it works here — the opposite of
+    #      what the label means on a pooled record.
     if req.adaptive_k and shifted_local and len(head) > 1:
         def _weak_under_shift(t: tuple[MemoryEntry, float, dict[str, Any]]) -> bool:
+            if t[0].entry_key in rescued:
+                return False
             bd = t[2]
             if str(bd.get("evidence_status") or "") == "contested":
                 return True
@@ -3101,16 +3157,17 @@ async def retrieve_entries(
         out.append(data)
     if req.include_avoid and avoided:
         avoided.sort(key=lambda e: (e.last_outcome_at or e.provenance.written_at), reverse=True)
-        # What replaced each avoided entry: the entries a contrast lesson on
-        # this query says the task was resolved with (same reading as the
-        # briefing's ``discredited[].replaced_by``), and the action the
-        # nearest contrast pair in the priors says resolved it.
+        # What replaced each avoided entry, per entry: the entries a contrast
+        # lesson on this query says the task was resolved with (same reading
+        # as the briefing's ``discredited[].replaced_by``), and the action
+        # that resolved it — the lesson's own ``resolved_action`` where it
+        # carries one, else the priors contrast for the same outcome. A
+        # contrast the lessons do not tie to this entry says nothing about
+        # it: two avoided rules must not both claim the one fix.
         replaced_by = _replacements_from_lessons(lessons) if lessons else {}
-        contrast_action: str | None = None
-        for c in (priors or {}).get("contrasts") or []:
-            if float(c.get("weight") or 0.0) >= _CONTRAST_MIN_W and c.get("resolved_with"):
-                contrast_action = str(c["resolved_with"])
-                break
+        resolved_action = _resolved_actions_from_lessons(
+            lessons, (priors or {}).get("contrasts") or []
+        )
         for entry in avoided[:AVOID_LIST_MAX]:
             data = (
                 _compact_entry_response(entry, rank=_COMPACT_FULL_HITS) if req.compact
@@ -3120,6 +3177,7 @@ async def retrieve_entries(
             data["_avoid"] = True
             local_only = entry.entry_key in locally_discredited
             replacements = list(replaced_by.get(entry.entry_key) or [])
+            action = resolved_action.get(entry.entry_key)
             data["_breakdown"] = {
                 "evidence": -1.0,
                 "evidence_status": "discredited",
@@ -3127,7 +3185,7 @@ async def retrieve_entries(
                 "last_outcome": entry.last_outcome,
                 "locally_discredited": local_only,
                 "replaced_by": replacements,
-                "resolved_with_action": contrast_action,
+                "resolved_with_action": action,
             }
             if req.compact:
                 # An avoid row's work is to name what stopped working and what
@@ -3136,7 +3194,18 @@ async def retrieve_entries(
                 # on. Compact mode already cut it to a preview; a one-liner
                 # that says so is the whole message. The field stays a string
                 # so every client parses the row as an entry.
-                when = entry.last_outcome_at or entry.provenance.written_at
+                #
+                # The date is the last *failure*: for a locally discredited
+                # rule the newest nearby outcome (a failure by construction —
+                # the entry's own ``last_outcome_at`` may be a later success
+                # on another class of task); otherwise the entry's last
+                # outcome when that was a failure, else nothing.
+                when = None
+                if local_only:
+                    recent = (local_evidence.get(entry.entry_key) or {}).get("recent") or []
+                    when = _as_utc(recent[0].get("committed_at")) if recent else None
+                elif entry.last_outcome is not None and not _evidence_is_success(entry.last_outcome):
+                    when = entry.last_outcome_at
                 parts = [
                     "stopped working on tasks like this" if local_only else "discredited",
                     f"last failure {when.date().isoformat()}" if when else "",
@@ -3145,8 +3214,8 @@ async def retrieve_entries(
                     parts.append("replaced by " + ", ".join(
                         r.rsplit("/", 1)[-1] for r in replacements[:3]
                     ))
-                if contrast_action:
-                    parts.append(f"resolved instead with {contrast_action}")
+                if action:
+                    parts.append(f"resolved instead with {action}")
                 data["value"] = "; ".join(p for p in parts if p)
                 data.pop("value_truncated", None)
             out.append(data)

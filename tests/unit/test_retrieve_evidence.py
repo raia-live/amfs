@@ -182,7 +182,10 @@ def test_a_validated_rule_that_failed_the_last_two_tasks_like_this_is_avoided(
         return {
             "acme/support/fix-restart": {
                 "success": 0.0, "failure": 2.0, "n": 2, "best_similarity": 0.97,
-                "recent": [{"success": False}, {"success": False}],
+                "recent": [
+                    {"success": False, "committed_at": "2026-09-01T10:00:00+00:00"},
+                    {"success": False, "committed_at": "2026-08-30T10:00:00+00:00"},
+                ],
             },
             # One nearby failure on fix-scale: enters the blend, is not discredited.
             "acme/support/fix-scale": {
@@ -210,6 +213,16 @@ def test_a_validated_rule_that_failed_the_last_two_tasks_like_this_is_avoided(
     scale = next(e for e in hits if e["key"] == "fix-scale")
     assert scale["_breakdown"]["evidence_local"]["n"] == 1
     assert scale["_breakdown"]["evidence"] < 0
+
+    # Compact: the one-liner dates the last *nearby failure*, not the entry's
+    # last outcome — which here is a success on some other class of task.
+    rows = client.post(
+        "/api/v1/retrieve",
+        json={"query": "queue stuck", "entity_path": "acme/support", "limit": 10,
+              "include_avoid": True, "compact": True},
+    ).json()
+    row = next(e for e in rows if e.get("_avoid"))
+    assert row["value"] == "stopped working on tasks like this; last failure 2026-09-01"
 
     # With the discredited rows asked for, nothing is hidden and nothing demoted.
     rows = client.post(

@@ -574,9 +574,23 @@ def test_a_contrast_in_the_priors_acts_on_the_resolver_and_names_it_on_the_avoid
 ) -> None:
     """One nearby fail-then-succeed outcome: the recommendation is the action
     that resolved it, the priors carry the pair, and the avoided rule — the one
-    the failed attempt acted on — says what resolved the task instead."""
+    the failed attempt acted on — says what resolved the task instead. The
+    action reaches the avoid row through the lesson for the same outcome, so
+    it lands on the rule that outcome named and on no other."""
+    from amfs_core import evidence as ev
+
     _stub_similar(server_mem._adapter, [_contrast_outcome_row("resolve:a", "resolve:b")])
     _outcomes(server_mem, "fix-a", OutcomeType.FAILURE, OutcomeType.FAILURE)
+    _outcomes(server_mem, "fix-b", OutcomeType.FAILURE, OutcomeType.FAILURE)
+    # The lesson for o-contrast: fix-a misled the attempt. No resolved_action
+    # of its own (a repair-loop pointer), so the action joins from the priors.
+    server_mem.write(
+        "acme/support", ev.contrast_lesson_key("o-contrast"),
+        {"kind": "contrast", "outcome_ref": "o-contrast", "avoid": ["acme/support/fix-a"],
+         "resolved_with": [], "task_excerpt": "card declined"},
+        confidence=0.8,
+    )
+    server_mem._read_tracker.clear()
 
     body, meta = _priors_meta(client, include_avoid=True, compact=True)
     assert meta["recommendation"]["mode"] == "act"
@@ -585,13 +599,16 @@ def test_a_contrast_in_the_priors_acts_on_the_resolver_and_names_it_on_the_avoid
         "failed": ["resolve:a"], "resolved_with": "resolve:b", "outcome_ref": "o-contrast",
     }
     assert meta["priors"]["contrasts"][0]["resolved_with"] == "resolve:b"
-    avoid = [e for e in body if e.get("_avoid")]
-    assert [e["key"] for e in avoid] == ["fix-a"]
-    assert avoid[0]["_breakdown"]["resolved_with_action"] == "resolve:b"
-    assert avoid[0]["_breakdown"]["locally_discredited"] is False
-    assert avoid[0]["value"].startswith("discredited; last failure ")
-    assert avoid[0]["value"].endswith("resolved instead with resolve:b")
-    assert "value_truncated" not in avoid[0]
+    avoid = {e["key"]: e for e in body if e.get("_avoid")}
+    assert sorted(avoid) == ["fix-a", "fix-b"]
+    assert avoid["fix-a"]["_breakdown"]["resolved_with_action"] == "resolve:b"
+    assert avoid["fix-a"]["_breakdown"]["locally_discredited"] is False
+    assert avoid["fix-a"]["value"].startswith("discredited; last failure ")
+    assert avoid["fix-a"]["value"].endswith("resolved instead with resolve:b")
+    assert "value_truncated" not in avoid["fix-a"]
+    # fix-b was not named by that outcome: it does not claim the fix.
+    assert avoid["fix-b"]["_breakdown"]["resolved_with_action"] is None
+    assert "resolved instead" not in avoid["fix-b"]["value"]
     # The elements keep their order: hits, avoid rows, then the meta element.
     kinds = ["meta" if e.get("_meta") else "avoid" if e.get("_avoid") else "hit" for e in body]
     assert kinds == sorted(kinds, key=["hit", "avoid", "meta"].index)
@@ -619,6 +636,43 @@ def test_under_a_query_shift_contested_alternatives_are_pruned_behind_the_leader
     # Without adaptive k the contested alternative stays.
     body, _ = _priors_meta(client, adaptive_k=False)
     assert "fix-c" in [e["key"] for e in body if not e.get("_meta")]
+
+
+def test_a_rescued_hit_is_not_pruned_under_the_shift(client, server_mem, monkeypatch) -> None:
+    """A rescued entry carries the ``contested`` label too, but it is in the
+    list because its local record says it works on tasks like this — the
+    opposite of what the label means on a pooled record. The shift pruning
+    must leave it where the rescue put it."""
+    from amfs_http import server
+
+    from tests.unit.test_retrieve_evidence import _AsyncShim
+
+    server_mem.write("acme/support", "fix-c", "card declined: retry the charge tomorrow", confidence=0.8)
+    server_mem._read_tracker.clear()
+    _stub_similar(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    monkeypatch.setattr(server, "_async_adapter", _AsyncShim(server_mem._adapter))
+    monkeypatch.setattr(
+        server_mem._adapter, "evidence_near",
+        lambda keys, vec, **kw: {
+            "acme/support/fix-c": {"success": 3.0, "failure": 0.0, "n": 3, "best_similarity": 0.9,
+                                   "recent": [{"success": True}] * 3},
+        },
+        raising=False,
+    )
+    # fix-a: the shifted rule. fix-b: untested, so it leads without the
+    # validated-leader pass (step 11) firing — what is under test is the shift
+    # pass (11b). fix-c: discredited by the pooled record, working on tasks
+    # like this one -> rescued, and labelled ``contested``.
+    _outcomes(server_mem, "fix-a", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
+    _outcomes(server_mem, "fix-c", OutcomeType.FAILURE, OutcomeType.FAILURE)
+    assert server_mem._adapter.read("acme/support", "fix-c").discredited_at is not None
+
+    body, meta = _priors_meta(client, adaptive_k=True, include_avoid=True)
+    assert meta["regime_shift_scope"] == "query"
+    hits = {e["key"]: e for e in body if not e.get("_meta") and not e.get("_avoid")}
+    assert "fix-c" in hits, sorted(hits)
+    assert hits["fix-c"]["_rescued"] is True and hits["fix-c"]["evidence_status"] == "contested"
+    assert list(hits)[0] == "fix-b"
 
 
 def test_the_off_query_rule_fires_the_shift_at_the_default_gate_too(client, server_mem) -> None:
