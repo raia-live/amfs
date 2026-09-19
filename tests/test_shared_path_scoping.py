@@ -36,14 +36,34 @@ GUARD = "_EXCLUDE_SHARED_PATHS"
 
 
 def _method(path: Path, name: str) -> str:
-    """The source of one method, up to the next def at the same indent."""
+    """The source of one method (or module-level function), up to the next
+    def at the same indent."""
     src = path.read_text()
-    start = src.index(f"    def {name}(") if f"    def {name}(" in src else src.index(
-        f"    async def {name}("
-    )
-    rest = src[start + 10 :]
-    end = re.search(r"\n    (?:async )?def ", rest)
-    return src[start : start + 10 + (end.start() if end else len(rest))]
+    for indent in ("    ", ""):
+        for prefix in (f"{indent}def {name}(", f"{indent}async def {name}("):
+            marker = f"\n{prefix}"
+            if marker in src:
+                start = src.index(marker) + 1
+                rest = src[start + 10 :]
+                end = re.search(rf"\n{indent}(?:async )?def ", rest)
+                return src[start : start + 10 + (end.start() if end else len(rest))]
+    raise AssertionError(f"{path.name} has no def {name}")
+
+
+#: Where a read builds its WHERE clause when that is not the method itself.
+#: ``list`` and ``count_entries`` on both adapters share the module-level
+#: ``list_conditions`` in adapter.py, so a page and the ``total`` it reports
+#: cannot disagree about which rows exist and the guard is applied to the
+#: unscoped read in one place; these tests follow it there.
+WHERE_BUILDER: dict[tuple[Path, str], tuple[Path, str]] = {
+    (SYNC, "list"): (SYNC, "list_conditions"),
+    (ASYNC, "list"): (SYNC, "list_conditions"),
+}
+
+
+def _where_body(path: Path, method: str) -> str:
+    """The source that decides which rows *method* reads."""
+    return _method(*WHERE_BUILDER.get((path, method), (path, method)))
 
 
 class TestTheGuardIsDefinedOnce:
@@ -116,7 +136,7 @@ class TestUnscopedReadsExcludeSharedNamespaces:
         ],
     )
     def test_the_guard_is_applied_when_no_path_is_given(self, path, method) -> None:
-        body = _method(path, method)
+        body = _where_body(path, method)
         assert GUARD in body, (
             f"{path.name}:{method} can return shared-namespace entries to a "
             f"query that never asked for them"
@@ -137,7 +157,7 @@ class TestUnscopedReadsExcludeSharedNamespaces:
         """Applying it unconditionally would break the scoped read too, which
         is the one case that must keep working: naming the path is how a
         caller says they want it."""
-        body = _method(path, method)
+        body = _where_body(path, method)
         assert re.search(
             r'conditions\.append\("entity_path = %s"\)\s*\n'
             r'\s*params\.append\([^)]+\)\s*\n'

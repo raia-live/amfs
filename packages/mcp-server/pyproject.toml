@@ -41,7 +41,7 @@ dependencies = [
     # 0.3.22 likewise: SearchQuery grew include_descendants, and nothing here
     # sets it. The floor rises only because a floor below the version in this
     # tree is what test_dependency_floors forbids.
-    "amfs-core>=0.3.31",
+    "amfs-core>=0.3.32",
     # 0.1.10 for the same reason, one layer down: this adapter builds the
     # /outcomes body field by field, and anything earlier does not copy
     # tool_calls into it. The floor was 0.1.2, which a cached 0.1.9 satisfies —
@@ -69,7 +69,7 @@ dependencies = [
     # falls back to its own list() call. The write still succeeds and still
     # returns a quality report — the scope block is simply never there, which is
     # indistinguishable from a scope that genuinely has no neighbours.
-    "amfs-adapter-http>=0.1.24",
+    "amfs-adapter-http>=0.1.25",
     "fastmcp>=2.0",
 ]
 
