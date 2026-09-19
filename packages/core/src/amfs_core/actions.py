@@ -56,6 +56,17 @@ ACT_MIN_P = 0.6
 ACT_MIN_N = 2
 EXPLORE_MAX_P = 0.4
 EXPLORE_MIN_N = 2
+#: Neighbourhood weight (``neighbourhood_weights``) a contrast pair needs
+#: before one fail-then-succeed outcome is enough to recommend the action
+#: that resolved it. ``exp(-gap/tau)`` at 0.25 is a task within ~0.04 of the
+#: nearest outcome under the production embedder — the same issue phrased
+#: differently, not a neighbouring class. ``ACT_MIN_N`` asks for two wins
+#: before acting on a record; a contrast is the one case where one outcome
+#: carries both halves of the evidence — what failed and what worked on the
+#: same task — and grid v4 measured what waiting for the second costs: most
+#: (store, issue) pairs saw a quirk only once or twice, and the store's
+#: success on the n-th exposure of the same issue ran 0.00, 0.12, 0.23.
+CONTRAST_MIN_W = 0.25
 
 _WHITESPACE = re.compile(r"\s")
 
@@ -214,11 +225,22 @@ def aggregate_priors(
     Each item of ``outcomes`` is a row with ``actions_taken`` (as produced by
     :func:`actions_taken`), ``committed_at`` and ``agent_id``; ``similarity`` is
     optional and multiplies the weight. Returns ``{"tried": [...], "untried":
-    [...], "n_outcomes": int}`` with ``tried`` sorted by posterior descending and,
-    within ties, by evidence.
+    [...], "n_outcomes": int, "contrasts": [...]}`` with ``tried`` sorted by
+    posterior descending and, within ties, by evidence.
+
+    ``contrasts`` are the fail-then-succeed outcomes among the rows: one
+    outcome in which an attempt ended on action ``A`` and failed, and the
+    terminal action ``B`` (a different one) succeeded. Each is ``{"failed":
+    [A, ...], "resolved_with": B, "weight", "task_similarity", "committed_at",
+    "outcome_ref", "agent_id"}``, heaviest (nearest, then newest) first. The
+    per-action ``tried`` rows already count A's loss and B's win; what they
+    lose is that the two came from the *same task* — the one piece of
+    evidence that says "when A fails here, B is what works", and the only
+    evidence there is after a single exposure. :func:`recommend` reads it.
     """
     now = now or datetime.now(timezone.utc)
     priors: dict[str, ActionPrior] = {}
+    contrasts: list[dict[str, Any]] = []
     # newest first so last_3 fills in time order
     rows = sorted(outcomes, key=lambda r: _as_dt(r.get("committed_at")) or now, reverse=True)
     for row in rows:
@@ -226,6 +248,8 @@ def aggregate_priors(
         age_days = max(0.0, (now - at).total_seconds() / 86400.0) if at else 0.0
         w = (daily_decay ** age_days) * float(row.get("similarity", 1.0) or 1.0)
         agent = str(row.get("agent_id") or "")
+        failed_here: list[str] = []
+        resolved_here: str | None = None
         for act in row.get("actions_taken") or []:
             key = str(act.get("action_key") or "")
             if not key:
@@ -244,6 +268,27 @@ def aggregate_priors(
                 pr.last_at = at
             if agent:
                 pr.agents.add(agent)
+            if act.get("attempt") is not None and not ok:
+                if key not in failed_here:
+                    failed_here.append(key)
+            elif act.get("attempt") is None and ok:
+                resolved_here = key
+        if failed_here and resolved_here and resolved_here not in failed_here:
+            contrasts.append({
+                "failed": failed_here,
+                "resolved_with": resolved_here,
+                "weight": round(float(row.get("similarity", 1.0) or 1.0), 3),
+                "task_similarity": (
+                    round(float(row["task_similarity"]), 3)
+                    if row.get("task_similarity") is not None else None
+                ),
+                "committed_at": at.isoformat() if at else None,
+                "outcome_ref": row.get("outcome_ref"),
+                "agent_id": agent or None,
+            })
+    # Rows were walked newest first and the sort is stable, so within a weight
+    # the newest contrast leads.
+    contrasts.sort(key=lambda c: -float(c["weight"]))
     tried = sorted(priors.values(), key=lambda p: (-p.p, -p.n, p.action_key))
     tried_keys = {p.action_key for p in tried}
     untried = [a for a in (candidate_actions or []) if a and a not in tried_keys]
@@ -251,6 +296,7 @@ def aggregate_priors(
         "tried": [p.as_dict() for p in tried],
         "untried": untried,
         "n_outcomes": len(rows),
+        "contrasts": contrasts,
     }
 
 
@@ -409,6 +455,16 @@ def recommend(
     still means something when it is every action; but a shift read over it
     does not send the agent exploring, since neither the shift nor the record
     is known to be about this kind of task.
+
+    A *contrast* — one nearby outcome in which action A failed an attempt and
+    action B then resolved the same task — is acted on from a single outcome
+    (:func:`_act_from_contrast`), ahead of the per-action winners, when the
+    winner it would displace is A itself or there is no winner. ``ACT_MIN_N``
+    exists because one win may be luck; a contrast is one outcome that holds
+    both the failure and the fix for the same task, and the alternative — act
+    on A because its record is long — is the repeated failure grid v4
+    measured. Local priors only: a contrast from the entity's whole record is
+    not known to be about this kind of task.
     """
     tried: list[Mapping[str, Any]] = list((priors or {}).get("tried") or [])
     untried: list[str] = list((priors or {}).get("untried") or [])
@@ -417,6 +473,17 @@ def recommend(
     winners = [t for t in tried if float(t.get("p", 0)) >= ACT_MIN_P and int(t.get("n", 0)) >= ACT_MIN_N]
     losers = [t for t in tried if float(t.get("p", 1)) < EXPLORE_MAX_P and int(t.get("n", 0)) >= EXPLORE_MIN_N]
     all_tried_failed = bool(tried) and len(losers) == len(tried)
+
+    if priors_are_local:
+        from_contrast = _act_from_contrast(
+            list((priors or {}).get("contrasts") or []),
+            tried,
+            winners,
+            regime_shift=regime_shift,
+            regime_shift_at=regime_shift_at,
+        )
+        if from_contrast is not None:
+            return from_contrast
 
     if winners and regime_shift:
         since = [w for w in winners if _won_since(w, regime_shift_at)]
@@ -473,6 +540,70 @@ def recommend(
     return None
 
 
+def _act_from_contrast(
+    contrasts: Sequence[Mapping[str, Any]],
+    tried: Sequence[Mapping[str, Any]],
+    winners: Sequence[Mapping[str, Any]],
+    *,
+    regime_shift: bool,
+    regime_shift_at: datetime | None,
+) -> dict[str, Any] | None:
+    """``act -> B`` from the nearest contrast pair, or ``None``.
+
+    The pair must be near-identical to the query (``weight >=
+    CONTRAST_MIN_W``); B's own record must not have turned since (its newest
+    take, if any, is a win — a B that lost more recently than it resolved
+    this task is not the fix); and under a regime shift the pair must
+    postdate the shift, or it may itself be pre-change evidence. The pair
+    yields to a per-action winner unless that winner is one of the actions
+    the pair says failed: an established C that the contrast is not about
+    keeps its recommendation; an established A that just failed on this kind
+    of task does not.
+    """
+    if not contrasts:
+        return None
+    by_key = {str(t.get("action_key")): t for t in tried}
+    for c in contrasts:
+        if float(c.get("weight") or 0.0) < CONTRAST_MIN_W:
+            break   # sorted heaviest first
+        resolved = str(c.get("resolved_with") or "")
+        failed = [str(a) for a in (c.get("failed") or [])]
+        if not resolved or not failed:
+            continue
+        if regime_shift:
+            at = _as_dt(c.get("committed_at"))
+            if regime_shift_at is None or at is None or at <= (
+                regime_shift_at if regime_shift_at.tzinfo
+                else regime_shift_at.replace(tzinfo=timezone.utc)
+            ):
+                continue
+        b = by_key.get(resolved)
+        if b is not None:
+            last_3 = list(b.get("last_3") or [])
+            if last_3 and last_3[0] != "won":
+                continue
+        if winners and winners[0].get("action_key") not in failed:
+            return None   # an established winner the pair is not about stands
+        a_text = ", ".join(failed[:3])
+        return {
+            "mode": "act",
+            "suggested_action": resolved,
+            "why": (
+                f"on a near-identical task here {a_text} failed and {resolved} resolved it"
+                + (
+                    f" ({b['won']}/{b['n']} overall)" if b is not None and int(b.get("n", 0)) > 1
+                    else ""
+                )
+            ),
+            "contrast": {
+                "failed": failed,
+                "resolved_with": resolved,
+                "outcome_ref": c.get("outcome_ref"),
+            },
+        }
+    return None
+
+
 def render_priors(priors: Mapping[str, Any] | None, recommendation: Mapping[str, Any] | None) -> str:
     """One compact block for an agent's context. Empty string when nothing to show."""
     if not priors and not recommendation:
@@ -483,6 +614,17 @@ def render_priors(priors: Mapping[str, Any] | None, recommendation: Mapping[str,
         parts = [f"{t['action_key']} {t['won']}/{t['n']}" + ("" if int(t.get('agents', 0)) <= 1 else f" ({t['agents']} agents)")
                  for t in tried[:6]]
         lines.append("Tried on similar tasks here: " + "; ".join(parts))
+    contrasts = [
+        c for c in ((priors or {}).get("contrasts") or [])
+        if float(c.get("weight") or 0.0) >= CONTRAST_MIN_W
+    ]
+    for c in contrasts[:2]:
+        failed = ", ".join(str(a) for a in (c.get("failed") or [])[:3])
+        if failed and c.get("resolved_with"):
+            lines.append(
+                f"On a near-identical task here {failed} failed and "
+                f"{c['resolved_with']} resolved it."
+            )
     untried = (priors or {}).get("untried") or []
     if untried:
         lines.append("Not yet tried here: " + ", ".join(untried[:8]))
@@ -495,6 +637,7 @@ def render_priors(priors: Mapping[str, Any] | None, recommendation: Mapping[str,
 
 __all__ = [
     "ACTION_VALUE_MAX_CHARS",
+    "CONTRAST_MIN_W",
     "PRIORS_NEIGHBOURHOOD_MIN_W",
     "PRIORS_NEIGHBOURHOOD_TAU",
     "neighbourhood_weights",

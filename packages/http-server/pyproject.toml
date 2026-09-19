@@ -1,6 +1,6 @@
 [project]
 name = "amfs-http-server"
-version = "0.3.37"
+version = "0.3.38"
 description = "AMFS HTTP/REST API server with SSE support"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -27,7 +27,7 @@ dependencies = [
     # unexpected keyword, _scope_block swallows it, and the block disappears —
     # while an adapter that ignored the argument instead would name another
     # agent's private keys. Either way the floor is what makes the rule real.
-    "amfs-core>=0.3.33",
+    "amfs-core>=0.3.34",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "sse-starlette>=2.0",

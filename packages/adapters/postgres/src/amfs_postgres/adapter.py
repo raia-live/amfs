@@ -3967,18 +3967,36 @@ class PostgresAdapter(AdapterABC):
         *,
         per_key: int = 50,
         min_similarity: float = 0.0,
+        tau: float | None = None,
+        min_weight: float | None = None,
+        recent: int = 5,
     ) -> dict[str, dict[str, Any]]:
         """The outcome record of each entry in ``entry_keys``, restricted to
         outcomes whose task was like the one embedded.
 
-        Returns ``entry_key -> {"success", "failure", "n", "best_similarity"}``
-        where ``success`` and ``failure`` are similarity-weighted counts: an
-        outcome on a task at similarity 0.9 counts 0.9, one at 0.5 counts 0.5.
-        Keys with no nearby outcome are absent. Terminal outcomes credit the
-        row's ``causal_entry_keys``; the failed attempts inside ``attempts``
-        credit their own keys with a failure, exactly as the propagation
-        trigger applies them to the pooled columns — so this is the pooled
-        record, conditioned on the task, and nothing more.
+        Returns ``entry_key -> {"success", "failure", "n", "best_similarity",
+        "recent"}``. ``success`` and ``failure`` are weighted counts, the
+        weight of each outcome relative to the *nearest* one for that key:
+        ``exp(-(best - sim) / tau)``, the form ``neighbourhood_weights`` gives
+        the action priors and for the same reason — under a retrieval
+        embedder every task on an entity clears any absolute floor, but
+        within one query the nearest outcomes are the same kind of task and
+        the rest trail by a gap. An outcome 0.05 behind the best counts a
+        fifth, one 0.1 behind counts 4%, and rows under ``min_weight`` are
+        dropped rather than counted toward ``n``. ``tau`` and ``min_weight``
+        default to the priors' constants. ``recent`` is the newest
+        in-neighbourhood outcomes for the key, newest first, each ``{success,
+        similarity, committed_at}`` — the order the sums cannot carry, which
+        ``locally_discredited`` reads. Keys with no nearby outcome are absent.
+
+        Terminal outcomes credit the row's ``causal_entry_keys``; the failed
+        attempts inside ``attempts`` credit their own keys with a failure,
+        exactly as the propagation trigger applies them to the pooled columns
+        — so this is the pooled record, conditioned on the task, and nothing
+        more. ``min_similarity`` is an absolute floor under the relative
+        weighting: rows below it never enter, so a key whose only outcomes
+        are on unrelated tasks has no local record rather than a full-weight
+        one.
 
         Bounded on both sides: ``per_key`` nearest outcomes per entry, over
         the outcomes the GIN index on ``causal_entry_keys`` narrows to.
@@ -3986,18 +4004,28 @@ class PostgresAdapter(AdapterABC):
         """
         if not self._has_outcome_embedding_col or not embedding or not entry_keys:
             return {}
+        from amfs_core.actions import PRIORS_NEIGHBOURHOOD_MIN_W, PRIORS_NEIGHBOURHOOD_TAU
+
+        tau_ = float(PRIORS_NEIGHBOURHOOD_TAU if tau is None else tau)
+        min_w = float(PRIORS_NEIGHBOURHOOD_MIN_W if min_weight is None else min_weight)
         vec = f"[{','.join(str(v) for v in embedding)}]"
         keys = list(dict.fromkeys(entry_keys))
         # Each row is unnested to (key, is_failure) pairs: the terminal outcome
         # for every causal key, and a failure for every key inside a failed
         # attempt. Rows are narrowed first by key overlap (indexed), then
-        # ranked per key by task similarity and cut at per_key. ``n`` counts
-        # distinct outcomes, not credits: one outcome that names a key in a
-        # failed attempt and again as a causal key is one nearby task, and
-        # must not on its own clear LOCAL_EVIDENCE_MIN_N.
+        # ranked per key by task similarity and cut at per_key, then weighted
+        # against the key's best match and cut again at min_weight. ``n``
+        # counts distinct outcomes, not credits: one outcome that names a key
+        # in a failed attempt and again as a causal key is one nearby task,
+        # and must not on its own clear LOCAL_EVIDENCE_MIN_N. ``recent`` is
+        # aggregated newest first with the failure credit ahead of the success
+        # credit of the same outcome, so the Python dedupe below keeps the
+        # failure: the entry misled an attempt on that task, whatever else it
+        # did afterwards.
         sql = """
             WITH near AS (
                 SELECT o.id AS outcome_id, o.outcome_type, o.causal_entry_keys, o.attempts,
+                       o.committed_at,
                        1 - (o.task_embedding <=> %s::vector) AS similarity
                 FROM amfs_outcomes o
                 WHERE o.namespace = %s
@@ -4017,11 +4045,11 @@ class PostgresAdapter(AdapterABC):
             credited AS (
                 SELECT n.outcome_id, k AS entry_key,
                        amfs_outcome_is_success(n.outcome_type) AS success,
-                       n.similarity
+                       n.similarity, n.committed_at
                 FROM near n, unnest(n.causal_entry_keys) AS k
                 WHERE k = ANY(%s::text[])
                 UNION ALL
-                SELECT n.outcome_id, ak AS entry_key, FALSE AS success, n.similarity
+                SELECT n.outcome_id, ak AS entry_key, FALSE AS success, n.similarity, n.committed_at
                 FROM near n,
                      jsonb_array_elements(n.attempts) AS att,
                      jsonb_array_elements_text(
@@ -4030,34 +4058,68 @@ class PostgresAdapter(AdapterABC):
                 WHERE ak = ANY(%s::text[])
             ),
             ranked AS (
-                SELECT outcome_id, entry_key, success, similarity,
-                       row_number() OVER (PARTITION BY entry_key ORDER BY similarity DESC) AS rn
+                SELECT outcome_id, entry_key, success, similarity, committed_at,
+                       row_number() OVER (PARTITION BY entry_key ORDER BY similarity DESC) AS rn,
+                       MAX(similarity) OVER (PARTITION BY entry_key) AS best
                 FROM credited
                 WHERE similarity >= %s
+            ),
+            weighted AS (
+                SELECT outcome_id, entry_key, success, similarity, committed_at, best,
+                       exp(-(best - similarity) / %s) AS w
+                FROM ranked
+                WHERE rn <= %s
             )
             SELECT entry_key,
-                   SUM(CASE WHEN success THEN similarity ELSE 0 END) AS success,
-                   SUM(CASE WHEN success THEN 0 ELSE similarity END) AS failure,
+                   SUM(CASE WHEN success THEN w ELSE 0 END) AS success,
+                   SUM(CASE WHEN success THEN 0 ELSE w END) AS failure,
                    COUNT(DISTINCT outcome_id) AS n,
-                   MAX(similarity) AS best_similarity
-            FROM ranked
-            WHERE rn <= %s
+                   MAX(similarity) AS best_similarity,
+                   (array_agg(
+                        jsonb_build_object(
+                            'o', outcome_id, 's', success, 'sim', similarity,
+                            'at', to_char(committed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"')
+                        )
+                        ORDER BY committed_at DESC, success ASC
+                   ))[1:%s] AS recent
+            FROM weighted
+            WHERE w >= %s
             GROUP BY entry_key
         """
-        params = [vec, self._namespace, keys, keys, keys, keys, float(min_similarity), int(per_key)]
+        # ``recent`` is over-fetched (two credits per outcome at most) and
+        # deduped per outcome below.
+        params = [
+            vec, self._namespace, keys, keys, keys, keys, float(min_similarity),
+            tau_ if tau_ > 0 else 1e-9, int(per_key), int(max(1, recent)) * 2, min_w,
+        ]
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
-        return {
-            row["entry_key"]: {
+        out: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            seen: set[Any] = set()
+            recent_rows: list[dict[str, Any]] = []
+            for item in _jsonb(row.get("recent"), []) or []:
+                item = _jsonb(item, None)   # jsonb[] elements may arrive decoded or as text
+                if not isinstance(item, dict) or item.get("o") in seen:
+                    continue
+                seen.add(item.get("o"))
+                recent_rows.append({
+                    "success": bool(item.get("s")),
+                    "similarity": float(item.get("sim") or 0.0),
+                    "committed_at": item.get("at"),
+                })
+                if len(recent_rows) >= max(1, recent):
+                    break
+            out[row["entry_key"]] = {
                 "success": float(row["success"] or 0.0),
                 "failure": float(row["failure"] or 0.0),
                 "n": int(row["n"] or 0),
                 "best_similarity": float(row["best_similarity"] or 0.0),
+                "recent": recent_rows,
             }
-            for row in rows
-        }
+        return out
 
     def action_stats(
         self,

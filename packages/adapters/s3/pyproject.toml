@@ -5,7 +5,7 @@ description = "AMFS adapter for S3-compatible object storage"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-    "amfs-core>=0.3.33",
+    "amfs-core>=0.3.34",
     "boto3>=1.34",
 ]
 

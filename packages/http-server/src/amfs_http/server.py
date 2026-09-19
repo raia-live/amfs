@@ -53,6 +53,7 @@ from amfs_core.scope import SqlScope
 from amfs_core.ranking import keyword_coverage as _keyword_coverage
 from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
+from amfs_core.actions import CONTRAST_MIN_W as _CONTRAST_MIN_W
 from amfs_core.actions import actions_taken as derive_actions_taken
 from amfs_core.engine import read_tracker_scope
 from amfs_core.evidence import evidence_signal as _evidence_signal
@@ -348,7 +349,9 @@ from amfs_core.evidence import (  # noqa: E402
     DISCREDIT_THRESHOLD,
     blend_local_evidence as _blend_local_evidence,
     is_synthetic_key as _is_synthetic_key,
+    locally_discredited as _locally_discredited,
     locally_valid as _locally_valid,
+    replacements_from_lessons as _replacements_from_lessons,
 )
 
 
@@ -901,6 +904,51 @@ async def _discredited_below_gate(
         and not _is_excluded_entity(getattr(e, "entity_path", ""))
         and not _is_synthetic_key(getattr(e, "key", ""))
     ]
+
+
+def _as_utc(value: Any) -> datetime | None:
+    """A datetime or ISO string as an aware UTC datetime; ``None`` otherwise."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return None
+
+
+def _resolved_actions_from_lessons(
+    lessons: list[MemoryEntry], contrasts: list[dict[str, Any]]
+) -> dict[str, str]:
+    """``entry_key -> action_key``: for each entry a contrast lesson names
+    under ``avoid``, the action that resolved that task instead.
+
+    The lesson's own ``resolved_action`` where it carries one (written by
+    ``amfs_core.evidence.contrast_lesson`` from the record's actions); else
+    the priors contrast for the same ``outcome_ref`` — the lesson and the
+    contrast are two readings of one outcome, joined on its ref. Neither the
+    nearest contrast nor any other is applied to an entry no lesson ties it
+    to: the entry keys are the lesson's, the action is the outcome's, and an
+    avoided rule that no fail-then-succeed outcome named gets nothing.
+    """
+    by_ref = {
+        str(c.get("outcome_ref")): str(c["resolved_with"])
+        for c in contrasts
+        if c.get("outcome_ref") and c.get("resolved_with")
+    }
+    out: dict[str, str] = {}
+    for e in lessons:
+        value = e.value if isinstance(e.value, dict) else None
+        if not value or not isinstance(value.get("avoid"), list):
+            continue
+        action = value.get("resolved_action") or by_ref.get(str(value.get("outcome_ref")))
+        if not action:
+            continue
+        for spec in value["avoid"]:
+            out.setdefault(str(spec), str(action))
+    return out
 
 
 def _priors_for_retrieve(
@@ -2530,7 +2578,14 @@ async def retrieve_entries(
     # 4. Drop benchmark/system scratch namespaces from user recall, and the
     #    system-written contrast lessons: those are consumed by the briefing
     #    (folded into the discredited section as "replaced by") and are not
-    #    knowledge an agent should read or be credited for.
+    #    knowledge an agent should read or be credited for. The lessons this
+    #    query surfaced are kept aside for the avoid list, which names what
+    #    replaced each avoided entry the same way the briefing does.
+    lessons: list[MemoryEntry] = [
+        v["entry"] for v in candidates.values()
+        if _is_synthetic_key(getattr(v["entry"], "key", ""))
+        and not _is_excluded_entity(getattr(v["entry"], "entity_path", ""))
+    ]
     candidates = {
         k: v
         for k, v in candidates.items()
@@ -2540,10 +2595,13 @@ async def retrieve_entries(
 
     # 5. Visibility (account RLS already scoped the fetch; this adds per-user +
     #    room scoping) applied ONCE over the full merged set so lexical-only
-    #    hits are filtered exactly like semantic ones — no leak path.
+    #    hits are filtered exactly like semantic ones — no leak path. The
+    #    lessons kept aside are filtered the same way: a replacement link
+    #    read from a lesson the caller cannot see is a leak by another name.
     if vis is not None and vis.should_filter():
         allowed = {e.entry_key for e in vis.filter_entries([v["entry"] for v in candidates.values()])}
         candidates = {k: v for k, v in candidates.items() if k in allowed}
+        lessons = vis.filter_entries(lessons) if lessons else lessons
 
     # 6. Artifact awareness (column authoritative once backfilled; classify on
     #    the fly otherwise so demotion works immediately).
@@ -2594,17 +2652,34 @@ async def retrieve_entries(
     #     be conditioned on the query — and a discredited rule that still works
     #     for tasks like this one is kept, labelled ``contested``, rather than
     #     hidden from the one class that needs it.
+    #
+    #     The same record, read the other way: a *validated* rule whose two
+    #     most recent outcomes on tasks like this one were failures has
+    #     stopped working for this class of task, whatever its pooled label
+    #     says (``locally_discredited``). It leaves the ranked list for the
+    #     avoid list, with what replaced it. Grid v4 measured the alternative
+    #     — the rule kept its ``validated`` label and its rank through 4-7
+    #     failures on the same quirk, because the pooled record was long and
+    #     the failures few.
     local_evidence: dict[str, dict[str, Any]] = {}
     if _local_evidence_enabled() and topical in query_vectors and candidates:
         near_fn = getattr(_get_memory()._adapter, "evidence_near", None)
         if callable(near_fn):
+            from amfs_core.actions import PRIORS_MIN_SIMILARITY as _PRIORS_MIN_SIM
+
             by_relevance = sorted(
                 candidates.values(), key=lambda v: (v["sim"], v["keyword"]), reverse=True
             )
             head_keys = [v["entry"].entry_key for v in by_relevance[:LOCAL_EVIDENCE_HEAD]]
             try:
+                # The priors' absolute floor, under the relative weighting the
+                # adapter applies: an outcome on an unrelated task is not local
+                # evidence however alone it is.
                 local_evidence = await _offload(
-                    _db_executor, near_fn, head_keys, query_vectors[topical]
+                    _db_executor,
+                    functools.partial(near_fn, min_similarity=_PRIORS_MIN_SIM),
+                    head_keys,
+                    query_vectors[topical],
                 )
             except Exception:  # noqa: BLE001 - the pooled record stands
                 logger.debug("evidence_near failed", exc_info=True)
@@ -2614,6 +2689,8 @@ async def retrieve_entries(
     # entry_key -> (similarity, keyword) for the query-scoped shift reading.
     avoided_match: dict[str, tuple[float, float]] = {}
     rescued: set[str] = set()
+    # Validated by the pooled record, failed on the last two tasks like this.
+    locally_discredited: set[str] = set()
     if not req.include_discredited:
         kept_candidates: dict[str, dict[str, Any]] = {}
         for k, v in candidates.items():
@@ -2624,6 +2701,10 @@ async def retrieve_entries(
                 elif v["sim"] > 0.0 or v["keyword"] > 0.0:
                     avoided.append(v["entry"])
                     avoided_match[k] = (float(v["sim"]), float(v["keyword"]))
+            elif _locally_discredited(local_evidence.get(k)):
+                locally_discredited.add(k)
+                avoided.append(v["entry"])
+                avoided_match[k] = (float(v["sim"]), float(v["keyword"]))
             else:
                 kept_candidates[k] = v
         candidates = kept_candidates
@@ -2865,13 +2946,16 @@ async def retrieve_entries(
             # or carries a rare query term the leader lacks (its lexical
             # coverage ahead by ADAPTIVE_K_KEYWORD_GAP) — the cases where the
             # leader's record, not its topic, put it first, and the agent
-            # should still see what the query was actually about.
+            # should still see what the query was actually about. A rescued
+            # peer — discredited by the pooled record, confirmed on tasks
+            # like this one — is read as validated here: the record that
+            # kept it is the local one.
             top_rel = float(head[0][2].get("relevance") or 0.0)
             top_kw = float(head[0][2].get("keyword") or 0.0)
             head = [head[0]] + [
                 t for t in head[1:]
                 if (
-                    t[0].evidence_status == "validated"
+                    (t[0].evidence_status == "validated" or t[0].entry_key in rescued)
                     and t[1] >= top_score * ADAPTIVE_K_KEEP_RATIO
                 )
                 or float(t[2].get("relevance") or 0.0) > top_rel
@@ -2880,49 +2964,15 @@ async def retrieve_entries(
         else:
             head = [t for t in head if t[1] >= top_score * ADAPTIVE_K_KEEP_RATIO] or head[:1]
 
-    render = _compact_entry_response if req.compact else _entry_to_response
-    out: list[dict[str, Any]] = []
-    for rank, (entry, score, breakdown) in enumerate(head):
-        data = _compact_entry_response(entry, rank=rank) if req.compact else render(entry)
-        data["_score"] = round(score, 4)
-        if entry.entry_key in rescued:
-            # The label the ranking used, not the pooled one the entry carries:
-            # to this query the rule is contested, not discredited, and the
-            # agent reads the top-level field.
-            data["evidence_status"] = breakdown.get("evidence_status")
-            data["_rescued"] = True
-        if req.compact:
-            data["_breakdown"] = {"evidence_status": breakdown.get("evidence_status")}
-        else:
-            data["_breakdown"] = {
-                k: round(v, 4) if isinstance(v, float) else v
-                for k, v in breakdown.items()
-            }
-        out.append(data)
-    if req.include_avoid and avoided:
-        avoided.sort(key=lambda e: (e.last_outcome_at or e.provenance.written_at), reverse=True)
-        for entry in avoided[:AVOID_LIST_MAX]:
-            # A preview, in compact mode: an avoid row's work is to name what
-            # stopped working and how it failed, and a 120-character head is
-            # enough to recognise it. Rendering it at rank 0 carried the whole
-            # value, which for three avoided entries cost more than the hits.
-            data = (
-                _compact_entry_response(entry, rank=_COMPACT_FULL_HITS) if req.compact
-                else render(entry)
-            )
-            data["_score"] = 0.0
-            data["_avoid"] = True
-            data["_breakdown"] = {
-                "evidence": -1.0,
-                "evidence_status": "discredited",
-                "failure_count": entry.failure_count,
-                "last_outcome": entry.last_outcome,
-            }
-            out.append(data)
-
     # 12. Action priors and a recommendation, as one trailing element the client
     #     asked for. What the entries cannot say — "tried here and failed",
     #     "nobody has tried X" — comes from the outcome record, not from memory.
+    #     Computed before the hits are rendered: the query-scoped shift it
+    #     reads also tightens the hit list (11b), and the contrast it finds
+    #     names what to do instead of an avoided entry.
+    meta: dict[str, Any] | None = None
+    priors: dict[str, Any] | None = None
+    shifted_local = False
     if req.include_priors and req.entity_path:
         from amfs_core.actions import recommend as _recommend
 
@@ -3050,7 +3100,7 @@ async def retrieve_entries(
             priors_are_local=(priors or {}).get("source") != "action_stats",
         )
         if priors is not None or recommendation is not None or shifted:
-            out.append({
+            meta = {
                 "_meta": True,
                 "priors": priors,
                 "recommendation": recommendation,
@@ -3058,7 +3108,119 @@ async def retrieve_entries(
                 "regime_shift_scope": (
                     "query" if shifted_local else ("entity" if shifted else None)
                 ),
-            })
+            }
+
+    # 11b. Under a query-scoped shift — a rule the query is about has stopped
+    #      working — the alternatives to the leader that the record has
+    #      already marked against on tasks like this are noise with a cost:
+    #      grid v4 found 5.4 discredited-or-contested rows in the context of
+    #      failing episodes against 3.0 in successes. Drop the non-leading
+    #      hits whose status is ``contested`` or whose local record on this
+    #      kind of task is more failure than success. Never below one hit,
+    #      and the leader itself is never dropped here: what to do about the
+    #      leader is the recommendation's call. A rescued hit is never weak:
+    #      it carries the ``contested`` label too, but it is in the list
+    #      because its local record says it works here — the opposite of
+    #      what the label means on a pooled record.
+    if req.adaptive_k and shifted_local and len(head) > 1:
+        def _weak_under_shift(t: tuple[MemoryEntry, float, dict[str, Any]]) -> bool:
+            if t[0].entry_key in rescued:
+                return False
+            bd = t[2]
+            if str(bd.get("evidence_status") or "") == "contested":
+                return True
+            local = bd.get("evidence_local") or {}
+            return float(local.get("failure") or 0.0) > float(local.get("success") or 0.0)
+
+        head = [head[0]] + [t for t in head[1:] if not _weak_under_shift(t)]
+
+    # 13. Render. Hits first, then the avoid list, then the trailing meta
+    #     element (clients lift it out by its ``_meta`` flag).
+    render = _compact_entry_response if req.compact else _entry_to_response
+    out: list[dict[str, Any]] = []
+    for rank, (entry, score, breakdown) in enumerate(head):
+        data = _compact_entry_response(entry, rank=rank) if req.compact else render(entry)
+        data["_score"] = round(score, 4)
+        if entry.entry_key in rescued:
+            # The label the ranking used, not the pooled one the entry carries:
+            # to this query the rule is contested, not discredited, and the
+            # agent reads the top-level field.
+            data["evidence_status"] = breakdown.get("evidence_status")
+            data["_rescued"] = True
+        if req.compact:
+            data["_breakdown"] = {"evidence_status": breakdown.get("evidence_status")}
+        else:
+            data["_breakdown"] = {
+                k: round(v, 4) if isinstance(v, float) else v
+                for k, v in breakdown.items()
+            }
+        out.append(data)
+    if req.include_avoid and avoided:
+        avoided.sort(key=lambda e: (e.last_outcome_at or e.provenance.written_at), reverse=True)
+        # What replaced each avoided entry, per entry: the entries a contrast
+        # lesson on this query says the task was resolved with (same reading
+        # as the briefing's ``discredited[].replaced_by``), and the action
+        # that resolved it — the lesson's own ``resolved_action`` where it
+        # carries one, else the priors contrast for the same outcome. A
+        # contrast the lessons do not tie to this entry says nothing about
+        # it: two avoided rules must not both claim the one fix.
+        replaced_by = _replacements_from_lessons(lessons) if lessons else {}
+        resolved_action = _resolved_actions_from_lessons(
+            lessons, (priors or {}).get("contrasts") or []
+        )
+        for entry in avoided[:AVOID_LIST_MAX]:
+            data = (
+                _compact_entry_response(entry, rank=_COMPACT_FULL_HITS) if req.compact
+                else render(entry)
+            )
+            data["_score"] = 0.0
+            data["_avoid"] = True
+            local_only = entry.entry_key in locally_discredited
+            replacements = list(replaced_by.get(entry.entry_key) or [])
+            action = resolved_action.get(entry.entry_key)
+            data["_breakdown"] = {
+                "evidence": -1.0,
+                "evidence_status": "discredited",
+                "failure_count": entry.failure_count,
+                "last_outcome": entry.last_outcome,
+                "locally_discredited": local_only,
+                "replaced_by": replacements,
+                "resolved_with_action": action,
+            }
+            if req.compact:
+                # An avoid row's work is to name what stopped working and what
+                # replaced it, not to restate the rule: the value it carried
+                # was, in grid v4, the text failing agents were still acting
+                # on. Compact mode already cut it to a preview; a one-liner
+                # that says so is the whole message. The field stays a string
+                # so every client parses the row as an entry.
+                #
+                # The date is the last *failure*: for a locally discredited
+                # rule the newest nearby outcome (a failure by construction —
+                # the entry's own ``last_outcome_at`` may be a later success
+                # on another class of task); otherwise the entry's last
+                # outcome when that was a failure, else nothing.
+                when = None
+                if local_only:
+                    recent = (local_evidence.get(entry.entry_key) or {}).get("recent") or []
+                    when = _as_utc(recent[0].get("committed_at")) if recent else None
+                elif entry.last_outcome is not None and not _evidence_is_success(entry.last_outcome):
+                    when = entry.last_outcome_at
+                parts = [
+                    "stopped working on tasks like this" if local_only else "discredited",
+                    f"last failure {when.date().isoformat()}" if when else "",
+                ]
+                if replacements:
+                    parts.append("replaced by " + ", ".join(
+                        r.rsplit("/", 1)[-1] for r in replacements[:3]
+                    ))
+                if action:
+                    parts.append(f"resolved instead with {action}")
+                data["value"] = "; ".join(p for p in parts if p)
+                data.pop("value_truncated", None)
+            out.append(data)
+    if meta is not None:
+        out.append(meta)
     return out
 
 
