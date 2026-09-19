@@ -6,7 +6,7 @@ import hashlib
 import logging
 from typing import TYPE_CHECKING, Protocol
 
-from amfs_core.models import Digest, DigestType, Event, EventType
+from amfs_core.models import Digest, DigestType, Event, EventType, MemoryEntry
 
 if TYPE_CHECKING:
     from amfs_postgres.adapter import PostgresAdapter
@@ -188,6 +188,26 @@ class DigestCompiler:
                      count, len(entity_paths), len(agent_ids), len(source_ids), errors, b)
         return count
 
+    def _entries_by_agent(self, branch: str, agent_ids: list[str], predicate) -> list[MemoryEntry]:
+        """Current entries written by any of *agent_ids*.
+
+        Asked of the adapter with its ``agent_id`` filter where it has one (the
+        Postgres adapters do), so an agent's fingerprint costs one indexed read.
+        Until this the fingerprint of an ``agent:`` or ``source:`` scope listed
+        the whole tenant and kept the matching rows in Python — and the worker
+        computes a fingerprint after every compile, so on a busy tenant this
+        was a full listing per agent-brief compile. Adapters without the filter
+        keep the listing; *predicate* is the same membership test applied to
+        ``provenance.agent_id``.
+        """
+        try:
+            out: list[MemoryEntry] = []
+            for aid in agent_ids:
+                out.extend(self._adapter.list(branch=branch, agent_id=aid))
+            return out
+        except TypeError:
+            return [e for e in self._adapter.list(branch=branch) if predicate(e.provenance.agent_id)]
+
     def compute_scope_fingerprint(self, scope_key: str, *, branch: str | None = None) -> str | None:
         """Compute a lightweight fingerprint for a scope's current state.
 
@@ -204,15 +224,12 @@ class DigestCompiler:
             if kind == "entity":
                 entries = self._adapter.list(scope, branch=b)
             elif kind == "agent":
-                entries = [
-                    e for e in self._adapter.list(branch=b)
-                    if e.provenance.agent_id == scope
-                ]
+                entries = self._entries_by_agent(b, [scope], lambda a: a == scope)
             elif kind == "source":
-                entries = [
-                    e for e in self._adapter.list(branch=b)
-                    if e.provenance.agent_id.endswith(f"/{scope}")
-                ]
+                # compile_source reads exactly these two authors for a source
+                entries = self._entries_by_agent(
+                    b, [f"webhook/{scope}", f"external/{scope}"], lambda a: a.endswith(f"/{scope}")
+                )
             elif kind == "connection":
                 entries = self._adapter.list(scope, branch=b)
             else:
