@@ -735,19 +735,32 @@ class BriefingService:
         except Exception:
             return
 
-        entries = _hot_context_entries(entries)
         if not entries:
             return
+
+        # The digest is created whenever the scope holds *anything*, not only
+        # when something qualifies for the hot context: this is the lead digest
+        # the evidence sections attach to, and a scope whose knowledge is all
+        # procedures (or all discredited) still has a ``procedures`` or
+        # ``discredited`` section to show. Without it the agent would be
+        # briefed with an empty list.
+        fetched = len(entries)
+        entries = _hot_context_entries(entries)
         hot_entries = [self._entry_brief(e) for e in entries]
+        narrative = f"No compiled digest yet for {entity_path}. " + (
+            "Showing top priority entries."
+            if hot_entries
+            else "See the evidence sections below."
+        )
 
         digests.append(Digest(
             digest_type=DigestType.ENTITY,
             scope=entity_path,
             summary={
-                "narrative": f"No compiled digest yet for {entity_path}. Showing top priority entries.",
+                "narrative": narrative,
                 "hot_context": hot_entries,
             },
-            entry_count=len(entries),
+            entry_count=fetched,
             source_agents=[],
             compiled_at=datetime.now(timezone.utc),
             namespace=self._namespace,

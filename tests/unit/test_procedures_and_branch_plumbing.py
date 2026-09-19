@@ -229,6 +229,30 @@ class TestBriefingProcedures:
             "procedure-0", "procedure-1", "procedure-2",
         }
 
+    def test_a_procedure_only_scope_is_still_briefed(self, tmp_path) -> None:
+        """No compiled digest (a new entity, or a repair branch — digests are
+        branch-scoped) and nothing but procedures at the scope. Keeping
+        procedures out of the hot context must not mean no lead digest, or
+        the ``procedures`` section has nowhere to attach and the agent gets
+        an empty briefing for a scope that has a method to follow."""
+        adapter = FilesystemAdapter(root=tmp_path / ".amfs", namespace="test")
+        adapter.list_digests = lambda **kw: []  # type: ignore[attr-defined]
+        adapter.list_branches = lambda **kw: []  # type: ignore[attr-defined]
+        mem = AgentMemory(agent_id="ops-agent", adapter=adapter)
+        mem.write("acme/rotate", "procedure-rotate", PROCEDURE, confidence=0.8,
+                  memory_type=MemoryType.PROCEDURE)
+        service = BriefingService(adapter=adapter, namespace="test")
+
+        digests = service.briefing(entity_path="acme/rotate")
+        lead = next(d for d in digests if d.digest_type == DigestType.ENTITY
+                    and d.scope == "acme/rotate")
+        assert lead.summary["hot_context"] == []
+        assert [r["key"] for r in lead.summary["procedures"]] == ["procedure-rotate"]
+        assert "evidence sections" in lead.summary["narrative"]
+        # Compact goes through the same lead digest.
+        compact = service.briefing(entity_path="acme/rotate", compact=True)
+        assert [r["key"] for r in compact[0].summary["procedures"]] == ["procedure-rotate"]
+
     def test_discredited_procedure_is_not_repeated(self, world) -> None:
         mem, service, _ = world
         mem.write("acme/support", "procedure-rotate", PROCEDURE, confidence=0.7,
