@@ -109,6 +109,28 @@ _EXCLUDE_SHARED_PATHS = "entity_path NOT LIKE '@%%/%%'"
 # by identity, so it can never collide with a real SQL fragment.
 _BRANCH_SCOPE = "<branch scope>"
 
+
+def branch_scope_sql(branch: str, parent: str | None) -> tuple[str, list[Any]]:
+    """The ``WHERE`` fragment reading *branch* as an overlay on *parent*, with
+    its parameters in order: the branch's own live rows, plus the parent's live
+    row for every ``(entity_path, key)`` the branch has not touched. With no
+    parent (``main``, or a branch the adapter has no record of) it is the plain
+    branch filter. Shared by both adapters; see ``PostgresAdapter._branch_scope``
+    for why the parent is read live rather than as of the branch point.
+    """
+    if parent is None:
+        return "branch = %s", [branch]
+    return (
+        "(branch = %s OR (branch = %s AND NOT EXISTS ("
+        "SELECT 1 FROM amfs_memory_entries b"
+        " WHERE b.namespace = amfs_memory_entries.namespace"
+        " AND b.branch = %s"
+        " AND b.entity_path = amfs_memory_entries.entity_path"
+        " AND b.key = amfs_memory_entries.key"
+        " AND b.superseded_at IS NULL)))",
+        [branch, parent, branch],
+    )
+
 # Benchmark and system rows, kept out of the aggregates that describe how much
 # memory an account has. The predicates come from amfs_core.exclusions so that
 # this and the Python aggregate cannot answer differently; see that module.
@@ -1589,20 +1611,12 @@ class PostgresAdapter(AdapterABC):
         only in the entries the branch changed; a snapshot would drift from
         ``main`` for as long as the branch lives and confound the comparison.
         ``main`` itself, and a branch with no record, read their own rows only.
+
+        The fragment is :func:`branch_scope_sql`; the async adapter builds the
+        same one from its own parent lookup, so the two read paths cannot
+        disagree about what a branch sees.
         """
-        parent = self._parent_branch(cur, branch)
-        if parent is None:
-            return "branch = %s", [branch]
-        return (
-            "(branch = %s OR (branch = %s AND NOT EXISTS ("
-            "SELECT 1 FROM amfs_memory_entries b"
-            " WHERE b.namespace = amfs_memory_entries.namespace"
-            " AND b.branch = %s"
-            " AND b.entity_path = amfs_memory_entries.entity_path"
-            " AND b.key = amfs_memory_entries.key"
-            " AND b.superseded_at IS NULL)))",
-            [branch, parent, branch],
-        )
+        return branch_scope_sql(branch, self._parent_branch(cur, branch))
 
     def read(
         self,

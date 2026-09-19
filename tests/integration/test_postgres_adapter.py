@@ -1379,3 +1379,152 @@ def test_a_branch_the_adapter_never_recorded_reads_only_itself(adapter) -> None:
     assert adapter.list("acme/pricing", branch="ghost") == []
     assert adapter.search(SearchQuery(entity_path="acme/pricing"), branch="ghost") == []
     assert adapter.read("acme/pricing", "plans", branch="ghost") is None
+
+
+# ---------------------------------------------------------------------------
+# The same overlay through the async adapter — the path the HTTP server's
+# /search, /retrieve and /entries actually run (Bugbot on #427: the overlay
+# had been wired into the sync adapter only, so a hosted session on a repair
+# branch or a canary saw the branch's own rows and nothing else).
+# ---------------------------------------------------------------------------
+
+
+def _run(coro):
+    import asyncio
+
+    return asyncio.run(coro)
+
+
+async def _async_adapter():
+    from amfs_postgres.async_adapter import AsyncPostgresAdapter
+
+    a = AsyncPostgresAdapter(dsn=PG_DSN, namespace="test")
+    await a.open()
+    return a
+
+
+def test_the_async_adapter_lists_and_searches_a_branch_over_its_live_parent(adapter) -> None:
+    from amfs_core.models import SearchQuery
+
+    branch = _branch_world(adapter)
+
+    async def go():
+        a = await _async_adapter()
+        try:
+            listed = await a.list("acme/pricing", branch=branch)
+            hits = await a.search(SearchQuery(entity_path="acme/pricing", limit=10), branch=branch)
+            by_key = await a.search(
+                SearchQuery(query="plans", entity_path="acme/pricing"), branch=branch
+            )
+            on_main = await a.list("acme/pricing")
+            return listed, hits, by_key, on_main
+        finally:
+            await a.close()
+
+    listed, hits, by_key, on_main = _run(go())
+    expected = [
+        ("plans", {"tiers": ["starter", "team"]}),
+        ("rate-limit", {"rpm": 60}),
+        ("risk-stale-limit", {"note": "30 rpm was the old plan"}),
+    ]
+    assert _keys(listed) == expected
+    assert _keys(hits) == expected
+    # A filter applies to the union, not only to the branch's own rows.
+    assert [e.key for e in by_key] == ["plans"]
+    # main is untouched by what the branch did.
+    assert _keys(on_main) == [
+        ("plans", {"tiers": ["starter", "team"]}),
+        ("rate-limit", {"rpm": 30}),
+    ]
+
+
+def test_the_async_adapter_reads_the_parent_live_and_a_ghost_branch_reads_nothing(adapter) -> None:
+    from datetime import UTC, datetime
+
+    from amfs_core.models import MemoryEntry, Provenance, SearchQuery
+
+    branch = _branch_world(adapter)
+    # main learns something after the branch point; the branch must see it.
+    adapter.write(MemoryEntry(
+        entity_path="acme/pricing", key="plans", version=2,
+        value={"tiers": ["starter", "team", "enterprise"]}, confidence=0.9,
+        provenance=Provenance(agent_id="a", session_id="s2", written_at=datetime.now(UTC)),
+    ))
+
+    async def go():
+        a = await _async_adapter()
+        try:
+            plans = await a.read("acme/pricing", "plans", branch=branch)
+            limit = await a.read("acme/pricing", "rate-limit", branch=branch)
+            listed = await a.list("acme/pricing", branch=branch)
+            ghost = (
+                await a.list("acme/pricing", branch="ghost"),
+                await a.search(SearchQuery(entity_path="acme/pricing"), branch="ghost"),
+                await a.read("acme/pricing", "plans", branch="ghost"),
+            )
+            return plans, limit, listed, ghost
+        finally:
+            await a.close()
+
+    plans, limit, listed, ghost = _run(go())
+    assert plans is not None and plans.version == 2 and plans.value["tiers"][-1] == "enterprise"
+    assert [e.value for e in listed if e.key == "plans"] == [
+        {"tiers": ["starter", "team", "enterprise"]}
+    ]
+    # The branch's own change still shadows main's version of that key.
+    assert limit is not None and limit.value == {"rpm": 60}
+    # No branch row means no parent to overlay; nothing is invented.
+    assert ghost == ([], [], None)
+
+
+def test_the_async_semantic_search_sees_the_parent_through_the_overlay(adapter) -> None:
+    """``/retrieve`` ranks by vector when pgvector is there; the branch must
+    rank the union, so the parent's rows can win and a shadowed key appears
+    once, in the branch's version."""
+    from amfs_core.models import SemanticQuery
+    from amfs_postgres.adapter import PostgresAdapter
+
+    _DIM = 8
+
+    class FixedEmbedder:
+        def embed(self, text: str) -> list[float]:
+            vec = [0.0] * _DIM
+            for tok in str(text).lower().split():
+                vec[hash(tok) % _DIM] += 1.0
+            norm = sum(v * v for v in vec) ** 0.5 or 1.0
+            return [v / norm for v in vec]
+
+        def embed_value(self, value) -> list[float]:
+            return self.embed(value if isinstance(value, str) else str(value))
+
+    branch = _branch_world(adapter)
+    embedding = PostgresAdapter(dsn=PG_DSN, namespace="test", auto_schema=False,
+                                embedder=FixedEmbedder(), embedding_dim=_DIM)
+    try:
+        embedding.ensure_embedding_column()
+        assert embedding.backfill_embeddings() >= 4  # both branches' rows
+    finally:
+        embedding.close()
+
+    async def go():
+        a = await _async_adapter()
+        try:
+            assert a._has_embedding_col, "pgvector column not detected"
+            q = SemanticQuery(text="rpm", entity_path="acme/pricing", limit=10, min_similarity=0.0)
+            on_branch = await a.semantic_search(q, FixedEmbedder(), branch=branch)
+            on_main = await a.semantic_search(q, FixedEmbedder())
+            return on_branch, on_main
+        finally:
+            await a.close()
+
+    on_branch, on_main = _run(go())
+    branch_keys = sorted((e.key, e.value) for e, _ in on_branch)
+    assert branch_keys == [
+        ("plans", {"tiers": ["starter", "team"]}),          # the parent's, live
+        ("rate-limit", {"rpm": 60}),                        # the branch's, once
+        ("risk-stale-limit", {"note": "30 rpm was the old plan"}),
+    ]
+    assert sorted((e.key, e.value) for e, _ in on_main) == [
+        ("plans", {"tiers": ["starter", "team"]}),
+        ("rate-limit", {"rpm": 30}),
+    ]
