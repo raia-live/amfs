@@ -100,7 +100,7 @@ class AgentClusterStrategy:
         type_vecs: dict[str, list[float]] = {}
         collab_sets: dict[str, set] = {}
 
-        all_type_keys = {"fact", "belief", "experience"}
+        all_type_keys = {"fact", "belief", "experience", "procedure"}
 
         for a in agents:
             aid = a["agent_id"]

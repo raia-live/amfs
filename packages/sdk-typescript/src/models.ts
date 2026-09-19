@@ -13,6 +13,21 @@ export enum OutcomeType {
   /** @deprecated Use CRITICAL_FAILURE */ P1_INCIDENT = "p1_incident",
 }
 
+/**
+ * Classification of a memory entry, mirroring `amfs_core.models.MemoryType`.
+ *
+ * `fact` is stable knowledge; `belief` a hypothesis that decays faster;
+ * `experience` a record of an action taken, decaying slower; `procedure` is
+ * how to do a task — a goal, ordered steps and what to do when one fails —
+ * decaying slowest and listed by the briefing in its own `procedures` section.
+ */
+export enum MemoryType {
+  FACT = "fact",
+  BELIEF = "belief",
+  EXPERIENCE = "experience",
+  PROCEDURE = "procedure",
+}
+
 export const OUTCOME_MULTIPLIERS: Record<string, number> = {
   [OutcomeType.CRITICAL_FAILURE]: 1.15,
   [OutcomeType.FAILURE]: 1.1,

@@ -83,7 +83,7 @@ The adapter auto-creates three tables and associated triggers:
 | `tier` | `SMALLINT` | Memory tier: `1`=Hot, `2`=Warm, `3`=Archive (default: `3`) |
 | `importance_score` | `NUMERIC(6,4)` | Multi-dimensional importance (0.0–1.0) |
 | `importance_dimensions` | `JSONB` | Per-dimension breakdown |
-| `memory_type` | `TEXT` | Memory type: `fact`, `belief`, or `experience` (default: `fact`) |
+| `memory_type` | `TEXT` | Memory type: `fact`, `belief`, `experience` or `procedure` (default: `fact`) |
 | `artifact_refs` | `JSONB` | Linked external blobs (default: `[]`) |
 | `search_tsv` | `TSVECTOR` | Auto-generated full-text search vector (GIN-indexed) |
 | `embedding` | `VECTOR(384)` | Vector embedding for semantic search (HNSW-indexed, requires pgvector) |

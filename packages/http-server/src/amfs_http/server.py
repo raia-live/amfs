@@ -1398,11 +1398,7 @@ async def write_entry(
 ) -> dict[str, Any]:
     mem = _get_memory()
 
-    type_map = {
-        "fact": MemoryType.FACT,
-        "belief": MemoryType.BELIEF,
-        "experience": MemoryType.EXPERIENCE,
-    }
+    type_map = {m.value: m for m in MemoryType}
     mt = type_map.get(req.memory_type.lower(), MemoryType.FACT)
 
     original_agent = mem._tagger.agent_id if req.agent_id else None
@@ -2054,7 +2050,7 @@ async def retrieve_entries(
     """
     from datetime import datetime as _dt, timezone as _tz
 
-    from amfs_core.content import ARTIFACT_PENALTY, classify_artifact
+    from amfs_core.content import ARTIFACT_PENALTY, PROCEDURE_BOOST, classify_artifact
     from amfs_core.query_norm import normalize_temporal
 
     branch = req.branch or "main"
@@ -2197,9 +2193,13 @@ async def retrieve_entries(
     keyword_weight = 0.15
     evidence_weight = req.evidence_weight
 
+    def _is_procedure(e: MemoryEntry) -> bool:
+        mt = getattr(e, "memory_type", None)
+        return str(getattr(mt, "value", mt)) == MemoryType.PROCEDURE.value
+
     def _composite(
         relevance: float, recency: float, conf: float, keyword: float, artifact: bool,
-        evidence: float = 0.0,
+        evidence: float = 0.0, procedure: bool = False,
     ) -> float:
         """The composite score, in one place because step 8 recomputes it.
 
@@ -2214,6 +2214,9 @@ async def retrieve_entries(
         outcomes; this term is what separates an author's untested 0.9 from a
         0.9 that has been confirmed a dozen times, and what pushes an entry
         with a mixed record below both.
+
+        *procedure* applies ``PROCEDURE_BOOST``: at equal relevance, how to do
+        the task ranks above a fact about it.
         """
         score = (
             req.semantic_weight * relevance
@@ -2222,7 +2225,11 @@ async def retrieve_entries(
             + keyword_weight * keyword
             + evidence_weight * evidence
         )
-        return score * ARTIFACT_PENALTY if artifact else score
+        if artifact:
+            score *= ARTIFACT_PENALTY
+        if procedure:
+            score *= PROCEDURE_BOOST
+        return score
 
     scored: list[tuple[MemoryEntry, float, dict[str, Any]]] = []
     for slot in candidates.values():
@@ -2239,18 +2246,24 @@ async def retrieve_entries(
             recency = 0.0
         conf = float(entry.confidence)
         artifact = _is_artifact(entry)
+        procedure = _is_procedure(entry)
         evidence = _evidence_signal(entry)
         # Components are kept unrounded so step 8 can rebuild the score
         # exactly; rounding happens once, on the way out.
-        scored.append((entry, _composite(sim, recency, conf, keyword, artifact, evidence), {
-            "semantic": sim,
-            "recency": recency,
-            "confidence": conf,
-            "keyword": keyword,
-            "evidence": evidence,
-            "evidence_status": entry.evidence_status,
-            "is_artifact": artifact,
-        }))
+        scored.append((
+            entry,
+            _composite(sim, recency, conf, keyword, artifact, evidence, procedure),
+            {
+                "semantic": sim,
+                "recency": recency,
+                "confidence": conf,
+                "keyword": keyword,
+                "evidence": evidence,
+                "evidence_status": entry.evidence_status,
+                "is_artifact": artifact,
+                "is_procedure": procedure,
+            },
+        ))
 
     scored.sort(key=lambda t: t[1], reverse=True)
 
@@ -2290,6 +2303,7 @@ async def retrieve_entries(
                     _composite(
                         norm, bd["recency"], bd["confidence"], bd["keyword"],
                         bd["is_artifact"], bd.get("evidence", 0.0),
+                        bd.get("is_procedure", False),
                     ),
                     {**bd, "rerank": rs, "rerank_normalised": norm,
                      "rerank_absolute": absolute_score},
@@ -7105,6 +7119,7 @@ async def get_briefing(
     credit_reuse: bool = Query(False),
     compact: bool = Query(False),
     since: datetime | None = Query(None),
+    branch: str | None = Query(None),
     # See retrieve_entries: injected on the type, defaulted so the handler stays
     # callable in-process without one.
     response: Response = None,
@@ -7115,6 +7130,9 @@ async def get_briefing(
     *compact* returns only the lead entity digest with its hot context and
     evidence sections, narrative trimmed. *since* trims the list sections to
     what changed after that moment — the delta since the last briefing.
+    *branch* reads the hot context and evidence sections from that memory
+    branch instead of ``main`` — how a repair branch or a canary is briefed
+    before it is merged.
 
     *credit_reuse* books the briefing as a real read of the knowledge it
     surfaces. It is off by default and has to be asked for, because the same
@@ -7132,6 +7150,8 @@ async def get_briefing(
     }
     if since is not None:
         briefing_kwargs["since"] = since
+    if branch:
+        briefing_kwargs["branch"] = branch
     digests = mem.briefing(**briefing_kwargs)
 
     vis = _get_visibility_filter(request)

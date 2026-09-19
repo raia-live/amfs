@@ -955,8 +955,13 @@ class HttpAdapter(AdapterABC):
         credit_reuse: bool = False,
         compact: bool = False,
         since: datetime | None = None,
+        branch: str | None = None,
     ) -> list[Digest]:
-        """Proxy briefing to the HTTP server which has full Cortex access."""
+        """Proxy briefing to the HTTP server which has full Cortex access.
+
+        *branch* is sent only when it is not the default, so a server that
+        predates the parameter still answers (it ignores unknown query params).
+        """
         params: dict[str, Any] = {"limit": limit}
         if since is not None:
             params["since"] = since.isoformat()
@@ -964,6 +969,8 @@ class HttpAdapter(AdapterABC):
             params["entity_path"] = entity_path
         if agent_id:
             params["agent_id"] = agent_id
+        if branch and branch != "main":
+            params["branch"] = branch
         # Sent only when asked for. The server treats a briefing as a real read
         # of what it surfaces, and that is true for an agent about to act on it
         # and false for a panel rendering it for a human, so the caller decides.

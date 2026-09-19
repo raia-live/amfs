@@ -37,6 +37,19 @@ def _preview(value: Any, limit: int = 160) -> str:
     text = value if isinstance(value, str) else str(value)
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
+
+def _memory_type(entry: MemoryEntry) -> str:
+    mt = getattr(entry, "memory_type", None)
+    return str(getattr(mt, "value", mt) or "fact")
+
+
+def _procedure_goal(value: Any) -> str | None:
+    """The ``goal`` of a structured procedure, or ``None`` for free text."""
+    if isinstance(value, dict):
+        goal = value.get("goal")
+        return _preview(goal, 120) if isinstance(goal, str) and goal.strip() else None
+    return None
+
 # Three authors, three keys each. This rides along on the one call every agent
 # is told to make first, so it is paying for itself in context window on every
 # task — enough to route, not enough to be worth skimming past.
@@ -207,7 +220,7 @@ class BriefingService:
         for d in digests:
             if d.digest_type != DigestType.ENTITY or d.scope != entity_path:
                 continue
-            for section in ("hot_context", "validated", "discredited", "tried_here"):
+            for section in ("hot_context", "validated", "discredited", "procedures", "tried_here"):
                 rows = d.summary.get(section)
                 if not isinstance(rows, list):
                     continue
@@ -369,6 +382,21 @@ class BriefingService:
 
         shifted = [e for e in self._regime_shift(entries) if not _is_synthetic(e.key)]
 
+        # Procedures are how to do the task, not facts about it, so they get a
+        # section of their own rather than competing with facts for the hot
+        # context. Validated first, then by confidence; discredited ones are
+        # already in the section above and are not repeated here.
+        procedures = sorted(
+            (
+                e for e in entries
+                if _memory_type(e) == "procedure"
+                and e.discredited_at is None
+                and not _is_synthetic(e.key)
+            ),
+            key=lambda e: (e.success_count, e.confidence),
+            reverse=True,
+        )[:_EVIDENCE_SECTION_LIMIT]
+
         lead.summary["validated"] = [
             {
                 "key": e.key,
@@ -393,6 +421,24 @@ class BriefingService:
             }
             for e in discredited
         ]
+        if procedures:
+            lead.summary["procedures"] = [
+                {
+                    "key": e.key,
+                    "entity_path": e.entity_path,
+                    "confidence": round(e.confidence, 3),
+                    "evidence_status": e.evidence_status,
+                    "success_count": e.success_count,
+                    "failure_count": e.failure_count,
+                    "goal": _procedure_goal(e.value),
+                    "value_preview": _preview(e.value),
+                    "written_at": e.provenance.written_at.isoformat(),
+                    "last_outcome_at": (
+                        e.last_outcome_at.isoformat() if e.last_outcome_at else None
+                    ),
+                }
+                for e in procedures
+            ]
         if shifted:
             lead.summary["regime_shift"] = {
                 "suspected": True,
@@ -448,7 +494,10 @@ class BriefingService:
         lead = self._lead_digest(digests, entity_path)
         if lead is None:
             return digests[:1]
-        keep = ("narrative", "hot_context", "validated", "discredited", "regime_shift", "tried_here", "explore")
+        keep = (
+            "narrative", "hot_context", "validated", "discredited", "procedures",
+            "regime_shift", "tried_here", "explore",
+        )
         summary = {k: lead.summary[k] for k in keep if k in lead.summary}
         narrative = summary.get("narrative")
         if isinstance(narrative, str) and len(narrative) > _COMPACT_NARRATIVE_CHARS:

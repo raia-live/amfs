@@ -655,7 +655,7 @@ amfs_write(
     value: str,
     confidence: float = 1.0,
     pattern_refs: list[str] | None = None,
-    memory_type: str = "fact",  # "fact" | "belief" | "experience"
+    memory_type: str = "fact",  # "fact" | "belief" | "experience" | "procedure"
     artifact_refs: list[dict] | None = None,
 ) -> str (JSON)
 ```

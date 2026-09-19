@@ -686,13 +686,28 @@ export class AgentMemory {
       minConfidence?: number;
       limit?: number;
       includeArtifacts?: boolean;
+      /** Memory branch to retrieve from; defaults to `main`. */
+      branch?: string;
     }
   ): Promise<Array<{ entry: MemoryEntry; score: number }>> {
     return this.requireHttp("retrieveAsync").retrieveAsync(query, options);
   }
 
-  /** Compiled Cortex briefing for an entity — the start-of-session context load. */
-  async briefingAsync(options?: { entityPath?: string; limit?: number }): Promise<unknown> {
+  /**
+   * Compiled Cortex briefing for an entity — the start-of-session context load.
+   *
+   * `compact` returns the lead digest with its evidence sections (`validated`,
+   * `discredited`, `procedures`, `regime_shift`); `since` trims those to what
+   * changed after that moment; `branch` briefs from a branch other than `main`.
+   */
+  async briefingAsync(options?: {
+    entityPath?: string;
+    agentId?: string;
+    limit?: number;
+    compact?: boolean;
+    since?: string;
+    branch?: string;
+  }): Promise<unknown> {
     return this.requireHttp("briefingAsync").briefingAsync(options);
   }
 
