@@ -8443,10 +8443,18 @@ def main() -> None:
                     namespace=namespace,
                 )
                 tenant_provider = _make_tenant_provider(dsn)
+                # The catch-up scan runs on every instance (no advisory lock), so
+                # its interval sets the fleet-wide scan rate: 36 instances at the
+                # 300 s default is one tenant-wide scan every ~8 s. The scan is
+                # a GROUP BY since the adapter grew list_scopes(), but the knob
+                # stays: 0 disables it on deployments where the event path is
+                # trusted to compile every scope.
+                catchup_s = float(os.environ.get("AMFS_CORTEX_CATCHUP_INTERVAL_S", "300"))
                 _cortex_worker = CortexWorker(
                     dsn=dsn,
                     compiler=compiler,
                     use_advisory_lock=False,
+                    catchup_interval_s=catchup_s,
                     tenant_provider=tenant_provider,
                 )
 

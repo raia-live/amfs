@@ -374,20 +374,9 @@ class CortexWorker:
 
         tid = self._get_tenant_context()
 
-        entries = adapter.list(branch=branch)
-        entity_paths: set[str] = set()
-        agent_ids: set[str] = set()
-
-        for entry in entries:
-            entity_paths.add(entry.entity_path)
-            aid = entry.provenance.agent_id
-            if not aid.startswith(("webhook/", "external/")):
-                agent_ids.add(aid)
-
-        existing_digests = adapter.list_digests(namespace=namespace)
-        existing_scopes: set[str] = set()
-        for d in existing_digests:
-            existing_scopes.add(f"{d.digest_type.value}:{d.scope}")
+        entity_paths, agent_ids = self._scopes_present(adapter, branch)
+        agent_ids = {a for a in agent_ids if not a.startswith(("webhook/", "external/"))}
+        existing_scopes = self._digest_scopes_present(adapter, namespace, branch)
 
         queued = 0
         for aid in agent_ids:
@@ -409,6 +398,32 @@ class CortexWorker:
                 queued += 1
 
         return queued, len(agent_ids), len(entity_paths)
+
+    @staticmethod
+    def _scopes_present(adapter: Any, branch: str) -> tuple[set[str], set[str]]:
+        """Distinct entity paths and agent ids with current entries.
+
+        The Postgres adapter answers this with a ``GROUP BY`` (``list_scopes``);
+        every other adapter is asked for its entries. The scan used to call
+        ``adapter.list(branch=...)`` unconditionally, which on a large tenant
+        meant shipping and deserialising every row once per instance every
+        ``catchup_interval_s`` — the single heaviest query on a busy
+        deployment, and one whose cost grew with the store.
+        """
+        fn = getattr(adapter, "list_scopes", None)
+        if callable(fn):
+            paths, agents = fn(branch=branch)
+            return set(paths), set(agents)
+        entries = adapter.list(branch=branch)
+        return {e.entity_path for e in entries}, {e.provenance.agent_id for e in entries}
+
+    @staticmethod
+    def _digest_scopes_present(adapter: Any, namespace: str, branch: str) -> set[str]:
+        """``"<type>:<scope>"`` of every existing digest, keys only where the adapter can."""
+        fn = getattr(adapter, "list_digest_scopes", None)
+        if callable(fn):
+            return set(fn(namespace=namespace, branch=branch))
+        return {f"{d.digest_type.value}:{d.scope}" for d in adapter.list_digests(namespace=namespace)}
 
     def _maybe_catchup(self) -> None:
         """Periodically scan for missing digests as a lightweight safety net."""
