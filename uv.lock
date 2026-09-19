@@ -231,7 +231,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-postgres"
-version = "0.2.21"
+version = "0.2.22"
 source = { editable = "packages/adapters/postgres" }
 dependencies = [
     { name = "amfs-core" },
@@ -330,7 +330,7 @@ provides-extras = ["cli"]
 
 [[package]]
 name = "amfs-core"
-version = "0.3.33"
+version = "0.3.34"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "pydantic" },
@@ -354,7 +354,7 @@ provides-extras = ["embedder", "embedder-st"]
 
 [[package]]
 name = "amfs-cortex"
-version = "0.1.9"
+version = "0.1.10"
 source = { editable = "packages/cortex" }
 dependencies = [
     { name = "amfs" },
@@ -395,7 +395,7 @@ provides-extras = ["crewai"]
 
 [[package]]
 name = "amfs-http-server"
-version = "0.3.37"
+version = "0.3.38"
 source = { editable = "packages/http-server" }
 dependencies = [
     { name = "amfs" },
@@ -465,7 +465,7 @@ provides-extras = ["langgraph"]
 
 [[package]]
 name = "amfs-mcp-server"
-version = "0.7.32"
+version = "0.7.33"
 source = { editable = "packages/mcp-server" }
 dependencies = [
     { name = "amfs" },
