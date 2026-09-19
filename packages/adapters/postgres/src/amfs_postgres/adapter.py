@@ -1212,6 +1212,12 @@ class PostgresAdapter(AdapterABC):
             ON amfs_memory_entries (namespace, entity_path)
             WHERE tier <= 2 AND superseded_at IS NULL
         """)
+        # TTL sweep (list_expired): the few rows carrying a ttl_at, by expiry.
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_ttl
+            ON amfs_memory_entries (ttl_at)
+            WHERE ttl_at IS NOT NULL AND superseded_at IS NULL
+        """)
         # Outcome propagation (trigger v3): evidence columns on entries,
         # attempts/final_action_index on outcomes, and the propagate function
         # with its helpers. Applied from the migration file rather than a copy
@@ -2191,6 +2197,34 @@ class PostgresAdapter(AdapterABC):
                 cur.execute(query, params)
                 rows = cur.fetchall()
 
+        return [self._row_to_entry(r) for r in rows]
+
+    def list_expired(
+        self, *, now: datetime | None = None, branch: str = "main", limit: int = 1000
+    ) -> list[MemoryEntry]:
+        """Current entries whose ``ttl_at`` has passed, oldest expiry first.
+
+        What a TTL sweep needs: the rows to archive, found through the
+        partial index on ``ttl_at`` (``idx_entries_ttl``) rather than by
+        listing the tenant and checking each entry's clock in Python. Same
+        row set as ``list()`` — current versions, this branch, shared paths
+        excluded — narrowed to the expired ones. *limit* bounds one sweep;
+        the next sweep picks up the rest.
+        """
+        conditions, params = list_conditions(
+            self._namespace, None, include_superseded=False, branch=branch, scope=None, agent_id=None,
+        )
+        conditions.append("ttl_at IS NOT NULL AND ttl_at <= %s")
+        params.append(now or datetime.now(timezone.utc))
+        query = (
+            f"SELECT {entry_select(self._has_is_artifact_col, self._has_validators_col)} "
+            f"FROM amfs_memory_entries WHERE {' AND '.join(conditions)} ORDER BY ttl_at LIMIT %s"
+        )
+        params.append(limit)
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
         return [self._row_to_entry(r) for r in rows]
 
     def list_scopes(self, *, branch: str = "main") -> tuple[set[str], set[str]]:

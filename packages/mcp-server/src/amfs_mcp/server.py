@@ -376,6 +376,30 @@ def _call_compat(fn: Any, **kwargs: Any) -> Any:
     return fn(**kwargs)
 
 
+def _ttl_sweep_interval(adapter: AdapterABC) -> float | None:
+    """Seconds between client-side TTL sweeps, or ``None`` for no sweeper.
+
+    ``AMFS_TTL_SWEEP_INTERVAL`` decides when set (``0`` or a negative value
+    disables). Otherwise the sweeper runs every 300 s against a local store
+    (filesystem, direct Postgres) and not at all over HTTP: a hosted tenant
+    is swept by its server, and a client sweep there was one whole-tenant
+    listing per MCP process every five minutes — on a 25k-entry tenant 3-27 s
+    each, mostly timed out, and multiplied by every Claude/Cursor/Codex window
+    the user had open.
+    """
+    raw = os.environ.get("AMFS_TTL_SWEEP_INTERVAL")
+    if raw:
+        try:
+            interval = float(raw)
+        except ValueError:
+            logger.warning("AMFS_TTL_SWEEP_INTERVAL=%r is not a number; TTL sweep disabled", raw)
+            return None
+        return interval if interval > 0 else None
+    if type(adapter).__name__ == "HttpAdapter":
+        return None
+    return 300.0
+
+
 def _get_adapter() -> AdapterABC:
     """Lazily initialise the shared storage adapter (one per process)."""
     global _adapter
@@ -442,8 +466,7 @@ def _get_memory() -> AgentMemory:
         return _memories[name]
 
     adapter = _get_adapter()
-    ttl_interval_str = os.environ.get("AMFS_TTL_SWEEP_INTERVAL")
-    ttl_sweep_interval = float(ttl_interval_str) if ttl_interval_str else 300.0
+    ttl_sweep_interval = _ttl_sweep_interval(adapter)
 
     logger.info("AMFS MCP server — creating memory for agent_id=%s", name)
     mem = AgentMemory(

@@ -1359,6 +1359,40 @@ def test_list_scopes_matches_list_without_shipping_the_rows(adapter) -> None:
     assert adapter.list_digest_scopes(namespace=ns, branch="other") == set()
 
 
+def test_list_expired_returns_only_current_rows_past_their_ttl(adapter) -> None:
+    """``list_expired`` is the TTL sweep's read: current versions on the branch
+    whose ``ttl_at`` has passed, oldest expiry first, shared paths excluded —
+    and after the sweep archives them (new version, no TTL) it finds nothing."""
+    from datetime import UTC, datetime, timedelta
+
+    from amfs_core.lifecycle import LifecycleManager
+    from amfs_core.models import MemoryEntry, Provenance
+
+    now = datetime.now(UTC)
+
+    def _w(path, key, ttl):
+        return adapter.write(MemoryEntry(entity_path=path, key=key, value="v", ttl_at=ttl,
+                                         provenance=Provenance(agent_id="a", session_id="s", written_at=now)))
+
+    _w("acme/support", "older", now - timedelta(hours=2))
+    _w("acme/support", "old", now - timedelta(hours=1))
+    _w("acme/support", "live", now + timedelta(hours=1))
+    _w("acme/support", "forever", None)
+    _w("@room/shared", "old", now - timedelta(hours=1))
+    _w("acme/billing", "renewed", now - timedelta(hours=1))
+    _w("acme/billing", "renewed", now + timedelta(hours=1))   # newer version: the old one is superseded
+
+    assert [e.key for e in adapter.list_expired(now=now)] == ["older", "old"]
+    assert adapter.list_expired(now=now, limit=1)[0].key == "older"
+    assert adapter.list_expired(now=now, branch="other") == []
+
+    archived = LifecycleManager(adapter).sweep()
+    assert sorted(e.key for e in archived) == ["old", "older"]
+    assert all(e.confidence == 0.0 and e.ttl_at is None for e in archived)
+    assert adapter.list_expired() == []
+    assert adapter.read("acme/support", "old").confidence == 0.0
+
+
 def test_outcome_task_text_is_stored_and_read_back_per_entity(adapter) -> None:
     """``task_input`` reaches the outcome row as ``task_text`` — the head of
     it, and only when given — and ``recent_task_texts`` reads an entity's
