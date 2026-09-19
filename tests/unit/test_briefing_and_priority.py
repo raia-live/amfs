@@ -155,7 +155,11 @@ class TestHotContextInjection:
         query = search_call[0][0]
         assert isinstance(query, SearchQuery)
         assert query.sort_by == "priority"
-        assert query.limit == 3
+        # Fetched with headroom: discredited, synthetic and procedure rows are
+        # dropped after the fetch, and the section still shows three facts.
+        from amfs_cortex.briefing import _HOT_CONTEXT_LIMIT, _HOT_CONTEXT_SCAN_LIMIT
+
+        assert query.limit == _HOT_CONTEXT_SCAN_LIMIT > _HOT_CONTEXT_LIMIT == 3
 
 
 # ──────────────────────────────────────────────────────────────

@@ -86,7 +86,7 @@ entry = mem.read("checkout-service", "risk-race-condition")
 | **Decision traces** | Full trace capture — reads, writes, query events, errors, timing, and state diffs. |
 | **Knowledge graph** | Relationships between entities, agents, and outcomes auto-materialize from normal operations. |
 | **Hybrid search** | Full-text + semantic + recency + confidence in a single ranked result set. |
-| **Memory types** | Classify as `fact`, `belief`, or `experience` — each with its own decay rate. |
+| **Memory types** | Classify as `fact`, `belief`, `experience` or `procedure` (how to do a task) — each with its own decay rate. |
 | **Tiered memory** | Hot / Warm / Archive with progressive retrieval and frequency-modulated decay. |
 
 ### Platform

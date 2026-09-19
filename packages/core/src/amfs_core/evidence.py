@@ -603,11 +603,35 @@ def inherit_evidence(new: MemoryEntry, current: MemoryEntry | None) -> MemoryEnt
     return new.model_copy(update=update)
 
 
+#: Keys the system writes for itself. Read paths hide them from agents (the
+#: briefing folds them into ``discredited.replaced_by``) and training and eval
+#: pipelines exclude them.
 SYNTHETIC_KEY_PREFIXES: tuple[str, ...] = ("lesson-contrast-",)
+
+#: Keys the repair loop writes *for* agents: a risk note or corrected value
+#: proposed by SenseLab eval and approved by a person. Unlike synthetic keys
+#: these are knowledge an agent should read — they are what stops the next
+#: failure — so read paths keep them. Training pipelines exclude them: a
+#: model is meant to learn the corrected *behaviour* from the trajectories the
+#: correction produced, not to memorise the note that produced it, and a note
+#: that names a past failure would otherwise be the strongest lexical signal
+#: in every prompt it appears in.
+CORRECTIVE_KEY_PREFIXES: tuple[str, ...] = ("risk-", "correction-")
 
 
 def is_synthetic_key(key: str) -> bool:
     return key.startswith(SYNTHETIC_KEY_PREFIXES)
+
+
+def is_corrective_key(key: str) -> bool:
+    """Whether *key* is a repair-loop correction (see ``CORRECTIVE_KEY_PREFIXES``)."""
+    return key.startswith(CORRECTIVE_KEY_PREFIXES)
+
+
+def is_training_excluded_key(key: str) -> bool:
+    """Whether a training or fine-tuning pipeline should leave *key* out of the
+    prompt it renders: synthetic lessons and repair-loop corrections both."""
+    return is_synthetic_key(key) or is_corrective_key(key)
 
 
 def contrast_lesson_key(outcome_ref: str) -> str:
@@ -616,6 +640,7 @@ def contrast_lesson_key(outcome_ref: str) -> str:
 
 
 __all__ = [
+    "CORRECTIVE_KEY_PREFIXES",
     "DISCREDIT_THRESHOLD",
     "EVIDENCE_DECAY",
     "PRIOR_STRENGTH",
@@ -632,8 +657,10 @@ __all__ = [
     "contrast_lesson_key",
     "evidence_signal",
     "evidence_weight",
+    "is_corrective_key",
     "is_success",
     "is_synthetic_key",
+    "is_training_excluded_key",
     "outcome_model",
     "outcome_steps",
     "posterior",

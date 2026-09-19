@@ -37,6 +37,7 @@ export type { ExternalContext } from "./tracker.js";
 export { OutcomeBackPropagator } from "./outcome.js";
 export { defaultConfig } from "./config.js";
 export {
+  MemoryType,
   OutcomeType,
   OUTCOME_MULTIPLIERS,
 } from "./models.js";

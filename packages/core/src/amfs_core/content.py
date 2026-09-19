@@ -33,6 +33,14 @@ from typing import Any
 # OSS blend and mirrored by the Pro MultiStrategyRetriever.
 ARTIFACT_PENALTY = 0.5
 
+# The mirror image for procedures (``MemoryType.PROCEDURE``): a retrieve is a
+# question about a task, and an entry that says how to do the task answers it
+# better than a fact about it at the same relevance. Mild on purpose — it
+# breaks ties in favour of method, it does not let a weakly related procedure
+# outrank a strongly related fact. Multiplicative like the penalty above, and
+# shared by the OSS blend and the Pro reranker's composite for the same reason.
+PROCEDURE_BOOST = 1.1
+
 # Only scan the head of a value: enough to detect code markers cheaply and to
 # build a descriptor, without paying to regex a multi-megabyte blob on every
 # write or every candidate in a read-time fallback.

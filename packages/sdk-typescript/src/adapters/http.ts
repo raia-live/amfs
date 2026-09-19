@@ -267,11 +267,22 @@ export class HttpAdapter implements AmfsAdapter {
 
   async briefingAsync(options?: {
     entityPath?: string;
+    agentId?: string;
     limit?: number;
+    /** Lead digest only, with its evidence sections; a fraction of the tokens. */
+    compact?: boolean;
+    /** Only what changed after this ISO-8601 moment in the list sections. */
+    since?: string;
+    /** Brief from a memory branch other than `main` (a repair branch, a canary). */
+    branch?: string;
   }): Promise<unknown> {
     const params = new URLSearchParams();
     if (options?.entityPath) params.set("entity_path", options.entityPath);
+    if (options?.agentId) params.set("agent_id", options.agentId);
     if (options?.limit) params.set("limit", String(options.limit));
+    if (options?.compact) params.set("compact", "true");
+    if (options?.since) params.set("since", options.since);
+    if (options?.branch && options.branch !== "main") params.set("branch", options.branch);
     const qs = params.toString();
     return this.fetch(`/api/v1/briefing${qs ? `?${qs}` : ""}`);
   }

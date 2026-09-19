@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -14,12 +15,17 @@ class MemoryType(str, Enum):
     """Classification of memory entries for type-specific behavior.
 
     Facts are objective and stable. Beliefs are subjective and decay faster.
-    Experiences are append-only records of agent actions.
+    Experiences are append-only records of agent actions. Procedures are
+    *how to do a task*: an ordered set of steps, with what to check before
+    acting and what to do when a step fails. They are what the repair loop
+    ships when a failure was about method rather than fact, so they decay
+    slowest and the briefing lists them in their own section.
     """
 
     FACT = "fact"
     BELIEF = "belief"
     EXPERIENCE = "experience"
+    PROCEDURE = "procedure"
 
 
 class ProvenanceTier(int, Enum):
@@ -92,12 +98,57 @@ def clamp_confidence(value: float) -> float:
     """Clamp a confidence value into the valid [0.0, 1.0] range."""
     return max(0.0, min(1.0, float(value)))
 
-# Beliefs are penalised more by regressions and decay faster.
+# Beliefs are penalised more by regressions and decay faster. Procedures are
+# the slowest: a way of doing a task stays valid until an outcome says it
+# does not, and outcomes — not age — are what should retire one.
 MEMORY_TYPE_DECAY_MULTIPLIERS: dict[MemoryType, float] = {
     MemoryType.FACT: 1.0,
     MemoryType.BELIEF: 0.5,
     MemoryType.EXPERIENCE: 1.5,
+    MemoryType.PROCEDURE: 2.0,
 }
+
+#: Keys a procedure's value is expected to carry when it is a dict. The
+#: quality evaluator reports what is missing; nothing rejects the write.
+PROCEDURE_REQUIRED_FIELDS: tuple[str, ...] = ("goal", "steps")
+PROCEDURE_OPTIONAL_FIELDS: tuple[str, ...] = ("preconditions", "on_failure", "verify")
+
+
+def procedure_issues(value: Any) -> list[str]:
+    """What a procedure value is missing, as short issue codes.
+
+    A procedure is a dict with a ``goal`` and a non-empty ``steps`` list (each
+    step a non-blank string or a dict with a non-blank ``action``), optionally
+    ``preconditions``, ``on_failure`` and ``verify``. A plain string is
+    accepted when it reads as a numbered or bulleted list of at least two
+    steps; anything else is ``not_structured``. Pure; used by
+    ``amfs_core.quality``.
+    """
+    if isinstance(value, dict):
+        out: list[str] = []
+        goal = value.get("goal")
+        if not isinstance(goal, str) or not goal.strip():
+            out.append("missing_goal")
+        steps = value.get("steps")
+        if not isinstance(steps, list) or not steps:
+            out.append("missing_steps")
+        else:
+            for step in steps:
+                text = step.get("action") if isinstance(step, dict) else step
+                if isinstance(text, str) and text.strip():
+                    continue
+                out.append("malformed_step")
+                break
+        return out
+    if isinstance(value, str):
+        lines = [ln.strip() for ln in value.splitlines() if ln.strip()]
+        listed = [ln for ln in lines if _PROCEDURE_STEP_LINE.match(ln)]
+        return [] if len(listed) >= 2 else ["not_structured"]
+    return ["not_structured"]
+
+
+#: ``- step``, ``* step``, ``• step``, ``1. step``, ``1) step``.
+_PROCEDURE_STEP_LINE = re.compile(r"^(?:[-*•]|\d+[.)])\s+\S")
 
 _PRODUCTION_AGENT_PREFIXES = ("agent/", "prod/", "prod-")
 

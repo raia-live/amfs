@@ -12,7 +12,7 @@ import json
 from abc import ABC, abstractmethod
 from typing import Any
 
-from amfs_core.models import QualityIssue, QualityReport
+from amfs_core.models import QualityIssue, QualityReport, procedure_issues
 
 _RATIONALE_WORDS = frozenset({
     "because", "reason", "hypothesis", "rationale", "evidence",
@@ -89,6 +89,7 @@ class HeuristicQualityEvaluator(MemoryQualityEvaluator):
         score -= self._check_missing_pattern_refs(refs, siblings, issues)
         score -= self._check_belief_no_rationale(mt, str_value, issues)
         score -= self._check_overconfident_belief(mt, confidence, issues)
+        score -= self._check_procedure_shape(mt, value, issues)
 
         score = max(score, 0.0)
         action = "stored_ok" if score >= 0.8 else "stored_with_suggestions"
@@ -202,3 +203,37 @@ class HeuristicQualityEvaluator(MemoryQualityEvaluator):
             suggestion="Lower the confidence to reflect the subjective nature of this belief.",
         ))
         return 0.1
+
+    @staticmethod
+    def _check_procedure_shape(
+        mt: str,
+        value: Any,
+        issues: list[QualityIssue],
+    ) -> float:
+        """A procedure is steps to follow; one that has none is a note, not a
+        procedure. Reports what is missing (see ``procedure_issues``) and takes
+        one penalty however many codes there are — enough on its own to land
+        the write in ``stored_with_suggestions``, so the agent is asked to add
+        the steps. Never rejects the write."""
+        if mt != "procedure":
+            return 0.0
+        codes = procedure_issues(value)
+        if not codes:
+            return 0.0
+        # A structured procedure is not "unstructured": drop that issue if the
+        # generic check added it, so the agent gets one actionable message.
+        issues[:] = [i for i in issues if i.type != "unstructured"]
+        issues.append(QualityIssue(
+            type="procedure_incomplete",
+            message=(
+                "This procedure is missing: " + ", ".join(codes) + ". A procedure "
+                "needs a goal and an ordered list of steps so the next agent can "
+                "follow it without re-deriving the method."
+            ),
+            suggestion=(
+                'Write the value as {"goal": "...", "preconditions": [...], '
+                '"steps": ["...", ...], "on_failure": "...", "verify": "..."} — '
+                "or as a numbered list of at least two steps."
+            ),
+        ))
+        return 0.25

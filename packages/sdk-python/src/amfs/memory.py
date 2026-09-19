@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 import math
+import os
 import threading
 import uuid
 from collections import defaultdict
@@ -57,6 +58,10 @@ from amfs.config import load_config_or_default
 from amfs.factory import create_adapter_from_config
 
 logger = logging.getLogger(__name__)
+
+#: Environment variable naming the branch an ``AgentMemory`` starts on when the
+#: constructor is not given one. Read once, at construction.
+BRANCH_ENV = "AMFS_BRANCH"
 
 _sdk_bg_executor: ThreadPoolExecutor | None = None
 _sdk_bg_lock = threading.Lock()
@@ -219,6 +224,34 @@ def _metadata_to_dict(meta: Any) -> dict[str, Any]:
     return {}
 
 
+def _call_shedding_unknown_keywords(
+    fn: Callable[..., Any], kwargs: dict[str, Any], *, optional: tuple[str, ...]
+) -> Any:
+    """Call *fn* with *kwargs*, dropping one *optional* keyword per ``TypeError``
+    until the call is accepted.
+
+    Adapters are pluggable and versioned separately, so an older one rejects a
+    keyword a newer SDK sends. Dropping every optional keyword on the first
+    ``TypeError`` would answer a request for a compact delta briefing on a
+    branch with a full briefing of ``main``; dropping only what the adapter
+    does not know keeps the rest of the request intact. A ``TypeError`` that
+    names none of the optional keywords still present is the adapter's own
+    and is re-raised.
+    """
+    present = [name for name in optional if name in kwargs]
+    while True:
+        try:
+            return fn(**kwargs)
+        except TypeError as exc:
+            if not present:
+                raise
+            message = str(exc)
+            named = [name for name in present if f"'{name}'" in message]
+            drop = named[0] if named else present[0]
+            present.remove(drop)
+            kwargs = {k: v for k, v in kwargs.items() if k != drop}
+
+
 # ---------------------------------------------------------------------------
 # Lightweight digest scoring — used when amfs_cortex is not installed but the
 # adapter supports list_digests (e.g. PostgresAdapter used directly by the MCP
@@ -310,6 +343,7 @@ class AgentMemory:
         conflict_policy: ConflictPolicy = ConflictPolicy.LAST_WRITE_WINS,
         on_conflict: Callable[[MemoryEntry, MemoryEntry, Any], Any] | None = None,
         importance_evaluator: Any | None = None,
+        branch: str | None = None,
     ) -> None:
         self._config = load_config_or_default(config_path)
 
@@ -327,7 +361,10 @@ class AgentMemory:
         self._conflict_policy = conflict_policy
         self._on_conflict = on_conflict
         self._importance_evaluator = importance_evaluator
-        self._branch = "main"
+        # The branch every read and write goes to unless the call names one.
+        # ``branch=`` wins, then ``AMFS_BRANCH`` — how a process is pointed at
+        # a repair branch or a canary without a code change — then ``main``.
+        self._branch = (branch or os.environ.get(BRANCH_ENV) or "main").strip() or "main"
         self._session_metadata: SessionMetadata | None = None
         # Buffered separately from ``_session_metadata`` — which callers (and the
         # MCP server) reassign wholesale — and merged into it at commit time.
@@ -374,6 +411,11 @@ class AgentMemory:
     @property
     def namespace(self) -> str:
         return self._config.namespace
+
+    @property
+    def branch(self) -> str:
+        """The branch reads and writes go to unless a call names another."""
+        return self._branch
 
     @property
     def adapter(self) -> AdapterABC:
@@ -689,6 +731,7 @@ class AgentMemory:
         recall_config: RecallConfig | None = None,
         depth: int = 3,
         include_artifacts: bool = True,
+        branch: str | None = None,
     ) -> list[MemoryEntry] | list[ScoredEntry]:
         """Search across all entities with rich filters.
 
@@ -705,10 +748,14 @@ class AgentMemory:
 
         *depth* controls progressive retrieval across memory tiers:
           1 = HOT only, 2 = HOT + WARM, 3 = all tiers (default).
+
+        *branch* defaults to the active branch. Adapters that are not
+        branch-aware (filesystem, S3) search their single store.
         """
         from amfs_core.embedder import cosine_similarity
 
         paths = entity_paths or ([entity_path] if entity_path else [None])
+        resolved_branch = branch or self._branch
 
         seen_keys: set[str] = set()
         merged: list[MemoryEntry] = []
@@ -727,7 +774,7 @@ class AgentMemory:
                 depth=depth,
                 include_artifacts=include_artifacts,
             )
-            for entry in self._adapter.search(sq):
+            for entry in self._adapter_search(sq, resolved_branch):
                 if entry.entry_key not in seen_keys:
                     if not entry.shared and entry.provenance.agent_id != self.agent_id:
                         continue
@@ -796,6 +843,20 @@ class AgentMemory:
         scored.sort(key=lambda s: s.score, reverse=True)
         return scored
 
+    def _adapter_search(self, query: SearchQuery, branch: str) -> list[MemoryEntry]:
+        """``adapter.search`` on *branch* when the adapter takes one.
+
+        ``main`` is every adapter's default, so it is never sent; a non-default
+        branch is, and an adapter that rejects the keyword (filesystem, S3)
+        is searched without it rather than failing the call.
+        """
+        if not branch or branch == "main":
+            return self._adapter.search(query)
+        try:
+            return self._adapter.search(query, branch=branch)
+        except TypeError:
+            return self._adapter.search(query)
+
     def semantic_search(
         self,
         text: str,
@@ -836,6 +897,7 @@ class AgentMemory:
         candidate_actions: list[str] | None = None,
         situation: str | None = None,
         compact: bool = False,
+        branch: str | None = None,
     ) -> list[ScoredEntry]:
         """Rank memories by meaning for a natural-language query.
 
@@ -855,8 +917,12 @@ class AgentMemory:
         so it can name the untried ones; ``situation`` labels the kind of task.
         ``compact=True`` trims each hit to the fields an agent acts on. Both are
         server-side features; the local adapters return entries without them.
+
+        *branch* defaults to the active branch (``checkout``), so an agent on
+        a repair branch retrieves what that branch says, not what ``main`` does.
         """
         cfg = recall_config or RecallConfig()
+        resolved_branch = branch or self._branch
 
         adapter_retrieve = getattr(self._adapter, "retrieve", None)
         if callable(adapter_retrieve):
@@ -870,6 +936,12 @@ class AgentMemory:
                         "situation": situation,
                         "compact": compact,
                     }
+                # Sent only off the default: every adapter's retrieve defaults
+                # to main, and an older one without the keyword would otherwise
+                # raise TypeError here and fall back to local scoring for every
+                # call, not just branched ones.
+                if resolved_branch and resolved_branch != "main":
+                    extra["branch"] = resolved_branch
                 rows = adapter_retrieve(
                     query,
                     entity_path=entity_path,
@@ -903,6 +975,7 @@ class AgentMemory:
             limit=limit,
             recall_config=cfg,
             include_artifacts=include_artifacts,
+            branch=resolved_branch,
         )
         self._record_retrieval_reuse(query, entity_path, result)  # type: ignore[arg-type]
         return result  # type: ignore[return-value]
@@ -2417,11 +2490,14 @@ class AgentMemory:
         """
         # Prefer the adapter's native briefing when available (e.g. HttpAdapter
         # proxies to the server which has full Cortex + Postgres access).
+        resolved_agent = agent_id or self.agent_id
+        resolved_branch = branch or self._branch
+
         adapter_briefing = getattr(self._adapter, "briefing", None)
         if callable(adapter_briefing):
             kwargs: dict = {
                 "entity_path": entity_path,
-                "agent_id": agent_id or self.agent_id,
+                "agent_id": resolved_agent,
                 "limit": limit,
             }
             # Passed only when asked for, and only to an adapter that knows the
@@ -2433,17 +2509,18 @@ class AgentMemory:
                 kwargs["compact"] = True
             if since is not None:
                 kwargs["since"] = since
-            try:
-                digests = adapter_briefing(**kwargs)
-            except TypeError:
-                kwargs.pop("credit_reuse", None)
-                kwargs.pop("compact", None)
-                kwargs.pop("since", None)
-                digests = adapter_briefing(**kwargs)
+            # The active branch used to be dropped on this path, so a client
+            # that had checked out a branch was briefed from main.
+            if resolved_branch and resolved_branch != "main":
+                kwargs["branch"] = resolved_branch
+            digests = _call_shedding_unknown_keywords(
+                adapter_briefing, kwargs,
+                # Newest keyword first: an adapter that predates ``branch`` is
+                # far more likely to know ``compact`` and ``since`` than the
+                # other way round, and each retry costs one round-trip.
+                optional=("branch", "since", "compact", "credit_reuse"),
+            )
             return self._book_briefing_lineage(digests, credit_reuse)
-
-        resolved_agent = agent_id or self.agent_id
-        resolved_branch = branch or self._branch
 
         try:
             from amfs_cortex.briefing import BriefingService
