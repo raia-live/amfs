@@ -1325,6 +1325,40 @@ def test_list_digests_relevant_to_keeps_what_the_briefing_would_score(adapter) -
     assert len(adapter.list_digests(namespace=ns, digest_type=DigestType.ENTITY)) == 3
 
 
+def test_list_scopes_matches_list_without_shipping_the_rows(adapter) -> None:
+    """``list_scopes`` is the distinct (entity_path, agent_id) of exactly the rows
+    ``list()`` returns — current versions only, shared ``@room/...`` paths
+    excluded — and ``list_digest_scopes`` the ``type:scope`` keys of the
+    tenant's digests. Both are what the catch-up scan compares."""
+    import uuid
+    from datetime import UTC, datetime
+
+    from amfs_core.models import Digest, DigestType, MemoryEntry, Provenance
+
+    def _w(path, key, agent):
+        adapter.write(MemoryEntry(entity_path=path, key=key, value="v", provenance=Provenance(agent_id=agent, session_id="s", written_at=datetime.now(UTC))))
+
+    _w("acme/support", "k1", "support-agent")
+    _w("acme/support", "k1", "support-agent")      # a second version: superseded, same scope
+    _w("acme/support", "k2", "other-agent")
+    _w("acme/billing", "k1", "webhook/github")
+    _w("@room/shared", "k1", "support-agent")       # shared path: excluded by the same guard list() uses
+
+    paths, agents = adapter.list_scopes()
+    listed = adapter.list()
+    assert paths == {e.entity_path for e in listed} == {"acme/support", "acme/billing"}
+    assert agents == {e.provenance.agent_id for e in listed} == {"support-agent", "other-agent", "webhook/github"}
+    assert adapter.list_scopes(branch="other") == (set(), set())
+
+    ns = f"ds-{uuid.uuid4().hex[:8]}"
+    adapter.upsert_digest(Digest(digest_type=DigestType.ENTITY, scope="acme/support", summary={"n": 1},
+                                 entry_count=1, source_agents=[], namespace=ns, branch="main"))
+    adapter.upsert_digest(Digest(digest_type=DigestType.AGENT_BRIEF, scope="support-agent", summary={},
+                                 entry_count=1, source_agents=[], namespace=ns, branch="main"))
+    assert adapter.list_digest_scopes(namespace=ns) == {"entity:acme/support", "agent_brief:support-agent"}
+    assert adapter.list_digest_scopes(namespace=ns, branch="other") == set()
+
+
 def test_outcome_task_text_is_stored_and_read_back_per_entity(adapter) -> None:
     """``task_input`` reaches the outcome row as ``task_text`` — the head of
     it, and only when given — and ``recent_task_texts`` reads an entity's

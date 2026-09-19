@@ -2193,6 +2193,53 @@ class PostgresAdapter(AdapterABC):
 
         return [self._row_to_entry(r) for r in rows]
 
+    def list_scopes(self, *, branch: str = "main") -> tuple[set[str], set[str]]:
+        """The distinct ``(entity paths, agent ids)`` behind the current entries.
+
+        What the Cortex worker's catch-up scan needs to know — which scopes exist
+        so it can queue the ones without a digest — computed as a ``GROUP BY``
+        instead of :meth:`list`, which ships every current row of the tenant and
+        builds a :class:`MemoryEntry` for each. On a store of 80k entries that
+        listing took 30-300 s per scan and ran once per instance every five
+        minutes; this reads two columns and returns in milliseconds. The row
+        set is exactly the one ``list()`` would return: same namespace, branch,
+        shared-path guard and superseded filter.
+        """
+        conditions, params = list_conditions(
+            self._namespace, None, include_superseded=False, branch=branch, scope=None, agent_id=None,
+        )
+        query = (
+            f"SELECT entity_path, agent_id FROM amfs_memory_entries WHERE {' AND '.join(conditions)} "
+            "GROUP BY entity_path, agent_id"
+        )
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
+        return {r["entity_path"] for r in rows}, {r["agent_id"] for r in rows if r["agent_id"]}
+
+    def list_digest_scopes(self, namespace: str = "default", branch: str = "main") -> set[str]:
+        """``"<digest_type>:<scope>"`` for every digest of the current tenant.
+
+        The catch-up scan compares this against :meth:`list_scopes`; it needs
+        the keys only, not the summaries :meth:`list_digests` would load.
+        """
+        account_id = self._get_current_account_id()
+        where = ["namespace = %s", "branch = %s"]
+        params: list[Any] = [namespace, branch]
+        if account_id:
+            where.append("account_id = %s")
+            params.append(account_id)
+        else:
+            where.append("account_id IS NULL")
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT digest_type, scope FROM amfs_digests WHERE {' AND '.join(where)}", params
+                )
+                rows = cur.fetchall()
+        return {f"{r['digest_type']}:{r['scope']}" for r in rows}
+
     def count_entries(
         self,
         entity_path: str | None = None,
