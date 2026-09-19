@@ -32,7 +32,7 @@ from amfs_core.models import (
     SearchQuery,
     SemanticQuery,
 )
-from amfs_core.scope import descendants_sql
+from amfs_core.scope import SqlScope, descendants_sql
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -45,8 +45,11 @@ from amfs_postgres.adapter import (
     PostgresAdapter,
     _evidence_params,
     _inherit_from_row,
+    _list_order_sql,
+    _paginate_sql,
     connection_options,
     entry_select,
+    list_conditions,
     pool_bounds,
 )
 from amfs_postgres.knn import hnsw_scan_settings, parse_pgvector_version, use_hnsw_scan
@@ -453,24 +456,32 @@ class AsyncPostgresAdapter:
         *,
         include_superseded: bool = False,
         branch: str = "main",
+        scope: SqlScope | None = None,
+        agent_id: str | None = None,
+        order_by: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[MemoryEntry]:
-        conditions = ["namespace = %s", "branch = %s"]
-        params: list[Any] = [self._namespace, branch]
+        """Current entries, filtered, ordered and paged in SQL.
 
-        if entity_path is not None:
-            conditions.append("entity_path = %s")
-            params.append(entity_path)
-        else:
-            conditions.append(_EXCLUDE_SHARED_PATHS)
-
-        if not include_superseded:
-            conditions.append("superseded_at IS NULL")
-
+        The async twin of :meth:`PostgresAdapter.list`; see there for what the
+        keyword arguments beyond the ABC's mean. The WHERE comes from the same
+        ``list_conditions`` so the two adapters cannot drift.
+        """
+        conditions, params = list_conditions(
+            self._namespace,
+            entity_path,
+            include_superseded=include_superseded,
+            branch=branch,
+            scope=scope,
+            agent_id=agent_id,
+        )
         where = " AND ".join(conditions)
         query = (
             f"SELECT {entry_select(self._has_is_artifact_col)} FROM amfs_memory_entries "
-            f"WHERE {where} ORDER BY entity_path, key, version"
+            f"WHERE {where} ORDER BY {_list_order_sql(order_by)}"
         )
+        query, params = _paginate_sql(query, params, limit=limit, offset=offset)
 
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -478,6 +489,33 @@ class AsyncPostgresAdapter:
                 rows = await cur.fetchall()
 
         return [self._row_to_entry(r) for r in rows]
+
+    async def count_entries(
+        self,
+        entity_path: str | None = None,
+        *,
+        include_superseded: bool = False,
+        branch: str = "main",
+        scope: SqlScope | None = None,
+        agent_id: str | None = None,
+    ) -> int:
+        """``COUNT(*)`` over exactly the rows :meth:`list` would return."""
+        conditions, params = list_conditions(
+            self._namespace,
+            entity_path,
+            include_superseded=include_superseded,
+            branch=branch,
+            scope=scope,
+            agent_id=agent_id,
+        )
+        where = " AND ".join(conditions)
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT COUNT(*) AS n FROM amfs_memory_entries WHERE {where}", params
+                )
+                row = await cur.fetchone()
+        return int(row["n"]) if row else 0
 
     # ──────────────────────────────────────────────────────────────
     # 4. search

@@ -49,6 +49,7 @@ from amfs_core.aggregates import (
 )
 from amfs_core.ranking import composite_score
 from amfs_core.ranking import entry_text as _entry_text
+from amfs_core.scope import SqlScope
 from amfs_core.ranking import keyword_coverage as _keyword_coverage
 from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
@@ -986,10 +987,78 @@ def _active_visibility_filter(request: Request):
     context (plain API key on a single-user / self-hosted install) or the
     user is an account admin.
     """
-    vis = getattr(request.state, "visibility_filter", None)
+    vis = _get_visibility_filter(request)
     if vis is not None and vis.should_filter():
         return vis
     return None
+
+
+def _visibility_scope(request: Request) -> tuple[Any | None, Any | None]:
+    """How to apply the caller's visibility to a read: ``(scope, py_filter)``.
+
+    ``scope`` is the rule as a SQL predicate (``amfs_core.scope.SqlScope``)
+    when the filter can express itself that way — the hosted
+    ``UserVisibilityFilter`` does, via ``sql_predicate()`` — so the read is
+    narrowed in the query and a page is a page of visible rows. ``py_filter``
+    is the filter object when the rule has to run over loaded entries instead
+    (a filter without the hook, or one that declined). Both ``None`` when the
+    caller sees the whole account.
+
+    Exactly one of the two is set when scoping applies; a handler that takes
+    the SQL route must not also filter in Python, and one that gets
+    ``py_filter`` must not page in SQL, or it would page past hidden rows.
+    """
+    vis = _active_visibility_filter(request)
+    if vis is None:
+        return None, None
+    predicate = getattr(vis, "sql_predicate", None)
+    if callable(predicate):
+        try:
+            scope = predicate()
+        except Exception:  # noqa: BLE001 - the Python filter is always correct
+            logger.debug("visibility sql_predicate failed; filtering in Python", exc_info=True)
+            scope = None
+        # A real predicate only: anything else (a filter that declined with
+        # None, a stand-in object) means the rule runs over entries.
+        if isinstance(scope, SqlScope):
+            return scope, None
+    return None, vis
+
+
+def _entries_by_agent(mem: AgentMemory, agent_id: str) -> list[MemoryEntry]:
+    """One agent's current entries, narrowed in the query where the adapter
+    can (the Postgres adapters take ``agent_id``), over ``list()`` where it
+    cannot. Synchronous: call it off the event loop."""
+    try:
+        return mem._adapter.list(agent_id=agent_id)
+    except TypeError:
+        return [e for e in mem.list() if e.provenance.agent_id == agent_id]
+
+
+def _authors_of(mem: AgentMemory, refs: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
+    """Who wrote each ``(entity_path, key)`` — looked up for just those refs
+    where the adapter can (``entry_authors``), from ``list()`` where it
+    cannot. The graph views attribute an agent's reads to the entries'
+    authors and need the author of the entries it read, not of every entry
+    in the namespace. Synchronous: call it off the event loop."""
+    if not refs:
+        return {}
+    lookup = getattr(mem._adapter, "entry_authors", None)
+    if callable(lookup):
+        return lookup(refs)
+    wanted = set(refs)
+    return {
+        (e.entity_path, e.key): e.provenance.agent_id
+        for e in mem.list()
+        if (e.entity_path, e.key) in wanted
+    }
+
+
+#: Default page size for ``GET /entries`` when the caller names none, or 0 to
+#: keep returning the whole namespace as before (the default). A hosted
+#: deployment sets this once its own whole-list consumers page; the response
+#: always carries ``total``, so a capped client can tell and page on.
+ENTRIES_DEFAULT_LIMIT = int(os.environ.get("AMFS_ENTRIES_DEFAULT_LIMIT", "0") or 0)
 
 
 def _visible_agent_ids(request: Request) -> set[str] | None:
@@ -1804,51 +1873,118 @@ async def list_entries(
         _tls_acct, _state_acct, _state_user, _has_ctx,
     )
     mem = _get_memory()
-    if _async_adapter is not None:
+    if limit is None and ENTRIES_DEFAULT_LIMIT > 0:
+        limit = ENTRIES_DEFAULT_LIMIT
+    scope, py_vis = _visibility_scope(request)
+    # Only the Postgres adapters page in SQL; the filesystem adapter's list()
+    # takes none of the keyword arguments and is paged below as before.
+    sql_paged = _async_adapter is not None or hasattr(mem._adapter, "count_entries")
+
+    if py_vis is None and sql_paged:
+        # Visibility, order and page all in the query: the database returns
+        # the page, not the namespace. Before this, an account-wide listing
+        # loaded every current entry (100K on the largest account), filtered
+        # and sorted them in Python on the event loop, and sliced the page off
+        # the end — for a caller asking for 50 rows.
+        # The sync adapter is reached through AgentMemory.list(), which hides
+        # other agents' private entries; the async adapter never did. Each
+        # path keeps the behaviour it had, as a predicate rather than a pass.
+        sync_scope = SqlScope.all_of(
+            scope, SqlScope("shared OR agent_id = %s", (mem.agent_id,))
+        )
+        page_kw: dict[str, Any] = {
+            "branch": branch,
+            "include_superseded": include_superseded,
+            "scope": scope,
+            "order_by": sort,
+            "limit": limit,
+            "offset": offset,
+        }
+        sync_kw = {**page_kw, "scope": sync_scope}
+        count_keys = ("branch", "include_superseded", "scope")
+        sync_list = functools.partial(mem._adapter.list, entity_path, **sync_kw)
         try:
-            entries = await _async_adapter.list(entity_path, branch=branch, include_superseded=include_superseded)
+            if _async_adapter is not None:
+                entries = await _async_adapter.list(entity_path, **page_kw)
+                count_kw = {k: page_kw[k] for k in count_keys}
+            else:
+                entries = await _offload(_db_executor, sync_list)
+                count_kw = {k: sync_kw[k] for k in count_keys}
         except Exception:
-            logger.warning("Async list failed for %s — falling back to sync", entity_path, exc_info=True)
+            logger.warning(
+                "Paged list failed for %s — falling back to sync", entity_path, exc_info=True
+            )
             entries = []
-        if not entries:
-            sync_entries = mem.list(entity_path, branch=branch, include_superseded=include_superseded)
+            count_kw = {k: sync_kw[k] for k in count_keys}
+        if not entries and offset == 0 and _async_adapter is not None:
+            # The async pool once lost its tenant context and answered every
+            # read with nothing; cheap to rule out on an empty first page.
+            sync_entries = await _offload(_db_executor, sync_list)
             if sync_entries:
                 logger.warning(
-                    "Async adapter returned 0 entries for %s but sync found %d — RLS context mismatch",
+                    "Async adapter returned 0 entries for %s but sync found %d — RLS mismatch",
                     entity_path, len(sync_entries),
                 )
                 entries = sync_entries
-    else:
-        entries = mem.list(entity_path, branch=branch, include_superseded=include_superseded)
-    total_before = len(entries)
-
-    vis = _get_visibility_filter(request)
-    if vis is not None and vis.should_filter():
-        entries = vis.filter_entries(entries)
+        if limit is None and offset == 0:
+            total = len(entries)
+        elif _async_adapter is not None:
+            total = await _async_adapter.count_entries(entity_path, **count_kw)
+        else:
+            total = await _offload(
+                _db_executor, mem._adapter.count_entries, entity_path, **count_kw
+            )
         logger.warning(
-            "[ENTRIES] entity_path=%s mem.list=%d after_filter=%d user_agents=%s",
-            entity_path, total_before, len(entries),
-            sorted(vis.get_user_agents()) if vis else "N/A",
+            "[ENTRIES] entity_path=%s sql_paged rows=%d total=%d scoped=%s sort=%s "
+            "limit=%s offset=%d",
+            entity_path, len(entries), total, scope is not None, sort, limit, offset,
         )
     else:
+        # A filter that can only run over loaded entries, or an adapter that
+        # cannot page: load off the event loop, then filter, sort and page
+        # here — in that order, so a caller can never page past entries it
+        # is not allowed to see.
+        load_all = functools.partial(
+            mem.list, entity_path, branch=branch, include_superseded=include_superseded
+        )
+        if _async_adapter is not None:
+            try:
+                entries = await _async_adapter.list(
+                    entity_path, branch=branch, include_superseded=include_superseded
+                )
+            except Exception:
+                logger.warning(
+                    "Async list failed for %s — falling back to sync", entity_path, exc_info=True
+                )
+                entries = []
+            if not entries:
+                sync_entries = await _offload(_db_executor, load_all)
+                if sync_entries:
+                    logger.warning(
+                        "Async adapter returned 0 entries for %s but sync found %d — RLS mismatch",
+                        entity_path, len(sync_entries),
+                    )
+                    entries = sync_entries
+        else:
+            entries = await _offload(_db_executor, load_all)
+        total_before = len(entries)
+        if py_vis is not None:
+            entries = await _offload(_db_executor, py_vis.filter_entries, entries)
         logger.warning(
-            "[ENTRIES] entity_path=%s mem.list=%d NO_FILTER vis=%s",
-            entity_path, total_before, vis,
+            "[ENTRIES] entity_path=%s mem.list=%d after_filter=%d filtered=%s",
+            entity_path, total_before, len(entries), py_vis is not None,
         )
 
-    # Sorting/pagination/meta happen after the visibility filter so callers
-    # can never page past entries they aren't allowed to see. Defaults keep
-    # the historical behavior (full list, full fields) intact.
-    if sort == "written_at":
-        entries = sorted(entries, key=lambda e: e.provenance.written_at, reverse=True)
-    elif sort == "recall_count":
-        entries = sorted(entries, key=lambda e: e.recall_count, reverse=True)
+        if sort == "written_at":
+            entries = sorted(entries, key=lambda e: e.provenance.written_at, reverse=True)
+        elif sort == "recall_count":
+            entries = sorted(entries, key=lambda e: e.recall_count, reverse=True)
 
-    total = len(entries)
-    if offset:
-        entries = entries[offset:]
-    if limit is not None:
-        entries = entries[:limit]
+        total = len(entries)
+        if offset:
+            entries = entries[offset:]
+        if limit is not None:
+            entries = entries[:limit]
 
     payload = [_entry_to_response(e) for e in entries]
     if fields == "meta":
@@ -1867,18 +2003,34 @@ async def list_entity_summaries(
     """Per-entity aggregates without entry values — a few KB instead of the
     multi-MB /entries payload. Dashboards should prefer this endpoint."""
     mem = _get_memory()
+    adapter = mem._adapter
 
-    vis = _get_visibility_filter(request)
-    if vis is not None and vis.should_filter():
-        # Room visibility can't be expressed as a per-agent SQL filter, so
-        # filter entries in Python and aggregate with the shared helper.
+    scope, py_vis = _visibility_scope(request)
+
+    def _summaries() -> list[dict[str, Any]]:
+        """Off the event loop: one GROUP BY where the adapter and the
+        visibility rule allow it, a load-and-reduce otherwise."""
+        if py_vis is None:
+            try:
+                # The visibility rule travels into the GROUP BY as a
+                # predicate, so a per-user dashboard gets the same one query
+                # an admin does. Only passed when there is one: the ABC's
+                # default implementation does not take it.
+                if scope is None:
+                    return adapter.entity_summaries()
+                return adapter.entity_summaries(scope=scope)
+            except TypeError:
+                # An adapter without SQL scoping; reduce over its rows.
+                pass
         from amfs_core.aggregates import entity_summaries_from_entries
 
-        entries = vis.filter_entries(mem.list())
-        summaries = entity_summaries_from_entries(entries)
-    else:
-        summaries = mem._adapter.entity_summaries()
+        entries = mem.list()
+        vis = py_vis if py_vis is not None else _active_visibility_filter(request)
+        if vis is not None:
+            entries = vis.filter_entries(entries)
+        return entity_summaries_from_entries(entries)
 
+    summaries = await _offload(_db_executor, _summaries)
     return json.loads(json.dumps({"entities": summaries}, default=str))
 
 
@@ -2915,24 +3067,36 @@ async def get_stats(
 ) -> dict[str, Any]:
     mem = _get_memory()
 
-    vis = _get_visibility_filter(request)
-    if vis is not None and vis.should_filter():
-        # Visibility-scoped stats. This branch must return a SUPERSET of the
-        # MemoryStats shape (which the unfiltered branch below produces),
-        # because the client parses /stats via MemoryStats.model_validate —
-        # any missing field silently defaults (confidence→0.0, outcome→0) and
-        # any mis-named key (e.g. "oldest_entry" vs "oldest_entry_at") is
-        # dropped to None. Room visibility semantics (co-member entries on
-        # shared entity paths) can't be expressed as a plain agent_id filter,
-        # so this path filters in Python and aggregates via the same shared
-        # helper the adapter defaults use.
+    scope, py_vis = _visibility_scope(request)
+
+    def _stats() -> dict[str, Any]:
+        """Off the event loop. The scoped shapes must be a SUPERSET of the
+        MemoryStats shape, because the client parses /stats via
+        MemoryStats.model_validate — any missing field silently defaults
+        (confidence→0.0, outcome→0) and any mis-named key (e.g.
+        "oldest_entry" vs "oldest_entry_at") is dropped to None. Both scoped
+        routes below produce the same keys as the unscoped aggregate."""
+        if py_vis is None:
+            try:
+                # The visibility rule as a predicate in the aggregate: a
+                # per-user dashboard gets the same query an admin does. Only
+                # passed when there is one; the ABC default takes no scope.
+                if scope is None:
+                    return mem._adapter.stats_extended()
+                return mem._adapter.stats_extended(scope=scope)
+            except TypeError:
+                pass  # an adapter without SQL scoping; reduce over its rows
+        # A filter that can only run over loaded entries: load, filter,
+        # aggregate with the same shared helper the adapter defaults use.
         from amfs_core.aggregates import extended_stats_from_entries
 
-        entries = vis.filter_entries(await _offload(_db_executor, mem.list))
-        scoped = extended_stats_from_entries(entries)
-        return json.loads(json.dumps(scoped, default=str))
+        entries = mem.list()
+        vis = py_vis if py_vis is not None else _active_visibility_filter(request)
+        if vis is not None:
+            entries = vis.filter_entries(entries)
+        return extended_stats_from_entries(entries)
 
-    stats = await _offload(_db_executor, mem._adapter.stats_extended)
+    stats = await _offload(_db_executor, _stats)
     return json.loads(json.dumps(stats, default=str))
 
 
@@ -3201,23 +3365,27 @@ async def get_agent_profile(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     mem = _get_memory()
-    agent = mem._adapter.get_agent(agent_id, namespace=mem.namespace)
 
-    entries = [
-        e for e in mem.list()
-        if e.provenance.agent_id == agent_id
-        and not e.entity_path.startswith("_system/")
-    ]
+    def _profile_reads() -> tuple[Any, list[MemoryEntry], int, int]:
+        """Every synchronous read this page needs, off the event loop."""
+        agent = mem._adapter.get_agent(agent_id, namespace=mem.namespace)
+        entries = [
+            e for e in _entries_by_agent(mem, agent_id)
+            if not e.entity_path.startswith("_system/")
+        ]
+        # Both numbers are aggregates the adapter computes where the traces
+        # live; this route used to pull up to 10,000 full traces to count them.
+        trace_count = mem._adapter.count_traces(agent_id=agent_id)
+        total_reads = sum(
+            sum(keys.values()) for keys in mem._adapter.trace_read_counts(agent_id).values()
+        )
+        return agent, entries, trace_count, total_reads
+
+    agent, entries, trace_count, total_reads = await _offload(_db_executor, _profile_reads)
     entities_touched = {e.entity_path for e in entries}
     last_active = max(
         (e.provenance.written_at for e in entries),
         default=None,
-    )
-    # Both numbers are aggregates the adapter computes where the traces live;
-    # this route used to pull up to 10,000 full traces to count them.
-    trace_count = mem._adapter.count_traces(agent_id=agent_id)
-    total_reads = sum(
-        sum(keys.values()) for keys in mem._adapter.trace_read_counts(agent_id).values()
     )
 
     result: dict[str, Any] = {
@@ -4660,49 +4828,61 @@ async def list_agents(
         _tls_acct, _state_acct, _state_user, _has_ctx,
     )
     mem = _get_memory()
-    entries = mem.list()
-
-    vis = _get_visibility_filter(request)
-    if vis is not None and vis.should_filter():
-        pre_filter = len(entries)
-        entries = vis.filter_entries(entries)
-        logger.warning(
-            "[AGENTS] mem.list=%d after_entry_filter=%d user_agents=%s",
-            pre_filter, len(entries), sorted(vis.get_user_agents()),
-        )
-    else:
-        logger.warning(
-            "[AGENTS] mem.list=%d NO_FILTER vis=%s",
-            len(entries), vis,
-        )
+    vis = _active_visibility_filter(request)
+    # A non-admin sees only agents they own, and an agent's own entries are
+    # always visible to its owner — so the entry-level visibility pass the
+    # handler used to run reduces, for this listing, to "these agent ids".
+    own: set[str] | None = set(vis.get_user_agents()) if vis is not None else None
 
     agent_data: dict[str, dict[str, Any]] = {}
-    for e in entries:
-        if e.entity_path.startswith("_system/"):
-            continue
-        aid = e.provenance.agent_id
-        if aid not in agent_data:
-            agent_data[aid] = {
-                "agent_id": aid,
-                "entries_written": 0,
-                "entities_touched": set(),
-                "last_active": e.provenance.written_at,
-                "first_seen": e.provenance.written_at,
+    summarise = getattr(mem._adapter, "agent_summaries", None)
+    if callable(summarise):
+        # One GROUP BY instead of loading every entry in the account into
+        # Python to count them — 100K rows on the largest account, on the
+        # event loop, for a page that shows a few dozen numbers.
+        rows = await _offload(
+            _db_executor, summarise, agent_ids=sorted(own) if own is not None else None
+        )
+        for r in rows:
+            agent_data[r["agent_id"]] = {
+                "agent_id": r["agent_id"],
+                "entries_written": r["entries_written"],
+                "entities_touched": r["entities_touched"],
+                "last_active": r["last_active"],
+                "first_seen": r["first_seen"],
             }
-        agent_data[aid]["entries_written"] += 1
-        agent_data[aid]["entities_touched"].add(e.entity_path)
-        if e.provenance.written_at > agent_data[aid]["last_active"]:
-            agent_data[aid]["last_active"] = e.provenance.written_at
-        if e.provenance.written_at and (
-            agent_data[aid]["first_seen"] is None
-            or e.provenance.written_at < agent_data[aid]["first_seen"]
-        ):
-            agent_data[aid]["first_seen"] = e.provenance.written_at
+    else:
+        entries = await _offload(_db_executor, mem.list)
+        if vis is not None:
+            entries = vis.filter_entries(entries)
+        for e in entries:
+            if e.entity_path.startswith("_system/"):
+                continue
+            aid = e.provenance.agent_id
+            if aid not in agent_data:
+                agent_data[aid] = {
+                    "agent_id": aid,
+                    "entries_written": 0,
+                    "entities_touched": 0,
+                    "_entities": set(),
+                    "last_active": e.provenance.written_at,
+                    "first_seen": e.provenance.written_at,
+                }
+            agent_data[aid]["entries_written"] += 1
+            agent_data[aid]["_entities"].add(e.entity_path)
+            if e.provenance.written_at > agent_data[aid]["last_active"]:
+                agent_data[aid]["last_active"] = e.provenance.written_at
+            if e.provenance.written_at and (
+                agent_data[aid]["first_seen"] is None
+                or e.provenance.written_at < agent_data[aid]["first_seen"]
+            ):
+                agent_data[aid]["first_seen"] = e.provenance.written_at
+        for d in agent_data.values():
+            d["entities_touched"] = len(d.pop("_entities"))
+        if own is not None:
+            agent_data = {aid: d for aid, d in agent_data.items() if aid in own}
 
-    if vis is not None and vis.should_filter():
-        own = vis.get_user_agents()
-        before_own_filter = list(agent_data.keys())
-        agent_data = {aid: d for aid, d in agent_data.items() if aid in own}
+    if own is not None:
         # Include owner-linked agents that have written zero entries (e.g. an
         # agent that called set_identity over MCP but hasn't written memory
         # yet). Without this they never appear on the dashboard.
@@ -4711,51 +4891,56 @@ async def list_agents(
                 agent_data[aid] = {
                     "agent_id": aid,
                     "entries_written": 0,
-                    "entities_touched": set(),
+                    "entities_touched": 0,
                     "last_active": None,
                     "first_seen": None,
                 }
-        logger.warning(
-            "[AGENTS] own_filter: before=%s after=%s own_set=%s",
-            sorted(before_own_filter), sorted(agent_data.keys()), sorted(own),
-        )
+    logger.warning(
+        "[AGENTS] agents=%d scoped=%s sql=%s",
+        len(agent_data), own is not None, callable(summarise),
+    )
 
-    agent_registration: dict[str, dict[str, Any]] = {}
     known_agent_ids = list(agent_data.keys())
-    if known_agent_ids:
-        try:
-            from amfs_postgres.adapter import PostgresAdapter
-            adapter = mem._adapter
-            if isinstance(adapter, PostgresAdapter):
-                with adapter._pool.connection() as conn:
-                    with conn.cursor() as cur:
-                        placeholders = ", ".join(["%s"] * len(known_agent_ids))
-                        cur.execute(
-                            f"SELECT agent_id, created_at, last_active_at, profile "
-                            f"FROM amfs_agents "
-                            f"WHERE namespace = %s AND agent_id IN ({placeholders})",
-                            [adapter._namespace, *known_agent_ids],
-                        )
-                        for row in cur.fetchall():
-                            agent_registration[row["agent_id"]] = {
-                                "created_at": row["created_at"],
-                                "last_active_at": row.get("last_active_at"),
-                                "profile": row.get("profile"),
-                            }
-        except (ImportError, Exception):
-            pass
 
-    agent_descriptions: dict[str, dict[str, Any]] = {}
-    try:
-        desc_entries = mem.list("_system/agents")
-        for de in desc_entries:
-            val = de.value if isinstance(de.value, dict) else {}
-            agent_descriptions[de.key] = {
-                "description": val.get("description", ""),
-                "platform": val.get("platform", ""),
-            }
-    except Exception:
-        pass
+    def _registration_and_descriptions() -> tuple[dict[str, Any], dict[str, Any]]:
+        """Two small reads, off the event loop together."""
+        registration: dict[str, dict[str, Any]] = {}
+        if known_agent_ids:
+            try:
+                from amfs_postgres.adapter import PostgresAdapter
+                adapter = mem._adapter
+                if isinstance(adapter, PostgresAdapter):
+                    with adapter._pool.connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "SELECT agent_id, created_at, last_active_at, profile "
+                                "FROM amfs_agents "
+                                "WHERE namespace = %s AND agent_id = ANY(%s)",
+                                [adapter._namespace, known_agent_ids],
+                            )
+                            for row in cur.fetchall():
+                                registration[row["agent_id"]] = {
+                                    "created_at": row["created_at"],
+                                    "last_active_at": row.get("last_active_at"),
+                                    "profile": row.get("profile"),
+                                }
+            except (ImportError, Exception):
+                pass
+        descriptions: dict[str, dict[str, Any]] = {}
+        try:
+            for de in mem.list("_system/agents"):
+                val = de.value if isinstance(de.value, dict) else {}
+                descriptions[de.key] = {
+                    "description": val.get("description", ""),
+                    "platform": val.get("platform", ""),
+                }
+        except Exception:
+            pass
+        return registration, descriptions
+
+    agent_registration, agent_descriptions = await _offload(
+        _db_executor, _registration_and_descriptions
+    )
 
     agents = []
     for ad in sorted(agent_data.values(), key=lambda x: x["entries_written"], reverse=True):
@@ -4778,7 +4963,7 @@ async def list_agents(
         agents.append({
             "agentId": ad["agent_id"],
             "entriesWritten": ad["entries_written"],
-            "entitiesTouched": len(ad["entities_touched"]),
+            "entitiesTouched": ad["entities_touched"],
             "lastActive": last_active.isoformat() if last_active else None,
             "createdAt": created.isoformat() if created else None,
             "description": description,
@@ -5002,20 +5187,20 @@ async def agent_cross_reads(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     mem = _get_memory()
-    entries = mem.list()
 
-    entry_authors: dict[str, str] = {}
-    for e in entries:
-        entry_authors[f"{e.entity_path}/{e.key}"] = e.provenance.agent_id
+    def _reads_and_authors() -> tuple[dict[str, dict[str, int]], dict[tuple[str, str], str]]:
+        # Aggregated by the adapter; previously up to 10,000 full traces were
+        # fetched to tally their causal_entries here.
+        read_entities = mem._adapter.trace_read_counts(agent_id)
+        refs = [(ep, key) for ep, keys in read_entities.items() for key in keys]
+        return read_entities, _authors_of(mem, refs)
 
-    # Aggregated by the adapter; previously up to 10,000 full traces were
-    # fetched to tally their causal_entries here.
-    read_entities = mem._adapter.trace_read_counts(agent_id)
+    read_entities, entry_authors = await _offload(_db_executor, _reads_and_authors)
 
     cross_reads: dict[str, list[dict[str, Any]]] = {}
     for ep, keys in read_entities.items():
         for key, count in keys.items():
-            author = entry_authors.get(f"{ep}/{key}")
+            author = entry_authors.get((ep, key))
             if author and author != agent_id:
                 if author not in cross_reads:
                     cross_reads[author] = []
@@ -7120,32 +7305,35 @@ async def expertise_graph(
     to that single agent.
     """
     mem = _get_memory()
-    entries = mem.list()
 
-    vis = _get_visibility_filter(request)
-    if vis is not None and vis.should_filter():
-        entries = vis.filter_entries(entries)
+    # The set of authors the cells may name: the caller's own agents under
+    # per-user scoping (an agent's entries are always visible to its owner,
+    # so the entry-level pass reduces to this), narrowed to one when asked.
+    vis = _active_visibility_filter(request)
+    agent_ids: list[str] | None = None
+    if vis is not None:
+        visible = set(vis.get_user_agents())
+        agent_ids = sorted(visible & {agent_id}) if agent_id else sorted(visible)
+        if not agent_ids:
+            return {"agents": [], "entities": [], "cells": []}
+    elif agent_id:
+        agent_ids = [agent_id]
 
-    visible_agents: set[str] | None = None
-    if vis is not None and vis.should_filter():
-        visible_agents = vis.get_user_agents()
+    # Write counts per (agent, entity) come from one GROUP BY — the same
+    # aggregate the authority ranking uses — instead of every entry in the
+    # namespace loaded to be counted. Unscoped, it leaves out the _system/
+    # and benchmark rows, as /entities and /stats already do.
+    rows = await _offload(_db_executor, mem._adapter.agent_entity_stats, agent_ids=agent_ids)
 
     agent_entity_weights: dict[str, dict[str, int]] = {}
     agent_totals: dict[str, int] = {}
     entity_totals: dict[str, int] = {}
 
-    for e in entries:
-        aid = e.provenance.agent_id
-        if agent_id and aid != agent_id:
-            continue
-        if visible_agents is not None and aid not in visible_agents:
-            continue
-        ep = e.entity_path
-        agent_totals[aid] = agent_totals.get(aid, 0) + 1
-        entity_totals[ep] = entity_totals.get(ep, 0) + 1
-        if aid not in agent_entity_weights:
-            agent_entity_weights[aid] = {}
-        agent_entity_weights[aid][ep] = agent_entity_weights[aid].get(ep, 0) + 1
+    for r in rows:
+        aid, ep, n = r["agent_id"], r["entity_path"], int(r["entry_count"])
+        agent_totals[aid] = agent_totals.get(aid, 0) + n
+        entity_totals[ep] = entity_totals.get(ep, 0) + n
+        agent_entity_weights.setdefault(aid, {})[ep] = n
 
     top_agents = [
         a for a, _ in sorted(agent_totals.items(), key=lambda x: x[1], reverse=True)
@@ -7284,6 +7472,22 @@ def _compute_tiers(entries: list) -> tuple[dict[str, int], dict[str, float]]:
     return assigner.assign_with_scores(entries, scorer)
 
 
+def _tiered_entries(
+    mem: AgentMemory, vis: Any | None, agent_id: str | None
+) -> tuple[list[MemoryEntry], tuple[dict[str, int], dict[str, float]]]:
+    """The entries a tiers page scores, and their tiers and scores.
+
+    The tiering is a Python scorer over the whole visible set, so the set has
+    to be loaded; this loads only the named agent's rows when there is one
+    and runs the load, the visibility pass and the scoring together off the
+    event loop. Synchronous: call it via ``_offload``.
+    """
+    entries = _entries_by_agent(mem, agent_id) if agent_id else mem.list()
+    if vis is not None:
+        entries = vis.filter_entries(entries)
+    return entries, _compute_tiers(entries)
+
+
 @app.get("/api/v1/pro/tiers/distribution")
 async def tiers_distribution(
     request: Request,
@@ -7291,15 +7495,9 @@ async def tiers_distribution(
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Return HMO tier distribution (Hot / Warm / Archive)."""
-    mem = _get_memory()
-    entries = mem.list()
-    vis = _active_visibility_filter(request)
-    if vis is not None:
-        entries = vis.filter_entries(entries)
-    if agent_id:
-        entries = [e for e in entries if e.provenance.agent_id == agent_id]
-
-    tiers, scores = _compute_tiers(entries)
+    entries, (tiers, scores) = await _offload(
+        _db_executor, _tiered_entries, _get_memory(), _active_visibility_filter(request), agent_id
+    )
 
     hot = warm = archive = scored_count = 0
     score_sum = 0.0
@@ -7334,15 +7532,9 @@ async def tiers_entries(
     _auth: str | None = Depends(verify_api_key),
 ) -> list[dict[str, Any]]:
     """Return entries for a given HMO tier as a flat array."""
-    mem = _get_memory()
-    entries = mem.list()
-    vis = _active_visibility_filter(request)
-    if vis is not None:
-        entries = vis.filter_entries(entries)
-    if agent_id:
-        entries = [e for e in entries if e.provenance.agent_id == agent_id]
-
-    tier_map, score_map = _compute_tiers(entries)
+    entries, (tier_map, score_map) = await _offload(
+        _db_executor, _tiered_entries, _get_memory(), _active_visibility_filter(request), agent_id
+    )
 
     filtered = [e for e in entries if tier_map.get(e.entry_key) == tier]
     filtered.sort(key=lambda e: score_map.get(e.entry_key, 0.0), reverse=True)

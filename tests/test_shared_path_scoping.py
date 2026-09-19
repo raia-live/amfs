@@ -36,28 +36,34 @@ GUARD = "_EXCLUDE_SHARED_PATHS"
 
 
 def _method(path: Path, name: str) -> str:
-    """The source of one method, up to the next def at the same indent."""
+    """The source of one method (or module-level function), up to the next
+    def at the same indent."""
     src = path.read_text()
-    start = src.index(f"    def {name}(") if f"    def {name}(" in src else src.index(
-        f"    async def {name}("
-    )
-    rest = src[start + 10 :]
-    end = re.search(r"\n    (?:async )?def ", rest)
-    return src[start : start + 10 + (end.start() if end else len(rest))]
+    for indent in ("    ", ""):
+        for prefix in (f"{indent}def {name}(", f"{indent}async def {name}("):
+            marker = f"\n{prefix}"
+            if marker in src:
+                start = src.index(marker) + 1
+                rest = src[start + 10 :]
+                end = re.search(rf"\n{indent}(?:async )?def ", rest)
+                return src[start : start + 10 + (end.start() if end else len(rest))]
+    raise AssertionError(f"{path.name} has no def {name}")
 
 
 #: Where a read builds its WHERE clause when that is not the method itself.
-#: ``list`` and ``count_entries`` share ``_list_conditions`` so a page and the
-#: ``total`` it reports cannot disagree about which rows exist; the guard
-#: therefore lives there, and these tests follow it.
-WHERE_BUILDER: dict[tuple[Path, str], str] = {
-    (SYNC, "list"): "_list_conditions",
+#: ``list`` and ``count_entries`` on both adapters share the module-level
+#: ``list_conditions`` in adapter.py, so a page and the ``total`` it reports
+#: cannot disagree about which rows exist and the guard is applied to the
+#: unscoped read in one place; these tests follow it there.
+WHERE_BUILDER: dict[tuple[Path, str], tuple[Path, str]] = {
+    (SYNC, "list"): (SYNC, "list_conditions"),
+    (ASYNC, "list"): (SYNC, "list_conditions"),
 }
 
 
 def _where_body(path: Path, method: str) -> str:
     """The source that decides which rows *method* reads."""
-    return _method(path, WHERE_BUILDER.get((path, method), method))
+    return _method(*WHERE_BUILDER.get((path, method), (path, method)))
 
 
 class TestTheGuardIsDefinedOnce:

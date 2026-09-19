@@ -149,6 +149,40 @@ def _paginate_sql(
         params = [*params, int(offset)]
     return query, params
 
+
+def list_conditions(
+    namespace: str,
+    entity_path: str | None,
+    *,
+    include_superseded: bool,
+    branch: str,
+    scope: SqlScope | None,
+    agent_id: str | None,
+) -> tuple[list[str], list[Any]]:
+    """The WHERE behind ``list()`` and ``count_entries()`` on both adapters.
+
+    One definition so a page and the ``total`` it reports cannot disagree
+    about which rows exist, and so the shared-namespace guard is applied to
+    the unscoped read in one place (``tests/test_shared_path_scoping.py``).
+    """
+    conditions = ["namespace = %s", "branch = %s"]
+    params: list[Any] = [namespace, branch]
+
+    if entity_path is not None:
+        conditions.append("entity_path = %s")
+        params.append(entity_path)
+    else:
+        conditions.append(_EXCLUDE_SHARED_PATHS)
+
+    if not include_superseded:
+        conditions.append("superseded_at IS NULL")
+    if agent_id is not None:
+        conditions.append("agent_id = %s")
+        params.append(agent_id)
+    if scope is not None:
+        scope.apply(conditions, params)
+    return conditions, params
+
 def _attempts_from_row(raw: Any) -> list[AttemptRecord]:
     """``AttemptRecord`` list from the ``attempts`` JSONB column, tolerant of
     the column being absent, NULL, or a not-yet-decoded JSON string."""
@@ -1447,6 +1481,20 @@ class PostgresAdapter(AdapterABC):
             ON amfs_memory_entries (namespace, agent_id, written_at DESC)
             WHERE superseded_at IS NULL
         """)
+        # The two orders ``list()`` pages by (GET /entries?sort=...). Each lets
+        # a ``LIMIT`` page come off the index (incremental sort over the
+        # tiebreak columns) instead of a top-N sort over every current entry
+        # in the namespace.
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_written_desc
+            ON amfs_memory_entries (namespace, branch, written_at DESC)
+            WHERE superseded_at IS NULL
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_recall_desc
+            ON amfs_memory_entries (namespace, branch, recall_count DESC, written_at DESC)
+            WHERE superseded_at IS NULL
+        """)
 
         cur.execute("""
             ALTER TABLE amfs_api_keys
@@ -2118,7 +2166,8 @@ class PostgresAdapter(AdapterABC):
           before paging by construction, so a caller can never page past rows
           its scope hides.
         """
-        conditions, params = self._list_conditions(
+        conditions, params = list_conditions(
+            self._namespace,
             entity_path,
             include_superseded=include_superseded,
             branch=branch,
@@ -2127,8 +2176,8 @@ class PostgresAdapter(AdapterABC):
         )
         where = " AND ".join(conditions)
         query = (
-            f"SELECT {entry_select(self._has_is_artifact_col, self._has_validators_col)} FROM amfs_memory_entries "
-            f"WHERE {where} ORDER BY {_list_order_sql(order_by)}"
+            f"SELECT {entry_select(self._has_is_artifact_col, self._has_validators_col)} "
+            f"FROM amfs_memory_entries WHERE {where} ORDER BY {_list_order_sql(order_by)}"
         )
         query, params = _paginate_sql(query, params, limit=limit, offset=offset)
 
@@ -2152,7 +2201,8 @@ class PostgresAdapter(AdapterABC):
 
         The ``total`` a paged listing reports, computed without fetching a row.
         """
-        conditions, params = self._list_conditions(
+        conditions, params = list_conditions(
+            self._namespace,
             entity_path,
             include_superseded=include_superseded,
             branch=branch,
@@ -2165,35 +2215,6 @@ class PostgresAdapter(AdapterABC):
                 cur.execute(f"SELECT COUNT(*) AS n FROM amfs_memory_entries WHERE {where}", params)
                 row = cur.fetchone()
         return int(row["n"]) if row else 0
-
-    def _list_conditions(
-        self,
-        entity_path: str | None,
-        *,
-        include_superseded: bool,
-        branch: str,
-        scope: SqlScope | None,
-        agent_id: str | None,
-    ) -> tuple[list[str], list[Any]]:
-        """The WHERE shared by :meth:`list` and :meth:`count_entries`, so the
-        two cannot disagree about which rows a page is a page of."""
-        conditions = ["namespace = %s", "branch = %s"]
-        params: list[Any] = [self._namespace, branch]
-
-        if entity_path is not None:
-            conditions.append("entity_path = %s")
-            params.append(entity_path)
-        else:
-            conditions.append(_EXCLUDE_SHARED_PATHS)
-
-        if not include_superseded:
-            conditions.append("superseded_at IS NULL")
-        if agent_id is not None:
-            conditions.append("agent_id = %s")
-            params.append(agent_id)
-        if scope is not None:
-            scope.apply(conditions, params)
-        return conditions, params
 
     def entry_authors(self, refs: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
         """Who wrote each ``(entity_path, key)``, for the current version.
@@ -3162,6 +3183,63 @@ class PostgresAdapter(AdapterABC):
                 "hashed_count": r["hashed_count"],
                 "total_recalls": int(r["total_recalls"] or 0),
                 "recalled_tokens_saved": int(r["recalled_tokens_saved"] or 0),
+            }
+            for r in rows
+        ]
+
+    def agent_summaries(
+        self,
+        *,
+        agent_ids: list[str] | None = None,
+        scope: SqlScope | None = None,
+    ) -> list[dict[str, Any]]:
+        """Per-agent activity via GROUP BY — what ``GET /agents`` shows.
+
+        Entries written, distinct entities touched, first and last write, per
+        author, over live main-branch rows outside ``_system/`` (the same rows
+        the handler used to count after loading every entry into Python).
+        *agent_ids* narrows to the agents a caller may see; *scope* is a
+        visibility predicate for rules that a list of agents cannot express.
+        """
+        conditions = [
+            "namespace = %s",
+            "branch = 'main'",
+            "superseded_at IS NULL",
+            # A LIKE pattern, so the underscore is escaped: ``_system/`` and
+            # nothing else. Written with the doubled ``%`` psycopg requires.
+            "entity_path NOT LIKE '\\_system/%%'",
+            _EXCLUDE_SHARED_PATHS,
+        ]
+        params: list[Any] = [self._namespace]
+        if agent_ids is not None:
+            conditions.append("agent_id = ANY(%s)")
+            params.append(list(agent_ids))
+        if scope is not None:
+            scope.apply(conditions, params)
+        where = " AND ".join(conditions)
+
+        sql = f"""
+            SELECT agent_id,
+                   COUNT(*) AS entries_written,
+                   COUNT(DISTINCT entity_path) AS entities_touched,
+                   MIN(written_at) AS first_seen,
+                   MAX(written_at) AS last_active
+            FROM amfs_memory_entries
+            WHERE {where}
+            GROUP BY agent_id
+            ORDER BY COUNT(*) DESC, agent_id
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        return [
+            {
+                "agent_id": r["agent_id"],
+                "entries_written": int(r["entries_written"] or 0),
+                "entities_touched": int(r["entities_touched"] or 0),
+                "first_seen": r["first_seen"],
+                "last_active": r["last_active"],
             }
             for r in rows
         ]
