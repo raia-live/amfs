@@ -295,6 +295,54 @@ class TestEntriesInSql:
         assert body["entries"][0]["entity_path"] == "repo/c"
 
 
+class _LostContextAsyncAdapter:
+    """An async adapter whose pool has lost its tenant context: every read
+    and every count answers with nothing."""
+
+    def __init__(self) -> None:
+        self.count_calls = 0
+
+    async def list(self, entity_path: str | None = None, **kw: Any) -> list[MemoryEntry]:
+        return []
+
+    async def count_entries(self, entity_path: str | None = None, **kw: Any) -> int:
+        self.count_calls += 1
+        return 0
+
+
+class TestEntriesRecoveredFromSync:
+    def test_total_follows_the_page_to_the_sync_adapter(
+        self, paging: tuple[TestClient, _PagingAdapter], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When an empty async first page is replaced by the sync list, the
+        total must come from the sync adapter too — the async pool that
+        returned nothing would count nothing, and a client paging on ``total``
+        would stop after page one. (Bugbot, raia-live/amfs#421.)"""
+        client, adapter = paging
+        lost = _LostContextAsyncAdapter()
+        monkeypatch.setattr(server, "_async_adapter", lost)
+
+        body = client.get("/api/v1/entries?limit=2").json()
+
+        assert len(body["entries"]) == 2
+        assert body["total"] == 4, "total came from the pool that produced the page"
+        assert lost.count_calls == 0, "the lost-context pool must not be asked to count"
+        # And the sync count was scoped exactly like the sync page.
+        assert adapter.count_calls[-1]["scope"] == adapter.list_calls[-1]["scope"]
+
+    def test_no_recovery_when_sync_is_empty_too(
+        self, paging: tuple[TestClient, _PagingAdapter], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client, adapter = paging
+        adapter._entries.clear()
+        lost = _LostContextAsyncAdapter()
+        monkeypatch.setattr(server, "_async_adapter", lost)
+
+        body = client.get("/api/v1/entries?limit=2").json()
+        assert body["entries"] == []
+        assert body["total"] == 0
+
+
 class TestAgentsInSql:
     def test_agents_use_group_by_when_available(
         self, paging: tuple[TestClient, _PagingAdapter]

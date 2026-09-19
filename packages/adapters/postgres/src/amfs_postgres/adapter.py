@@ -20,7 +20,12 @@ import psycopg
 from psycopg.rows import dict_row
 
 from amfs_postgres._fts import or_tsquery
-from amfs_postgres.knn import hnsw_scan_settings, parse_pgvector_version, use_hnsw_scan
+from amfs_postgres.knn import (
+    hnsw_scan_reset,
+    hnsw_scan_settings,
+    parse_pgvector_version,
+    use_hnsw_scan,
+)
 from amfs_core.abc import AdapterABC, WatchHandle
 from amfs_core.content import ARTIFACT_PENALTY, classify_artifact, embedding_input
 from amfs_core.embedder import EmbedderABC
@@ -2432,6 +2437,11 @@ class PostgresAdapter(AdapterABC):
                     with conn.cursor() as cur:
                         cur.execute(sql, sql_params)
                         rows = cur.fetchall()
+                    # Before the block ends, not after: when the checkout
+                    # already sits in the RLS wrapper's transaction this block
+                    # is a savepoint, SET LOCAL outlives it, and the exact
+                    # re-run below would inherit the index settings.
+                    conn.execute(hnsw_scan_reset())
                 if len(rows) < query.limit:
                     rows = None
             if rows is None:

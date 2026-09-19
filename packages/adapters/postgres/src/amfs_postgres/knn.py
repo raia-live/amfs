@@ -80,6 +80,11 @@ def use_hnsw_scan(*, entity_path: str | None, version: tuple[int, ...] | None) -
     return entity_path is None and supports_iterative_scan(version)
 
 
+#: The GUCs :func:`hnsw_scan_settings` touches, in one place so the reset
+#: cannot forget one.
+_SCAN_GUCS: tuple[str, ...] = ("hnsw.iterative_scan", "hnsw.ef_search", "enable_sort")
+
+
 def hnsw_scan_settings(limit: int) -> str:
     """The ``SET LOCAL`` statements that put one statement on the HNSW index,
     as a single multi-statement string (one round trip; it carries no
@@ -87,6 +92,14 @@ def hnsw_scan_settings(limit: int) -> str:
 
     Literal values only — these are GUCs, not parameters, and psycopg cannot
     bind them. ``limit`` is clamped into pgvector's accepted range.
+
+    Pair every use with :func:`hnsw_scan_reset` **inside the same block**.
+    ``SET LOCAL`` lasts to the end of the *transaction*, and the adapter does
+    not always own that: the tenant RLS wrapper opens one before handing the
+    connection out, which makes an inner ``conn.transaction()`` a savepoint,
+    and settings made under a savepoint survive its release. Without the reset
+    the exact-scan fallback — the whole reason a small tenant in a large table
+    gets a complete answer — would run forced back onto the index.
     """
     ef_search = max(_EF_SEARCH_MIN, min(int(limit), _EF_SEARCH_MAX))
     return "; ".join(
@@ -96,3 +109,11 @@ def hnsw_scan_settings(limit: int) -> str:
             "SET LOCAL enable_sort = off",
         ]
     )
+
+
+def hnsw_scan_reset() -> str:
+    """Undo :func:`hnsw_scan_settings` for the rest of whatever transaction
+    the connection is in. ``SET LOCAL ... TO DEFAULT`` restores the session
+    value and, like the settings it undoes, is a no-op outside a transaction —
+    so it is safe wherever the settings were."""
+    return "; ".join(f"SET LOCAL {guc} TO DEFAULT" for guc in _SCAN_GUCS)

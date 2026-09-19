@@ -1916,6 +1916,7 @@ async def list_entries(
             )
             entries = []
             count_kw = {k: sync_kw[k] for k in count_keys}
+        recovered_by_sync = False
         if not entries and offset == 0 and _async_adapter is not None:
             # The async pool once lost its tenant context and answered every
             # read with nothing; cheap to rule out on an empty first page.
@@ -1926,11 +1927,17 @@ async def list_entries(
                     entity_path, len(sync_entries),
                 )
                 entries = sync_entries
+                recovered_by_sync = True
         if limit is None and offset == 0:
             total = len(entries)
-        elif _async_adapter is not None:
+        elif _async_adapter is not None and not recovered_by_sync:
             total = await _async_adapter.count_entries(entity_path, **count_kw)
         else:
+            # The page came from the sync adapter, so the count must too: the
+            # async pool that returned nothing would count nothing, and the
+            # sync page was scoped by sync_scope, not by count_kw's scope.
+            if recovered_by_sync:
+                count_kw = {k: sync_kw[k] for k in count_keys}
             total = await _offload(
                 _db_executor, mem._adapter.count_entries, entity_path, **count_kw
             )

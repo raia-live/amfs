@@ -68,6 +68,17 @@ class TestScanSettings:
     def test_ef_search_is_clamped_to_pgvector_range(self, limit, ef) -> None:
         assert f"hnsw.ef_search = {ef}" in knn.hnsw_scan_settings(limit)
 
+    def test_reset_undoes_every_setting_it_made(self) -> None:
+        """Every GUC the settings touch is restored, by name, and locally."""
+        settings = knn.hnsw_scan_settings(150)
+        reset = knn.hnsw_scan_reset()
+        set_gucs = {s.split()[2] for s in settings.split("; ")}
+        reset_gucs = {s.split()[2] for s in reset.split("; ")}
+        assert set_gucs == reset_gucs == {"hnsw.iterative_scan", "hnsw.ef_search", "enable_sort"}
+        assert all(
+            s.startswith("SET LOCAL ") and s.endswith(" TO DEFAULT") for s in reset.split("; ")
+        )
+
 
 # ── the adapter's routing, on a fake connection ───────────────────────
 
@@ -97,9 +108,11 @@ class _Cursor:
 
     async def execute(self, sql: str, params: Any = None) -> None:
         self._conn.statements.append(sql)
-        # Under the HNSW settings the fake returns however many rows the test
-        # configured for the index route; the plain path returns the exact set.
-        self._conn._pending = self._conn.rows_hnsw if self._conn.in_txn else self._conn.rows_exact
+        # While the HNSW settings are in force the fake returns however many
+        # rows the test configured for the index route; otherwise the exact set.
+        self._conn._pending = (
+            self._conn.rows_hnsw if self._conn.hnsw_settings_active else self._conn.rows_exact
+        )
 
     async def fetchall(self):
         return list(self._conn._pending)
@@ -110,27 +123,49 @@ class _Txn:
         self._conn = conn
 
     async def __aenter__(self):
-        self._conn.in_txn = True
         self._conn.transactions += 1
+        self._conn.depth += 1
 
     async def __aexit__(self, *exc):
-        self._conn.in_txn = False
+        self._conn.depth -= 1
+        # Postgres semantics: SET LOCAL lasts to the end of the *outermost*
+        # transaction. Leaving a savepoint (depth still > 0) keeps it; leaving
+        # a real transaction drops it.
+        if self._conn.depth == 0:
+            self._conn.hnsw_settings_active = False
         return False
 
 
 class _Conn:
+    """Records what was sent and applies Postgres' SET LOCAL lifetime rules.
+
+    ``outer_transaction=True`` models the checkout the tenant RLS wrapper
+    hands out: already inside a transaction, so the adapter's own
+    ``transaction()`` is a savepoint.
+    """
+
     def __init__(
-        self, *, rows_hnsw: list[dict[str, Any]], rows_exact: list[dict[str, Any]]
+        self,
+        *,
+        rows_hnsw: list[dict[str, Any]],
+        rows_exact: list[dict[str, Any]],
+        outer_transaction: bool = False,
     ) -> None:
         self.rows_hnsw = rows_hnsw
         self.rows_exact = rows_exact
         self.statements: list[str] = []
         self.transactions = 0
-        self.in_txn = False
+        self.depth = 1 if outer_transaction else 0
+        self.hnsw_settings_active = False
         self._pending: list[dict[str, Any]] = []
 
     async def execute(self, sql: str) -> None:
         self.statements.append(sql)
+        if sql.startswith("SET LOCAL"):
+            if "TO DEFAULT" in sql:
+                self.hnsw_settings_active = False
+            elif self.depth > 0:  # SET LOCAL outside a transaction is a no-op
+                self.hnsw_settings_active = True
 
     def cursor(self) -> _Cursor:
         return _Cursor(self)
@@ -172,10 +207,16 @@ class TestAccountWideReadUsesTheIndex:
         assert len(pairs) == 150
         assert conn.transactions == 1
         sets = [s for s in conn.statements if s.startswith("SET LOCAL")]
-        assert len(sets) == 1
+        assert len(sets) == 2, "the settings, then their reset"
         assert "hnsw.iterative_scan" in sets[0] and "enable_sort = off" in sets[0]
+        assert "TO DEFAULT" in sets[1]
         selects = [s for s in conn.statements if "FROM amfs_memory_entries" in s]
         assert len(selects) == 1, "a full result must not trigger the exact re-run"
+        # Settings, statement, reset — in that order, so nothing after the
+        # search on this connection runs under the index settings.
+        order = [conn.statements.index(s) for s in (sets[0], selects[0], sets[1])]
+        assert order == sorted(order)
+        assert not conn.hnsw_settings_active
 
     def test_the_rows_are_projected_not_star(self) -> None:
         conn = _Conn(rows_hnsw=[_row(i) for i in range(150)], rows_exact=[])
@@ -200,8 +241,32 @@ class TestAccountWideReadUsesTheIndex:
         selects = [s for s in conn.statements if "FROM amfs_memory_entries" in s]
         assert len(selects) == 2
         assert conn.transactions == 1
-        # The re-run is outside the transaction: no SET LOCAL applies to it.
+        # The re-run comes after the reset: no index setting applies to it.
+        reset_at = next(i for i, s in enumerate(conn.statements) if "TO DEFAULT" in s)
+        select_positions = [
+            i for i, s in enumerate(conn.statements) if "FROM amfs_memory_entries" in s
+        ]
+        assert select_positions[0] < reset_at < select_positions[1]
         assert conn.statements[-1] == selects[-1]
+
+    def test_fallback_is_exact_even_inside_the_rls_wrappers_transaction(self) -> None:
+        """The tenant wrapper opens a transaction before the pool hands the
+        connection out, so the adapter's ``transaction()`` is a savepoint and
+        ``SET LOCAL`` survives its release. Without an explicit reset the
+        "exact" re-run would be forced back onto the index and return the same
+        under-filled 30 rows — for exactly the small tenant the fallback is
+        for. (Bugbot, raia-live/amfs#421.)"""
+        conn = _Conn(
+            rows_hnsw=[_row(i) for i in range(30)],
+            rows_exact=[_row(i) for i in range(150)],
+            outer_transaction=True,
+        )
+        pairs = _search(_adapter(conn, version=(0, 8, 1)))
+
+        assert len(pairs) == 150, "the fallback must not inherit the HNSW settings"
+        assert not conn.hnsw_settings_active, (
+            "nothing later in the outer transaction inherits them either"
+        )
 
 
 class TestWhenTheIndexRouteIsNotAvailable:

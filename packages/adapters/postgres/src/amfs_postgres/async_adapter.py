@@ -52,7 +52,12 @@ from amfs_postgres.adapter import (
     list_conditions,
     pool_bounds,
 )
-from amfs_postgres.knn import hnsw_scan_settings, parse_pgvector_version, use_hnsw_scan
+from amfs_postgres.knn import (
+    hnsw_scan_reset,
+    hnsw_scan_settings,
+    parse_pgvector_version,
+    use_hnsw_scan,
+)
 from amfs_postgres.tenant_gucs import areset_tenant_gucs
 
 logger = logging.getLogger(__name__)
@@ -694,6 +699,11 @@ class AsyncPostgresAdapter:
                     async with conn.cursor() as cur:
                         await cur.execute(sql, sql_params)
                         rows = await cur.fetchall()
+                    # Before the block ends, not after: when the checkout
+                    # already sits in the RLS wrapper's transaction this block
+                    # is a savepoint, SET LOCAL outlives it, and the exact
+                    # re-run below would inherit the index settings.
+                    await conn.execute(hnsw_scan_reset())
                 if len(rows) < query.limit:
                     # The iterative scan gave up before the filter let enough
                     # rows through; the exact scan below is complete.
