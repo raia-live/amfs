@@ -454,7 +454,9 @@ export class HttpAdapter implements AmfsAdapter {
         recency_weight: options?.recencyWeight ?? 0.3,
         confidence_weight: options?.confidenceWeight ?? 0.2,
         include_artifacts: options?.includeArtifacts ?? true,
-        branch: options?.branch ?? "main",
+        // Omitted for main, like every other read: a named main is an explicit
+        // choice the server honours over a routed canary branch.
+        ...(options?.branch && options.branch !== "main" ? { branch: options.branch } : {}),
         ...(options?.entityPath ? { entity_path: options.entityPath } : {}),
       }),
     });

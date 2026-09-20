@@ -79,6 +79,25 @@ describe("identity headers", () => {
     expect(calls[0].headers[SESSION_HEADER]).toBe("sess-42");
   });
 
+  it("retrieve names no branch for main, so a routed session's recall follows the route", async () => {
+    mockFetch();
+    const calls2: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        calls2.push(String(init?.body));
+        return { ok: true, status: 200, json: async () => [], text: async () => "[]" } as unknown as Response;
+      })
+    );
+    const adapter = new HttpAdapter({ url: "http://s" });
+    await adapter.retrieveAsync("q");
+    await adapter.retrieveAsync("q", { branch: "main" });
+    await adapter.retrieveAsync("q", { branch: "repair/fix-1" });
+    expect(JSON.parse(calls2[0]).branch).toBeUndefined();
+    expect(JSON.parse(calls2[1]).branch).toBeUndefined();
+    expect(JSON.parse(calls2[2]).branch).toBe("repair/fix-1");
+  });
+
   it("leaves an adapter without bind alone", () => {
     const mem = new AgentMemory("sre-agent");
     expect(typeof (mem.adapter as { bind?: unknown }).bind).toBe("undefined");

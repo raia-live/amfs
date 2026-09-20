@@ -245,7 +245,19 @@ class TestTheSealCarriesTheStamps:
         assert len(committed["attributes"]) == 23
 
     def test_unrouted_is_untouched(self, committed) -> None:
-        self._commit(_request(), {"customer": "acme"})
+        """No layer spoke for this request: the bag is the client's, as is."""
+        self._commit(_request(), {"customer": "acme", "canary_arm": "canary"})
+        assert committed["attributes"] == {"customer": "acme", "canary_arm": "canary"}
+
+    def test_once_the_layer_has_spoken_a_clients_canary_claims_are_dropped(
+        self, committed
+    ) -> None:
+        """``trace_attributes={}`` is "decided: not routed". A session nothing
+        routed must not be able to vote in a canary it was not in."""
+        self._commit(
+            _request(trace_attributes={}),
+            {"customer": "acme", "canary_fix_id": "7a3c", "canary_arm": "canary"},
+        )
         assert committed["attributes"] == {"customer": "acme"}
 
     def test_no_attributes_and_no_route_stays_none(self, committed) -> None:

@@ -875,16 +875,24 @@ def _effective_branch(request: Request | None, branch: str | None) -> str:
     return "main"
 
 
-def _routed_trace_attributes(request: Request | None) -> dict[str, Any]:
+#: Attribute keys only the routing layer may set. When it has made a decision
+#: for the request (``trace_attributes`` is present, even empty) a client's own
+#: claims under these keys are dropped: a session nothing routed must not be
+#: able to vote in a canary it was not in.
+ROUTED_ONLY_ATTRIBUTES = frozenset({"canary_fix_id", "canary_arm"})
+
+
+def _routed_trace_attributes(request: Request | None) -> dict[str, Any] | None:
     """Attributes the layer in front of this route wants on the sealed trace.
 
-    Empty when nothing is set. Values are coerced to scalars the trace store
+    ``None`` when no layer made a decision for this request; a dict — possibly
+    empty — when one did. Values are coerced to scalars the trace store
     accepts; anything else is dropped rather than failing the commit.
     """
     state = getattr(request, "state", None) if request is not None else None
     raw = getattr(state, TRACE_ATTRIBUTES_STATE, None) if state is not None else None
     if not isinstance(raw, dict):
-        return {}
+        return None
     out: dict[str, Any] = {}
     for key, value in raw.items():
         if not isinstance(key, str) or not key.strip():
@@ -901,13 +909,20 @@ def _merge_routed_attributes(
 
     The server's values win. A client must not be able to put itself in the
     canary arm by sending ``canary_arm`` in its own bag, and the tally reads
-    only these keys to decide which arm a trace belongs to.
+    only these keys to decide which arm a trace belongs to — so once the
+    routing layer has spoken for a request, the client's claims under those
+    keys are dropped even when the layer's answer was "not routed".
     """
     routed = _routed_trace_attributes(request)
-    if not routed:
+    if routed is None:
         return attributes
-    merged = dict(attributes or {})
+    merged = {
+        k: v for k, v in (attributes or {}).items()
+        if str(k).strip().lower() not in ROUTED_ONLY_ATTRIBUTES
+    }
     merged.update(routed)
+    if not merged and attributes is None:
+        return None
     return merged
 
 

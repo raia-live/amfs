@@ -522,9 +522,13 @@ class HttpAdapter(AdapterABC):
             "semantic_weight": semantic_weight,
             "recency_weight": recency_weight,
             "confidence_weight": confidence_weight,
-            "branch": branch,
             "include_artifacts": include_artifacts,
         }
+        # Omitted for main, like every other read: a named ``main`` is an
+        # explicit choice the server honours over a routed canary branch, and
+        # retrieve is the recall path a canary most needs to route.
+        if branch and branch != "main":
+            body["branch"] = branch
         if entity_path:
             body["entity_path"] = entity_path
         # Sent only when set, so an older server that does not know the fields

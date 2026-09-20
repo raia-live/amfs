@@ -96,6 +96,24 @@ class TestBind:
         assert bare.identity_headers == {}
 
 
+class TestRetrieveNamesNoBranchForMain:
+    """The one read that still sent ``branch: main`` in its body. A named main
+    is an explicit choice the server honours over a routed canary branch, so
+    a canary session's retrieves — its primary recall path — never followed
+    the route."""
+
+    def test_main_is_omitted_and_a_branch_is_sent(self) -> None:
+        from tests.unit.test_http_adapter import _make_adapter
+
+        adapter, calls = _make_adapter({"POST /api/v1/retrieve": {"entries": []}})
+        adapter.retrieve("how do I rotate the key")
+        adapter.retrieve("how do I rotate the key", branch="main")
+        adapter.retrieve("how do I rotate the key", branch="repair/fix-1")
+        assert "branch" not in calls[0]["body"]
+        assert "branch" not in calls[1]["body"]
+        assert calls[2]["body"]["branch"] == "repair/fix-1"
+
+
 class TestAgentMemoryBinds:
     @pytest.fixture
     def seen(self) -> list[httpx.Request]:

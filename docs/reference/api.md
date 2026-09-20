@@ -939,7 +939,7 @@ A hosted server may add response headers describing the decision:
 | `X-AMFS-Memory-Branch` | The branch reads that named none were served from. |
 | `X-AMFS-Canary` | `canary` or `control` when the session is in a live canary; `unrouted` when it sent no identity headers or no canary is running. |
 
-The same layer can set `request.state.trace_attributes`; the server merges those keys into the sealed trace's attributes on both `/outcomes` and `/traces`, after validating the client's own bag, so they are exempt from the 20-key cap and overwrite anything the body claimed. The keys used are `canary_fix_id`, `canary_arm` and `memory_branch`.
+The same layer can set `request.state.trace_attributes`; the server merges those keys into the sealed trace's attributes on both `/outcomes` and `/traces`, after validating the client's own bag, so they are exempt from the 20-key cap and overwrite anything the body claimed. The keys used are `canary_fix_id`, `canary_arm` and `memory_branch`. Once the layer has set `trace_attributes` for a request — even to `{}`, meaning "decided: not routed" — a client's own `canary_fix_id` / `canary_arm` claims are dropped, so a session nothing routed cannot vote in a canary.
 
 ---
 
