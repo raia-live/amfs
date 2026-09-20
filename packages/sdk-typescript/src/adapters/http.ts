@@ -13,6 +13,26 @@ export interface HttpAdapterOptions {
   headers?: Record<string, string>;
 }
 
+/**
+ * Request header naming the agent the calling session acts as. Read routes
+ * carry no agent in their query or body, so without it a hosted server cannot
+ * attribute a read or look up the agent's live repair canary.
+ */
+export const AGENT_ID_HEADER = "X-AMFS-Agent-Id";
+/**
+ * Request header carrying the session id the SDK stamps on its trace — the key
+ * a hosted server hashes to keep one session on one arm of a live canary. A
+ * session that does not send it is never routed.
+ */
+export const SESSION_HEADER = "X-AMFS-Session";
+
+/** `value` as a header value (printable ASCII, single line), or undefined. */
+function headerValue(value: string | undefined | null): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const cleaned = String(value).replace(/[^\x20-\x7e]/g, "").trim().slice(0, 256);
+  return cleaned || undefined;
+}
+
 function snakeToCamel(str: string): string {
   return str.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
 }
@@ -45,6 +65,37 @@ export class HttpAdapter implements AmfsAdapter {
     if (opts.apiKey) {
       this.headers["X-AMFS-API-Key"] = opts.apiKey;
     }
+    this.opts = opts;
+  }
+
+  private readonly opts: HttpAdapterOptions;
+
+  /**
+   * An adapter on the same server that identifies itself as `agentId` in
+   * `sessionId` on every request. `AgentMemory` calls this when it is built, so
+   * two memories sharing one adapter never share an identity. Either id may be
+   * omitted; the header is then simply not sent.
+   */
+  bind(agentId: string | undefined, sessionId: string | undefined): HttpAdapter {
+    const identity: Record<string, string> = {};
+    const agent = headerValue(agentId);
+    const session = headerValue(sessionId);
+    if (agent) identity[AGENT_ID_HEADER] = agent;
+    if (session) identity[SESSION_HEADER] = session;
+    return new HttpAdapter({
+      ...this.opts,
+      agentId: agentId ?? this.opts.agentId,
+      headers: { ...this.opts.headers, ...identity },
+    });
+  }
+
+  /** The identity headers this adapter adds to every request (a copy). */
+  get identityHeaders(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const name of [AGENT_ID_HEADER, SESSION_HEADER]) {
+      if (this.headers[name]) out[name] = this.headers[name];
+    }
+    return out;
   }
 
   private async fetch<T>(

@@ -919,6 +919,28 @@ These endpoints are available when the `amfs-branching` module is installed:
 
 Authentication is via the `X-AMFS-API-Key` header. Set `AMFS_API_KEYS` to enable. Interactive API docs are available at `/docs` (Swagger UI).
 
+### Identity headers
+
+| Header | Sent by | Meaning |
+|--------|---------|---------|
+| `X-AMFS-Agent-Id` | SDKs (bound `HttpAdapter`), MCP servers | The agent the calling session acts as. Read routes carry no agent in their query or body, so this is how a read is attributed. |
+| `X-AMFS-Session` | SDKs (bound `HttpAdapter`), MCP servers | The session id the SDK stamps on its trace. A hosted server hashes it to keep every request of one session on the same arm of a live repair canary; a session that does not send it is never routed. |
+
+Both are set automatically: `AgentMemory` binds them onto an `HttpAdapter` when it is built (`HttpAdapter.bind(agent_id, session_id)`), and `as_agent` rebinds the agent while keeping the session. A raw HTTP client that wants to be routed sends the same two headers itself. Values are printable ASCII, at most 256 characters.
+
+### Memory branch on reads
+
+Every read route (`/entries`, `/entry`, `/entries/{path}/{key}`, `/search`, `/retrieve`, `/aggregate`, `/briefing`, `/quality/...`) takes an optional `branch`. When it is **omitted**, the read goes to `main` — unless a layer in front of the server has set `request.state.memory_branch`, in which case it goes there instead. This is the hook a hosted deployment uses to put a session in the canary arm of a repair canary without the client knowing. When `branch` is **named**, it always wins, so `branch=main` from a routed session still reads main. Writes and `/outcomes` never consult the hook: a routed session reads its branch and writes main.
+
+A hosted server may add response headers describing the decision:
+
+| Header | Meaning |
+|--------|---------|
+| `X-AMFS-Memory-Branch` | The branch reads that named none were served from. |
+| `X-AMFS-Canary` | `canary` or `control` when the session is in a live canary; `unrouted` when it sent no identity headers or no canary is running. |
+
+The same layer can set `request.state.trace_attributes`; the server merges those keys into the sealed trace's attributes on both `/outcomes` and `/traces`, after validating the client's own bag, so they are exempt from the 20-key cap and overwrite anything the body claimed. The keys used are `canary_fix_id`, `canary_arm` and `memory_branch`.
+
 ---
 
 ## Pro MCP Tools
