@@ -29,6 +29,35 @@ export interface AgentMemoryOptions {
   sessionId?: string;
   adapter?: AmfsAdapter;
   config?: AMFSConfig;
+  /**
+   * The memory branch every remote read and write goes to unless the call
+   * names one. Defaults to `AMFS_BRANCH` from the environment, then `main` —
+   * how a process is pointed at a repair branch or a canary without a code
+   * change. See {@link AgentMemory.checkout}.
+   */
+  branch?: string;
+}
+
+/** Environment variable naming the branch an `AgentMemory` starts on. */
+export const BRANCH_ENV = "AMFS_BRANCH";
+
+/**
+ * The session attribute a committed outcome carries when the memory was on a
+ * branch other than `main`: the trace says which memory it read. A canary and
+ * a customer replay are graded through it — a run of the same prompt on
+ * `main` never read the fix and does not count — so the SDK stamps it rather
+ * than leaving it to every caller to remember.
+ */
+export const MEMORY_BRANCH_ATTRIBUTE = "memory_branch";
+
+function branchFromEnv(): string | undefined {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  return env?.[BRANCH_ENV];
+}
+
+function normalizeBranch(branch: string | undefined | null): string {
+  const trimmed = (branch ?? "").trim();
+  return trimmed || "main";
 }
 
 export interface SearchOptions {
@@ -43,6 +72,8 @@ export interface SearchOptions {
   limit?: number;
   sortBy?: "confidence" | "recency" | "version" | "priority";
   recallConfig?: RecallConfig;
+  /** Memory branch to search; defaults to the memory's branch. */
+  branch?: string;
 }
 
 export interface MemoryStats {
@@ -67,6 +98,7 @@ export class AgentMemory {
   /** Cleared when an outcome is committed; see {@link setSessionAttributes}. */
   private _sessionAttributes: SessionAttributes = {};
   private _sessionLlmCalls: LlmCallRecord[] = [];
+  private _branch: string;
 
   constructor(agentId: string, options?: AgentMemoryOptions) {
     const config = options?.config ?? defaultConfig();
@@ -74,11 +106,36 @@ export class AgentMemory {
     this.adapter = options?.adapter ?? new InMemoryAdapter();
     this.namespace = config.namespace;
     this.readTracker = new ReadTracker();
+    // `branch` wins, then AMFS_BRANCH, then main — the Python SDK's order.
+    this._branch = normalizeBranch(options?.branch ?? branchFromEnv());
 
     const tagger = new CausalTagger(agentId, options?.sessionId);
     this.sessionId = tagger.sessionId;
     this.engine = new CoWEngine(this.adapter, tagger, this.readTracker);
     this.propagator = new OutcomeBackPropagator(this.adapter);
+  }
+
+  /** The branch remote reads and writes go to unless a call names another. */
+  get branch(): string {
+    return this._branch;
+  }
+
+  /**
+   * Point this memory at `branch` for every later remote read and write that
+   * does not name one; `null` or `""` means `main`. Returns the branch now
+   * active. The same thing `options.branch` does at construction, for a
+   * memory that outlives the choice — onto a repair branch while a replay
+   * runs and back to `main` when it ends.
+   */
+  checkout(branch: string | null | undefined): string {
+    this._branch = normalizeBranch(branch);
+    return this._branch;
+  }
+
+  /** The branch a remote call goes to: the call's own, else the memory's. */
+  private branchFor(branch: string | undefined): string | undefined {
+    const effective = branch ?? this._branch;
+    return effective === "main" ? undefined : effective;
   }
 
   read(
@@ -627,8 +684,14 @@ export class AgentMemory {
   }
 
   /** Read a single entry from the remote server. Records it for causal tracing. */
-  async readAsync(entityPath: string, key: string): Promise<MemoryEntry | null> {
-    const entry = await this.requireHttp("readAsync").readAsync(entityPath, key);
+  async readAsync(
+    entityPath: string,
+    key: string,
+    options?: { branch?: string }
+  ): Promise<MemoryEntry | null> {
+    const entry = await this.requireHttp("readAsync").readAsync(entityPath, key, {
+      branch: this.branchFor(options?.branch),
+    });
     if (entry) this.readTracker.record(entry);
     return entry;
   }
@@ -652,15 +715,19 @@ export class AgentMemory {
       value,
       agentId: this.agentId,
       ...options,
+      branch: this.branchFor(options?.branch),
     });
   }
 
   /** List entries under an entity path from the remote server. */
   async listAsync(
     entityPath?: string,
-    options?: { includeSuperseded?: boolean }
+    options?: { includeSuperseded?: boolean; branch?: string }
   ): Promise<MemoryEntry[]> {
-    return this.requireHttp("listAsync").listAsync(entityPath, options);
+    return this.requireHttp("listAsync").listAsync(entityPath, {
+      ...options,
+      branch: this.branchFor(options?.branch),
+    });
   }
 
   /** Filtered/keyword search on the remote server. */
@@ -675,6 +742,7 @@ export class AgentMemory {
       patternRef: options?.patternRef,
       sortBy: options?.sortBy,
       limit: options?.limit,
+      branch: this.branchFor(options?.branch),
     });
   }
 
@@ -686,11 +754,14 @@ export class AgentMemory {
       minConfidence?: number;
       limit?: number;
       includeArtifacts?: boolean;
-      /** Memory branch to retrieve from; defaults to `main`. */
+      /** Memory branch to retrieve from; defaults to the memory's branch. */
       branch?: string;
     }
   ): Promise<Array<{ entry: MemoryEntry; score: number }>> {
-    return this.requireHttp("retrieveAsync").retrieveAsync(query, options);
+    return this.requireHttp("retrieveAsync").retrieveAsync(query, {
+      ...options,
+      branch: this.branchFor(options?.branch),
+    });
   }
 
   /**
@@ -708,7 +779,10 @@ export class AgentMemory {
     since?: string;
     branch?: string;
   }): Promise<unknown> {
-    return this.requireHttp("briefingAsync").briefingAsync(options);
+    return this.requireHttp("briefingAsync").briefingAsync({
+      ...options,
+      branch: this.branchFor(options?.branch),
+    });
   }
 
   /**
@@ -728,11 +802,24 @@ export class AgentMemory {
       causalEntryKeys?: string[];
       causalConfidence?: number;
       attributes?: SessionAttributes;
+      /** The request the run answered; sealed on the trace for judges and training. */
+      taskInput?: string | null;
+      /** The agent's answer, in full. */
+      responseText?: string | null;
+      /** The actions taken, as `{tool_name, arguments}` rows. */
+      toolCalls?: Array<Record<string, unknown>>;
     }
   ): Promise<unknown> {
     const keys = options?.causalEntryKeys ?? this.readTracker.causalKeys;
     if (options?.attributes) this.setSessionAttributes(options.attributes);
-    const sessionMetadata = buildSessionMetadata(this._sessionAttributes, this._sessionLlmCalls);
+    // The branch stamp: on a branch other than main the trace says so, unless
+    // the caller set the attribute themselves. Added after the bag was
+    // validated so a bag at the key cap is not refused for the branch it ran on.
+    const attributes =
+      this._branch !== "main" && !(MEMORY_BRANCH_ATTRIBUTE in this._sessionAttributes)
+        ? { ...this._sessionAttributes, [MEMORY_BRANCH_ATTRIBUTE]: this._branch }
+        : this._sessionAttributes;
+    const sessionMetadata = buildSessionMetadata(attributes, this._sessionLlmCalls);
     const result = await this.requireHttp("commitOutcomeAsync").commitOutcomeAsync({
       outcomeRef,
       outcomeType: String(outcomeType),
@@ -741,6 +828,9 @@ export class AgentMemory {
       causalConfidence: options?.causalConfidence,
       agentId: this.agentId,
       sessionMetadata,
+      taskInput: options?.taskInput,
+      responseText: options?.responseText,
+      toolCalls: options?.toolCalls,
     });
     this.resetSessionMetadata();
     return result;

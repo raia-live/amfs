@@ -63,6 +63,13 @@ logger = logging.getLogger(__name__)
 #: constructor is not given one. Read once, at construction.
 BRANCH_ENV = "AMFS_BRANCH"
 
+#: The session attribute a committed outcome carries when the memory was on a
+#: branch other than ``main``: the trace says which memory it read. This is
+#: what a canary and a customer replay are graded through — a run of the same
+#: prompt on ``main`` never read the fix and does not count — so the SDK
+#: stamps it rather than leaving it to every caller to remember.
+MEMORY_BRANCH_ATTRIBUTE = "memory_branch"
+
 _sdk_bg_executor: ThreadPoolExecutor | None = None
 _sdk_bg_lock = threading.Lock()
 
@@ -1885,6 +1892,10 @@ class AgentMemory:
             **commit_attributes,
         }
         _check_attribute_count(attributes, "the merged session attributes")
+        # Stamped after the cap so a bag at the limit is not refused for the
+        # branch it ran on; a caller who set the attribute themselves wins.
+        if self._branch != "main":
+            attributes.setdefault(MEMORY_BRANCH_ATTRIBUTE, self._branch)
         existing_calls = data.get(SESSION_LLM_CALLS_KEY)
         llm_calls = [
             *(existing_calls if isinstance(existing_calls, list) else []),

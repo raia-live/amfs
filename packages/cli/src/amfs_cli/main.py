@@ -8,6 +8,7 @@ from amfs_cli.init import init_command
 from amfs_cli.log import log_command
 from amfs_cli.login import login_command
 from amfs_cli.recall import recall_command
+from amfs_cli.replay import app as replay_app
 from amfs_cli.search import search_command
 from amfs_cli.snapshot import app as snapshot_app
 from amfs_cli.inspect import app as inspect_app
@@ -37,6 +38,7 @@ app.command(name="verify", help="Verify content integrity of memory entries")(ve
 app.command(name="watch", help="Live-stream memory changes (SSE)")(watch_command)
 app.add_typer(snapshot_app, name="snapshot", help="Export and restore memory snapshots")
 app.add_typer(inspect_app, name="inspect", help="List, read, and diff memory entries")
+app.add_typer(replay_app, name="replay", help="Answer SenseLab replay requests (repair-loop webhook)")
 
 
 def _version_callback(value: bool) -> None:

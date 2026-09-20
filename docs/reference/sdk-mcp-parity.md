@@ -49,6 +49,10 @@ AMFS exposes memory three ways: the **MCP server** (for agents), the **Python SD
 | List traces | `amfs_list_traces` | `list_traces` (cursor / since / until) | `listTracesAsync`, `listTracesPageAsync` (`{traces, nextCursor, hasMore}`) |
 | Get trace | `amfs_get_trace` | `get_trace` | `getTraceAsync` |
 | Session attributes on the trace | `amfs_set_trace_attributes` (Pro) | `set_session_attributes`, `commit_outcome(attributes=...)` | `setSessionAttributes`, `commitOutcome(..., {attributes})`, `commitOutcomeAsync(..., {attributes})` |
+| Task, answer and actions on the trace | `amfs_commit_outcome(task_input=, response_text=, tool_calls=)` | `commit_outcome(task_input=, response_text=, tool_calls=)` | `commitOutcomeAsync(..., {taskInput, responseText, toolCalls})` |
+| Memory branch (default for every call) | `AMFS_BRANCH` on the server process | `AgentMemory(branch=)`, `AMFS_BRANCH`, `checkout()`; per-call `branch=` | `new AgentMemory(id, {branch})`, `AMFS_BRANCH`, `checkout()`; per-call `branch` |
+| `memory_branch` stamped on outcomes off `main` | via `AMFS_BRANCH` | automatic in `commit_outcome` | automatic in `commitOutcomeAsync` |
+| Replay webhook receiver (repair loop Tier 2) | — | `amfs.replay.ReplayReceiver`, `amfs replay serve` / `simulate` | `ReplayReceiver`, `createFetchHandler`, `serveReplay` |
 | Record an LLM call by hand | `amfs_record_llm_call` (Pro) | `record_llm_call` | `recordLlmCall` |
 | Record LLM calls automatically | — | `amfs_pro.tracing.instrument_openai` / `instrument_anthropic` / `instrument_litellm` (Pro) | `instrumentOpenAI`, `instrumentAnthropic` |
 

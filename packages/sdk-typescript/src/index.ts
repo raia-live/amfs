@@ -2,7 +2,7 @@
  * @senselab-ai/amfs — Agent Memory File System TypeScript SDK
  */
 
-export { AgentMemory, MemoryScope } from "./memory.js";
+export { AgentMemory, MemoryScope, BRANCH_ENV, MEMORY_BRANCH_ATTRIBUTE } from "./memory.js";
 export type { AgentMemoryOptions, SearchOptions, MemoryStats } from "./memory.js";
 export type { AmfsAdapter, WatchHandle } from "./adapter.js";
 export { createWatchHandle } from "./adapter.js";
@@ -35,6 +35,34 @@ export { CausalTagger, CoWEngine } from "./engine.js";
 export { ReadTracker } from "./tracker.js";
 export type { ExternalContext } from "./tracker.js";
 export { OutcomeBackPropagator } from "./outcome.js";
+export {
+  ReplayReceiver,
+  ReplayError,
+  SignatureError,
+  PayloadError,
+  parseReplayRequest,
+  signReplayBody,
+  verifyReplaySignature,
+  replayAttributes,
+  replayOutcomeRef,
+  createFetchHandler,
+  serveReplay,
+  CASE_ID_ATTRIBUTE,
+  EVENT_PING,
+  EVENT_REPLAY_REQUESTED,
+  SIGNATURE_HEADER,
+  EVENT_HEADER,
+  DELIVERY_HEADER,
+} from "./replay.js";
+export type {
+  ReplayRequest,
+  ReplayResult,
+  ReplayAnswer,
+  ReplayMemory,
+  ReplayReceiverOptions,
+  ReplayResponse,
+  HeaderBag,
+} from "./replay.js";
 export { defaultConfig } from "./config.js";
 export {
   MemoryType,
