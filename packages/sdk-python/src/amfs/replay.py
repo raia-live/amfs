@@ -68,7 +68,11 @@ from typing import Any
 
 from amfs_core.models import OutcomeType
 
-from amfs.memory import MEMORY_BRANCH_ATTRIBUTE
+from amfs.memory import (
+    MEMORY_BRANCH_ATTRIBUTE,
+    SDK_STAMPED_ATTRIBUTES,
+    SESSION_ATTRIBUTES_MAX_KEYS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -439,11 +443,16 @@ class ReplayReceiver:
         with the error as the answer, and one that outlasts *timeout* seconds
         as a failure with ``replay_error="timeout"``: a graded failure tells
         the loop more than a case that never came back."""
-        memory = self._memory_factory(request)
-        if hasattr(memory, "checkout") and getattr(memory, "branch", None) != request.branch:
-            memory.checkout(request.branch)
-        result = self._answer(request, memory, timeout)
-        attributes = {**result.attributes, **request.attributes}
+        memory = self._open_memory(request)
+        result, late = self._answer(request, memory, timeout)
+        if late:
+            # The runner still holds that memory, on its own thread, and will
+            # close it when it is done (see ``_answer``). The failure is
+            # committed on a memory of its own: committing on the runner's
+            # would race its tracker, and closing it would pull the adapter
+            # out from under an agent that is still using it.
+            memory = self._open_memory(request)
+        attributes = self._commit_attributes(request, memory, result)
         try:
             memory.commit_outcome(
                 request.outcome_ref,
@@ -454,12 +463,7 @@ class ReplayReceiver:
                 attributes=attributes,
             )
         finally:
-            closer = getattr(memory, "close", None)
-            if callable(closer) and self._owns_memory:
-                try:
-                    closer()
-                except Exception:  # noqa: BLE001
-                    logger.debug("closing the replay memory failed", exc_info=True)
+            self._close_memory(memory)
         trace = getattr(memory, "_last_trace", None)
         trace_id = getattr(trace, "id", None) or getattr(trace, "trace_id", None)
         return {
@@ -467,6 +471,62 @@ class ReplayReceiver:
             "outcome_ref": request.outcome_ref,
             "trace_id": str(trace_id) if trace_id else None,
         }
+
+    def _open_memory(self, request: ReplayRequest) -> Any:
+        memory = self._memory_factory(request)
+        if hasattr(memory, "checkout") and getattr(memory, "branch", None) != request.branch:
+            memory.checkout(request.branch)
+        return memory
+
+    def _close_memory(self, memory: Any) -> None:
+        """Close *memory* if the receiver opened it. Only what the receiver
+        opened is the receiver's to close."""
+        closer = getattr(memory, "close", None)
+        if callable(closer) and self._owns_memory:
+            try:
+                closer()
+            except Exception:  # noqa: BLE001
+                logger.debug("closing the replay memory failed", exc_info=True)
+
+    def _commit_attributes(
+        self, request: ReplayRequest, memory: Any, result: ReplayResult
+    ) -> dict[str, Any]:
+        """The bag the outcome is committed with: the grader's keys, then as
+        many of the runner's as fit under ``SESSION_ATTRIBUTES_MAX_KEYS``.
+
+        The grader's keys (``case_id``, ``fix_id``, ``replay_delivery_id``,
+        ``memory_branch``) are what makes the case gradable at all, so they
+        are never the ones to go. The runner's dimensions — the session bag
+        it set while running and the ``attributes`` it answered with — fill
+        what room is left, in that order; a runner that filled its bag to the
+        cap must not cost the case its trace. Whatever is dropped is logged.
+        The memory's own bag is cleared so ``commit_outcome`` does not merge
+        it back in over the trimmed set.
+        """
+        grader = {str(k).strip().lower(): v for k, v in request.attributes.items()}
+        room = SESSION_ATTRIBUTES_MAX_KEYS - sum(
+            1 for k in grader if k not in SDK_STAMPED_ATTRIBUTES
+        )
+        bag = getattr(memory, "session_attributes", None)
+        extras: dict[str, Any] = {}
+        for source in (bag if isinstance(bag, dict) else {}, result.attributes):
+            for raw_key, value in source.items():
+                key = str(raw_key).strip().lower()
+                if key not in grader:
+                    extras[key] = value
+        kept = dict(list(extras.items())[: max(room, 0)])
+        dropped = [k for k in extras if k not in kept]
+        if dropped:
+            logger.warning(
+                "replay of case %s: %d attribute(s) dropped to keep the commit under the "
+                "%d-key cap: %s",
+                request.case_id, len(dropped), SESSION_ATTRIBUTES_MAX_KEYS, ", ".join(dropped),
+            )
+        if bag:
+            clear = getattr(memory, "clear_session_attributes", None)
+            if callable(clear):
+                clear()
+        return {**kept, **grader}
 
     def _call_runner(self, request: ReplayRequest, memory: Any) -> ReplayResult:
         """The runner's answer, coerced; a raise is an answer too."""
@@ -480,24 +540,49 @@ class ReplayReceiver:
                 attributes={"replay_error": type(exc).__name__},
             )
 
-    def _answer(self, request: ReplayRequest, memory: Any, timeout: float | None) -> ReplayResult:
+    def _answer(
+        self, request: ReplayRequest, memory: Any, timeout: float | None
+    ) -> tuple[ReplayResult, bool]:
         """The runner's answer within *timeout* seconds, or a failure that says
-        it did not come. The runner runs on its own daemon thread when bounded:
-        a thread cannot be interrupted, so a late answer is left where it is
-        and never committed over the failure already recorded."""
+        it did not come — and whether the runner is still going (``late``).
+
+        The runner runs on its own daemon thread when bounded. A thread cannot
+        be interrupted, so past the deadline the runner keeps *memory* and
+        the thread, closes the memory itself when it finishes (if the
+        receiver opened it), and its answer is left where it is — never
+        committed over the failure already recorded. The hand-off is decided
+        under a lock: a runner that finishes at the buzzer is an answer, not
+        a timeout, and exactly one side closes the memory.
+        """
         if not timeout or timeout <= 0:
-            return self._call_runner(request, memory)
+            return self._call_runner(request, memory), False
         box: dict[str, ReplayResult] = {}
+        state = {"done": False, "late": False}
+        handoff = threading.Lock()
 
         def target() -> None:
-            box["result"] = self._call_runner(request, memory)
+            try:
+                box["result"] = self._call_runner(request, memory)
+            finally:
+                with handoff:
+                    state["done"] = True
+                    late = state["late"]
+                if late:
+                    logger.info(
+                        "replay of case %s finished after its deadline; answer discarded",
+                        request.case_id,
+                    )
+                    self._close_memory(memory)
 
         worker = threading.Thread(
             target=target, name=f"amfs-replay-run-{request.case_id[:8]}", daemon=True
         )
         worker.start()
         worker.join(timeout)
-        if worker.is_alive() or "result" not in box:
+        with handoff:
+            if not state["done"]:
+                state["late"] = True
+        if state["late"]:
             logger.warning(
                 "replay of case %s did not finish within %ss; committing a failure",
                 request.case_id, timeout,
@@ -506,8 +591,9 @@ class ReplayReceiver:
                 response_text=f"replay runner did not finish within {timeout:g}s",
                 outcome_type=OutcomeType.FAILURE,
                 attributes={"replay_error": "timeout"},
-            )
-        return box["result"]
+            ), True
+        worker.join()  # done: let the thread wind down before its result is read
+        return box["result"], False
 
     def _run_in_background(self, request: ReplayRequest) -> None:
         try:

@@ -419,6 +419,13 @@ class AgentMemory:
         """The attribute bag the next ``commit_outcome`` will stamp on its trace."""
         return dict(self._session_attributes)
 
+    def clear_session_attributes(self) -> None:
+        """Drop the attribute bag waiting for the next ``commit_outcome``, as
+        the commit itself does afterwards. For a caller that must fit its own
+        keys under the cap ahead of what a run set — the replay receiver's
+        grader keys, say."""
+        self._session_attributes = {}
+
     @property
     def session_llm_calls(self) -> list[dict[str, Any]]:
         """The LLM calls recorded since the last ``commit_outcome``."""

@@ -516,6 +516,15 @@ export class AgentMemory {
   }
 
   /**
+   * Drop the attribute bag waiting for the next commit, as the commit itself
+   * does afterwards. For a caller that must fit its own keys under the cap
+   * ahead of what a run set — the replay receiver's grader keys, say.
+   */
+  clearSessionAttributes(): void {
+    this._sessionAttributes = {};
+  }
+
+  /**
    * Record one LLM call for the trace the next committed outcome builds.
    *
    * Token counts and cost are only ever known if the agent reports them, so

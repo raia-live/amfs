@@ -130,7 +130,8 @@ What the receiver does for you:
 | Memory | `AgentMemory(agent_id=<request's>, branch=<request's>)` from your process configuration; pass `memory_factory=` to build it yourself (a specific adapter, a different agent id). |
 | Commit | `commit_outcome(f"replay:<fix>:<case>", outcome, task_input=…, response_text=…, attributes={"case_id", "memory_branch", "fix_id", "replay_delivery_id"})`. |
 | A runner that raises | Committed as a `failure` with the error as the answer. A graded failure tells the loop more than a case that never came back. |
-| A runner that hangs | `run_timeout` (default 600 s; `--timeout` on the CLI) bounds a background run. At the deadline a `failure` with `replay_error="timeout"` is committed so the case is still graded; the runner keeps its thread, and an answer it gives later is discarded, never committed over the failure. Inline runs are not bounded — they run inside the sender's request. |
+| A runner that hangs | `run_timeout` (default 600 s; `--timeout` on the CLI) bounds a background run. At the deadline a `failure` with `replay_error="timeout"` is committed — on a memory of its own, so the runner's is neither written to nor closed under it — and the case is still graded; the runner keeps its thread and its memory (closed when it finishes), and an answer it gives later is discarded, never committed over the failure. Inline runs are not bounded — they run inside the sender's request. |
+| Attribute cap | The grader's keys go on first; the runner's dimensions (its session bag, then the `attributes` it answered with) fill what room is left under the 20-key cap, and the rest is dropped with a warning (TypeScript: reported as `dropped_attributes` in the answer). A runner that filled its bag never costs the case its trace. |
 
 The runner may return a string (the answer, taken as a success), a
 `(answer, outcome_type)` pair, a `ReplayResult`, or a dict with

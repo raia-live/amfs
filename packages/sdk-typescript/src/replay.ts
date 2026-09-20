@@ -51,6 +51,7 @@
 
 import { OutcomeType } from "./models.js";
 import { MEMORY_BRANCH_ATTRIBUTE } from "./memory.js";
+import { SDK_STAMPED_ATTRIBUTES, SESSION_ATTRIBUTES_MAX_KEYS } from "./session.js";
 import type { SessionAttributes } from "./session.js";
 
 export const SIGNATURE_HEADER = "X-AMFS-Signature";
@@ -302,6 +303,9 @@ export type ReplayAnswer = ReplayResult | string | null | undefined;
 export interface ReplayMemory {
   readonly branch?: string;
   checkout?(branch: string): string;
+  /** The bag a run set while it ran; read so the grader's keys can be fitted ahead of it. */
+  readonly sessionAttributes?: SessionAttributes;
+  clearSessionAttributes?(): void;
   commitOutcomeAsync(
     outcomeRef: string,
     outcomeType: OutcomeType,
@@ -340,6 +344,46 @@ function toOutcome(value: ReplayResult["outcomeType"]): OutcomeType {
 }
 
 /** The receiving end of the replay webhook. */
+/**
+ * The bag the outcome is committed with: the grader's keys, then as many of
+ * the runner's as fit under `SESSION_ATTRIBUTES_MAX_KEYS`.
+ *
+ * The grader's keys (`case_id`, `fix_id`, `replay_delivery_id`,
+ * `memory_branch`) are what makes the case gradable at all, so they are never
+ * the ones to go. The runner's dimensions — the session bag it set while
+ * running and the `attributes` it answered with — fill what room is left, in
+ * that order; a runner that filled its bag to the cap must not cost the case
+ * its trace. The memory's own bag is cleared so the commit does not merge it
+ * back in over the trimmed set. What was dropped is returned, and the receiver
+ * reports it as `dropped_attributes` in its answer.
+ */
+export function commitAttributes(
+  request: ReplayRequest,
+  memory: ReplayMemory,
+  result: ReplayResult,
+): { attributes: SessionAttributes; dropped: string[] } {
+  const grader: SessionAttributes = {};
+  for (const [k, v] of Object.entries(replayAttributes(request))) grader[k.trim().toLowerCase()] = v;
+  let room = SESSION_ATTRIBUTES_MAX_KEYS;
+  for (const k of Object.keys(grader)) if (!SDK_STAMPED_ATTRIBUTES.has(k)) room -= 1;
+  const bag = memory.sessionAttributes ?? {};
+  const extras: SessionAttributes = {};
+  for (const source of [bag, result.attributes ?? {}]) {
+    for (const [rawKey, value] of Object.entries(source)) {
+      const key = String(rawKey).trim().toLowerCase();
+      if (!(key in grader)) extras[key] = value;
+    }
+  }
+  const kept: SessionAttributes = {};
+  const dropped: string[] = [];
+  for (const [k, v] of Object.entries(extras)) {
+    if (Object.keys(kept).length < Math.max(room, 0)) kept[k] = v;
+    else dropped.push(k);
+  }
+  if (Object.keys(bag).length > 0) memory.clearSessionAttributes?.();
+  return { attributes: { ...kept, ...grader }, dropped };
+}
+
 export class ReplayReceiver<M extends ReplayMemory = ReplayMemory> {
   private readonly seen = new Map<string, Record<string, unknown>>();
   private readonly inflight = new Set<Promise<void>>();
@@ -431,7 +475,7 @@ export class ReplayReceiver<M extends ReplayMemory = ReplayMemory> {
       };
     }
     const outcomeType = toOutcome(result.outcomeType);
-    const attributes: SessionAttributes = { ...(result.attributes ?? {}), ...replayAttributes(request) };
+    const { attributes, dropped } = commitAttributes(request, memory, result);
     const outcomeRef = replayOutcomeRef(request);
     const committed = await memory.commitOutcomeAsync(outcomeRef, outcomeType, {
       attributes,
@@ -447,6 +491,7 @@ export class ReplayReceiver<M extends ReplayMemory = ReplayMemory> {
       outcome_type: outcomeType,
       outcome_ref: outcomeRef,
       trace_id: traceId == null ? null : String(traceId),
+      ...(dropped.length > 0 ? { dropped_attributes: dropped } : {}),
     };
   }
 

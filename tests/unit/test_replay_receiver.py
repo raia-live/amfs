@@ -404,6 +404,101 @@ def test_the_timeout_leaves_a_prompt_runner_alone_and_inline_runs_unbounded(tmp_
     assert status == 200 and answer["outcome_type"] == "success", "inline runs are not bounded"
 
 
+def test_a_timed_out_runner_keeps_its_memory_and_the_failure_gets_one_of_its_own(
+    monkeypatch,
+) -> None:
+    """Past the deadline the runner still holds its memory on its own thread.
+    Committing the failure on it would race the runner's tracker, and closing
+    it would pull the adapter out from under an agent still using it — so the
+    failure is committed on a fresh memory, the runner's is closed by the
+    runner when it finishes, and its late answer is never committed."""
+    opened: list[Any] = []
+    gate = threading.Event()
+
+    class FakeMemory:
+        def __init__(self, *, agent_id: str, branch: str) -> None:
+            self.branch = branch
+            self.closed = False
+            self.commits: list[tuple] = []
+            self._last_trace = None
+            opened.append(self)
+
+        def commit_outcome(self, ref, outcome, **kw) -> list:
+            assert not self.closed, "committed on a closed memory"
+            self.commits.append((ref, outcome, kw["attributes"]))
+            return []
+
+        def close(self) -> None:
+            self.closed = True
+
+    import amfs.memory as memory_module
+
+    monkeypatch.setattr(memory_module, "AgentMemory", FakeMemory)
+    runner_done = threading.Event()
+
+    def hung(task_input: str, memory: Any) -> str:
+        try:
+            assert gate.wait(5)
+            assert not memory.closed, "the runner's memory was closed under it"
+            return "late answer"
+        finally:
+            runner_done.set()
+
+    receiver = ReplayReceiver(secret=None, run=hung, background=True, run_timeout=0.2)
+    try:
+        payload = _payload(agent_id="")
+        receiver.handle(*_signed(payload, secret=None))
+        assert receiver.drain(timeout=5)
+        runner_memory, failure_memory = opened
+        assert receiver.status(payload["delivery_id"])["outcome_type"] == "failure"
+        assert failure_memory.commits[0][2]["replay_error"] == "timeout"
+        assert failure_memory.closed is True, "the receiver closes what it opened for the failure"
+        assert runner_memory.commits == [] and runner_memory.closed is False, (
+            "the runner's memory is left to the runner"
+        )
+        gate.set()
+        assert runner_done.wait(5)
+        deadline = time.monotonic() + 2
+        while not runner_memory.closed and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert runner_memory.closed is True, "closed by the runner's thread once it finished"
+        assert runner_memory.commits == [], "the late answer is not committed"
+        assert len(opened) == 2
+    finally:
+        receiver.close()
+
+
+def test_the_graders_keys_survive_a_runner_that_filled_the_attribute_bag(tmp_path) -> None:
+    """A runner may set a session bag at the cap and answer with attributes
+    of its own. The grader's keys are what makes the case gradable, so they
+    go on first and the runner's dimensions fill what room is left; the
+    commit lands rather than raising and leaving the case without a trace."""
+    from amfs.memory import SESSION_ATTRIBUTES_MAX_KEYS
+
+    world = _World(tmp_path)
+
+    def greedy(task_input: str, memory: AgentMemory) -> dict[str, Any]:
+        memory.set_session_attributes({f"dim{i}": i for i in range(SESSION_ATTRIBUTES_MAX_KEYS)})
+        extras = {"model": "gpt-x", CASE_ID_ATTRIBUTE: "spoofed"}
+        return {"response_text": "ok", "attributes": extras}
+
+    receiver = ReplayReceiver(
+        secret=SECRET, run=greedy, memory_factory=world.memory_factory, background=False
+    )
+    payload = _payload()
+    status, answer = receiver.handle(*_signed(payload))
+    assert status == 200 and answer["outcome_type"] == "success"
+    attrs = world.last_trace.session_metadata.attributes
+    counted = [k for k in attrs if k != MEMORY_BRANCH_ATTRIBUTE]
+    assert len(counted) == SESSION_ATTRIBUTES_MAX_KEYS
+    assert attrs[CASE_ID_ATTRIBUTE] == payload["case_id"], "the grader's key, not the runner's"
+    assert attrs["fix_id"] == payload["fix_id"] and attrs["replay_delivery_id"]
+    assert attrs[MEMORY_BRANCH_ATTRIBUTE] == "repair/0d1f3a6c"
+    # The session bag went on first, so the runner's answered extras were the ones cut.
+    assert "dim0" in attrs and "model" not in attrs
+    assert world.memories[-1].session_attributes == {}, "the bag was cleared, not merged back"
+
+
 def test_the_default_memory_is_an_agent_memory_on_the_branch(tmp_path, monkeypatch) -> None:
     """No factory given: the receiver builds ``AgentMemory(agent_id, branch)``
     from the process configuration and closes what it opened."""

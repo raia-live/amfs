@@ -218,6 +218,44 @@ describe("the receiver", () => {
     expect(attrs[CASE_ID_ATTRIBUTE]).toBe("9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d");
   });
 
+  it("fits the grader's keys ahead of a runner that filled the attribute bag", async () => {
+    class BagMemory extends FakeMemory {
+      sessionAttributes: Record<string, string | number | boolean> = {};
+      clearSessionAttributes() {
+        this.sessionAttributes = {};
+      }
+    }
+    const memories: BagMemory[] = [];
+    const full: Record<string, number> = {};
+    for (let i = 0; i < SESSION_ATTRIBUTES_MAX_KEYS; i++) full[`dim${i}`] = i;
+    const receiver = new ReplayReceiver<BagMemory>({
+      secret: SECRET,
+      background: false,
+      memoryFactory: (req) => {
+        const m = new BagMemory(req.branch);
+        memories.push(m);
+        return m;
+      },
+      run: async (_task, memory) => {
+        memory.sessionAttributes = { ...full };
+        return { responseText: "ok", attributes: { model: "gpt-x", [CASE_ID_ATTRIBUTE]: "spoofed" } };
+      },
+    });
+    const { status, body } = await receiver.handle(...(await signed(payload())));
+    expect(status).toBe(200);
+    const attrs = memories[0].commits[0].options.attributes as Record<string, unknown>;
+    const counted = Object.keys(attrs).filter((k) => k !== MEMORY_BRANCH_ATTRIBUTE);
+    expect(counted).toHaveLength(SESSION_ATTRIBUTES_MAX_KEYS);
+    expect(attrs[CASE_ID_ATTRIBUTE]).toBe("9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d");
+    expect(attrs.fix_id).toBeDefined();
+    expect(attrs.replay_delivery_id).toBeDefined();
+    expect(attrs[MEMORY_BRANCH_ATTRIBUTE]).toBe("repair/0d1f3a6c");
+    expect(attrs.dim0).toBe(0);
+    expect(attrs.model).toBeUndefined();
+    expect(body.dropped_attributes).toEqual(["dim17", "dim18", "dim19", "model"]);
+    expect(memories[0].sessionAttributes).toEqual({});
+  });
+
   it("forwards the runner's tool calls so the judge can grade the action taken", async () => {
     const toolCalls = [{ tool_name: "resolve", arguments: { action: "resend_email" } }];
     const { receiver, memories } = world({

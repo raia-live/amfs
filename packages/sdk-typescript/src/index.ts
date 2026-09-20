@@ -47,6 +47,7 @@ export {
   replayAttributes,
   replayOutcomeRef,
   createFetchHandler,
+  commitAttributes,
   serveReplay,
   CASE_ID_ATTRIBUTE,
   EVENT_PING,
