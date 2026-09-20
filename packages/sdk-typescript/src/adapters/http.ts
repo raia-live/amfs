@@ -78,11 +78,15 @@ export class HttpAdapter implements AmfsAdapter {
 
   async readAsync(
     entityPath: string,
-    key: string
+    key: string,
+    options?: { branch?: string }
   ): Promise<MemoryEntry | null> {
+    const params = new URLSearchParams();
+    if (options?.branch && options.branch !== "main") params.set("branch", options.branch);
+    const qs = params.toString();
     try {
       return await this.fetch<MemoryEntry>(
-        `/api/v1/entries/${encodeURIComponent(entityPath)}/${encodeURIComponent(key)}`
+        `/api/v1/entries/${encodeURIComponent(entityPath)}/${encodeURIComponent(key)}${qs ? `?${qs}` : ""}`
       );
     } catch {
       return null;
@@ -130,11 +134,12 @@ export class HttpAdapter implements AmfsAdapter {
 
   async listAsync(
     entityPath?: string,
-    options?: { includeSuperseded?: boolean }
+    options?: { includeSuperseded?: boolean; branch?: string }
   ): Promise<MemoryEntry[]> {
     const params = new URLSearchParams();
     if (entityPath) params.set("entity_path", entityPath);
     if (options?.includeSuperseded) params.set("include_superseded", "true");
+    if (options?.branch && options.branch !== "main") params.set("branch", options.branch);
     const qs = params.toString();
     const data = await this.fetch<{ entries: MemoryEntry[] } | MemoryEntry[]>(
       `/api/v1/entries${qs ? `?${qs}` : ""}`
@@ -239,6 +244,12 @@ export class HttpAdapter implements AmfsAdapter {
      * these onto the trace it seals for this outcome.
      */
     sessionMetadata?: Record<string, unknown>;
+    /** The request the run answered — what a judge and training read the trace through. */
+    taskInput?: string | null;
+    /** The agent's answer, in full. */
+    responseText?: string | null;
+    /** The actions taken, as `{tool_name, arguments}` rows. */
+    toolCalls?: Array<Record<string, unknown>>;
   }): Promise<unknown> {
     const agentId = record.agentId ?? this.agentId;
     return this.fetch("/api/v1/outcomes", {
@@ -253,6 +264,9 @@ export class HttpAdapter implements AmfsAdapter {
         ...(record.sessionMetadata && Object.keys(record.sessionMetadata).length
           ? { session_metadata: record.sessionMetadata }
           : {}),
+        ...(record.taskInput != null ? { task_input: record.taskInput } : {}),
+        ...(record.responseText != null ? { response_text: record.responseText } : {}),
+        ...(record.toolCalls?.length ? { tool_calls: record.toolCalls } : {}),
       }),
     });
   }

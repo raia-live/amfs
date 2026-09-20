@@ -63,6 +63,13 @@ logger = logging.getLogger(__name__)
 #: constructor is not given one. Read once, at construction.
 BRANCH_ENV = "AMFS_BRANCH"
 
+#: The session attribute a committed outcome carries when the memory was on a
+#: branch other than ``main``: the trace says which memory it read. This is
+#: what a canary and a customer replay are graded through — a run of the same
+#: prompt on ``main`` never read the fix and does not count — so the SDK
+#: stamps it rather than leaving it to every caller to remember.
+MEMORY_BRANCH_ATTRIBUTE = "memory_branch"
+
 _sdk_bg_executor: ThreadPoolExecutor | None = None
 _sdk_bg_lock = threading.Lock()
 
@@ -101,17 +108,26 @@ SESSION_ATTRIBUTE_VALUE_MAX_LEN = 256
 _ATTRIBUTE_SCALARS = (str, int, float, bool)
 
 
+#: Attribute keys the SDK stamps itself, which do not count against
+#: ``SESSION_ATTRIBUTES_MAX_KEYS``: a caller's bag at the cap is still
+#: accepted — locally and by the server, which validates with the same
+#: function — for the branch it ran on.
+SDK_STAMPED_ATTRIBUTES = frozenset({"memory_branch"})
+
+
 def _check_attribute_count(attributes: dict[str, Any], what: str = "session attributes") -> None:
-    """``ValueError`` when *attributes* holds more than ``SESSION_ATTRIBUTES_MAX_KEYS``.
+    """``ValueError`` when *attributes* holds more than ``SESSION_ATTRIBUTES_MAX_KEYS``
+    caller keys (``SDK_STAMPED_ATTRIBUTES`` are not counted).
 
     Applied to each incoming bag and again to every merge (the session bag as
     it grows, and the trace's bag of identity metadata + session bag + commit
     attributes): a per-call check alone lets three bags of 20 become one of 60.
     """
-    if len(attributes) > SESSION_ATTRIBUTES_MAX_KEYS:
+    count = sum(1 for k in attributes if str(k).strip().lower() not in SDK_STAMPED_ATTRIBUTES)
+    if count > SESSION_ATTRIBUTES_MAX_KEYS:
         raise ValueError(
             f"at most {SESSION_ATTRIBUTES_MAX_KEYS} {what} are allowed "
-            f"(got {len(attributes)})"
+            f"(got {count})"
         )
 
 
@@ -402,6 +418,13 @@ class AgentMemory:
     def session_attributes(self) -> dict[str, str | int | float | bool]:
         """The attribute bag the next ``commit_outcome`` will stamp on its trace."""
         return dict(self._session_attributes)
+
+    def clear_session_attributes(self) -> None:
+        """Drop the attribute bag waiting for the next ``commit_outcome``, as
+        the commit itself does afterwards. For a caller that must fit its own
+        keys under the cap ahead of what a run set — the replay receiver's
+        grader keys, say."""
+        self._session_attributes = {}
 
     @property
     def session_llm_calls(self) -> list[dict[str, Any]]:
@@ -1884,6 +1907,11 @@ class AgentMemory:
             **self._session_attributes,
             **commit_attributes,
         }
+        # The stamp is exempt from the cap (``SDK_STAMPED_ATTRIBUTES``), here
+        # and on the server, so a bag at the limit is not refused for the
+        # branch it ran on; a caller who set the attribute themselves wins.
+        if self._branch != "main":
+            attributes.setdefault(MEMORY_BRANCH_ATTRIBUTE, self._branch)
         _check_attribute_count(attributes, "the merged session attributes")
         existing_calls = data.get(SESSION_LLM_CALLS_KEY)
         llm_calls = [

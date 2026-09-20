@@ -21,6 +21,8 @@ AMFS supports the following environment variables. They override values set in `
 | `AMFS_NAMESPACE` | Memory namespace for isolation | `default` |
 | `AMFS_DATA_DIR` | Custom filesystem data directory path | `.amfs` |
 | `AMFS_POSTGRES_DSN` | Postgres connection string; switches adapter to Postgres | — |
+| `AMFS_BRANCH` | Memory branch an `AgentMemory` (and the MCP server) starts on when none is given in code: every read and write goes there unless the call names another, and outcomes committed off `main` carry `attributes.memory_branch`. How a process is pointed at a repair branch or a canary without a code change. See [Replay Webhook](/amfs/guides/replay-webhook/). | `main` |
+| `AMFS_REPLAY_SECRET` | Shared secret of the agent's replay webhook, read by `amfs replay serve` / `simulate` when `--secret` is not given. | — |
 
 ---
 
