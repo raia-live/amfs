@@ -15,6 +15,23 @@ export const SESSION_ATTRIBUTE_KEY_MAX_LEN = 64;
 export const SESSION_ATTRIBUTE_VALUE_MAX_LEN = 256;
 
 /**
+ * Attribute keys the SDK stamps itself, which do not count against
+ * `SESSION_ATTRIBUTES_MAX_KEYS`: a caller's bag at the cap is still accepted —
+ * locally and by the server, which exempts the same keys — for the branch it
+ * ran on.
+ */
+export const SDK_STAMPED_ATTRIBUTES: ReadonlySet<string> = new Set(["memory_branch"]);
+
+/** How many of `keys` count against the cap. */
+export function countedAttributeKeys(keys: Iterable<string>): number {
+  let n = 0;
+  for (const key of keys) {
+    if (!SDK_STAMPED_ATTRIBUTES.has(String(key).trim().toLowerCase())) n += 1;
+  }
+  return n;
+}
+
+/**
  * The validated form of an attribute bag, or a thrown `TypeError` / `RangeError`.
  *
  * Keys are trimmed and lowercased (the server indexes them that way, so two
@@ -30,9 +47,10 @@ export function validateSessionAttributes(attributes: unknown): SessionAttribute
     throw new TypeError("attributes must be an object of scalar values");
   }
   const entries = Object.entries(attributes as Record<string, unknown>);
-  if (entries.length > SESSION_ATTRIBUTES_MAX_KEYS) {
+  const counted = countedAttributeKeys(entries.map(([k]) => k));
+  if (counted > SESSION_ATTRIBUTES_MAX_KEYS) {
     throw new RangeError(
-      `at most ${SESSION_ATTRIBUTES_MAX_KEYS} session attributes are allowed (got ${entries.length})`,
+      `at most ${SESSION_ATTRIBUTES_MAX_KEYS} session attributes are allowed (got ${counted})`,
     );
   }
   const out: SessionAttributes = {};

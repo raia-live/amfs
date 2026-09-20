@@ -27,7 +27,7 @@ from amfs_core.models import (
 )
 from amfs_core.exceptions import StaleWriteError
 
-from amfs.memory import MEMORY_BRANCH_ATTRIBUTE, AgentMemory, MemoryScope
+from amfs.memory import MEMORY_BRANCH_ATTRIBUTE, SDK_STAMPED_ATTRIBUTES, AgentMemory, MemoryScope
 from amfs.replay import ReplayReceiver, ReplayRequest, ReplayResult
 
 __all__ = [
@@ -46,6 +46,7 @@ __all__ = [
     "MemoryScope",
     "MemoryStats",
     "MemoryType",
+    "SDK_STAMPED_ATTRIBUTES",
     "ReplayReceiver",
     "ReplayRequest",
     "ReplayResult",

@@ -108,17 +108,26 @@ SESSION_ATTRIBUTE_VALUE_MAX_LEN = 256
 _ATTRIBUTE_SCALARS = (str, int, float, bool)
 
 
+#: Attribute keys the SDK stamps itself, which do not count against
+#: ``SESSION_ATTRIBUTES_MAX_KEYS``: a caller's bag at the cap is still
+#: accepted — locally and by the server, which validates with the same
+#: function — for the branch it ran on.
+SDK_STAMPED_ATTRIBUTES = frozenset({"memory_branch"})
+
+
 def _check_attribute_count(attributes: dict[str, Any], what: str = "session attributes") -> None:
-    """``ValueError`` when *attributes* holds more than ``SESSION_ATTRIBUTES_MAX_KEYS``.
+    """``ValueError`` when *attributes* holds more than ``SESSION_ATTRIBUTES_MAX_KEYS``
+    caller keys (``SDK_STAMPED_ATTRIBUTES`` are not counted).
 
     Applied to each incoming bag and again to every merge (the session bag as
     it grows, and the trace's bag of identity metadata + session bag + commit
     attributes): a per-call check alone lets three bags of 20 become one of 60.
     """
-    if len(attributes) > SESSION_ATTRIBUTES_MAX_KEYS:
+    count = sum(1 for k in attributes if str(k).strip().lower() not in SDK_STAMPED_ATTRIBUTES)
+    if count > SESSION_ATTRIBUTES_MAX_KEYS:
         raise ValueError(
             f"at most {SESSION_ATTRIBUTES_MAX_KEYS} {what} are allowed "
-            f"(got {len(attributes)})"
+            f"(got {count})"
         )
 
 
@@ -1891,11 +1900,12 @@ class AgentMemory:
             **self._session_attributes,
             **commit_attributes,
         }
-        _check_attribute_count(attributes, "the merged session attributes")
-        # Stamped after the cap so a bag at the limit is not refused for the
+        # The stamp is exempt from the cap (``SDK_STAMPED_ATTRIBUTES``), here
+        # and on the server, so a bag at the limit is not refused for the
         # branch it ran on; a caller who set the attribute themselves wins.
         if self._branch != "main":
             attributes.setdefault(MEMORY_BRANCH_ATTRIBUTE, self._branch)
+        _check_attribute_count(attributes, "the merged session attributes")
         existing_calls = data.get(SESSION_LLM_CALLS_KEY)
         llm_calls = [
             *(existing_calls if isinstance(existing_calls, list) else []),

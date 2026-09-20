@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import urllib.request
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -337,6 +338,72 @@ def test_the_background_receiver_acknowledges_at_once_and_runs_after(tmp_path) -
         receiver.close()
 
 
+def test_a_runner_that_outlasts_the_timeout_is_committed_as_a_failure(tmp_path) -> None:
+    """A hung runner would otherwise get its 202, have its delivery remembered
+    so retries are suppressed, and never commit — the case is never graded.
+    The bound commits a failure at the deadline; the runner's late answer,
+    when it comes, is not committed over it."""
+    world = _World(tmp_path)
+    gate = threading.Event()
+
+    def hung(task_input: str, memory: AgentMemory) -> str:
+        assert gate.wait(5), "the test released the runner"
+        return world.run(task_input, memory)
+
+    receiver = ReplayReceiver(
+        secret=SECRET, run=hung, memory_factory=world.memory_factory, run_timeout=0.2
+    )
+    try:
+        payload = _payload()
+        status, _ = receiver.handle(*_signed(payload))
+        assert status == 202
+        assert receiver.drain(timeout=5), "the receiver did not wait on the hung runner"
+        final = receiver.status(payload["delivery_id"])
+        assert final and final["ran"] is True and final["outcome_type"] == "failure"
+        trace = world.last_trace
+        assert trace.outcome_type == OutcomeType.FAILURE
+        assert trace.session_metadata.attributes["replay_error"] == "timeout"
+        assert trace.session_metadata.attributes[CASE_ID_ATTRIBUTE] == payload["case_id"]
+        assert "did not finish within 0.2s" in trace.response_text
+        committed = len(world.memories)
+        # The runner finishes late; nothing is committed on top of the failure.
+        gate.set()
+        deadline = time.monotonic() + 2
+        while not world.runs and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert world.runs, "the late runner did run to completion"
+        time.sleep(0.05)
+        assert len(world.memories) == committed
+        assert world.last_trace.outcome_type == OutcomeType.FAILURE
+    finally:
+        receiver.close()
+
+
+def test_the_timeout_leaves_a_prompt_runner_alone_and_inline_runs_unbounded(tmp_path) -> None:
+    world = _World(tmp_path)
+    receiver = ReplayReceiver(
+        secret=SECRET, run=world.run, memory_factory=world.memory_factory, run_timeout=5
+    )
+    try:
+        payload = _payload()
+        receiver.handle(*_signed(payload))
+        assert receiver.drain(timeout=5)
+        assert receiver.status(payload["delivery_id"])["outcome_type"] == "success"
+    finally:
+        receiver.close()
+
+    def slow(task_input: str, memory: AgentMemory) -> str:
+        time.sleep(0.3)
+        return world.run(task_input, memory)
+
+    inline = ReplayReceiver(
+        secret=SECRET, run=slow, memory_factory=world.memory_factory,
+        background=False, run_timeout=0.05,
+    )
+    status, answer = inline.handle(*_signed(_payload(delivery_id="d-inline")))
+    assert status == 200 and answer["outcome_type"] == "success", "inline runs are not bounded"
+
+
 def test_the_default_memory_is_an_agent_memory_on_the_branch(tmp_path, monkeypatch) -> None:
     """No factory given: the receiver builds ``AgentMemory(agent_id, branch)``
     from the process configuration and closes what it opened."""
@@ -468,3 +535,13 @@ class TestTheBranchStamp:
         attrs = mem._last_trace.session_metadata.attributes
         assert len(attrs) == SESSION_ATTRIBUTES_MAX_KEYS + 1
         assert attrs[MEMORY_BRANCH_ATTRIBUTE] == "repair/fix-1"
+        # The server validates the wire bag with the same function, so the
+        # 21-key bag the SDK just sent is accepted there too — and a 21st
+        # caller key still is not.
+        from amfs.memory import validate_session_attributes
+
+        assert len(validate_session_attributes(attrs)) == SESSION_ATTRIBUTES_MAX_KEYS + 1
+        with pytest.raises(ValueError, match="at most 20"):
+            validate_session_attributes({**full, "k20": 20})
+        with pytest.raises(ValueError, match="at most 20"):
+            validate_session_attributes({**full, "k20": 20, MEMORY_BRANCH_ATTRIBUTE: "b"})

@@ -289,6 +289,8 @@ export interface ReplayResult {
   responseText?: string | null;
   outcomeType?: OutcomeType | `${OutcomeType}` | boolean;
   attributes?: SessionAttributes;
+  /** The actions the run took, recorded on the trace so a judge can grade the expected action. */
+  toolCalls?: Array<Record<string, unknown>>;
 }
 
 export type ReplayAnswer = ReplayResult | string | null | undefined;
@@ -303,7 +305,12 @@ export interface ReplayMemory {
   commitOutcomeAsync(
     outcomeRef: string,
     outcomeType: OutcomeType,
-    options?: { attributes?: SessionAttributes; taskInput?: string; responseText?: string | null }
+    options?: {
+      attributes?: SessionAttributes;
+      taskInput?: string;
+      responseText?: string | null;
+      toolCalls?: Array<Record<string, unknown>>;
+    }
   ): Promise<unknown>;
 }
 
@@ -430,6 +437,7 @@ export class ReplayReceiver<M extends ReplayMemory = ReplayMemory> {
       attributes,
       taskInput: request.taskInput,
       responseText: result.responseText ?? null,
+      toolCalls: result.toolCalls,
     });
     const traceId =
       committed && typeof committed === "object"

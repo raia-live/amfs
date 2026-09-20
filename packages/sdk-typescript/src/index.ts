@@ -20,6 +20,7 @@ export type {
 export {
   validateSessionAttributes,
   SESSION_ATTRIBUTES_MAX_KEYS,
+  SDK_STAMPED_ATTRIBUTES,
   SESSION_ATTRIBUTE_KEY_MAX_LEN,
   SESSION_ATTRIBUTE_VALUE_MAX_LEN,
 } from "./session.js";

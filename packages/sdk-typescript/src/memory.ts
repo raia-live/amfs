@@ -19,6 +19,7 @@ import { OutcomeBackPropagator } from "./outcome.js";
 import {
   buildSessionMetadata,
   SESSION_ATTRIBUTES_MAX_KEYS,
+  countedAttributeKeys,
   toLlmCallRecord,
   validateSessionAttributes,
 } from "./session.js";
@@ -499,7 +500,7 @@ export class AgentMemory {
    */
   setSessionAttributes(attributes: SessionAttributes): SessionAttributes {
     const merged = { ...this._sessionAttributes, ...validateSessionAttributes(attributes) };
-    const size = Object.keys(merged).length;
+    const size = countedAttributeKeys(Object.keys(merged));
     if (size > SESSION_ATTRIBUTES_MAX_KEYS) {
       throw new RangeError(
         `at most ${SESSION_ATTRIBUTES_MAX_KEYS} session attributes are allowed (the bag would hold ${size})`,

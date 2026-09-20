@@ -8,11 +8,13 @@ import {
   OutcomeType,
   PayloadError,
   ReplayReceiver,
+  SESSION_ATTRIBUTES_MAX_KEYS,
   SignatureError,
   createFetchHandler,
   parseReplayRequest,
   serveReplay,
   signReplayBody,
+  validateSessionAttributes,
   verifyReplaySignature,
   type ReplayMemory,
   type ReplayRequest,
@@ -216,6 +218,19 @@ describe("the receiver", () => {
     expect(attrs[CASE_ID_ATTRIBUTE]).toBe("9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d");
   });
 
+  it("forwards the runner's tool calls so the judge can grade the action taken", async () => {
+    const toolCalls = [{ tool_name: "resolve", arguments: { action: "resend_email" } }];
+    const { receiver, memories } = world({
+      run: async () => ({ responseText: "resent", outcomeType: "success", toolCalls }),
+    });
+    await receiver.handle(...(await signed(payload())));
+    expect(memories[0].commits[0].options.toolCalls).toEqual(toolCalls);
+    // A runner that answers with a string commits none.
+    const plain = world();
+    await plain.receiver.handle(...(await signed(payload({ delivery_id: "d-plain" }))));
+    expect(plain.memories[0].commits[0].options.toolCalls).toBeUndefined();
+  });
+
   it("in the background: 202 first, the run after, and a redelivery meanwhile is acknowledged", async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
@@ -369,5 +384,28 @@ describe("the branch on AgentMemory", () => {
     mem.checkout("main");
     await mem.commitOutcomeAsync("o-3", OutcomeType.SUCCESS);
     expect(JSON.parse(String(calls.at(-1)!.init?.body)).session_metadata).toBeUndefined();
+  });
+
+  it("the stamp does not count against the attribute cap, here or on the wire", async () => {
+    mockFetch();
+    const mem = new AgentMemory("a", {
+      adapter: new HttpAdapter({ url: "http://s" }),
+      branch: "repair/x",
+    });
+    const full: Record<string, number> = {};
+    for (let i = 0; i < SESSION_ATTRIBUTES_MAX_KEYS; i++) full[`k${i}`] = i;
+    mem.setSessionAttributes(full);
+    expect(() => mem.setSessionAttributes({ k20: 20 })).toThrow(/at most 20/);
+    await mem.commitOutcomeAsync("o-1", OutcomeType.SUCCESS);
+    const sent = JSON.parse(String(calls.at(-1)!.init?.body)).session_metadata.attributes;
+    expect(Object.keys(sent)).toHaveLength(SESSION_ATTRIBUTES_MAX_KEYS + 1);
+    expect(sent[MEMORY_BRANCH_ATTRIBUTE]).toBe("repair/x");
+    // The 21-key bag the SDK just sent passes the validator the server shares;
+    // a 21st caller key still does not, stamp or no stamp.
+    expect(Object.keys(validateSessionAttributes(sent))).toHaveLength(SESSION_ATTRIBUTES_MAX_KEYS + 1);
+    expect(() => validateSessionAttributes({ ...full, k20: 20 })).toThrow(/at most 20/);
+    expect(() => validateSessionAttributes({ ...full, k20: 20, [MEMORY_BRANCH_ATTRIBUTE]: "b" })).toThrow(
+      /at most 20/
+    );
   });
 });

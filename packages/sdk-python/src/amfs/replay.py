@@ -338,7 +338,12 @@ class ReplayReceiver:
         (default). ``False`` runs inline and answers 200 with the outcome —
         for tests and for agents that finish inside the sender's timeout.
     :param run_timeout: seconds a background run may take before the receiver
-        commits a failure for it.
+        commits a failure for it (``replay_error="timeout"``) so the case is
+        still graded. The runner cannot be interrupted: it keeps its thread,
+        and an answer it gives after the deadline is discarded rather than
+        committed over the failure. Inline runs (``background=False``) are
+        not bounded — they run inside the sender's request. ``None`` or
+        ``0`` disables the bound.
     """
 
     def __init__(
@@ -427,24 +432,17 @@ class ReplayReceiver:
 
     # -- the run ----------------------------------------------------------
 
-    def replay(self, request: ReplayRequest) -> dict[str, Any]:
+    def replay(self, request: ReplayRequest, *, timeout: float | None = None) -> dict[str, Any]:
         """Run one case and commit its outcome on the request's branch. Returns
         a summary (``outcome_type``, ``outcome_ref``, ``trace_id`` when the
         adapter reports one). A runner that raises is committed as a failure
-        with the error as the answer: a graded failure tells the loop more
-        than a case that never came back."""
+        with the error as the answer, and one that outlasts *timeout* seconds
+        as a failure with ``replay_error="timeout"``: a graded failure tells
+        the loop more than a case that never came back."""
         memory = self._memory_factory(request)
         if hasattr(memory, "checkout") and getattr(memory, "branch", None) != request.branch:
             memory.checkout(request.branch)
-        try:
-            result = ReplayResult.coerce(self._run(request.task_input, memory))
-        except Exception as exc:  # noqa: BLE001 - the runner is the customer's code
-            logger.warning("replay of case %s raised", request.case_id, exc_info=True)
-            result = ReplayResult(
-                response_text=f"replay runner raised {type(exc).__name__}: {exc}"[:2000],
-                outcome_type=OutcomeType.FAILURE,
-                attributes={"replay_error": type(exc).__name__},
-            )
+        result = self._answer(request, memory, timeout)
         attributes = {**result.attributes, **request.attributes}
         try:
             memory.commit_outcome(
@@ -470,9 +468,50 @@ class ReplayReceiver:
             "trace_id": str(trace_id) if trace_id else None,
         }
 
+    def _call_runner(self, request: ReplayRequest, memory: Any) -> ReplayResult:
+        """The runner's answer, coerced; a raise is an answer too."""
+        try:
+            return ReplayResult.coerce(self._run(request.task_input, memory))
+        except Exception as exc:  # noqa: BLE001 - the runner is the customer's code
+            logger.warning("replay of case %s raised", request.case_id, exc_info=True)
+            return ReplayResult(
+                response_text=f"replay runner raised {type(exc).__name__}: {exc}"[:2000],
+                outcome_type=OutcomeType.FAILURE,
+                attributes={"replay_error": type(exc).__name__},
+            )
+
+    def _answer(self, request: ReplayRequest, memory: Any, timeout: float | None) -> ReplayResult:
+        """The runner's answer within *timeout* seconds, or a failure that says
+        it did not come. The runner runs on its own daemon thread when bounded:
+        a thread cannot be interrupted, so a late answer is left where it is
+        and never committed over the failure already recorded."""
+        if not timeout or timeout <= 0:
+            return self._call_runner(request, memory)
+        box: dict[str, ReplayResult] = {}
+
+        def target() -> None:
+            box["result"] = self._call_runner(request, memory)
+
+        worker = threading.Thread(
+            target=target, name=f"amfs-replay-run-{request.case_id[:8]}", daemon=True
+        )
+        worker.start()
+        worker.join(timeout)
+        if worker.is_alive() or "result" not in box:
+            logger.warning(
+                "replay of case %s did not finish within %ss; committing a failure",
+                request.case_id, timeout,
+            )
+            return ReplayResult(
+                response_text=f"replay runner did not finish within {timeout:g}s",
+                outcome_type=OutcomeType.FAILURE,
+                attributes={"replay_error": "timeout"},
+            )
+        return box["result"]
+
     def _run_in_background(self, request: ReplayRequest) -> None:
         try:
-            outcome = self.replay(request)
+            outcome = self.replay(request, timeout=self._run_timeout)
             with self._lock:
                 prior = self._seen.get(request.delivery_id) or {}
                 self._remember(request.delivery_id, {**prior, "ran": True, **outcome})

@@ -130,10 +130,13 @@ What the receiver does for you:
 | Memory | `AgentMemory(agent_id=<request's>, branch=<request's>)` from your process configuration; pass `memory_factory=` to build it yourself (a specific adapter, a different agent id). |
 | Commit | `commit_outcome(f"replay:<fix>:<case>", outcome, task_input=…, response_text=…, attributes={"case_id", "memory_branch", "fix_id", "replay_delivery_id"})`. |
 | A runner that raises | Committed as a `failure` with the error as the answer. A graded failure tells the loop more than a case that never came back. |
+| A runner that hangs | `run_timeout` (default 600 s; `--timeout` on the CLI) bounds a background run. At the deadline a `failure` with `replay_error="timeout"` is committed so the case is still graded; the runner keeps its thread, and an answer it gives later is discarded, never committed over the failure. Inline runs are not bounded — they run inside the sender's request. |
 
 The runner may return a string (the answer, taken as a success), a
 `(answer, outcome_type)` pair, a `ReplayResult`, or a dict with
-`response_text`, `outcome_type`, `tool_calls` and `attributes`.
+`response_text`, `outcome_type`, `tool_calls` and `attributes`. Return the
+`tool_calls` the run made when you have them: the judge grades the action a
+fix was meant to change, not only the words.
 
 ### Without a web framework
 
@@ -194,8 +197,10 @@ await serveReplay(receiver, { port: 8787 });
 in-memory, and a replay needs the server's branch. The receiver otherwise
 behaves as the Python one — `202` and a background run, duplicates
 acknowledged, `410` past the deadline, a thrown runner committed as a
-failure — and commits with the same attributes, `taskInput` and
-`responseText`.
+failure — and commits with the same attributes, `taskInput`, `responseText`
+and the `toolCalls` a `ReplayResult` returns. One difference: it has no run
+timeout of its own, so bound a runner that may hang at the framework or
+platform level (a function timeout, `AbortSignal.timeout` inside `run`).
 
 ---
 
@@ -215,7 +220,9 @@ unless the call names another. And every outcome committed while off `main`
 carries **`attributes.memory_branch`** automatically, so the trace says which
 memory it read — the same stamp the hosted gateway puts on a canary session.
 This is what lets a canary and a replay be graded at all; a caller who sets
-the attribute themselves wins.
+the attribute themselves wins. The stamp does not count against the 20-key
+attribute cap, in the SDK or on the server: a bag already at the limit is
+still accepted for the branch it ran on.
 
 ---
 
