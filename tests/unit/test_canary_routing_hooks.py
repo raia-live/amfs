@@ -322,6 +322,28 @@ class TestTheDeferredTraceCarriesTheStamps:
         # No raw metadata came in, so the seal falls back to the trace's own.
         assert posted["sealed_meta"] is None
 
+    def test_once_the_layer_has_spoken_a_clients_canary_claims_are_dropped(
+        self, posted
+    ) -> None:
+        """Same rule as /outcomes: ``trace_attributes={}`` is "decided: not
+        routed", and this is the path every HttpAdapter commit seals on."""
+        self._post(
+            _request(trace_attributes={}),
+            self._body({"customer": "acme", "canary_fix_id": "7a3c", "canary_arm": "canary"}),
+        )
+        assert posted["saved"].session_metadata.model_dump()["attributes"] == {"customer": "acme"}
+        assert posted["sealed_meta"]["attributes"] == {"customer": "acme"}
+        assert posted["sealed_meta"]["spans"] == [{"a": 1}]
+
+    def test_the_server_wins_over_the_body(self, posted) -> None:
+        self._post(
+            _request(trace_attributes={"canary_fix_id": "7a3c", "canary_arm": "control"}),
+            self._body({"canary_fix_id": "forged", "canary_arm": "canary"}),
+        )
+        attrs = posted["saved"].session_metadata.model_dump()["attributes"]
+        assert attrs == {"canary_fix_id": "7a3c", "canary_arm": "control"}
+        assert posted["sealed_meta"]["attributes"] == attrs
+
     def test_unrouted_is_untouched(self, posted) -> None:
         self._post(_request(), self._body({"customer": "acme"}))
         assert posted["saved"].session_metadata.model_dump()["attributes"] == {"customer": "acme"}

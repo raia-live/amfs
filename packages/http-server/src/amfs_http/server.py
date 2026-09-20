@@ -3909,24 +3909,26 @@ async def save_trace(
     # arm that is stamped on one path and not the other is a tally that counts
     # SDK sessions in neither arm. Written onto the trace that is saved and onto
     # the raw metadata that is sealed, since the seal prefers the raw body when
-    # there is one and the trace's own metadata when there is not.
-    routed = _routed_trace_attributes(req)
-    if routed:
+    # there is one and the trace's own metadata when there is not. Through the
+    # same merge as /outcomes, so a decided-but-unrouted request (``{}``) drops
+    # the client's own canary claims here too — this is the path every
+    # HttpAdapter commit seals on, since ``trace_follows`` skips the other.
+    if _routed_trace_attributes(req) is not None:
         meta = trace.session_metadata or SessionMetadata()
         existing = getattr(meta, "attributes", None)
-        merged = dict(existing) if isinstance(existing, dict) else {}
-        merged.update(routed)
+        merged = _merge_routed_attributes(
+            req, dict(existing) if isinstance(existing, dict) else {}
+        )
         trace = trace.model_copy(
-            update={"session_metadata": meta.model_copy(update={"attributes": merged})}
+            update={"session_metadata": meta.model_copy(update={"attributes": merged or {}})}
         )
         if isinstance(raw_meta, dict):
             raw_attrs = raw_meta.get("attributes")
             raw_meta = {
                 **raw_meta,
-                "attributes": {
-                    **(raw_attrs if isinstance(raw_attrs, dict) else {}),
-                    **routed,
-                },
+                "attributes": _merge_routed_attributes(
+                    req, dict(raw_attrs) if isinstance(raw_attrs, dict) else {}
+                ) or {},
             }
     saved = mem._adapter.save_trace(trace)
     # Sealed like a trace committed through /outcomes. Until this call, a trace
