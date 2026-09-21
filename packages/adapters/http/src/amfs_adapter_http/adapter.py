@@ -492,8 +492,11 @@ class HttpAdapter(AdapterABC):
         # the entries written at the root of it, which is usually none of them.
         if getattr(query, "include_descendants", False):
             body["include_descendants"] = True
+        # Omitted for main, like every other read: a hosted canary routes a
+        # session by the branch it did *not* name, and a search that named
+        # main would read baseline memory while retrieve read the branch.
         branch = kwargs.get("branch")
-        if branch:
+        if branch and branch != "main":
             body["branch"] = branch
         data = self._post("/api/v1/search", body)
         self._capture_reuse_value()

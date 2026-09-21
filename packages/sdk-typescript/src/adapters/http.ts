@@ -225,7 +225,8 @@ export class HttpAdapter implements AmfsAdapter {
         ...(query.patternRef ? { pattern_ref: query.patternRef } : {}),
         ...(query.sortBy ? { sort_by: query.sortBy } : {}),
         ...(query.depth != null ? { depth: query.depth } : {}),
-        ...(query.branch ? { branch: query.branch } : {}),
+        // Omitted for main, like every other read, so a hosted canary can route the session.
+        ...(query.branch && query.branch !== "main" ? { branch: query.branch } : {}),
       }),
     });
   }
