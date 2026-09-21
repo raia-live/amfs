@@ -134,8 +134,19 @@ _async_adapter = None  # AsyncPostgresAdapter | None, set in lifespan
 
 @asynccontextmanager
 async def _lifespan(application: FastAPI):  # noqa: ARG001
-    """Open/close the async connection pool for hot-path DB access."""
-    global _async_adapter
+    """Open/close the async connection pool for hot-path DB access, and run
+    the embedded Cortex worker for the life of this process.
+
+    The Cortex worker starts here rather than in ``main()`` because this is the
+    hook that runs once in every process that serves requests. With
+    ``--workers`` above one, uvicorn imports ``amfs_http.server:app`` afresh
+    in each child; ``main()`` runs only in the supervisor, so a worker started
+    there is invisible to the ``/api/v1/cortex/*`` routes in the children —
+    they read the module global and saw ``None``. Starting it per process
+    keeps those routes truthful and costs one LISTEN connection and a
+    two-connection pool per worker instead of per instance.
+    """
+    global _async_adapter, _cortex_worker
     dsn = os.environ.get("AMFS_POSTGRES_DSN")
     if dsn and not os.environ.get("AMFS_HTTP_URL"):
         try:
@@ -147,10 +158,22 @@ async def _lifespan(application: FastAPI):  # noqa: ARG001
         except Exception:
             logger.warning("Failed to start async adapter — falling back to sync", exc_info=True)
             _async_adapter = None
+    if _env_flag("AMFS_WITH_CORTEX"):
+        _start_embedded_cortex()
     yield
+    if _cortex_worker is not None:
+        try:
+            _cortex_worker.stop()
+        except Exception:  # noqa: BLE001 - shutting down; nothing to do about it
+            logger.debug("Cortex worker stop raised", exc_info=True)
     if _async_adapter is not None:
         await _async_adapter.close()
         logger.info("Async Postgres adapter closed")
+
+
+def _env_flag(name: str) -> bool:
+    """Whether environment variable *name* is set to a truthy value."""
+    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 app = FastAPI(
@@ -233,8 +256,72 @@ _bg_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="amfs-bg")
 # checkouts from the sync pool, not a throughput target. ``_offload`` copies
 # the calling context into the thread so the tenant ContextVars the RLS pool
 # reads are the request's, not the thread's leftovers.
+#
+# Routes whose whole body is synchronous — the admin, team, API-key and
+# pattern routes that open ``pool.connection()`` and return — are plain
+# ``def``, on purpose. FastAPI runs a ``def`` endpoint on the anyio worker
+# pool, with the caller's contextvars copied in, so the body needs no
+# ``_offload`` wrapping; declared ``async`` the same body holds the loop for
+# the length of the query, and for however long the pool checkout has to wait
+# when the pool is busy. Do not "fix" one back to ``async def`` unless it
+# gains an ``await``.
+
+
+def _effective_cpu_count() -> int:
+    """The CPUs this process may actually use, not the ones the host has.
+
+    ``os.cpu_count()`` reports the machine. In a container it is the node's
+    core count, while the scheduler holds the process to whatever the cgroup
+    quota or affinity mask says — on Cloud Run a 2-vCPU service can read 8 or
+    more here. Sizing a thread pool for the host's cores then puts several
+    ONNX threads on every core the container is allowed, which is the thrash
+    the pool was sized to avoid.
+
+    Takes the smallest of: the affinity mask (Linux), the cgroup v2 quota
+    (``cpu.max``, ``quota/period`` rounded up), the cgroup v1 quota, and
+    ``os.cpu_count()``. ``AMFS_MODEL_THREADS`` overrides all of it for the
+    deployment that knows better. Never below one.
+    """
+    override = os.environ.get("AMFS_MODEL_THREADS")
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            logger.warning("AMFS_MODEL_THREADS=%r is not an integer; ignoring", override)
+
+    candidates: list[int] = []
+    host = os.cpu_count()
+    if host:
+        candidates.append(host)
+    try:
+        candidates.append(len(os.sched_getaffinity(0)))  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        pass
+    for quota_path, period_path in (
+        ("/sys/fs/cgroup/cpu.max", None),
+        ("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "/sys/fs/cgroup/cpu/cpu.cfs_period_us"),
+    ):
+        try:
+            with open(quota_path) as fh:
+                first = fh.read().split()
+            if period_path is None:
+                quota_s, period_s = first[0], first[1]
+            else:
+                quota_s = first[0]
+                with open(period_path) as fh:
+                    period_s = fh.read().split()[0]
+            if quota_s in ("max", "-1"):
+                continue
+            quota, period = int(quota_s), int(period_s)
+            if quota > 0 and period > 0:
+                candidates.append(max(1, -(-quota // period)))
+        except (OSError, ValueError, IndexError):
+            continue
+    return max(1, min(candidates) if candidates else 2)
+
+
 _model_executor = ThreadPoolExecutor(
-    max_workers=max(1, os.cpu_count() or 2), thread_name_prefix="amfs-model"
+    max_workers=_effective_cpu_count(), thread_name_prefix="amfs-model"
 )
 _db_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="amfs-db")
 
@@ -246,6 +333,19 @@ async def _offload(executor: ThreadPoolExecutor, fn: Any, /, *args: Any, **kwarg
     return await loop.run_in_executor(
         executor, functools.partial(ctx.run, functools.partial(fn, *args, **kwargs))
     )
+
+
+def _sync_search(adapter: Any, sq: Any, branch: Any) -> list[Any]:
+    """``adapter.search`` for adapters with and without a ``branch`` parameter.
+
+    Meant to run on ``_db_executor`` via ``_offload``; the sync search is the
+    fallback the async path takes when it returns nothing, and it must not
+    hold the loop any more than the primary path does.
+    """
+    try:
+        return adapter.search(sq, branch=branch)
+    except TypeError:
+        return adapter.search(sq)
 
 
 _known_agents: set[str] = set()
@@ -1635,7 +1735,7 @@ async def _read_entry(
 
 
 @app.get("/api/v1/quality/{entity_path:path}/{key}")
-async def entry_quality(
+def entry_quality(
     request: Request,
     entity_path: str,
     key: str,
@@ -1736,11 +1836,10 @@ async def _scope_block(
     vis = _get_visibility_filter(request) if request is not None else None
     if vis is not None and vis.should_filter():
         try:
-            visible = {
-                e.key for e in vis.filter_entries(
-                    _get_memory()._adapter.list(entity_path, branch=branch)
-                )
-            }
+            listed = await _offload(
+                _db_executor, _get_memory()._adapter.list, entity_path, branch=branch
+            )
+            visible = {e.key for e in vis.filter_entries(listed)}
             counts = {**counts, "keys": [k for k in counts.get("keys", []) if k in visible]}
         except Exception:  # noqa: BLE001 - drop the sample rather than leak it
             counts = {**counts, "keys": []}
@@ -2404,10 +2503,9 @@ async def search_entries(
             logger.warning("Async search failed — falling back to sync", exc_info=True)
             results = []
         if not results:
-            try:
-                sync_results = mem._adapter.search(sq, branch=branch)
-            except TypeError:
-                sync_results = mem._adapter.search(sq)
+            # Runs on every search that finds nothing, so it goes off the loop
+            # like the primary path did.
+            sync_results = await _offload(_db_executor, _sync_search, mem._adapter, sq, branch)
             if sync_results:
                 logger.warning(
                     "Async search returned 0 results but sync found %d — RLS context mismatch",
@@ -2415,10 +2513,7 @@ async def search_entries(
                 )
                 results = sync_results
     else:
-        try:
-            results = mem._adapter.search(sq, branch=branch)
-        except TypeError:
-            results = mem._adapter.search(sq)
+        results = await _offload(_db_executor, _sync_search, mem._adapter, sq, branch)
 
     vis = _get_visibility_filter(request)
     if vis is not None and vis.should_filter():
@@ -2593,9 +2688,7 @@ async def retrieve_entries(
     if not candidates:
         mem = _get_memory()
         try:
-            results = mem._adapter.search(sq_lex, branch=branch)
-        except TypeError:
-            results = mem._adapter.search(sq_lex)
+            results = await _offload(_db_executor, _sync_search, mem._adapter, sq_lex, branch)
         except Exception:
             results = []
         for entry in results:
@@ -5076,7 +5169,7 @@ Return ONLY valid JSON, no markdown formatting."""
 
 
 @app.get("/api/v1/admin/usage")
-async def get_usage(
+def get_usage(
     request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -6618,7 +6711,7 @@ def _audit_log(
 
 
 @app.get("/api/v1/admin/api-keys")
-async def list_api_keys(
+def list_api_keys(
     request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -6675,7 +6768,7 @@ async def list_api_keys(
 
 
 @app.post("/api/v1/admin/api-keys")
-async def create_api_key(
+def create_api_key(
     req: CreateAPIKeyRequest,
     request: Request,
     _auth: str | None = Depends(verify_api_key),
@@ -6729,7 +6822,7 @@ async def create_api_key(
 
 
 @app.delete("/api/v1/admin/api-keys/{key_id}")
-async def revoke_api_key(
+def revoke_api_key(
     key_id: str,
     request: Request,
     _auth: str | None = Depends(verify_api_key),
@@ -6776,7 +6869,7 @@ async def revoke_api_key(
 
 
 @app.get("/api/v1/admin/audit")
-async def list_audit_log(
+def list_audit_log(
     request: Request,
     action: str | None = Query(None),
     limit: int = Query(200),
@@ -6876,7 +6969,7 @@ async def list_patterns(
 
 
 @app.get("/api/v1/admin/teams")
-async def list_teams(
+def list_teams(
     request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -6919,7 +7012,7 @@ async def list_teams(
 
 
 @app.post("/api/v1/admin/teams")
-async def create_team(
+def create_team(
     req: CreateTeamRequest,
     request: Request,
     _auth: str | None = Depends(verify_api_key),
@@ -6954,7 +7047,7 @@ async def create_team(
 
 
 @app.patch("/api/v1/admin/teams/{team_id}")
-async def update_team(
+def update_team(
     team_id: str,
     req: UpdateTeamRequest,
     request: Request,
@@ -7009,7 +7102,7 @@ async def update_team(
 
 
 @app.delete("/api/v1/admin/teams/{team_id}")
-async def delete_team(
+def delete_team(
     team_id: str,
     request: Request,
     _auth: str | None = Depends(verify_api_key),
@@ -7044,7 +7137,7 @@ async def delete_team(
 
 
 @app.get("/api/v1/admin/teams/{team_id}/members")
-async def list_team_members(
+def list_team_members(
     request: Request,
     team_id: str,
     include_removed: bool = Query(False),
@@ -7100,7 +7193,7 @@ async def list_team_members(
 
 
 @app.post("/api/v1/admin/teams/{team_id}/members")
-async def add_team_member(
+def add_team_member(
     team_id: str,
     req: AddTeamMemberRequest,
     request: Request,
@@ -7157,7 +7250,7 @@ async def add_team_member(
 
 
 @app.patch("/api/v1/admin/teams/{team_id}/members/{member_id}")
-async def update_team_member(
+def update_team_member(
     team_id: str,
     member_id: str,
     req: UpdateTeamMemberRequest,
@@ -7213,7 +7306,7 @@ async def update_team_member(
 
 
 @app.delete("/api/v1/admin/teams/{team_id}/members/{member_id}")
-async def remove_team_member(
+def remove_team_member(
     team_id: str,
     member_id: str,
     request: Request,
@@ -7247,7 +7340,7 @@ async def remove_team_member(
 
 
 @app.post("/api/v1/admin/teams/{team_id}/members/{member_id}/reinstate")
-async def reinstate_team_member(
+def reinstate_team_member(
     team_id: str,
     member_id: str,
     request: Request,
@@ -7291,7 +7384,7 @@ async def reinstate_team_member(
 
 
 @app.get("/api/v1/admin/members/check-email")
-async def check_member_email(
+def check_member_email(
     request: Request,
     email: str = Query(...),
     _auth: str | None = Depends(verify_api_key),
@@ -7356,7 +7449,7 @@ async def check_member_email(
 
 
 @app.get("/api/v1/admin/patterns")
-async def list_detected_patterns(
+def list_detected_patterns(
     pattern_type: str | None = Query(None),
     category: str | None = Query(None),
     severity: str | None = Query(None),
@@ -7437,7 +7530,7 @@ async def list_detected_patterns(
 
 
 @app.post("/api/v1/admin/patterns/scan")
-async def run_pattern_scan(
+def run_pattern_scan(
     req: RunPatternDetectionRequest,
     request: Request,
     _auth: str | None = Depends(verify_api_key),
@@ -7543,7 +7636,7 @@ async def run_pattern_scan(
 
 
 @app.patch("/api/v1/admin/patterns/{pattern_id}/resolve")
-async def resolve_pattern(
+def resolve_pattern(
     pattern_id: str,
     request: Request,
     _auth: str | None = Depends(verify_api_key),
@@ -8162,7 +8255,9 @@ async def _credit_briefing_reuse(
             if _async_adapter is not None:
                 entry = await _async_adapter.read(entity_path, key, branch=branch)
             else:
-                entry = _get_memory()._adapter.read(entity_path, key, branch=branch)
+                entry = await _offload(
+                    _db_executor, _get_memory()._adapter.read, entity_path, key, branch=branch
+                )
         except Exception:  # noqa: BLE001 - the value block is reporting, not the answer
             logger.debug("briefing reuse lookup failed", exc_info=True)
 
@@ -8778,86 +8873,104 @@ def _make_tenant_provider(dsn: str):
     return _provider
 
 
+def _start_embedded_cortex() -> None:
+    """Start the embedded Cortex worker in this process, if it can be.
+
+    Called from the app lifespan, so it runs once per serving process — see
+    ``_lifespan`` for why not from ``main()``. Idempotent: a second call in the
+    same process (a test re-entering the lifespan) is a no-op.
+    """
+    global _cortex_worker
+    if _cortex_worker is not None:
+        return
+    dsn = os.environ.get("AMFS_POSTGRES_DSN")
+    if not dsn:
+        logger.warning("AMFS_WITH_CORTEX requires AMFS_POSTGRES_DSN")
+        return
+
+    try:
+        from amfs_postgres.adapter import PostgresAdapter
+        from amfs_cortex.compiler import DigestCompiler
+        from amfs_cortex.worker import CortexWorker
+
+        namespace = os.environ.get("AMFS_NAMESPACE", "default")
+        # One background thread compiling digests on a timer, sharing a
+        # process with the request path. Sized for that rather than left
+        # on the pool default, which would have it hold as many
+        # connections as the endpoints do while using one at a time —
+        # multiplied by every process the service scales out to.
+        adapter = PostgresAdapter(
+            dsn=dsn, namespace=namespace, min_pool_size=1, max_pool_size=2
+        )
+
+        strategies = []
+        try:
+            from amfs_cortex_pro import get_pro_strategies
+            strategies = get_pro_strategies()
+            logger.info("Pro compilation strategies loaded")
+        except ImportError:
+            pass
+
+        compiler = DigestCompiler(
+            adapter=adapter,
+            strategies=strategies or None,
+            namespace=namespace,
+        )
+        tenant_provider = _make_tenant_provider(dsn)
+        # The catch-up scan runs in every serving process (no advisory lock),
+        # so its interval sets the fleet-wide scan rate: 36 processes at the
+        # 300 s default is one tenant-wide scan every ~8 s. A deployment that
+        # runs several workers per instance should raise this in proportion
+        # to keep the rate where it was. The scan is a GROUP BY since the
+        # adapter grew list_scopes(), but the knob stays: 0 disables it on
+        # deployments where the event path is trusted to compile every scope.
+        catchup_s = float(os.environ.get("AMFS_CORTEX_CATCHUP_INTERVAL_S", "300"))
+        worker = CortexWorker(
+            dsn=dsn,
+            compiler=compiler,
+            use_advisory_lock=False,
+            catchup_interval_s=catchup_s,
+            tenant_provider=tenant_provider,
+        )
+
+        try:
+            from amfs_cortex_pro import get_outcome_wiring, HotContextTracker
+            wiring = get_outcome_wiring(adapter, namespace)
+            if wiring:
+                worker._outcome_wiring = wiring
+                logger.info("Outcome wiring attached to embedded Cortex worker")
+            tracker = HotContextTracker()
+            worker._hot_tracker = tracker
+            logger.info("Hot context tracker attached to embedded Cortex worker")
+        except ImportError:
+            pass
+
+        from amfs_http.pro_proxy import create_forwarder
+        forwarder = create_forwarder()
+        if forwarder:
+            worker._pro_forwarder = forwarder
+
+        t = threading.Thread(target=worker.run, daemon=True, name="cortex-embedded")
+        t.start()
+        _cortex_worker = worker
+        logger.info("Embedded Cortex worker started (pid=%d)", os.getpid())
+    except ImportError:
+        logger.warning("AMFS_WITH_CORTEX requires amfs-cortex package")
+    except Exception:
+        logger.exception("Failed to start embedded Cortex worker — server will run without Cortex")
+
+
 def main() -> None:
     """Run the AMFS HTTP server via uvicorn."""
-    global _cortex_worker
     args = _parse_args()
 
+    # The flag becomes an environment variable rather than a start here, so
+    # that every uvicorn worker process — which inherits the environment but
+    # not this function's locals — starts its own Cortex from the lifespan.
+    # Setting the variable directly (docker-compose, a systemd unit) works the
+    # same without the flag.
     if args.with_cortex:
-        dsn = os.environ.get("AMFS_POSTGRES_DSN")
-        if dsn:
-            import threading
-
-            try:
-                from amfs_postgres.adapter import PostgresAdapter
-                from amfs_cortex.compiler import DigestCompiler
-                from amfs_cortex.worker import CortexWorker
-
-                namespace = os.environ.get("AMFS_NAMESPACE", "default")
-                # One background thread compiling digests on a timer, sharing a
-                # process with the request path. Sized for that rather than left
-                # on the pool default, which would have it hold as many
-                # connections as the endpoints do while using one at a time —
-                # multiplied by every instance the service scales out to.
-                adapter = PostgresAdapter(
-                    dsn=dsn, namespace=namespace, min_pool_size=1, max_pool_size=2
-                )
-
-                strategies = []
-                try:
-                    from amfs_cortex_pro import get_pro_strategies
-                    strategies = get_pro_strategies()
-                    logger.info("Pro compilation strategies loaded")
-                except ImportError:
-                    pass
-
-                compiler = DigestCompiler(
-                    adapter=adapter,
-                    strategies=strategies or None,
-                    namespace=namespace,
-                )
-                tenant_provider = _make_tenant_provider(dsn)
-                # The catch-up scan runs on every instance (no advisory lock), so
-                # its interval sets the fleet-wide scan rate: 36 instances at the
-                # 300 s default is one tenant-wide scan every ~8 s. The scan is
-                # a GROUP BY since the adapter grew list_scopes(), but the knob
-                # stays: 0 disables it on deployments where the event path is
-                # trusted to compile every scope.
-                catchup_s = float(os.environ.get("AMFS_CORTEX_CATCHUP_INTERVAL_S", "300"))
-                _cortex_worker = CortexWorker(
-                    dsn=dsn,
-                    compiler=compiler,
-                    use_advisory_lock=False,
-                    catchup_interval_s=catchup_s,
-                    tenant_provider=tenant_provider,
-                )
-
-                try:
-                    from amfs_cortex_pro import get_outcome_wiring, HotContextTracker
-                    wiring = get_outcome_wiring(adapter, namespace)
-                    if wiring:
-                        _cortex_worker._outcome_wiring = wiring
-                        logger.info("Outcome wiring attached to embedded Cortex worker")
-                    tracker = HotContextTracker()
-                    _cortex_worker._hot_tracker = tracker
-                    logger.info("Hot context tracker attached to embedded Cortex worker")
-                except ImportError:
-                    pass
-
-                from amfs_http.pro_proxy import create_forwarder
-                forwarder = create_forwarder()
-                if forwarder:
-                    _cortex_worker._pro_forwarder = forwarder
-
-                t = threading.Thread(target=_cortex_worker.run, daemon=True, name="cortex-embedded")
-                t.start()
-                logger.info("Embedded Cortex worker started")
-            except ImportError:
-                logger.warning("--with-cortex requires amfs-cortex package")
-            except Exception:
-                logger.exception("Failed to start embedded Cortex worker — server will run without Cortex")
-        else:
-            logger.warning("--with-cortex requires AMFS_POSTGRES_DSN")
+        os.environ["AMFS_WITH_CORTEX"] = "1"
 
     workers = args.workers
     if args.reload and workers > 1:
