@@ -523,18 +523,20 @@ class AsyncPostgresAdapter:
         scope: SqlScope | None = None,
         agent_id: str | None = None,
     ) -> int:
-        """``COUNT(*)`` over exactly the rows :meth:`list` would return."""
-        conditions, params = list_conditions(
-            self._namespace,
-            entity_path,
-            include_superseded=include_superseded,
-            branch=branch,
-            scope=scope,
-            agent_id=agent_id,
-        )
-        where = " AND ".join(conditions)
+        """``COUNT(*)`` over exactly the rows :meth:`list` would return —
+        the same branch overlay included, so a page and its ``total`` agree."""
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
+                conditions, params = list_conditions(
+                    self._namespace,
+                    entity_path,
+                    include_superseded=include_superseded,
+                    branch=branch,
+                    scope=scope,
+                    agent_id=agent_id,
+                    branch_scope=await self._branch_scope(cur, branch),
+                )
+                where = " AND ".join(conditions)
                 await cur.execute(
                     f"SELECT COUNT(*) AS n FROM amfs_memory_entries WHERE {where}", params
                 )

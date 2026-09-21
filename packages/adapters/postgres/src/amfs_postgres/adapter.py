@@ -1722,8 +1722,9 @@ class PostgresAdapter(AdapterABC):
                     """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'amfs_outcomes'
-                      AND column_name IN ('actions_taken', 'task_embedding', 'environment')
-                      AND column_name IN ('actions_taken', 'task_embedding', 'task_text')
+                      AND column_name IN (
+                        'actions_taken', 'task_embedding', 'environment', 'task_text'
+                      )
                     """,
                 )
                 found = {row["column_name"] for row in cur.fetchall()}

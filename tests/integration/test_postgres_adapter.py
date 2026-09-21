@@ -1438,6 +1438,38 @@ def test_the_async_adapter_lists_and_searches_a_branch_over_its_live_parent(adap
     ]
 
 
+def test_a_branch_count_agrees_with_its_paged_list_on_both_adapters(adapter) -> None:
+    """``count_entries`` is the ``total`` a paged ``/entries`` reports, so it
+    must read the branch through the same overlay ``list`` does: three rows
+    on the branch (two of them main's, seen through), two on main. A count of
+    the branch's own rows alone would stop a client paging to ``total`` early."""
+    branch = _branch_world(adapter)
+
+    assert adapter.count_entries("acme/pricing", branch=branch) == 3
+    assert adapter.count_entries("acme/pricing") == 2
+    assert adapter.count_entries("acme/pricing", branch=branch) == len(
+        adapter.list("acme/pricing", branch=branch)
+    )
+    page = adapter.list("acme/pricing", branch=branch, limit=2, offset=0)
+    rest = adapter.list("acme/pricing", branch=branch, limit=2, offset=2)
+    assert len(page) + len(rest) == 3
+
+    async def go():
+        a = await _async_adapter()
+        try:
+            return (
+                await a.count_entries("acme/pricing", branch=branch),
+                await a.count_entries("acme/pricing"),
+                len(await a.list("acme/pricing", branch=branch)),
+            )
+        finally:
+            await a.close()
+
+    on_branch, on_main, listed = _run(go())
+    assert (on_branch, on_main) == (3, 2)
+    assert on_branch == listed
+
+
 def test_the_async_adapter_reads_the_parent_live_and_a_ghost_branch_reads_nothing(adapter) -> None:
     from datetime import UTC, datetime
 
