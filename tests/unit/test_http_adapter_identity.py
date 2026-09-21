@@ -156,3 +156,19 @@ class TestAgentMemoryBinds:
         adapter = _Broken.__new__(_Broken)
         mem = AgentMemory("sre-agent", adapter=adapter)
         assert mem.adapter is adapter
+
+    def test_a_bind_that_returns_nothing_leaves_the_adapter_in_place(self, tmp_path) -> None:
+        """A test double whose ``__getattr__`` answers every name with a
+        no-op, or a wrapper that forgot to return: the handle keeps its
+        adapter rather than ending up with ``None``."""
+        from amfs import AgentMemory
+        from amfs_filesystem.adapter import FilesystemAdapter
+
+        class _Forgetful(FilesystemAdapter):
+            def bind(self, agent_id: Any, session_id: Any) -> None:
+                return None
+
+        fs = _Forgetful(tmp_path / "amfs")
+        mem = AgentMemory("sre-agent", adapter=fs)
+        assert mem.adapter is fs
+        assert mem.as_agent("other").adapter is fs

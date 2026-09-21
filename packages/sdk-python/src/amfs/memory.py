@@ -92,10 +92,14 @@ def _bind_adapter(adapter: AdapterABC, tagger: CausalTagger) -> AdapterABC:
     if not callable(bind):
         return adapter
     try:
-        return bind(tagger.agent_id, tagger.session_id)
+        bound = bind(tagger.agent_id, tagger.session_id)
     except Exception:  # noqa: BLE001 - attribution must not break construction
         logger.debug("adapter.bind failed — continuing unbound", exc_info=True)
         return adapter
+    # A ``bind`` that hands back nothing usable — a test double's catch-all,
+    # a wrapper that forgot to return — leaves the handle as it was rather
+    # than replacing the adapter with ``None``.
+    return bound if bound is not None else adapter
 
 
 _sdk_bg_executor: ThreadPoolExecutor | None = None
