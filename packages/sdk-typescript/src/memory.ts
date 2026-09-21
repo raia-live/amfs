@@ -112,6 +112,18 @@ export class AgentMemory {
 
     const tagger = new CausalTagger(agentId, options?.sessionId);
     this.sessionId = tagger.sessionId;
+    // An adapter that talks to a server identifies this memory's agent and
+    // session on every request, so a hosted server can attribute reads and
+    // keep the whole session on one arm of a live repair canary. Duck-typed:
+    // the in-memory adapter has no identity to declare.
+    const bind = (this.adapter as { bind?: unknown }).bind;
+    if (typeof bind === "function") {
+      this.adapter = (bind as (a: string, s: string) => AmfsAdapter).call(
+        this.adapter,
+        agentId,
+        tagger.sessionId
+      );
+    }
     this.engine = new CoWEngine(this.adapter, tagger, this.readTracker);
     this.propagator = new OutcomeBackPropagator(this.adapter);
   }

@@ -20,7 +20,14 @@ export const SESSION_ATTRIBUTE_VALUE_MAX_LEN = 256;
  * locally and by the server, which exempts the same keys — for the branch it
  * ran on.
  */
-export const SDK_STAMPED_ATTRIBUTES: ReadonlySet<string> = new Set(["memory_branch"]);
+export const SDK_STAMPED_ATTRIBUTES: ReadonlySet<string> = new Set([
+  "memory_branch",
+  // Stamped by a hosted server when the session was routed through a live
+  // repair canary (which fix, which arm). Never set by the SDK; exempt so a
+  // caller's bag at the cap is not refused for a stamp it did not add.
+  "canary_fix_id",
+  "canary_arm",
+]);
 
 /** How many of `keys` count against the cap. */
 export function countedAttributeKeys(keys: Iterable<string>): number {

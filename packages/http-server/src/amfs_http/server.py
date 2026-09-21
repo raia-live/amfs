@@ -62,6 +62,7 @@ from amfs_core.models import (
     MemoryEntry,
     SearchQuery,
     SemanticQuery,
+    SessionMetadata,
 )
 from amfs_core.pagination import (
     InvalidCursorError,
@@ -837,6 +838,94 @@ def _get_visibility_filter(request: Request):
     return getattr(request.state, "visibility_filter", None)
 
 
+#: ``request.state`` attribute a layer in front of these routes may set to move
+#: a session's *reads* onto a memory branch it never named. The SaaS layer sets
+#: it when the calling session is in the canary arm of a live repair canary.
+MEMORY_BRANCH_STATE = "memory_branch"
+#: ``request.state`` attribute holding attributes the same layer wants on the
+#: sealed trace — which canary the session was in and which arm. Merged
+#: server-side, after the caller's bag has been validated, so they are exempt
+#: from the client cap and cannot be forged from the body.
+TRACE_ATTRIBUTES_STATE = "trace_attributes"
+
+
+def _effective_branch(request: Request | None, branch: str | None) -> str:
+    """The branch a read should hit: the caller's when named, else routed, else main.
+
+    A caller that names a branch always gets that branch — an explicit
+    ``branch=main`` from a canary session still reads main, which is what a
+    repair tool inspecting the baseline needs. A caller that names none reads
+    whatever ``request.state.memory_branch`` says, which is how a session the
+    SaaS layer put in a canary arm reads the proposal without knowing it, and
+    ``main`` when nothing is set — the behaviour every route had before.
+
+    Reads only. Writes and commits never consult this: a canary session reads
+    its branch and writes main, because what the agent learns during the test
+    is the user's, not the proposal's.
+    """
+    # ``isinstance`` rather than truthiness: a handler invoked in-process (Pro
+    # composes several, and the tests do) receives the ``Query(...)`` sentinel
+    # as its default, and that object is truthy without being a branch.
+    if isinstance(branch, str) and branch.strip():
+        return branch.strip()
+    state = getattr(request, "state", None) if request is not None else None
+    routed = getattr(state, MEMORY_BRANCH_STATE, None) if state is not None else None
+    if isinstance(routed, str) and routed.strip():
+        return routed.strip()
+    return "main"
+
+
+#: Attribute keys only the routing layer may set. When it has made a decision
+#: for the request (``trace_attributes`` is present, even empty) a client's own
+#: claims under these keys are dropped: a session nothing routed must not be
+#: able to vote in a canary it was not in.
+ROUTED_ONLY_ATTRIBUTES = frozenset({"canary_fix_id", "canary_arm"})
+
+
+def _routed_trace_attributes(request: Request | None) -> dict[str, Any] | None:
+    """Attributes the layer in front of this route wants on the sealed trace.
+
+    ``None`` when no layer made a decision for this request; a dict — possibly
+    empty — when one did. Values are coerced to scalars the trace store
+    accepts; anything else is dropped rather than failing the commit.
+    """
+    state = getattr(request, "state", None) if request is not None else None
+    raw = getattr(state, TRACE_ATTRIBUTES_STATE, None) if state is not None else None
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            out[key.strip().lower()] = value
+    return out
+
+
+def _merge_routed_attributes(
+    request: Request | None, attributes: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """*attributes* with the routed stamps on top; ``None`` stays ``None`` when nothing is added.
+
+    The server's values win. A client must not be able to put itself in the
+    canary arm by sending ``canary_arm`` in its own bag, and the tally reads
+    only these keys to decide which arm a trace belongs to — so once the
+    routing layer has spoken for a request, the client's claims under those
+    keys are dropped even when the layer's answer was "not routed".
+    """
+    routed = _routed_trace_attributes(request)
+    if routed is None:
+        return attributes
+    merged = {
+        k: v for k, v in (attributes or {}).items()
+        if str(k).strip().lower() not in ROUTED_ONLY_ATTRIBUTES
+    }
+    merged.update(routed)
+    if not merged and attributes is None:
+        return None
+    return merged
+
+
 def _active_visibility_filter(request: Request):
     """Return the visibility filter when per-user scoping applies, else None.
 
@@ -1192,7 +1281,7 @@ async def read_entry_by_query(
     request: Request,
     entity_path: str = Query(...),
     key: str = Query(...),
-    branch: str = Query("main"),
+    branch: str | None = Query(None),
     response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -1224,7 +1313,7 @@ async def read_entry(
     request: Request,
     entity_path: str,
     key: str,
-    branch: str = Query("main"),
+    branch: str | None = Query(None),
     response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -1235,9 +1324,10 @@ async def _read_entry(
     request: Request,
     entity_path: str,
     key: str,
-    branch: str,
+    branch: str | None,
     response: Response | None = None,
 ) -> dict[str, Any]:
+    branch = _effective_branch(request, branch)
     mem = _get_memory()
     credited = False
     if _async_adapter is not None:
@@ -1283,10 +1373,11 @@ async def entry_quality(
     request: Request,
     entity_path: str,
     key: str,
-    branch: str = Query("main"),
+    branch: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Compute a quality report for a stored entry on demand."""
+    branch = _effective_branch(request, branch)
     mem = _get_memory()
     # Read straight from the adapter — this is an internal/dashboard inspection,
     # not an agent recall, so it must NOT increment recall_count (doing so
@@ -1636,7 +1727,7 @@ async def write_entry(
 async def list_entries(
     request: Request,
     entity_path: str | None = Query(None),
-    branch: str = Query("main"),
+    branch: str | None = Query(None),
     include_superseded: bool = Query(False),
     limit: int | None = Query(None, ge=1, le=10_000),
     offset: int = Query(0, ge=0),
@@ -1656,6 +1747,7 @@ async def list_entries(
         "[TLS-DIAG] /entries tls_account=%s state_account=%s state_user=%s has_tenant_ctx=%s",
         _tls_acct, _state_acct, _state_user, _has_ctx,
     )
+    branch = _effective_branch(request, branch)
     mem = _get_memory()
     if _async_adapter is not None:
         try:
@@ -1762,7 +1854,7 @@ async def aggregate_entries_endpoint(
         )
 
     mem = _get_memory()
-    entries = mem.list(req.entity_path, branch=req.branch)
+    entries = mem.list(req.entity_path, branch=_effective_branch(request, req.branch))
 
     vis = _get_visibility_filter(request)
     if vis is not None and vis.should_filter():
@@ -1932,7 +2024,7 @@ async def search_entries(
     response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> list[dict[str, Any]]:
-    branch = getattr(req, "branch", "main") or "main"
+    branch = _effective_branch(request, getattr(req, "branch", None))
     sq = SearchQuery(
         query=req.query,
         entity_path=req.entity_path,
@@ -2053,7 +2145,7 @@ async def retrieve_entries(
     from amfs_core.content import ARTIFACT_PENALTY, PROCEDURE_BOOST, classify_artifact
     from amfs_core.query_norm import normalize_temporal
 
-    branch = req.branch or "main"
+    branch = _effective_branch(request, req.branch)
     vis = _get_visibility_filter(request)
     embedder = _get_server_embedder()
 
@@ -3523,6 +3615,10 @@ async def commit_outcome(
         raise HTTPException(
             status_code=422, detail=f"session_metadata.attributes: {exc}"
         ) from exc
+    # After validation, never before: the routing layer's stamps (which canary
+    # this session was in, and which arm) are the server's, so they are exempt
+    # from the client's key cap and overwrite anything the body claimed.
+    client_attributes = _merge_routed_attributes(request, client_attributes) or {}
     client_llm_calls = client_meta.get("llm_calls")
     if not isinstance(client_llm_calls, list):
         client_llm_calls = []
@@ -3807,6 +3903,33 @@ async def save_trace(
                 session_id=trace.session_id,
             ),
         })
+    raw_meta = body.get("session_metadata") if isinstance(body, dict) else None
+    # The routing layer's stamps, on the same footing as in /outcomes: this is
+    # the other request a routed session's trace can arrive on, and a canary
+    # arm that is stamped on one path and not the other is a tally that counts
+    # SDK sessions in neither arm. Written onto the trace that is saved and onto
+    # the raw metadata that is sealed, since the seal prefers the raw body when
+    # there is one and the trace's own metadata when there is not. Through the
+    # same merge as /outcomes, so a decided-but-unrouted request (``{}``) drops
+    # the client's own canary claims here too — this is the path every
+    # HttpAdapter commit seals on, since ``trace_follows`` skips the other.
+    if _routed_trace_attributes(req) is not None:
+        meta = trace.session_metadata or SessionMetadata()
+        existing = getattr(meta, "attributes", None)
+        merged = _merge_routed_attributes(
+            req, dict(existing) if isinstance(existing, dict) else {}
+        )
+        trace = trace.model_copy(
+            update={"session_metadata": meta.model_copy(update={"attributes": merged or {}})}
+        )
+        if isinstance(raw_meta, dict):
+            raw_attrs = raw_meta.get("attributes")
+            raw_meta = {
+                **raw_meta,
+                "attributes": _merge_routed_attributes(
+                    req, dict(raw_attrs) if isinstance(raw_attrs, dict) else {}
+                ) or {},
+            }
     saved = mem._adapter.save_trace(trace)
     # Sealed like a trace committed through /outcomes. Until this call, a trace
     # arriving here — which is every trace an HttpAdapter client commits — was
@@ -3814,7 +3937,6 @@ async def save_trace(
     # is sealed, so the immutable copy carries the persisted id; the raw body is
     # passed alongside because ``model_validate`` above dropped the
     # ``session_metadata`` keys the Pro recorder's spans travel in.
-    raw_meta = body.get("session_metadata") if isinstance(body, dict) else None
     immutable_trace_id = _auto_seal_trace(mem, saved, session_metadata=raw_meta)
     result = saved.model_dump(mode="json")
     if immutable_trace_id:
@@ -7150,7 +7272,12 @@ async def get_briefing(
     }
     if since is not None:
         briefing_kwargs["since"] = since
-    if branch:
+    # Resolved through the routing hook like every other read, then passed only
+    # when it is not main so a server-side ``briefing`` that predates the
+    # keyword keeps working (``mem.briefing`` here is always current, but the
+    # in-process callers in Pro compose this handler with their own memory).
+    branch = _effective_branch(request, branch)
+    if branch != "main":
         briefing_kwargs["branch"] = branch
     digests = mem.briefing(**briefing_kwargs)
 
@@ -7161,7 +7288,7 @@ async def get_briefing(
     # After visibility filtering, never before: an entry the caller may not see
     # must not be credited to them either.
     if credit_reuse:
-        await _credit_briefing_reuse(response, request, digests)
+        await _credit_briefing_reuse(response, request, digests, branch=branch)
 
     return {
         "digests": [d.model_dump(mode="json") for d in digests],

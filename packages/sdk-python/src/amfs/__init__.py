@@ -27,7 +27,14 @@ from amfs_core.models import (
 )
 from amfs_core.exceptions import StaleWriteError
 
-from amfs.memory import MEMORY_BRANCH_ATTRIBUTE, SDK_STAMPED_ATTRIBUTES, AgentMemory, MemoryScope
+from amfs.memory import (
+    CANARY_ARM_ATTRIBUTE,
+    CANARY_FIX_ATTRIBUTE,
+    MEMORY_BRANCH_ATTRIBUTE,
+    SDK_STAMPED_ATTRIBUTES,
+    AgentMemory,
+    MemoryScope,
+)
 from amfs.replay import ReplayReceiver, ReplayRequest, ReplayResult
 
 __all__ = [
@@ -42,6 +49,8 @@ __all__ = [
     "Event",
     "LayerConfig",
     "MemoryEntry",
+    "CANARY_ARM_ATTRIBUTE",
+    "CANARY_FIX_ATTRIBUTE",
     "MEMORY_BRANCH_ATTRIBUTE",
     "MemoryScope",
     "MemoryStats",

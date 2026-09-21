@@ -69,6 +69,38 @@ BRANCH_ENV = "AMFS_BRANCH"
 #: prompt on ``main`` never read the fix and does not count — so the SDK
 #: stamps it rather than leaving it to every caller to remember.
 MEMORY_BRANCH_ATTRIBUTE = "memory_branch"
+#: The two stamps a hosted server puts on a trace when the session was routed
+#: through a live repair canary: which fix was under test, and which arm the
+#: session sat in (``"canary"`` read the fix's branch, ``"control"`` read
+#: main). Both arms are stamped so the tally compares like with like and a
+#: session nothing routed is in neither. The SDK never sets these itself —
+#: they are the server's — but it must recognise them: they arrive in the
+#: merged bag at commit and must not count against the caller's cap.
+CANARY_FIX_ATTRIBUTE = "canary_fix_id"
+CANARY_ARM_ATTRIBUTE = "canary_arm"
+
+
+def _bind_adapter(adapter: AdapterABC, tagger: CausalTagger) -> AdapterABC:
+    """*adapter* identifying itself as *tagger*'s agent and session, when it can.
+
+    Duck-typed on ``bind`` so the in-memory, filesystem and Postgres adapters
+    are returned untouched: only a transport that talks to a server has any
+    identity to declare. Never raises — a handle that cannot be bound is a
+    handle that works exactly as it did before.
+    """
+    bind = getattr(adapter, "bind", None)
+    if not callable(bind):
+        return adapter
+    try:
+        bound = bind(tagger.agent_id, tagger.session_id)
+    except Exception:  # noqa: BLE001 - attribution must not break construction
+        logger.debug("adapter.bind failed — continuing unbound", exc_info=True)
+        return adapter
+    # A ``bind`` that hands back nothing usable — a test double's catch-all,
+    # a wrapper that forgot to return — leaves the handle as it was rather
+    # than replacing the adapter with ``None``.
+    return bound if bound is not None else adapter
+
 
 _sdk_bg_executor: ThreadPoolExecutor | None = None
 _sdk_bg_lock = threading.Lock()
@@ -112,7 +144,9 @@ _ATTRIBUTE_SCALARS = (str, int, float, bool)
 #: ``SESSION_ATTRIBUTES_MAX_KEYS``: a caller's bag at the cap is still
 #: accepted — locally and by the server, which validates with the same
 #: function — for the branch it ran on.
-SDK_STAMPED_ATTRIBUTES = frozenset({"memory_branch"})
+SDK_STAMPED_ATTRIBUTES = frozenset({
+    MEMORY_BRANCH_ATTRIBUTE, CANARY_FIX_ATTRIBUTE, CANARY_ARM_ATTRIBUTE,
+})
 
 
 def _check_attribute_count(attributes: dict[str, Any], what: str = "session attributes") -> None:
@@ -369,6 +403,11 @@ class AgentMemory:
             self._adapter = create_adapter_from_config(self._config)
 
         self._tagger = CausalTagger(agent_id, session_id)
+        # An adapter that talks to a server over HTTP identifies this handle's
+        # agent and session on every request, so a hosted server can attribute
+        # reads and keep the whole session on one arm of a live repair canary.
+        # Bound per handle rather than on the adapter: see ``as_agent``.
+        self._adapter = _bind_adapter(self._adapter, self._tagger)
         self._read_tracker = ReadTracker()
         self._engine = CoWEngine(self._adapter, self._tagger, self._read_tracker)
         self._propagator = OutcomeBackPropagator(self._adapter)
@@ -494,7 +533,11 @@ class AgentMemory:
         clone = copy.copy(self)
         clone._tagger = CausalTagger(agent_id, self._tagger.session_id)
         clone._read_tracker = ReadTracker()
-        clone._engine = CoWEngine(self._adapter, clone._tagger, clone._read_tracker)
+        # Same connection, this identity: an HTTP adapter carries the agent on
+        # its requests, and the shared one carries ours.
+        clone._adapter = _bind_adapter(self._adapter, clone._tagger)
+        clone._engine = CoWEngine(clone._adapter, clone._tagger, clone._read_tracker)
+        clone._propagator = OutcomeBackPropagator(clone._adapter)
         # Session state belongs to the session that built it, and a trace is
         # sealed per handle: sharing these would let an impersonated write show
         # up in the caller's trace, which is the confusion this method exists to

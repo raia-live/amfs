@@ -93,7 +93,11 @@ class SearchRequest(BaseModel):
     pattern_ref: str | None = None
     limit: int = 100
     sort_by: str = "confidence"
-    branch: str = "main"
+    # ``None`` rather than ``"main"`` so the server can tell a caller that
+    # named no branch from one that asked for main: the former may be routed
+    # onto a canary branch by the SaaS layer (``request.state.memory_branch``),
+    # the latter never is. The SDK omits the field when it is main.
+    branch: str | None = None
     depth: int = 3
     # When True (default) artifacts are demoted to the bottom of results; when
     # False they are excluded entirely.
@@ -118,7 +122,7 @@ class AggregateRequest(BaseModel):
     field: str | None = None
     group_by: str | None = None
     row_path: str | None = None
-    branch: str = "main"
+    branch: str | None = None  # see SearchRequest.branch
 
 
 class RetrieveRequest(BaseModel):
@@ -136,7 +140,7 @@ class RetrieveRequest(BaseModel):
     semantic_weight: float = 0.5
     recency_weight: float = 0.3
     confidence_weight: float = 0.2
-    branch: str = "main"
+    branch: str | None = None  # see SearchRequest.branch
     # When True (default) artifacts (stored source files) are demoted but still
     # returned; when False they are excluded entirely from results.
     include_artifacts: bool = True
