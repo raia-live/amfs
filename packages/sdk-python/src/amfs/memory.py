@@ -1076,20 +1076,30 @@ class AgentMemory:
                 # call, not just branched ones.
                 if resolved_branch and resolved_branch != "main":
                     extra["branch"] = resolved_branch
-                rows = adapter_retrieve(
-                    query,
-                    entity_path=entity_path,
-                    min_confidence=min_confidence,
-                    limit=limit,
-                    semantic_weight=cfg.semantic_weight,
-                    recency_weight=cfg.recency_weight,
-                    confidence_weight=cfg.confidence_weight,
-                    include_artifacts=include_artifacts,
-                    evidence_weight=cfg.evidence_weight,
-                    include_discredited=cfg.include_discredited,
-                    include_avoid=cfg.include_avoid,
-                    adaptive_k=cfg.adaptive_k,
-                    **extra,
+                # Shed the keywords an older adapter does not know one at a
+                # time, as ``briefing`` does: once identity or ``Run.begin``
+                # fills the environment it is sent on every call, and a
+                # ``TypeError`` here would otherwise turn every retrieve into
+                # the local fallback.
+                rows = _call_shedding_unknown_keywords(
+                    adapter_retrieve,
+                    {
+                        "query": query,
+                        "entity_path": entity_path,
+                        "min_confidence": min_confidence,
+                        "limit": limit,
+                        "semantic_weight": cfg.semantic_weight,
+                        "recency_weight": cfg.recency_weight,
+                        "confidence_weight": cfg.confidence_weight,
+                        "include_artifacts": include_artifacts,
+                        "evidence_weight": cfg.evidence_weight,
+                        "include_discredited": cfg.include_discredited,
+                        "include_avoid": cfg.include_avoid,
+                        "adaptive_k": cfg.adaptive_k,
+                        **extra,
+                    },
+                    optional=("environment", "abstain", "branch", "situation",
+                              "compact", "candidate_actions", "include_priors"),
                 )
                 scored = [
                     ScoredEntry(entry=entry, score=score, breakdown=breakdown or {})

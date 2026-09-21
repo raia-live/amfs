@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
 from .evidence import is_success
+from .models import ENVIRONMENT_KEYS
 
 #: Largest argument value that may become part of an action key. Longer strings
 #: are free text (a reply, a note) and never identify an action.
@@ -259,17 +260,41 @@ def aggregate_priors(
     }
 
 
+def recorded_environment(row: Mapping[str, Any]) -> dict[str, str]:
+    """The environment an outcome row was recorded in, from wherever the
+    producer put it: an ``environment`` block, the top level of
+    ``session_metadata`` (``model``), its ``attributes`` (where ``Run.begin``
+    and ``set_session_attributes`` stamp ``agent_version`` / ``runtime``), or a
+    trace's ``attributes`` bag. Later sources fill in keys earlier ones left
+    unset; the first that names a key wins."""
+    out: dict[str, str] = {}
+    sources: list[Any] = [row.get("environment")]
+    meta = row.get("session_metadata")
+    if isinstance(meta, Mapping):
+        sources.append(meta)
+        sources.append(meta.get("attributes"))
+    sources.append(row.get("attributes"))
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        for key in ENVIRONMENT_KEYS:
+            if key in out:
+                continue
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                out[key] = value.strip()
+    return out
+
+
 def _env_match(row: Mapping[str, Any], env: Mapping[str, str], mismatch_weight: float) -> float:
     """1.0 when the row's recorded environment agrees with *env* on every key
     both report (or reports nothing); *mismatch_weight* otherwise."""
-    recorded = row.get("environment") or row.get("session_metadata") or {}
-    if not isinstance(recorded, Mapping):
-        return 1.0
+    recorded = recorded_environment(row)
     for key, want in env.items():
         have = recorded.get(key)
-        if have is None or str(have).strip() == "":
+        if have is None:
             continue
-        if str(have).strip() != want:
+        if have != want:
             return mismatch_weight
     return 1.0
 
@@ -490,4 +515,5 @@ __all__ = [
     "recommend",
     "render_priors",
     "stable_bucket",
+    "recorded_environment",
 ]

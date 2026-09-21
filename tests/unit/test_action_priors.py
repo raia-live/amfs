@@ -209,6 +209,36 @@ def test_aggregate_priors_down_weights_another_environment() -> None:
     assert same["p"] == pytest.approx((2 + 1) / (2.5 + 2), abs=1e-3)
 
 
+def test_recorded_environment_reads_every_place_a_producer_puts_it() -> None:
+    """``Run.begin`` and ``set_session_attributes`` stamp agent_version /
+    runtime into ``session_metadata.attributes``; ``model`` sits at the top of
+    the metadata; the store may return an ``environment`` block of its own.
+    Priors must see all of them, first source to name a key winning."""
+    row = {
+        "session_metadata": {
+            "model": "gpt-5",
+            "attributes": {"agent_version": "2.1.0", "runtime": "python3.12", "noise": "x"},
+        },
+    }
+    assert act.recorded_environment(row) == {
+        "model": "gpt-5", "agent_version": "2.1.0", "runtime": "python3.12",
+    }
+    # A stored environment block is authoritative over the metadata.
+    assert act.recorded_environment({**row, "environment": {"runtime": "node20"}})["runtime"] == "node20"
+    # A trace's attribute bag counts too; blanks and non-strings are skipped.
+    assert act.recorded_environment({"attributes": {"runtime": "  ", "model": 3}}) == {}
+    assert act.recorded_environment({}) == {}
+    # And the weights follow: an attribute-stamped runtime mismatch is down-weighted.
+    now = datetime.now(UTC)
+    rows = [
+        {"actions_taken": [{"action_key": "fix:pin", "success": True}], "committed_at": now,
+         "agent_id": "a", "session_metadata": {"attributes": {"runtime": "python3.9"}}},
+    ]
+    plain = act.aggregate_priors(rows)["tried"][0]
+    scoped = act.aggregate_priors(rows, environment={"runtime": "python3.12"})["tried"][0]
+    assert scoped["p"] < plain["p"]
+
+
 # ── SDK derivation at commit ───────────────────────────────────────────────
 
 

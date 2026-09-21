@@ -157,6 +157,36 @@ def test_similar_outcomes_and_action_stats_scope_by_entity(adapter) -> None:
     assert pr["untried"] == ["resolve:refund"]
 
 
+def test_outcome_rows_carry_the_environment_they_were_recorded_in(adapter) -> None:
+    """The environment is derived at commit from the record's session metadata
+    — ``model`` at its top, ``agent_version`` / ``runtime`` in its attribute
+    bag — and comes back on the priors rows so ``aggregate_priors`` can
+    down-weight what won under another runtime."""
+    assert adapter._has_outcome_env_col
+    win = {"index": 0, "action_key": "fix:pin", "tool_name": "fix", "success": True, "attempt": None}
+    rec = _record(OutcomeType.SUCCESS, [], actions=[win], paths=["acme/ci"], situation="import error")
+    rec = rec.model_copy(update={"session_metadata": {
+        "model": "gpt-5", "attributes": {"runtime": "python3.9", "agent_version": "1.4.0", "noise": "x"},
+    }})
+    adapter.commit_outcome(rec)
+    # A row with no metadata records no environment, and reads back as {}.
+    adapter.commit_outcome(_record(OutcomeType.SUCCESS, [], agent="a2", actions=[win],
+                                   paths=["acme/ci"], situation="import error"))
+
+    stats = adapter.action_stats("acme/ci")
+    by_agent = {r["agent_id"]: r["environment"] for r in stats}
+    assert by_agent["a1"] == {"model": "gpt-5", "agent_version": "1.4.0", "runtime": "python3.9"}
+    assert by_agent["a2"] == {}
+    similar = adapter.similar_outcomes("acme/ci", _Embedder().embed("import error"), k=10, min_similarity=0.9)
+    assert {r["agent_id"]: r["environment"] for r in similar} == by_agent
+
+    from amfs_core.actions import aggregate_priors
+
+    plain = aggregate_priors(stats)["tried"][0]
+    scoped = aggregate_priors(stats, environment={"runtime": "python3.12"})["tried"][0]
+    assert plain["won"] == scoped["won"] == 2 and scoped["p"] < plain["p"]
+
+
 def test_migration_is_idempotent_on_a_bootstrapped_database(adapter) -> None:
     """Re-applying 008+009 (a restart) changes nothing and keeps one step overload."""
     adapter._apply_schema_if_needed() if hasattr(adapter, "_apply_schema_if_needed") else None

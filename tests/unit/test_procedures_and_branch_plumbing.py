@@ -367,6 +367,29 @@ class TestBriefingProcedures:
             "guidance_strength"
         ] == "strong"
 
+    def test_tried_here_is_scoped_by_the_briefing_environment(self, world) -> None:
+        """The action record reaching ``tried_here`` is weighted by the caller's
+        environment the way retrieve priors are: a win stamped under another
+        runtime counts, at reduced weight."""
+        from datetime import UTC, datetime
+
+        mem, service, _ = world
+        adapter = mem._adapter
+        now = datetime.now(UTC)
+        adapter.action_stats = lambda entity_path, **kw: [  # type: ignore[attr-defined]
+            {"actions_taken": [{"action_key": "fix:pin", "success": True}], "committed_at": now,
+             "agent_id": "a", "session_metadata": {"attributes": {"runtime": "python3.9"}}},
+            {"actions_taken": [{"action_key": "fix:pin", "success": False}], "committed_at": now,
+             "agent_id": "b", "session_metadata": {"attributes": {"runtime": "python3.12"}}},
+        ]
+        plain = _lead(service.briefing(entity_path="acme/support")).summary["tried_here"][0]
+        scoped = _lead(service.briefing(
+            entity_path="acme/support", environment={"runtime": "python3.12"},
+        )).summary["tried_here"][0]
+        assert plain["action"] == scoped["action"] == "fix:pin"
+        assert plain["won"] == scoped["won"] == 1
+        assert scoped["p"] < plain["p"]
+
     def test_discredited_procedure_is_not_repeated(self, world) -> None:
         mem, service, _ = world
         mem.write("acme/support", "procedure-rotate", PROCEDURE, confidence=0.7,
@@ -480,6 +503,33 @@ class TestBranchPlumbing:
         moment = datetime.now(UTC)
         mem.briefing(entity_path="svc", compact=True, since=moment, credit_reuse=True)
         assert calls == [{"compact": True, "since": moment, "credit_reuse": True}]
+
+    def test_retrieve_sheds_environment_and_abstain_for_an_older_adapter(self, tmp_path) -> None:
+        """Once identity fills the environment it rides on every retrieve; an
+        adapter that predates the keyword must still be asked — with the rest
+        of the request intact — rather than every call falling back to local
+        scoring on a ``TypeError``."""
+        calls: list[dict[str, Any]] = []
+
+        class _PreEnvAdapter(FilesystemAdapter):
+            def retrieve(self, query, *, entity_path=None, min_confidence=0.0, limit=10,
+                         semantic_weight=0.0, recency_weight=0.0, confidence_weight=0.0,
+                         include_artifacts=False, evidence_weight=0.0, include_discredited=False,
+                         include_avoid=False, adaptive_k=False, agent_id=None,
+                         include_priors=False, candidate_actions=None, situation=None,
+                         compact=False, branch=None):
+                calls.append({"query": query, "include_priors": include_priors,
+                              "candidate_actions": candidate_actions, "branch": branch})
+                return []
+
+        adapter = _PreEnvAdapter(root=tmp_path / ".amfs", namespace="test")
+        mem = AgentMemory(agent_id="a", adapter=adapter, branch="repair/fix-1")
+        mem.set_session_attributes({"runtime": "python3.12", "agent_version": "1.2.0"})
+        assert mem.environment()  # the keyword is being sent
+        mem.retrieve("stuck queue", entity_path="svc", include_priors=True,
+                     candidate_actions=["fix:restart"], abstain=True)
+        assert calls == [{"query": "stuck queue", "include_priors": True,
+                          "candidate_actions": ["fix:restart"], "branch": "repair/fix-1"}]
 
     def test_briefing_survives_an_adapter_that_knows_none_of_the_options(self, tmp_path) -> None:
         calls: list[dict[str, Any]] = []

@@ -114,11 +114,14 @@ class Run:
         self._candidate_actions = list(candidate_actions) if candidate_actions else None
         self._situation = situation
 
+        # The explicit keywords win over the mapping, but only when given:
+        # an unset keyword must not erase what ``environment`` carried.
+        merged: dict[str, Any] = dict(environment or {})
+        for key, value in (("model", model), ("agent_version", agent_version), ("runtime", runtime)):
+            if value is not None:
+                merged[key] = value
         env: dict[str, str] = {}
-        for key, value in {
-            **dict(environment or {}),
-            "model": model, "agent_version": agent_version, "runtime": runtime,
-        }.items():
+        for key, value in merged.items():
             if key in ENVIRONMENT_KEYS and isinstance(value, str) and value.strip():
                 env[key] = value.strip()
         if env:

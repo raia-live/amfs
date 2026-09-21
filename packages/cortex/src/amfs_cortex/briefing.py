@@ -200,7 +200,9 @@ class BriefingService:
             hit_statuses = self._inject_evidence_sections(
                 digests, entity_path, branch, environment=environment
             )
-            self._inject_action_sections(digests, entity_path, hit_statuses)
+            self._inject_action_sections(
+                digests, entity_path, hit_statuses, environment=environment
+            )
             if not compact:
                 self._inject_who_to_ask(digests, entity_path, agent_id, branch)
             if compact:
@@ -215,6 +217,8 @@ class BriefingService:
         digests: list[Digest],
         entity_path: str,
         hit_statuses: list[str] | None = None,
+        *,
+        environment: Mapping[str, Any] | None = None,
     ) -> None:
         """Attach ``tried_here`` to the lead digest: per-action won/lost on this
         entity from the outcome record (``amfs_core.actions``), plus ``explore``
@@ -222,7 +226,9 @@ class BriefingService:
         Nothing is attached when the adapter keeps no outcome record.
         *hit_statuses* are the evidence statuses of the scope's entries, from
         the evidence sections, so ``guidance_strength`` can be re-rated with
-        the action record included."""
+        the action record included. *environment* is the caller's model /
+        agent_version / runtime; outcomes recorded under another are
+        down-weighted, as they are for ``retrieve`` priors."""
         hit_statuses = list(hit_statuses or [])
         lead = self._lead_digest(digests, entity_path)
         if lead is None:
@@ -239,7 +245,7 @@ class BriefingService:
             return
         from amfs_core.actions import aggregate_priors, guidance_strength
 
-        priors = aggregate_priors(rows)
+        priors = aggregate_priors(rows, environment=environment)
         tried = priors.get("tried") or []
         if not tried:
             return
