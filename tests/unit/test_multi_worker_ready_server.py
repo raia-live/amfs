@@ -224,6 +224,122 @@ def test_a_sync_route_runs_off_the_event_loop(monkeypatch) -> None:
     assert seen["thread"].startswith("AnyIO worker thread"), seen
 
 
+# ── Sync routes may build the singleton concurrently ─────────────────
+
+
+def test_get_memory_builds_exactly_one_instance_under_concurrent_first_calls(monkeypatch) -> None:
+    """Threadpool routes racing into _get_memory must share one AgentMemory."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    built: list[object] = []
+
+    def slow_build():
+        # Widen the window: without the lock every racer gets past the
+        # ``is None`` check before the first one assigns.
+        time.sleep(0.05)
+        obj = object()
+        built.append(obj)
+        server._memory = obj  # what the real builder does
+        return obj
+
+    monkeypatch.setattr(server, "_memory", None)
+    monkeypatch.setattr(server, "_build_memory", slow_build)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: server._get_memory(), range(8)))
+
+    assert len(built) == 1, f"built {len(built)} AgentMemory instances; the lock is not held"
+    assert all(r is built[0] for r in results)
+
+
+# ── SSE broadcasts from threadpool threads reach loop-bound subscribers ──
+
+
+def test_room_broadcast_from_a_worker_thread_wakes_the_subscriber() -> None:
+    """The sync rooms routes broadcast from the threadpool; the loop must wake."""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    from amfs_http.sse import SSEManager
+
+    async def scenario() -> tuple[dict, str]:
+        mgr = SSEManager()
+        gen = mgr.room_event_generator("room-1")
+        first = asyncio.ensure_future(gen.__anext__())
+        await asyncio.sleep(0)  # let the generator subscribe
+
+        loop_thread = threading.current_thread().name
+        seen: dict[str, str] = {}
+
+        def from_thread() -> None:
+            seen["thread"] = threading.current_thread().name
+            mgr.broadcast_room_event("room-1", "discussion_message", {"agent_id": "a"})
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            await asyncio.get_running_loop().run_in_executor(pool, from_thread)
+
+        assert seen["thread"] != loop_thread, "test must broadcast off the loop"
+        # A put_nowait from the other thread leaves the loop asleep; only a
+        # threadsafe hand-off delivers within a bounded wait with nothing
+        # else happening on the loop.
+        event = await asyncio.wait_for(first, timeout=2.0)
+        await gen.aclose()
+        return event, seen["thread"]
+
+    event, _ = asyncio.run(scenario())
+    assert event["event"] == "discussion_message"
+    assert '"agent_id": "a"' in event["data"]
+
+
+def test_broadcast_on_the_loop_is_still_direct() -> None:
+    import asyncio
+
+    from amfs_http.sse import SSEManager
+
+    async def scenario() -> dict:
+        mgr = SSEManager()
+        queue = mgr.subscribe_room("r")
+        mgr.broadcast_room_event("r", "join", {"user_id": "u"})
+        return queue.get_nowait()  # already there, no loop turn needed
+
+    assert asyncio.run(scenario())["type"] == "join"
+
+
+def test_unsubscribe_forgets_the_queue_loop() -> None:
+    import asyncio
+
+    from amfs_http.sse import SSEManager
+
+    async def scenario() -> int:
+        mgr = SSEManager()
+        q = mgr.subscribe("*")
+        assert len(mgr._loops) == 1
+        mgr.unsubscribe("*", q)
+        return len(mgr._loops)
+
+    assert asyncio.run(scenario()) == 0
+
+
+def test_a_subscriber_whose_loop_is_gone_is_skipped_quietly() -> None:
+    import asyncio
+
+    from amfs_http.sse import SSEManager
+
+    mgr = SSEManager()
+
+    async def subscribe():
+        return mgr.subscribe_room("r")
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(subscribe())
+    finally:
+        loop.close()
+    # The subscriber's loop is closed: broadcasting must neither raise nor hang.
+    mgr.broadcast_room_event("r", "join", {})
+
+
 # ── The sync search fallback ─────────────────────────────────────────
 
 

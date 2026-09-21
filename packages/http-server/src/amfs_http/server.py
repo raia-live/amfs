@@ -704,8 +704,28 @@ except ImportError:
     from amfs_http.pro_proxy import mount_pro_proxy
     mount_pro_proxy(app)
 
+_memory_lock = threading.Lock()
+
+
 def _get_memory() -> AgentMemory:
-    """Lazily initialise the shared AgentMemory singleton."""
+    """Return the shared AgentMemory singleton, building it on first call.
+
+    Double-checked under a lock: the sync-bodied routes run on the threadpool,
+    so the first requests after a worker starts — a dashboard load fires
+    several at once — can arrive here together, and without the lock each
+    would build its own ``AgentMemory`` and adapter pool, with every loser
+    dropped unclosed. The fast path stays lock-free.
+    """
+    if _memory is not None:
+        return _memory
+    with _memory_lock:
+        if _memory is not None:
+            return _memory
+        return _build_memory()
+
+
+def _build_memory() -> AgentMemory:
+    """Construct the shared AgentMemory. Call through ``_get_memory``."""
     global _memory
     if _memory is not None:
         return _memory
