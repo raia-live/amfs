@@ -216,7 +216,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-http"
-version = "0.1.27"
+version = "0.1.28"
 source = { editable = "packages/adapters/http" }
 dependencies = [
     { name = "amfs-core" },
