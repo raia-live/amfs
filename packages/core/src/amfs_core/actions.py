@@ -22,6 +22,7 @@ actions and never once tried the one that worked.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -36,7 +37,19 @@ ACTION_VALUE_MAX_CHARS = 40
 #: Nearest outcomes considered for priors.
 PRIORS_K = 20
 #: Cosine similarity below which a past task is not "the same kind of task".
+#: A floor, not a neighbourhood: see :func:`neighbourhood_weights`.
 PRIORS_MIN_SIMILARITY = 0.75
+#: How fast an outcome's weight in the priors falls with its similarity gap
+#: to the nearest outcome. Calibrated on grid v3's logged task prompts under
+#: the production embedder (bge-small): same-class pairs sit at 0.91-0.98,
+#: cross-class pairs at 0.81-0.96, and the two overlap on any absolute
+#: threshold — but within one query the nearest outcomes are the same class
+#: and the cross-class ones trail by 0.05-0.11. exp(-gap/0.03) puts a task
+#: 0.05 behind the best at a fifth of its weight and 0.1 behind at 4%.
+PRIORS_NEIGHBOURHOOD_TAU = 0.03
+#: Outcomes whose neighbourhood weight falls under this are dropped rather
+#: than counted: they would inflate ``n`` while barely moving ``p``.
+PRIORS_NEIGHBOURHOOD_MIN_W = 0.1
 #: Per-day decay of an outcome's weight in the priors.
 PRIORS_DAILY_DECAY = 0.9
 #: Recommendation thresholds.
@@ -50,6 +63,25 @@ EXPLORE_MIN_N = 2
 ENV_MISMATCH_WEIGHT = 0.5
 #: Evidence statuses of a top hit that carry no weight of their own.
 _WEAK_STATUSES = frozenset({"untested", "contested", "discredited"})
+#: Consecutive newest losses after which an action's lifetime record no
+#: longer makes it a winner. ``last_3`` is all the record keeps, so this is
+#: its full length: a win-then-three-losses is the shape of a rule that has
+#: stopped working, and grid v5 measured the alternative — ``act`` kept
+#: naming an action that had won 8/8 before a change and 0/5 since, for as
+#: long as it took the lifetime ratio to fall under ``ACT_MIN_P`` (a fifth
+#: of the episodes of that task class never found the new fix).
+RECENT_FAIL_STREAK = 3
+#: Neighbourhood weight (``neighbourhood_weights``) a contrast pair needs
+#: before one fail-then-succeed outcome is enough to recommend the action
+#: that resolved it. ``exp(-gap/tau)`` at 0.25 is a task within ~0.04 of the
+#: nearest outcome under the production embedder — the same issue phrased
+#: differently, not a neighbouring class. ``ACT_MIN_N`` asks for two wins
+#: before acting on a record; a contrast is the one case where one outcome
+#: carries both halves of the evidence — what failed and what worked on the
+#: same task — and grid v4 measured what waiting for the second costs: most
+#: (store, issue) pairs saw a quirk only once or twice, and the store's
+#: success on the n-th exposure of the same issue ran 0.00, 0.12, 0.23.
+CONTRAST_MIN_W = 0.25
 
 _WHITESPACE = re.compile(r"\s")
 
@@ -210,8 +242,8 @@ def aggregate_priors(
     Each item of ``outcomes`` is a row with ``actions_taken`` (as produced by
     :func:`actions_taken`), ``committed_at`` and ``agent_id``; ``similarity`` is
     optional and multiplies the weight. Returns ``{"tried": [...], "untried":
-    [...], "n_outcomes": int}`` with ``tried`` sorted by posterior descending and,
-    within ties, by evidence.
+    [...], "n_outcomes": int, "contrasts": [...]}`` with ``tried`` sorted by
+    posterior descending and, within ties, by evidence.
 
     When *environment* is given (``{"model": ..., "runtime": ...}``, see
     ``amfs_core.models.environment_of``), a row whose ``session_metadata`` (or
@@ -219,10 +251,21 @@ def aggregate_priors(
     by *env_mismatch_weight*: what won under another runtime is evidence, but
     weaker. Rows that report no environment are unaffected, and so is every
     caller that passes none — the default output is unchanged.
+
+    ``contrasts`` are the fail-then-succeed outcomes among the rows: one
+    outcome in which an attempt ended on action ``A`` and failed, and the
+    terminal action ``B`` (a different one) succeeded. Each is ``{"failed":
+    [A, ...], "resolved_with": B, "weight", "task_similarity", "committed_at",
+    "outcome_ref", "agent_id"}``, heaviest (nearest, then newest) first. The
+    per-action ``tried`` rows already count A's loss and B's win; what they
+    lose is that the two came from the *same task* — the one piece of
+    evidence that says "when A fails here, B is what works", and the only
+    evidence there is after a single exposure. :func:`recommend` reads it.
     """
     now = now or datetime.now(timezone.utc)
     env = {k: str(v).strip() for k, v in (environment or {}).items() if v}
     priors: dict[str, ActionPrior] = {}
+    contrasts: list[dict[str, Any]] = []
     # newest first so last_3 fills in time order
     rows = sorted(outcomes, key=lambda r: _as_dt(r.get("committed_at")) or now, reverse=True)
     for row in rows:
@@ -232,6 +275,8 @@ def aggregate_priors(
         if env:
             w *= _env_match(row, env, env_mismatch_weight)
         agent = str(row.get("agent_id") or "")
+        failed_here: list[str] = []
+        resolved_here: str | None = None
         for act in row.get("actions_taken") or []:
             key = str(act.get("action_key") or "")
             if not key:
@@ -250,6 +295,27 @@ def aggregate_priors(
                 pr.last_at = at
             if agent:
                 pr.agents.add(agent)
+            if act.get("attempt") is not None and not ok:
+                if key not in failed_here:
+                    failed_here.append(key)
+            elif act.get("attempt") is None and ok:
+                resolved_here = key
+        if failed_here and resolved_here and resolved_here not in failed_here:
+            contrasts.append({
+                "failed": failed_here,
+                "resolved_with": resolved_here,
+                "weight": round(float(row.get("similarity", 1.0) or 1.0), 3),
+                "task_similarity": (
+                    round(float(row["task_similarity"]), 3)
+                    if row.get("task_similarity") is not None else None
+                ),
+                "committed_at": at.isoformat() if at else None,
+                "outcome_ref": row.get("outcome_ref"),
+                "agent_id": agent or None,
+            })
+    # Rows were walked newest first and the sort is stable, so within a weight
+    # the newest contrast leads.
+    contrasts.sort(key=lambda c: -float(c["weight"]))
     tried = sorted(priors.values(), key=lambda p: (-p.p, -p.n, p.action_key))
     tried_keys = {p.action_key for p in tried}
     untried = [a for a in (candidate_actions or []) if a and a not in tried_keys]
@@ -257,6 +323,7 @@ def aggregate_priors(
         "tried": [p.as_dict() for p in tried],
         "untried": untried,
         "n_outcomes": len(rows),
+        "contrasts": contrasts,
     }
 
 
@@ -297,6 +364,54 @@ def _env_match(row: Mapping[str, Any], env: Mapping[str, str], mismatch_weight: 
         if have != want:
             return mismatch_weight
     return 1.0
+
+
+def neighbourhood_weights(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    tau: float = PRIORS_NEIGHBOURHOOD_TAU,
+    min_weight: float = PRIORS_NEIGHBOURHOOD_MIN_W,
+) -> list[dict[str, Any]]:
+    """Re-weight similar outcomes relative to the nearest one.
+
+    ``similar_outcomes`` returns rows above an absolute similarity floor, and
+    under a retrieval embedder that floor admits every task on the entity:
+    the priors were pooled over classes of task that share a vocabulary, and
+    a "tried and failed here" read over the wrong class sent agents to
+    explore actions that were winning for the class they were on (grid v3:
+    an ``explore`` recommendation, when followed, succeeded 14% of the time
+    against 67% when ignored). Absolute thresholds cannot fix that — the
+    same-class and cross-class similarity ranges overlap — but the *gap* to
+    the best match can: within one query the nearest outcomes are the same
+    kind of task, and the rest trail.
+
+    Each row's ``similarity`` becomes ``exp(-(best - sim) / tau)``, which
+    :func:`aggregate_priors` multiplies into its weight; rows under
+    *min_weight* are dropped so they do not count toward ``n``. Rows without a
+    similarity are returned unchanged. Where classes are indistinguishable by
+    task text (grid v3's diagnose: the prompt is a template and the class is
+    in the diagnostic findings) the weights flatten and the priors are pooled
+    as before — the caller should then pass ``situation`` so the outcome is
+    embedded with what distinguished it.
+    """
+    sims = [float(r.get("similarity") or 0.0) for r in rows if r.get("similarity") is not None]
+    if not sims:
+        return [dict(r) for r in rows]
+    best = max(sims)
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if r.get("similarity") is None:
+            out.append(dict(r))
+            continue
+        gap = max(0.0, best - float(r["similarity"]))
+        w = math.exp(-gap / tau) if tau > 0 else (1.0 if gap == 0.0 else 0.0)
+        if w < min_weight:
+            continue
+        row = dict(r)
+        row["task_similarity"] = float(r["similarity"])
+        row["similarity"] = w
+        out.append(row)
+    return out
 
 
 def _as_dt(value: Any) -> datetime | None:
@@ -361,10 +476,12 @@ def recommend(
     candidate_actions: Sequence[str] | None = None,
     top_hit_status: str | None = None,
     top_hit_recent_failure: bool = False,
+    top_hit_shifted: bool = False,
     regime_shift: bool = False,
     regime_shift_at: datetime | None = None,
     abstain: bool = False,
     hit_statuses: Sequence[str] | None = None,
+    priors_are_local: bool = True,
 ) -> dict[str, Any] | None:
     """Decide ``act`` / ``explore`` / ``escalate`` from priors and the top hit.
 
@@ -383,20 +500,100 @@ def recommend(
     of hits nothing has confirmed. Off by default so existing payloads do not
     change.
 
+    Everything here is meant to be read over *this kind of task*: the priors
+    over the outcomes nearest the query (:func:`neighbourhood_weights`) and
+    ``regime_shift`` over the entries the query is about. Grid v3 measured
+    what happens otherwise — an entity-wide shift and pooled priors sent
+    agents to explore past memory that was right for their task, and the
+    ``explore`` they followed won 14% of the time.
+
     A regime shift skips the winning priors, because their wins may predate the
     change — except a winner whose latest take was *after* the shift and won
     (``regime_shift_at`` against the prior's ``last_at``, and its newest
     ``last_3`` entry). That is the replacement the shift called for, already
     found; sending the agent to explore past it would re-learn what the record
     already knows.
+
+    A validated top hit with no recent failure is acted on even under a shift,
+    unless the top hit is itself the rule that shifted (``top_hit_shifted``).
+    The shift says *something* on the entity stopped working; the hit's own
+    record says this did not, and the record of the thing in hand outranks a
+    flag about its neighbours.
+
+    ``explore`` needs a record to explore *from*: everything tried on tasks
+    like this has failed, or a shift, and in either case at least one action
+    tried. With nothing tried the "untried" list is every candidate and the
+    pick is a hash of the agent's name — advice with no information in it.
+
+    A winner is also read against its newest takes. An action that lost its
+    last ``RECENT_FAIL_STREAK`` outcomes is not acted on whatever its
+    lifetime ratio, and one that had won before counts as a shift at the
+    action level: the explore that follows names it ("won 8/11, lost its
+    last 3 — what worked here has stopped working"). Grid v5 measured the
+    alternative: after a change, ``act`` kept naming the old fix for as long
+    as its lifetime ratio stayed over ``ACT_MIN_P``, and an action tried once
+    and lost kept "everything tried has failed" from ever becoming true —
+    17 of 24 agent groups never found the new fix in 40 episodes. Firm
+    failures (a low ratio over ``EXPLORE_MIN_N`` takes, or a streak) are what
+    ``escalate`` asserts; for ``explore`` an action never seen to win is
+    failed enough, since holding an agent on a 0/1 while candidates sit
+    untried is the worse bet.
+
+    ``priors_are_local=False`` says the priors are the entity's whole record
+    (the ``action_stats`` fallback of a store without task embeddings). Such
+    a record can still name a winner, and "every action tried here failed"
+    still means something when it is every action; but a shift read over it
+    does not send the agent exploring, since neither the shift nor the record
+    is known to be about this kind of task.
+
+    A *contrast* — one nearby outcome in which action A failed an attempt and
+    action B then resolved the same task — is acted on from a single outcome
+    (:func:`_act_from_contrast`), ahead of the per-action winners, when the
+    winner it would displace is A itself or there is no winner. ``ACT_MIN_N``
+    exists because one win may be luck; a contrast is one outcome that holds
+    both the failure and the fix for the same task, and the alternative — act
+    on A because its record is long — is the repeated failure grid v4
+    measured. Local priors only: a contrast from the entity's whole record is
+    not known to be about this kind of task.
     """
     tried: list[Mapping[str, Any]] = list((priors or {}).get("tried") or [])
     untried: list[str] = list((priors or {}).get("untried") or [])
     have_candidates = bool(candidate_actions)
 
-    winners = [t for t in tried if float(t.get("p", 0)) >= ACT_MIN_P and int(t.get("n", 0)) >= ACT_MIN_N]
-    losers = [t for t in tried if float(t.get("p", 1)) < EXPLORE_MAX_P and int(t.get("n", 0)) >= EXPLORE_MIN_N]
-    all_tried_failed = bool(tried) and len(losers) == len(tried)
+    # A winner is read from its record *and* its recent takes: an action that
+    # lost its newest RECENT_FAIL_STREAK outcomes is not one, however long it
+    # won before. Those with a real record behind them are what a shift looks
+    # like at the action level ("what worked here has stopped working"), and
+    # they are named in the explore that follows.
+    winners = [
+        t for t in tried
+        if float(t.get("p", 0)) >= ACT_MIN_P and int(t.get("n", 0)) >= ACT_MIN_N and not _recently_failing(t)
+    ]
+    stopped = [t for t in tried if _recently_failing(t) and int(t.get("won", 0)) >= ACT_MIN_N]
+    # Two readings of "failed". ``losers`` is the firm one — a low ratio over
+    # at least EXPLORE_MIN_N takes, or a streak — and is what ``escalate``
+    # asserts. ``failed_now`` also counts an action never seen to win: a 0/1
+    # is weak evidence *for* the action, but it is no reason to hold an agent
+    # on it when candidates are untried, and grid v5 found the explore it
+    # blocked was the one that would have found the new fix.
+    losers = [
+        t for t in tried
+        if (float(t.get("p", 1)) < EXPLORE_MAX_P and int(t.get("n", 0)) >= EXPLORE_MIN_N) or _recently_failing(t)
+    ]
+    failed_now = [t for t in tried if t in losers or int(t.get("won", 0)) == 0]
+    all_tried_failed = bool(tried) and len(failed_now) == len(tried)
+    all_tried_failed_firm = bool(tried) and len(losers) == len(tried)
+
+    if priors_are_local:
+        from_contrast = _act_from_contrast(
+            list((priors or {}).get("contrasts") or []),
+            tried,
+            winners,
+            regime_shift=regime_shift,
+            regime_shift_at=regime_shift_at,
+        )
+        if from_contrast is not None:
+            return from_contrast
 
     if winners and regime_shift:
         since = [w for w in winners if _won_since(w, regime_shift_at)]
@@ -416,25 +613,50 @@ def recommend(
             "why": f"{best['action_key']} won {best['won']}/{best['n']} on similar tasks here"
                    + (f" ({best['agents']} agents)" if int(best.get("agents", 0)) > 1 else ""),
         }
-    if top_hit_status == "validated" and not top_hit_recent_failure and not regime_shift and not all_tried_failed:
-        return {
-            "mode": "act",
-            "suggested_action": None,
-            "why": "top memory hit is validated by outcomes and has no recent failure",
-        }
-    if (all_tried_failed or regime_shift) and untried:
+    if (
+        have_candidates
+        and top_hit_status == "validated"
+        and not top_hit_recent_failure
+        and not top_hit_shifted
+        and not all_tried_failed
+    ):
+        # Only for a caller choosing among a fixed set of actions. Without
+        # candidates there is no action to act *with*, and ``act`` on a bare
+        # validated hit reads as "follow the top hit": grid v5 (2026-09-20)
+        # measured it on a task whose terminal tool has no action enum —
+        # ``act`` on 92% of episodes, and the agent followed the top hit over
+        # the task's own constraints, 42% first-attempt failures against 6%
+        # for the same protocol without the recommendation. The hit's
+        # ``evidence_status`` already tells the agent it is validated.
+        why = "top memory hit is validated by outcomes and has no recent failure"
+        if regime_shift:
+            why += "; a shift is suspected elsewhere on this entity, not in this hit's record"
+        return {"mode": "act", "suggested_action": None, "why": why}
+    shift_explores = regime_shift and priors_are_local
+    if (all_tried_failed or shift_explores) and untried and tried:
         pick = untried[stable_bucket(agent_id, len(untried))]
-        failed = ", ".join(f"{t['action_key']} {t['won']}/{t['n']}" for t in losers[:4])
-        why = "regime shift suspected for this entity; " if regime_shift else ""
-        why += (f"tried and failed here: {failed}; " if failed else "")
+        failed = ", ".join(f"{t['action_key']} {t['won']}/{t['n']}" for t in failed_now[:4])
+        why = "regime shift suspected for tasks like this; " if shift_explores else ""
+        if stopped:
+            s = stopped[0]
+            why += (f"{s['action_key']} won {s['won']}/{s['n']} on tasks like this but lost its last "
+                    f"{len(s.get('last_3') or [])} — what worked here has stopped working; ")
+        elif failed:
+            why += f"tried and failed on similar tasks here: {failed}; "
         why += f"{len(untried)} untried — try {pick}"
-        return {"mode": "explore", "suggested_action": pick, "untried": untried, "why": why}
-    if have_candidates and all_tried_failed and not untried:
+        out: dict[str, Any] = {"mode": "explore", "suggested_action": pick, "untried": untried, "why": why}
+        if stopped:
+            out["stopped_working"] = [str(s["action_key"]) for s in stopped]
+        return out
+    if have_candidates and all_tried_failed_firm and not untried:
         failed = ", ".join(f"{t['action_key']} {t['won']}/{t['n']}" for t in losers[:6])
         return {
             "mode": "escalate",
             "suggested_action": None,
-            "why": f"every candidate action has failed on similar tasks here: {failed}",
+            "why": (
+                f"every known action has failed on tasks like this: {failed}. "
+                "If you have attempts left, try an action not listed; otherwise hand off"
+            ),
         }
     if have_candidates and top_hit_status == "discredited" and not untried and tried:
         return {
@@ -471,7 +693,12 @@ def guidance_strength(
     Pure; the briefing and the SDK's ``Guidance`` carry the label."""
     tried = list((priors or {}).get("tried") or [])
     statuses = [s for s in (hit_statuses or []) if s]
-    winners = [t for t in tried if float(t.get("p", 0)) >= ACT_MIN_P and int(t.get("n", 0)) >= ACT_MIN_N]
+    # The same reading of "winner" as recommend(): a record that lost its
+    # newest RECENT_FAIL_STREAK takes is not one, whatever its lifetime ratio.
+    winners = [
+        t for t in tried
+        if float(t.get("p", 0)) >= ACT_MIN_P and int(t.get("n", 0)) >= ACT_MIN_N and not _recently_failing(t)
+    ]
     if regime_shift:
         return "thin" if (tried or statuses) else "none"
     if winners or "validated" in statuses:
@@ -481,6 +708,76 @@ def guidance_strength(
     return "thin"
 
 
+def _recently_failing(prior: Mapping[str, Any]) -> bool:
+    """The action lost its newest ``RECENT_FAIL_STREAK`` outcomes (all the record keeps)."""
+    last = list(prior.get("last_3") or [])
+    return len(last) >= RECENT_FAIL_STREAK and all(x == "lost" for x in last[:RECENT_FAIL_STREAK])
+
+
+def _act_from_contrast(
+    contrasts: Sequence[Mapping[str, Any]],
+    tried: Sequence[Mapping[str, Any]],
+    winners: Sequence[Mapping[str, Any]],
+    *,
+    regime_shift: bool,
+    regime_shift_at: datetime | None,
+) -> dict[str, Any] | None:
+    """``act -> B`` from the nearest contrast pair, or ``None``.
+
+    The pair must be near-identical to the query (``weight >=
+    CONTRAST_MIN_W``); B's own record must not have turned since (its newest
+    take, if any, is a win — a B that lost more recently than it resolved
+    this task is not the fix); and under a regime shift the pair must
+    postdate the shift, or it may itself be pre-change evidence. The pair
+    yields to a per-action winner unless that winner is one of the actions
+    the pair says failed: an established C that the contrast is not about
+    keeps its recommendation; an established A that just failed on this kind
+    of task does not.
+    """
+    if not contrasts:
+        return None
+    by_key = {str(t.get("action_key")): t for t in tried}
+    for c in contrasts:
+        if float(c.get("weight") or 0.0) < CONTRAST_MIN_W:
+            break   # sorted heaviest first
+        resolved = str(c.get("resolved_with") or "")
+        failed = [str(a) for a in (c.get("failed") or [])]
+        if not resolved or not failed:
+            continue
+        if regime_shift:
+            at = _as_dt(c.get("committed_at"))
+            if regime_shift_at is None or at is None or at <= (
+                regime_shift_at if regime_shift_at.tzinfo
+                else regime_shift_at.replace(tzinfo=timezone.utc)
+            ):
+                continue
+        b = by_key.get(resolved)
+        if b is not None:
+            last_3 = list(b.get("last_3") or [])
+            if last_3 and last_3[0] != "won":
+                continue
+        if winners and winners[0].get("action_key") not in failed:
+            return None   # an established winner the pair is not about stands
+        a_text = ", ".join(failed[:3])
+        return {
+            "mode": "act",
+            "suggested_action": resolved,
+            "why": (
+                f"on a near-identical task here {a_text} failed and {resolved} resolved it"
+                + (
+                    f" ({b['won']}/{b['n']} overall)" if b is not None and int(b.get("n", 0)) > 1
+                    else ""
+                )
+            ),
+            "contrast": {
+                "failed": failed,
+                "resolved_with": resolved,
+                "outcome_ref": c.get("outcome_ref"),
+            },
+        }
+    return None
+
+
 def render_priors(priors: Mapping[str, Any] | None, recommendation: Mapping[str, Any] | None) -> str:
     """One compact block for an agent's context. Empty string when nothing to show."""
     if not priors and not recommendation:
@@ -488,9 +785,24 @@ def render_priors(priors: Mapping[str, Any] | None, recommendation: Mapping[str,
     lines: list[str] = []
     tried = (priors or {}).get("tried") or []
     if tried:
-        parts = [f"{t['action_key']} {t['won']}/{t['n']}" + ("" if int(t.get('agents', 0)) <= 1 else f" ({t['agents']} agents)")
-                 for t in tried[:6]]
+        parts = [
+            f"{t['action_key']} {t['won']}/{t['n']}"
+            + ("" if int(t.get('agents', 0)) <= 1 else f" ({t['agents']} agents)")
+            + (f", lost last {len(t.get('last_3') or [])}" if _recently_failing(t) and int(t.get("won", 0)) else "")
+            for t in tried[:6]
+        ]
         lines.append("Tried on similar tasks here: " + "; ".join(parts))
+    contrasts = [
+        c for c in ((priors or {}).get("contrasts") or [])
+        if float(c.get("weight") or 0.0) >= CONTRAST_MIN_W
+    ]
+    for c in contrasts[:2]:
+        failed = ", ".join(str(a) for a in (c.get("failed") or [])[:3])
+        if failed and c.get("resolved_with"):
+            lines.append(
+                f"On a near-identical task here {failed} failed and "
+                f"{c['resolved_with']} resolved it."
+            )
     untried = (priors or {}).get("untried") or []
     if untried:
         lines.append("Not yet tried here: " + ", ".join(untried[:8]))
@@ -503,6 +815,10 @@ def render_priors(priors: Mapping[str, Any] | None, recommendation: Mapping[str,
 
 __all__ = [
     "ACTION_VALUE_MAX_CHARS",
+    "CONTRAST_MIN_W",
+    "PRIORS_NEIGHBOURHOOD_MIN_W",
+    "PRIORS_NEIGHBOURHOOD_TAU",
+    "neighbourhood_weights",
     "PRIORS_K",
     "PRIORS_MIN_SIMILARITY",
     "PRIORS_DAILY_DECAY",

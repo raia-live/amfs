@@ -39,6 +39,48 @@ class TestScopeFingerprint:
         assert fp is not None
         assert fp == hashlib.sha256(b"empty").hexdigest()[:16]
 
+    def test_agent_scope_asks_the_adapter_for_that_agent_only(self) -> None:
+        """An ``agent:`` fingerprint reads one author's rows through the
+        adapter's ``agent_id`` filter; it does not list the tenant and filter
+        in Python. The worker computes this after every compile, so on a
+        tenant with many agents the old listing was a full scan per agent
+        brief."""
+        from amfs_cortex.compiler import DigestCompiler
+
+        adapter = MagicMock()
+        adapter.list.return_value = [_make_entry("k1")]
+        compiler = DigestCompiler(adapter=adapter)
+
+        assert compiler.compute_scope_fingerprint("agent:a") is not None
+        adapter.list.assert_called_once_with(branch="main", agent_id="a")
+
+        adapter.list.reset_mock()
+        compiler.compute_scope_fingerprint("source:github")
+        assert [c.kwargs["agent_id"] for c in adapter.list.call_args_list] == [
+            "webhook/github", "external/github",
+        ]
+
+    def test_agent_scope_falls_back_to_listing_without_the_filter(self) -> None:
+        """An adapter whose ``list`` has no ``agent_id`` keyword gets the
+        previous behaviour: list, then keep the matching author."""
+        from amfs_cortex.compiler import DigestCompiler
+
+        mine, theirs = _make_entry("k1"), _make_entry("k2")
+        theirs.provenance.agent_id = "b"
+
+        class Plain:
+            calls = 0
+
+            def list(self, entity_path=None, *, include_superseded=False, branch="main"):
+                Plain.calls += 1
+                return [mine, theirs]
+
+        compiler = DigestCompiler(adapter=Plain())
+        with_both = compiler.compute_scope_fingerprint("agent:a")
+        only_mine = DigestCompiler(adapter=MagicMock(list=MagicMock(return_value=[mine])))
+        assert with_both == only_mine.compute_scope_fingerprint("agent:a")
+        assert Plain.calls == 1
+
     def test_deterministic_for_same_state(self) -> None:
         from amfs_cortex.compiler import DigestCompiler
 

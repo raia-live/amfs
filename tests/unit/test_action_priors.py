@@ -140,10 +140,131 @@ def test_recommend_escalates_only_when_candidates_were_given() -> None:
 
 
 def test_recommend_acts_on_a_validated_top_hit_and_not_on_a_shifted_one() -> None:
-    assert act.recommend(None, top_hit_status="validated")["mode"] == "act"
-    assert act.recommend(None, top_hit_status="validated", top_hit_recent_failure=True) is None
-    rec = act.recommend({"tried": [], "untried": ["resolve:c"]}, top_hit_status="validated", regime_shift=True)
+    cands = ["resolve:a", "resolve:c"]
+    assert act.recommend(None, top_hit_status="validated", candidate_actions=cands)["mode"] == "act"
+    assert act.recommend(None, top_hit_status="validated", top_hit_recent_failure=True,
+                         candidate_actions=cands) is None
+    # A shift elsewhere on the entity does not override the hit's own record...
+    mixed = {"tried": [{"action_key": "resolve:a", "won": 1, "lost": 1, "p": 0.5, "n": 2,
+                        "agents": 1, "last_3": ["lost", "won"], "last_at": None}],
+             "untried": ["resolve:c"]}
+    rec = act.recommend(mixed, top_hit_status="validated", regime_shift=True, candidate_actions=cands)
+    assert rec["mode"] == "act" and rec["suggested_action"] is None
+    assert "elsewhere" in rec["why"]
+    # ...but the hit being the rule that shifted does.
+    rec = act.recommend(mixed, top_hit_status="validated", regime_shift=True, top_hit_shifted=True,
+                        candidate_actions=cands)
     assert rec["mode"] == "explore" and rec["suggested_action"] == "resolve:c"
+
+
+def test_a_validated_top_hit_alone_is_not_an_act_without_candidate_actions() -> None:
+    """No candidates, no action to act with. A caller whose task is not a choice
+    among a fixed set of actions gets no ``act`` off a bare validated hit — the
+    hit's own ``evidence_status`` already says it is validated, and grid v5
+    measured what the extra ``act`` costs such a caller (42% vs 6% failures)."""
+    assert act.recommend(None, top_hit_status="validated") is None
+    assert act.recommend(None, top_hit_status="validated", candidate_actions=[]) is None
+    # A real winner among candidates still acts, with or without a validated hit.
+    won = {"tried": [{"action_key": "resolve:a", "won": 3, "lost": 0, "p": 1.0, "n": 3,
+                      "agents": 1, "last_3": ["won", "won", "won"], "last_at": None}],
+           "untried": []}
+    assert act.recommend(won, top_hit_status="untested")["suggested_action"] == "resolve:a"
+
+
+def _prior(key: str, won: int, n: int, last_3: list[str], p: float | None = None) -> dict:
+    return {"action_key": key, "won": won, "lost": n - won, "n": n, "agents": 1,
+            "p": (won / n) if p is None else p, "last_3": last_3, "last_at": None}
+
+
+def test_a_winner_that_lost_its_last_three_is_not_acted_on() -> None:
+    """Grid v5, ci-fix after the change: rerun_job had won every flaky-integration
+    task, then lost every one since. Its lifetime ratio kept it a winner for a
+    dozen more episodes; the record's newest takes say the rule has turned."""
+    cands = ["fix:rerun_job", "fix:fix_code", "fix:edit_generated_file", "fix:add_audit_exception"]
+    stale = {"tried": [_prior("fix:rerun_job", 8, 11, ["lost", "lost", "lost"]),
+                       _prior("fix:fix_code", 0, 4, ["lost", "lost", "lost"])],
+             "untried": ["fix:edit_generated_file", "fix:add_audit_exception"]}
+    rec = act.recommend(stale, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "explore"
+    assert rec["suggested_action"] in stale["untried"]
+    assert rec["stopped_working"] == ["fix:rerun_job"]
+    assert "stopped working" in rec["why"] and "8/11" in rec["why"]
+    # Two losses are not a streak: the lifetime record still stands.
+    fresh = {"tried": [_prior("fix:rerun_job", 8, 10, ["lost", "lost", "won"])], "untried": ["fix:fix_code"]}
+    assert act.recommend(fresh, candidate_actions=cands)["mode"] == "act"
+    # The streak shows in the rendered line, so the agent reads it without the recommendation.
+    assert "fix:rerun_job 8/11, lost last 3" in act.render_priors(stale, None)
+    assert "lost last" not in act.render_priors(fresh, None)
+
+
+def test_an_action_tried_once_and_lost_does_not_block_explore() -> None:
+    """The flaky-integration record at the end of grid v5: six actions tried, none
+    winning, one of them 0/1 — and no recommendation, because a single loss
+    was not a firm failure. The agent kept cycling the same three actions and
+    never reached the two untried ones."""
+    cands = ["fix:" + a for a in ("run_formatter", "fix_code", "rerun_job", "update_snapshots",
+                                  "regen_migrations", "bump_dependency", "add_audit_exception",
+                                  "edit_generated_file")]
+    record = {"tried": [_prior("fix:update_snapshots", 0, 1, ["lost"]),
+                        _prior("fix:run_formatter", 5, 8, ["won", "won", "lost"], p=0.37),
+                        _prior("fix:regen_migrations", 0, 2, ["lost", "lost"]),
+                        _prior("fix:rerun_job", 3, 13, ["lost", "lost", "lost"]),
+                        _prior("fix:bump_dependency", 0, 6, ["lost", "lost", "lost"]),
+                        _prior("fix:fix_code", 0, 12, ["lost", "lost", "lost"])],
+              "untried": ["fix:add_audit_exception", "fix:edit_generated_file"]}
+    rec = act.recommend(record, agent_id="ci-agent-3", candidate_actions=cands)
+    assert rec["mode"] == "explore" and rec["suggested_action"] in record["untried"]
+    # ...but a 0/1 is not firm enough to *escalate* on when nothing is untried.
+    exhausted = {"tried": [_prior("fix:a", 0, 1, ["lost"]), _prior("fix:b", 0, 3, ["lost", "lost", "lost"])],
+                 "untried": []}
+    assert act.recommend(exhausted, candidate_actions=["fix:a", "fix:b"]) is None
+    firm = {"tried": [_prior("fix:a", 0, 2, ["lost", "lost"]), _prior("fix:b", 0, 3, ["lost", "lost", "lost"])],
+            "untried": []}
+    assert act.recommend(firm, candidate_actions=["fix:a", "fix:b"])["mode"] == "escalate"
+
+
+def test_explore_needs_something_tried_to_explore_from() -> None:
+    """With nothing tried, "untried" is every candidate and the pick is a hash
+    of the agent's name: no information, so no advice."""
+    assert act.recommend({"tried": [], "untried": ["resolve:c"]}, regime_shift=True) is None
+    assert act.recommend({"tried": [], "untried": ["resolve:c"]}, top_hit_status="contested",
+                         regime_shift=True) is None
+
+
+def test_a_shift_over_entity_wide_priors_does_not_explore() -> None:
+    """The action_stats fallback is every outcome on the entity. A winner there
+    is acted on; a shift read over it is not a reason to explore."""
+    rec = act.recommend(_LOSERS, agent_id="x", candidate_actions=["resolve:a", "resolve:b", "resolve:c"],
+                        regime_shift=True, priors_are_local=False)
+    # all tried failed still explores — that claim holds for the whole entity.
+    assert rec["mode"] == "explore"
+    mixed = {"tried": [{"action_key": "resolve:a", "won": 2, "lost": 1, "p": 0.6, "n": 3,
+                        "agents": 1, "last_3": ["won", "won", "lost"], "last_at": None}],
+             "untried": ["resolve:c"]}
+    assert act.recommend(mixed, regime_shift=True, priors_are_local=False, agent_id="x") is None
+    assert act.recommend(mixed, regime_shift=True, priors_are_local=True, agent_id="x")["mode"] == "explore"
+
+
+def test_neighbourhood_weights_are_relative_to_the_best_match() -> None:
+    rows = [_row([("resolve:a", True)], sim=0.92), _row([("resolve:a", True)], sim=0.90),
+            _row([("resolve:b", False)], sim=0.86), _row([("resolve:b", False)], sim=0.80)]
+    out = act.neighbourhood_weights(rows)
+    weights = {round(r["task_similarity"], 2): round(r["similarity"], 3) for r in out}
+    assert weights[0.92] == 1.0
+    assert 0.4 < weights[0.90] < 0.6          # 0.02 behind: exp(-2/3)
+    assert 0.1 < weights[0.86] < 0.2          # 0.06 behind: exp(-2)
+    assert 0.80 not in weights, "0.12 behind is dropped, not counted"
+    priors = act.aggregate_priors(out)
+    tried = {t["action_key"]: t for t in priors["tried"]}
+    assert tried["resolve:a"]["n"] == 2 and tried["resolve:b"]["n"] == 1
+    assert tried["resolve:a"]["p"] > 0.6, "the near wins carry their weight"
+    assert tried["resolve:b"]["p"] > 0.4, "one far loss at a fifth of a weight is not a loser"
+
+
+def test_neighbourhood_weights_leave_rows_without_similarity_alone() -> None:
+    rows = [{"actions_taken": [], "committed_at": None, "agent_id": "a"}]
+    assert act.neighbourhood_weights(rows) == rows
+    assert act.neighbourhood_weights([]) == []
 
 
 def test_recommend_is_silent_with_nothing_to_say() -> None:
@@ -163,8 +284,14 @@ def test_recommend_abstains_only_when_asked_and_only_on_weak_evidence() -> None:
     assert rec["mode"] == "abstain"
     # Nothing to rate at all: still silent (no hits, no priors).
     assert act.recommend(empty, abstain=True) is None
-    # A validated hit acts; a winning prior acts; neither abstains.
-    assert act.recommend(empty, top_hit_status="validated", abstain=True)["mode"] == "act"
+    # A validated hit never abstains. With candidate actions it acts; without
+    # them (#429) there is no action to act *with*, so it stays silent — the
+    # hit's own evidence_status carries the message — but it is not "weak".
+    assert act.recommend(
+        empty, top_hit_status="validated", abstain=True, candidate_actions=["resolve:a"],
+    )["mode"] == "act"
+    assert act.recommend(empty, top_hit_status="validated", abstain=True) is None
+    # A winning prior acts.
     pr = {"tried": [{"action_key": "resolve:b", "won": 3, "lost": 0, "p": 0.8, "n": 3, "agents": 1}], "untried": []}
     assert act.recommend(pr, top_hit_status="untested", abstain=True)["mode"] == "act"
     # A thin prior (n=1) is still a prior: not abstain, not act — silent.
@@ -237,6 +364,117 @@ def test_recorded_environment_reads_every_place_a_producer_puts_it() -> None:
     plain = act.aggregate_priors(rows)["tried"][0]
     scoped = act.aggregate_priors(rows, environment={"runtime": "python3.12"})["tried"][0]
     assert scoped["p"] < plain["p"]
+# ── contrasts: one fail-then-succeed outcome ───────────────────────────────
+
+
+def _contrast_row(failed, resolved, *, sim=1.0, days_ago=0, agent="a1", ref="o1"):
+    """An outcome in which attempt 1 ended on *failed* and lost, and the terminal
+    action *resolved* won — the shape ``actions_taken`` produces."""
+    row = _row([], sim=sim, days_ago=days_ago, agent=agent)
+    row["actions_taken"] = [
+        {"action_key": failed, "success": False, "attempt": 1},
+        {"action_key": resolved, "success": True, "attempt": None},
+    ]
+    row["outcome_ref"] = ref
+    return row
+
+
+def test_aggregate_priors_extracts_contrast_pairs_and_keeps_the_per_action_counts() -> None:
+    rows = act.neighbourhood_weights([
+        _contrast_row("resolve:a", "resolve:b", sim=0.95, ref="near"),
+        _contrast_row("resolve:a", "resolve:c", sim=0.90, ref="far"),
+        _row([("resolve:a", True)], sim=0.95),           # a plain win, no contrast
+        _row([("resolve:a", False)], sim=0.95),          # a plain loss, no contrast
+    ])
+    pr = act.aggregate_priors(rows)
+    by = {t["action_key"]: t for t in pr["tried"]}
+    assert by["resolve:a"]["lost"] == 3 and by["resolve:a"]["won"] == 1
+    assert by["resolve:b"]["won"] == 1
+    assert [c["outcome_ref"] for c in pr["contrasts"]] == ["near", "far"], "heaviest first"
+    near = pr["contrasts"][0]
+    assert near["failed"] == ["resolve:a"] and near["resolved_with"] == "resolve:b"
+    assert near["weight"] == 1.0 and near["task_similarity"] == 0.95
+    assert pr["contrasts"][1]["weight"] < 0.25, "0.05 behind the best is not near-identical"
+
+
+def test_a_retry_with_the_same_action_is_not_a_contrast() -> None:
+    row = _row([], sim=1.0)
+    row["actions_taken"] = [
+        {"action_key": "resolve:a", "success": False, "attempt": 1},
+        {"action_key": "resolve:a", "success": True, "attempt": None},
+    ]
+    assert act.aggregate_priors([row])["contrasts"] == []
+
+
+def test_recommend_acts_on_the_resolving_action_of_a_near_identical_contrast() -> None:
+    """One exposure is enough when the outcome holds both halves: A failed an
+    attempt on this task and B resolved it. ACT_MIN_N would wait for a second
+    win; grid v4 measured the wait as the same quirk failing 4-7 more times."""
+    pr = act.aggregate_priors(act.neighbourhood_weights([_contrast_row("resolve:a", "resolve:b", sim=0.95)]))
+    rec = act.recommend(pr, agent_id="x")
+    assert rec["mode"] == "act" and rec["suggested_action"] == "resolve:b"
+    assert rec["contrast"]["failed"] == ["resolve:a"]
+    assert "resolve:a failed and resolve:b resolved it" in rec["why"]
+
+
+def test_a_contrast_displaces_a_winner_only_when_the_winner_is_what_failed() -> None:
+    # A has a long record and just failed on this task; B resolved it.
+    rows = act.neighbourhood_weights(
+        [_row([("resolve:a", True)], sim=0.95, days_ago=d) for d in (3, 4, 5, 6, 7)]
+        + [_contrast_row("resolve:a", "resolve:b", sim=0.95)]
+    )
+    pr = act.aggregate_priors(rows)
+    a = next(t for t in pr["tried"] if t["action_key"] == "resolve:a")
+    assert a["p"] >= act.ACT_MIN_P and a["n"] >= act.ACT_MIN_N, "A still qualifies as a winner"
+    rec = act.recommend(pr, agent_id="x")
+    assert rec["mode"] == "act" and rec["suggested_action"] == "resolve:b"
+
+    # An established C the contrast says nothing about keeps its recommendation.
+    rows = act.neighbourhood_weights(
+        [_row([("resolve:c", True)], sim=0.95, days_ago=d) for d in (3, 4, 5)]
+        + [_contrast_row("resolve:a", "resolve:b", sim=0.95)]
+    )
+    rec = act.recommend(act.aggregate_priors(rows), agent_id="x")
+    assert rec["mode"] == "act" and rec["suggested_action"] == "resolve:c"
+
+
+def test_a_contrast_is_ignored_when_far_when_b_lost_since_and_when_not_local() -> None:
+    base = _row([("resolve:c", True)], sim=0.95)
+    # Far: the pair is 0.06 behind the best match.
+    pr = act.aggregate_priors(act.neighbourhood_weights([base, _contrast_row("resolve:a", "resolve:b", sim=0.89)]))
+    assert pr["contrasts"] and pr["contrasts"][0]["weight"] < act.CONTRAST_MIN_W
+    assert act.recommend(pr, agent_id="x") is None, "one far pair and one plain win say nothing"
+    # B lost more recently than it resolved this task.
+    pr = act.aggregate_priors(act.neighbourhood_weights([
+        _contrast_row("resolve:a", "resolve:b", sim=0.95, days_ago=2),
+        _row([("resolve:b", False)], sim=0.95, days_ago=1),
+    ]))
+    rec = act.recommend(pr, agent_id="x")
+    assert rec is None or rec["suggested_action"] != "resolve:b"
+    # Entity-wide priors (action_stats fallback) are not known to be about this task.
+    pr = act.aggregate_priors([_contrast_row("resolve:a", "resolve:b")])
+    assert act.recommend(pr, agent_id="x", priors_are_local=False) is None
+
+
+def test_under_a_regime_shift_the_contrast_must_postdate_it() -> None:
+    pr = act.aggregate_priors(act.neighbourhood_weights([_contrast_row("resolve:a", "resolve:b", sim=0.95, days_ago=3)]))
+    shift_after = datetime.now(UTC) - timedelta(days=1)
+    shift_before = datetime.now(UTC) - timedelta(days=5)
+    assert act.recommend(pr, agent_id="x", regime_shift=True, regime_shift_at=shift_after) is None
+    rec = act.recommend(pr, agent_id="x", regime_shift=True, regime_shift_at=shift_before)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "resolve:b"
+    assert act.recommend(pr, agent_id="x", regime_shift=True, regime_shift_at=None) is None
+
+
+def test_render_priors_names_the_near_identical_contrast() -> None:
+    pr = act.aggregate_priors(act.neighbourhood_weights([_contrast_row("resolve:a", "resolve:b", sim=0.95)]))
+    text = act.render_priors(pr, act.recommend(pr, agent_id="x"))
+    assert "On a near-identical task here resolve:a failed and resolve:b resolved it." in text
+    assert "Recommendation: act -> resolve:b" in text
+    far = act.aggregate_priors(act.neighbourhood_weights([
+        _row([("resolve:c", True)], sim=0.95), _contrast_row("resolve:a", "resolve:b", sim=0.89),
+    ]))
+    assert "near-identical" not in act.render_priors(far, None)
 
 
 # ── SDK derivation at commit ───────────────────────────────────────────────
@@ -331,6 +569,23 @@ def _stub_stats(adapter, rows):
     adapter.action_stats = lambda entity_path, **kw: list(rows)  # type: ignore[attr-defined]
 
 
+class _StubEmbedder:
+    def embed(self, text: str) -> list[float]:
+        return [1.0, 0.0]
+
+
+def _stub_similar(adapter, rows):
+    """Priors from the outcomes nearest the query — the source that is about
+    this kind of task, and the one a shift may send exploring. Needs an
+    embedder for the query vector; the semantic channel itself stays off
+    because these tests run without the async adapter."""
+    from amfs_http import server
+
+    adapter.similar_outcomes = lambda entity_path, embedding, **kw: list(rows)  # type: ignore[attr-defined]
+    adapter.action_stats = lambda entity_path, **kw: []  # type: ignore[attr-defined]
+    server._get_server_embedder = lambda: _StubEmbedder()  # restored by the server_mem monkeypatch
+
+
 def test_retrieve_without_include_priors_is_unchanged(client, server_mem) -> None:
     _stub_stats(server_mem._adapter, [_row([("resolve:a", False)])])
     resp = client.post("/api/v1/retrieve", json={"query": "card declined", "entity_path": "acme/support"})
@@ -412,12 +667,13 @@ def test_a_second_failure_flags_the_shift_even_after_the_rule_leaves_the_head(cl
     the clearest case of a regime shift — a rule validated eight times and then
     discredited — is the one that fires it, and the winner is skipped for an
     untried action."""
-    _stub_stats(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _stub_similar(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
     _outcomes(server_mem, "fix-a", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
 
     body, meta = _priors_meta(client)
     assert all(e.get("key") != "fix-a" for e in body if not e.get("_meta")), "discredited rule left the head"
     assert meta["regime_shift"] is True
+    assert meta["regime_shift_scope"] == "query"
     assert meta["recommendation"]["mode"] == "explore"
     assert meta["recommendation"]["suggested_action"] == "resolve:b"
     assert "regime shift" in meta["recommendation"]["why"]
@@ -428,7 +684,7 @@ def test_the_shift_still_fires_when_the_confidence_gate_hid_the_discredited_rule
     the discredit threshold, so a retrieve gated there (the benchmark's setting)
     never saw it — and the two-failure signal went with it. The flag reads a
     separate, ungated fetch of the query-matched discredited rows."""
-    _stub_stats(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _stub_similar(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
     _outcomes(server_mem, "fix-a", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
     entry = server_mem._adapter.read("acme/support", "fix-a")
     assert entry.discredited_at is not None and entry.confidence < 0.5
@@ -436,23 +692,148 @@ def test_the_shift_still_fires_when_the_confidence_gate_hid_the_discredited_rule
     body, meta = _priors_meta(client, min_confidence=0.5)
     assert all(e.get("key") != "fix-a" for e in body if not e.get("_meta"))
     assert meta["regime_shift"] is True
+    assert meta["regime_shift_scope"] == "query", "the hidden rule matches this query"
     assert meta["recommendation"]["mode"] == "explore"
 
 
 def test_the_below_gate_read_is_entity_wide_not_a_rerun_of_the_query(client, server_mem) -> None:
     """The rule that stopped working need not share a word with this query, and
-    a rule validated over months is old by write time. The below-gate read is
-    the entity's discredited rows, whatever they say and whenever they were
-    written — the same scope priors and the briefing use."""
+    a rule validated over months is old by write time. The entity-wide flag
+    reads the entity's discredited rows, whatever they say and whenever they
+    were written — the same scope the briefing uses.
+
+    The flag is reported; it does not steer the recommendation. The rule that
+    shifted is about a stuck queue and this query is about a declined card, so
+    the winner for declined cards is still the recommendation. Sending every
+    class of task on the entity to explore past its own winning action was
+    measured in grid v3 at 14% success on the explores it produced."""
     server_mem.write("acme/support", "fix-old", "rotate the ingest worker on a stuck queue", confidence=0.8)
     server_mem._read_tracker.clear()
-    _stub_stats(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _stub_similar(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
     _outcomes(server_mem, "fix-old", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
     assert server_mem._adapter.read("acme/support", "fix-old").discredited_at is not None
 
     _, meta = _priors_meta(client, min_confidence=0.5)  # query: "card declined" — no overlap with fix-old
     assert meta["regime_shift"] is True
-    assert meta["recommendation"]["mode"] == "explore"
+    assert meta["regime_shift_scope"] == "entity"
+    assert meta["recommendation"]["mode"] == "act"
+    assert meta["recommendation"]["suggested_action"] == "resolve:a"
+
+
+def _contrast_outcome_row(failed: str, resolved: str, *, agent="a1", ref="o-contrast"):
+    row = _row([], agent=agent)
+    row["actions_taken"] = [
+        {"action_key": failed, "success": False, "attempt": 1},
+        {"action_key": resolved, "success": True, "attempt": None},
+    ]
+    row["outcome_ref"] = ref
+    return row
+
+
+def test_a_contrast_in_the_priors_acts_on_the_resolver_and_names_it_on_the_avoid_row(
+    client, server_mem
+) -> None:
+    """One nearby fail-then-succeed outcome: the recommendation is the action
+    that resolved it, the priors carry the pair, and the avoided rule — the one
+    the failed attempt acted on — says what resolved the task instead. The
+    action reaches the avoid row through the lesson for the same outcome, so
+    it lands on the rule that outcome named and on no other."""
+    from amfs_core import evidence as ev
+
+    _stub_similar(server_mem._adapter, [_contrast_outcome_row("resolve:a", "resolve:b")])
+    _outcomes(server_mem, "fix-a", OutcomeType.FAILURE, OutcomeType.FAILURE)
+    _outcomes(server_mem, "fix-b", OutcomeType.FAILURE, OutcomeType.FAILURE)
+    # The lesson for o-contrast: fix-a misled the attempt. No resolved_action
+    # of its own (a repair-loop pointer), so the action joins from the priors.
+    server_mem.write(
+        "acme/support", ev.contrast_lesson_key("o-contrast"),
+        {"kind": "contrast", "outcome_ref": "o-contrast", "avoid": ["acme/support/fix-a"],
+         "resolved_with": [], "task_excerpt": "card declined"},
+        confidence=0.8,
+    )
+    server_mem._read_tracker.clear()
+
+    body, meta = _priors_meta(client, include_avoid=True, compact=True)
+    assert meta["recommendation"]["mode"] == "act"
+    assert meta["recommendation"]["suggested_action"] == "resolve:b"
+    assert meta["recommendation"]["contrast"] == {
+        "failed": ["resolve:a"], "resolved_with": "resolve:b", "outcome_ref": "o-contrast",
+    }
+    assert meta["priors"]["contrasts"][0]["resolved_with"] == "resolve:b"
+    avoid = {e["key"]: e for e in body if e.get("_avoid")}
+    assert sorted(avoid) == ["fix-a", "fix-b"]
+    assert avoid["fix-a"]["_breakdown"]["resolved_with_action"] == "resolve:b"
+    assert avoid["fix-a"]["_breakdown"]["locally_discredited"] is False
+    assert avoid["fix-a"]["value"].startswith("discredited; last failure ")
+    assert avoid["fix-a"]["value"].endswith("resolved instead with resolve:b")
+    assert "value_truncated" not in avoid["fix-a"]
+    # fix-b was not named by that outcome: it does not claim the fix.
+    assert avoid["fix-b"]["_breakdown"]["resolved_with_action"] is None
+    assert "resolved instead" not in avoid["fix-b"]["value"]
+    # The elements keep their order: hits, avoid rows, then the meta element.
+    kinds = ["meta" if e.get("_meta") else "avoid" if e.get("_avoid") else "hit" for e in body]
+    assert kinds == sorted(kinds, key=["hit", "avoid", "meta"].index)
+
+
+def test_under_a_query_shift_contested_alternatives_are_pruned_behind_the_leader(
+    client, server_mem
+) -> None:
+    """A rule the query is about has stopped working (query-scoped shift). The
+    alternatives the record has already marked against on tasks like this are
+    the rows grid v4 found in failing contexts; behind the leader they go."""
+    server_mem.write("acme/support", "fix-c", "card declined: retry the charge tomorrow", confidence=0.8)
+    server_mem._read_tracker.clear()
+    _stub_similar(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _outcomes(server_mem, "fix-a", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
+    _outcomes(server_mem, "fix-b", *([OutcomeType.SUCCESS] * 3))
+    _outcomes(server_mem, "fix-c", OutcomeType.SUCCESS, OutcomeType.SUCCESS, OutcomeType.SUCCESS, OutcomeType.FAILURE)
+    assert server_mem._adapter.read("acme/support", "fix-c").evidence_status == "contested"
+
+    body, meta = _priors_meta(client, adaptive_k=True)
+    assert meta["regime_shift_scope"] == "query"
+    hits = [e["key"] for e in body if not e.get("_meta")]
+    assert hits == ["fix-b"], hits
+
+    # Without adaptive k the contested alternative stays.
+    body, _ = _priors_meta(client, adaptive_k=False)
+    assert "fix-c" in [e["key"] for e in body if not e.get("_meta")]
+
+
+def test_a_rescued_hit_is_not_pruned_under_the_shift(client, server_mem, monkeypatch) -> None:
+    """A rescued entry carries the ``contested`` label too, but it is in the
+    list because its local record says it works on tasks like this — the
+    opposite of what the label means on a pooled record. The shift pruning
+    must leave it where the rescue put it."""
+    from amfs_http import server
+
+    from tests.unit.test_retrieve_evidence import _AsyncShim
+
+    server_mem.write("acme/support", "fix-c", "card declined: retry the charge tomorrow", confidence=0.8)
+    server_mem._read_tracker.clear()
+    _stub_similar(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    monkeypatch.setattr(server, "_async_adapter", _AsyncShim(server_mem._adapter))
+    monkeypatch.setattr(
+        server_mem._adapter, "evidence_near",
+        lambda keys, vec, **kw: {
+            "acme/support/fix-c": {"success": 3.0, "failure": 0.0, "n": 3, "best_similarity": 0.9,
+                                   "recent": [{"success": True}] * 3},
+        },
+        raising=False,
+    )
+    # fix-a: the shifted rule. fix-b: untested, so it leads without the
+    # validated-leader pass (step 11) firing — what is under test is the shift
+    # pass (11b). fix-c: discredited by the pooled record, working on tasks
+    # like this one -> rescued, and labelled ``contested``.
+    _outcomes(server_mem, "fix-a", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
+    _outcomes(server_mem, "fix-c", OutcomeType.FAILURE, OutcomeType.FAILURE)
+    assert server_mem._adapter.read("acme/support", "fix-c").discredited_at is not None
+
+    body, meta = _priors_meta(client, adaptive_k=True, include_avoid=True)
+    assert meta["regime_shift_scope"] == "query"
+    hits = {e["key"]: e for e in body if not e.get("_meta") and not e.get("_avoid")}
+    assert "fix-c" in hits, sorted(hits)
+    assert hits["fix-c"]["_rescued"] is True and hits["fix-c"]["evidence_status"] == "contested"
+    assert list(hits)[0] == "fix-b"
 
 
 def test_the_off_query_rule_fires_the_shift_at_the_default_gate_too(client, server_mem) -> None:
@@ -461,12 +842,13 @@ def test_the_off_query_rule_fires_the_shift_at_the_default_gate_too(client, serv
     stopped working but shares no words with the query never flags."""
     server_mem.write("acme/support", "fix-old", "rotate the ingest worker on a stuck queue", confidence=0.8)
     server_mem._read_tracker.clear()
-    _stub_stats(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
+    _stub_similar(server_mem._adapter, [_row([("resolve:a", True)], agent=f"a{i}") for i in range(3)])
     _outcomes(server_mem, "fix-old", *([OutcomeType.SUCCESS] * 8), OutcomeType.FAILURE, OutcomeType.FAILURE)
 
     _, meta = _priors_meta(client)  # default min_confidence=0.0
     assert meta["regime_shift"] is True
-    assert meta["recommendation"]["mode"] == "explore"
+    assert meta["regime_shift_scope"] == "entity"
+    assert meta["recommendation"]["mode"] == "act"
 
 
 def test_the_below_gate_read_respects_the_callers_visibility(client, server_mem, monkeypatch) -> None:

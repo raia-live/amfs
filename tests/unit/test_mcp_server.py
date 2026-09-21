@@ -1001,3 +1001,34 @@ class TestConfigResolution:
             os.environ.pop("AMFS_DATA_DIR", None)
             config = _resolve_config()
             assert config.layers["primary"].adapter == "filesystem"
+
+
+class TestTtlSweepInterval:
+    """The MCP server sweeps TTLs itself only for a store it owns. Over HTTP
+    the hosted server sweeps, and a client sweep was one whole-tenant
+    listing per MCP process every five minutes."""
+
+    def test_local_store_sweeps_every_five_minutes(self, tmp_path, monkeypatch) -> None:
+        from amfs_mcp.server import _ttl_sweep_interval
+
+        monkeypatch.delenv("AMFS_TTL_SWEEP_INTERVAL", raising=False)
+        assert _ttl_sweep_interval(FilesystemAdapter(root=tmp_path, namespace="t")) == 300.0
+
+    def test_http_adapter_does_not_sweep_unless_asked(self, monkeypatch) -> None:
+        from amfs_adapter_http import HttpAdapter
+        from amfs_mcp.server import _ttl_sweep_interval
+
+        http = HttpAdapter(base_url="http://127.0.0.1:1", api_key="k")
+        monkeypatch.delenv("AMFS_TTL_SWEEP_INTERVAL", raising=False)
+        assert _ttl_sweep_interval(http) is None
+        monkeypatch.setenv("AMFS_TTL_SWEEP_INTERVAL", "900")
+        assert _ttl_sweep_interval(http) == 900.0
+
+    def test_zero_or_garbage_disables(self, tmp_path, monkeypatch) -> None:
+        from amfs_mcp.server import _ttl_sweep_interval
+
+        fs = FilesystemAdapter(root=tmp_path, namespace="t")
+        monkeypatch.setenv("AMFS_TTL_SWEEP_INTERVAL", "0")
+        assert _ttl_sweep_interval(fs) is None
+        monkeypatch.setenv("AMFS_TTL_SWEEP_INTERVAL", "soon")
+        assert _ttl_sweep_interval(fs) is None

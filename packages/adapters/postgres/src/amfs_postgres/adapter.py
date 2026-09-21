@@ -20,6 +20,12 @@ import psycopg
 from psycopg.rows import dict_row
 
 from amfs_postgres._fts import or_tsquery
+from amfs_postgres.knn import (
+    hnsw_scan_reset,
+    hnsw_scan_settings,
+    parse_pgvector_version,
+    use_hnsw_scan,
+)
 from amfs_core.abc import AdapterABC, WatchHandle
 from amfs_core.content import ARTIFACT_PENALTY, classify_artifact, embedding_input
 from amfs_core.embedder import EmbedderABC
@@ -73,7 +79,7 @@ from amfs_core.models import (
     ToolCall,
     TraceEntry,
 )
-from amfs_core.scope import descendants_sql
+from amfs_core.scope import SqlScope, descendants_sql
 
 try:
     from psycopg_pool import ConnectionPool as _ConnectionPool
@@ -144,6 +150,82 @@ _EXCLUDE_SYSTEM_ROWS = (
     f"({ENTITY_PATH_NOT_EXCLUDED_SQL} AND {AGENT_ID_NOT_EXCLUDED_SQL})"
 )
 
+#: ORDER BY clauses ``list()`` accepts by name. Every descending order carries
+#: the full key as a tiebreak so ``LIMIT/OFFSET`` pages never overlap or skip
+#: when two rows share a timestamp or a count — which, for written_at on a
+#: bulk import, they routinely do.
+_LIST_ORDERS: dict[str | None, str] = {
+    None: "entity_path, key, version",
+    "written_at": "written_at DESC, entity_path DESC, key DESC, version DESC",
+    "recall_count": "recall_count DESC, written_at DESC, entity_path DESC, key DESC, version DESC",
+}
+
+
+def _list_order_sql(order_by: str | None) -> str:
+    try:
+        return _LIST_ORDERS[order_by]
+    except KeyError:
+        raise ValueError(
+            f"unsupported order_by {order_by!r}; one of {sorted(k for k in _LIST_ORDERS if k)}"
+        ) from None
+
+
+def _paginate_sql(
+    query: str, params: list[Any], *, limit: int | None, offset: int
+) -> tuple[str, list[Any]]:
+    """Append ``LIMIT``/``OFFSET`` as parameters, only when asked for."""
+    if limit is not None:
+        query += " LIMIT %s"
+        params = [*params, int(limit)]
+    if offset:
+        query += " OFFSET %s"
+        params = [*params, int(offset)]
+    return query, params
+
+
+def list_conditions(
+    namespace: str,
+    entity_path: str | None,
+    *,
+    include_superseded: bool,
+    branch: str,
+    scope: SqlScope | None,
+    agent_id: str | None,
+    branch_scope: tuple[str, list[Any]] | None = None,
+) -> tuple[list[str], list[Any]]:
+    """The WHERE behind ``list()`` and ``count_entries()`` on both adapters.
+
+    One definition so a page and the ``total`` it reports cannot disagree
+    about which rows exist, and so the shared-namespace guard is applied to
+    the unscoped read in one place (``tests/test_shared_path_scoping.py``).
+
+    *branch_scope* replaces the plain ``branch = %s`` predicate with the
+    overlay fragment from :func:`branch_scope_sql` (a branch's own live rows
+    plus the parent's for every key it has not touched) — the adapters pass
+    it once they hold a cursor to look the parent up on.
+    """
+    if branch_scope is not None:
+        branch_sql, branch_params = branch_scope
+    else:
+        branch_sql, branch_params = "branch = %s", [branch]
+    conditions = ["namespace = %s", branch_sql]
+    params: list[Any] = [namespace, *branch_params]
+
+    if entity_path is not None:
+        conditions.append("entity_path = %s")
+        params.append(entity_path)
+    else:
+        conditions.append(_EXCLUDE_SHARED_PATHS)
+
+    if not include_superseded:
+        conditions.append("superseded_at IS NULL")
+    if agent_id is not None:
+        conditions.append("agent_id = %s")
+        params.append(agent_id)
+    if scope is not None:
+        scope.apply(conditions, params)
+    return conditions, params
+
 def _attempts_from_row(raw: Any) -> list[AttemptRecord]:
     """``AttemptRecord`` list from the ``attempts`` JSONB column, tolerant of
     the column being absent, NULL, or a not-yet-decoded JSON string."""
@@ -182,6 +264,21 @@ _OUTCOME_EVIDENCE_SQL = (
 _ACTION_PRIORS_SQL = (
     Path(__file__).parent / "migrations" / "009_action_priors.sql"
 ).read_text(encoding="utf-8")
+#: Migration 010 — the index behind ``evidence_near`` (query-conditioned
+#: evidence read off the outcome rows). Same treatment as 008 and 009.
+_LOCAL_EVIDENCE_SQL = (
+    Path(__file__).parent / "migrations" / "010_local_evidence.sql"
+).read_text(encoding="utf-8")
+#: Migration 011 — the task text on the outcome row, the background corpus
+#: retrieve weights query terms against. Same treatment as 008–010.
+_OUTCOME_TASK_TEXT_SQL = (
+    Path(__file__).parent / "migrations" / "011_outcome_task_text.sql"
+).read_text(encoding="utf-8")
+#: Characters of ``task_input`` kept on the outcome row. Read for word
+#: statistics — which of a query's words recur across this entity's tasks —
+#: so the head of the request is all that is needed, and a pasted log or
+#: transcript does not make every commit a large write.
+TASK_TEXT_CHARS = 2_000
 
 # Shared by the sync and async adapters so the two cannot drift apart. account_id
 # is omitted on purpose: the hosted product gives the column a default in a tenant
@@ -665,6 +762,8 @@ class PostgresAdapter(AdapterABC):
         self._has_action_cols = False
         self._has_outcome_embedding_col = False
         self._has_outcome_env_col = False
+        self._has_task_text_col = False
+        self._pgvector_version: tuple[int, ...] | None = None
         # When an embedder is provided, embeddings are computed at write time and
         # persisted, so ANN retrieval (semantic_search / pgvector HNSW) works
         # without a separate backfill pass. embedding_dim must match the column
@@ -807,7 +906,10 @@ class PostgresAdapter(AdapterABC):
         if migrations is None:
             return None
         return hashlib.sha256(
-            (_SCHEMA_SQL + migrations + _OUTCOME_EVIDENCE_SQL + _ACTION_PRIORS_SQL).encode("utf-8")
+            (
+                _SCHEMA_SQL + migrations + _OUTCOME_EVIDENCE_SQL + _ACTION_PRIORS_SQL
+                + _LOCAL_EVIDENCE_SQL + _OUTCOME_TASK_TEXT_SQL
+            ).encode("utf-8")
         ).hexdigest()
 
     def _expected_tables(self) -> frozenset[str]:
@@ -1149,6 +1251,12 @@ class PostgresAdapter(AdapterABC):
             ON amfs_memory_entries (namespace, entity_path)
             WHERE tier <= 2 AND superseded_at IS NULL
         """)
+        # TTL sweep (list_expired): the few rows carrying a ttl_at, by expiry.
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_ttl
+            ON amfs_memory_entries (ttl_at)
+            WHERE ttl_at IS NOT NULL AND superseded_at IS NULL
+        """)
         # Outcome propagation (trigger v3): evidence columns on entries,
         # attempts/final_action_index on outcomes, and the propagate function
         # with its helpers. Applied from the migration file rather than a copy
@@ -1164,6 +1272,10 @@ class PostgresAdapter(AdapterABC):
             ALTER TABLE amfs_outcomes
             ADD COLUMN IF NOT EXISTS environment JSONB
         """)
+        # Query-conditioned evidence: see migration 010.
+        cur.execute(_LOCAL_EVIDENCE_SQL)
+        # The task text on outcomes: see migration 011.
+        cur.execute(_OUTCOME_TASK_TEXT_SQL)
         # task_embedding on outcomes follows the entries' embedding dimension,
         # so it is derived here rather than declared in the migration.
         cur.execute(
@@ -1427,6 +1539,20 @@ class PostgresAdapter(AdapterABC):
             ON amfs_memory_entries (namespace, agent_id, written_at DESC)
             WHERE superseded_at IS NULL
         """)
+        # The two orders ``list()`` pages by (GET /entries?sort=...). Each lets
+        # a ``LIMIT`` page come off the index (incremental sort over the
+        # tiebreak columns) instead of a top-N sort over every current entry
+        # in the namespace.
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_written_desc
+            ON amfs_memory_entries (namespace, branch, written_at DESC)
+            WHERE superseded_at IS NULL
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_recall_desc
+            ON amfs_memory_entries (namespace, branch, recall_count DESC, written_at DESC)
+            WHERE superseded_at IS NULL
+        """)
 
         cur.execute("""
             ALTER TABLE amfs_api_keys
@@ -1583,17 +1709,28 @@ class PostgresAdapter(AdapterABC):
                 self._has_is_artifact_col = "is_artifact" in found
                 self._has_evidence_cols = "success_count" in found
                 self._has_validators_col = "validators" in found
+                self._pgvector_version = None
+                if self._has_embedding_col:
+                    # Decides whether the account-wide vector search may take
+                    # the HNSW route (see amfs_postgres.knn).
+                    cur.execute("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+                    row = cur.fetchone()
+                    self._pgvector_version = parse_pgvector_version(
+                        row["extversion"] if row else None
+                    )
                 cur.execute(
                     """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'amfs_outcomes'
                       AND column_name IN ('actions_taken', 'task_embedding', 'environment')
+                      AND column_name IN ('actions_taken', 'task_embedding', 'task_text')
                     """,
                 )
                 found = {row["column_name"] for row in cur.fetchall()}
                 self._has_action_cols = "actions_taken" in found
                 self._has_outcome_embedding_col = "task_embedding" in found
                 self._has_outcome_env_col = "environment" in found
+                self._has_task_text_col = "task_text" in found
 
     # ------------------------------------------------------------------
     # read
@@ -2095,31 +2232,185 @@ class PostgresAdapter(AdapterABC):
         *,
         include_superseded: bool = False,
         branch: str = "main",
+        scope: SqlScope | None = None,
+        agent_id: str | None = None,
+        order_by: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[MemoryEntry]:
-        conditions = ["namespace = %s"]
-        params: list[Any] = [self._namespace]
+        """Current entries, filtered, ordered and paged in SQL.
 
-        if entity_path is not None:
-            conditions.append("entity_path = %s")
-            params.append(entity_path)
-        else:
-            conditions.append(_EXCLUDE_SHARED_PATHS)
+        The keyword arguments beyond the ABC's exist so the HTTP read path never
+        has to materialise a namespace to answer a question about part of it:
 
-        if not include_superseded:
-            conditions.append("superseded_at IS NULL")
+        - *scope* is the caller's visibility rule as a predicate (see
+          :class:`amfs_core.scope.SqlScope`); *agent_id* narrows to one author.
+        - *order_by* is ``None`` for the stable ``entity_path, key, version``
+          order, ``"written_at"`` for newest first, ``"recall_count"`` for most
+          reused first. Both descending orders carry the full tiebreak, so a
+          page boundary is deterministic.
+        - *limit*/*offset* page the result in the query. Filtering happens
+          before paging by construction, so a caller can never page past rows
+          its scope hides.
 
+        *branch* is read as an overlay on its parent (``_branch_scope``): a
+        repair branch or a canary lists the same memory ``main`` does, apart
+        from the entries it changed.
+        """
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
-                scope_sql, scope_params = self._branch_scope(cur, branch)
-                where = " AND ".join([conditions[0], scope_sql, *conditions[1:]])
+                conditions, params = list_conditions(
+                    self._namespace,
+                    entity_path,
+                    include_superseded=include_superseded,
+                    branch=branch,
+                    scope=scope,
+                    agent_id=agent_id,
+                    branch_scope=self._branch_scope(cur, branch),
+                )
+                where = " AND ".join(conditions)
                 query = (
                     f"SELECT {entry_select(self._has_is_artifact_col, self._has_validators_col)} "
-                    f"FROM amfs_memory_entries WHERE {where} ORDER BY entity_path, key, version"
+                    f"FROM amfs_memory_entries WHERE {where} ORDER BY {_list_order_sql(order_by)}"
                 )
-                cur.execute(query, [params[0], *scope_params, *params[1:]])
+                query, params = _paginate_sql(query, params, limit=limit, offset=offset)
+                cur.execute(query, params)
                 rows = cur.fetchall()
 
         return [self._row_to_entry(r) for r in rows]
+
+    def list_expired(
+        self, *, now: datetime | None = None, branch: str = "main", limit: int = 1000
+    ) -> list[MemoryEntry]:
+        """Current entries whose ``ttl_at`` has passed, oldest expiry first.
+
+        What a TTL sweep needs: the rows to archive, found through the
+        partial index on ``ttl_at`` (``idx_entries_ttl``) rather than by
+        listing the tenant and checking each entry's clock in Python. Same
+        row set as ``list()`` — current versions, this branch, shared paths
+        excluded — narrowed to the expired ones. *limit* bounds one sweep;
+        the next sweep picks up the rest.
+        """
+        conditions, params = list_conditions(
+            self._namespace, None, include_superseded=False, branch=branch, scope=None, agent_id=None,
+        )
+        conditions.append("ttl_at IS NOT NULL AND ttl_at <= %s")
+        params.append(now or datetime.now(timezone.utc))
+        query = (
+            f"SELECT {entry_select(self._has_is_artifact_col, self._has_validators_col)} "
+            f"FROM amfs_memory_entries WHERE {' AND '.join(conditions)} ORDER BY ttl_at LIMIT %s"
+        )
+        params.append(limit)
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
+        return [self._row_to_entry(r) for r in rows]
+
+    def list_scopes(self, *, branch: str = "main") -> tuple[set[str], set[str]]:
+        """The distinct ``(entity paths, agent ids)`` behind the current entries.
+
+        What the Cortex worker's catch-up scan needs to know — which scopes exist
+        so it can queue the ones without a digest — computed as a ``GROUP BY``
+        instead of :meth:`list`, which ships every current row of the tenant and
+        builds a :class:`MemoryEntry` for each. On a store of 80k entries that
+        listing took 30-300 s per scan and ran once per instance every five
+        minutes; this reads two columns and returns in milliseconds. The row
+        set is exactly the one ``list()`` would return: same namespace, branch,
+        shared-path guard and superseded filter.
+        """
+        conditions, params = list_conditions(
+            self._namespace, None, include_superseded=False, branch=branch, scope=None, agent_id=None,
+        )
+        query = (
+            f"SELECT entity_path, agent_id FROM amfs_memory_entries WHERE {' AND '.join(conditions)} "
+            "GROUP BY entity_path, agent_id"
+        )
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
+        return {r["entity_path"] for r in rows}, {r["agent_id"] for r in rows if r["agent_id"]}
+
+    def list_digest_scopes(self, namespace: str = "default", branch: str = "main") -> set[str]:
+        """``"<digest_type>:<scope>"`` for every digest of the current tenant.
+
+        The catch-up scan compares this against :meth:`list_scopes`; it needs
+        the keys only, not the summaries :meth:`list_digests` would load.
+        """
+        account_id = self._get_current_account_id()
+        where = ["namespace = %s", "branch = %s"]
+        params: list[Any] = [namespace, branch]
+        if account_id:
+            where.append("account_id = %s")
+            params.append(account_id)
+        else:
+            where.append("account_id IS NULL")
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT digest_type, scope FROM amfs_digests WHERE {' AND '.join(where)}", params
+                )
+                rows = cur.fetchall()
+        return {f"{r['digest_type']}:{r['scope']}" for r in rows}
+
+    def count_entries(
+        self,
+        entity_path: str | None = None,
+        *,
+        include_superseded: bool = False,
+        branch: str = "main",
+        scope: SqlScope | None = None,
+        agent_id: str | None = None,
+    ) -> int:
+        """``COUNT(*)`` over exactly the rows :meth:`list` would return.
+
+        The ``total`` a paged listing reports, computed without fetching a row.
+        Same branch overlay as :meth:`list`, so the two cannot disagree.
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                conditions, params = list_conditions(
+                    self._namespace,
+                    entity_path,
+                    include_superseded=include_superseded,
+                    branch=branch,
+                    scope=scope,
+                    agent_id=agent_id,
+                    branch_scope=self._branch_scope(cur, branch),
+                )
+                where = " AND ".join(conditions)
+                cur.execute(f"SELECT COUNT(*) AS n FROM amfs_memory_entries WHERE {where}", params)
+                row = cur.fetchone()
+        return int(row["n"]) if row else 0
+
+    def entry_authors(self, refs: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
+        """Who wrote each ``(entity_path, key)``, for the current version.
+
+        The memory-graph and cross-agent-read views attribute an agent's reads
+        to the entries' authors. They need the author of the few hundred entries
+        the agent read, not of every entry in the namespace — which is what they
+        fetched before this existed.
+        """
+        if not refs:
+            return {}
+        paths = [p for p, _ in refs]
+        keys = [k for _, k in refs]
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT e.entity_path, e.key, e.agent_id
+                    FROM amfs_memory_entries e
+                    JOIN unnest(%s::text[], %s::text[]) AS r(entity_path, key)
+                      ON r.entity_path = e.entity_path AND r.key = e.key
+                    WHERE e.namespace = %s AND e.branch = 'main'
+                      AND e.superseded_at IS NULL
+                    """,
+                    [paths, keys, self._namespace],
+                )
+                rows = cur.fetchall()
+        return {(r["entity_path"], r["key"]): r["agent_id"] for r in rows}
 
     # ------------------------------------------------------------------
     # search (full-text via tsvector when available, SQL filter otherwise)
@@ -2277,7 +2568,7 @@ class PostgresAdapter(AdapterABC):
         if not self._has_embedding_col:
             return super().semantic_search(query, embedder)
 
-        query_vec = embedder.embed(query.text)
+        query_vec = query.embedding if query.embedding is not None else embedder.embed(query.text)
 
         conditions = ["namespace = %s", "superseded_at IS NULL", "embedding IS NOT NULL"]
         params: list[Any] = [self._namespace]
@@ -2290,23 +2581,43 @@ class PostgresAdapter(AdapterABC):
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
+        if query.max_confidence is not None:
+            conditions.append("confidence <= %s")
+            params.append(query.max_confidence)
 
         where = " AND ".join(conditions)
         vec_str = f"[{','.join(str(v) for v in query_vec)}]"
+        # Projected, not ``*``, and routed onto the HNSW index for account-wide
+        # reads — the same two changes as the async twin; see amfs_postgres.knn.
+        sql = f"""
+            SELECT {entry_select(self._has_is_artifact_col, self._has_validators_col)},
+                   1 - (embedding <=> %s::vector) AS similarity
+            FROM amfs_memory_entries
+            WHERE {where}
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+        """
+        sql_params = [vec_str] + params + [vec_str, query.limit]
 
         with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    SELECT *, 1 - (embedding <=> %s::vector) AS similarity
-                    FROM amfs_memory_entries
-                    WHERE {where}
-                    ORDER BY embedding <=> %s::vector
-                    LIMIT %s
-                    """,
-                    [vec_str] + params + [vec_str, query.limit],
-                )
-                rows = cur.fetchall()
+            rows: list[dict[str, Any]] | None = None
+            if use_hnsw_scan(entity_path=query.entity_path, version=self._pgvector_version):
+                with conn.transaction():
+                    conn.execute(hnsw_scan_settings(query.limit))
+                    with conn.cursor() as cur:
+                        cur.execute(sql, sql_params)
+                        rows = cur.fetchall()
+                    # Before the block ends, not after: when the checkout
+                    # already sits in the RLS wrapper's transaction this block
+                    # is a savepoint, SET LOCAL outlives it, and the exact
+                    # re-run below would inherit the index settings.
+                    conn.execute(hnsw_scan_reset())
+                if len(rows) < query.limit:
+                    rows = None
+            if rows is None:
+                with conn.cursor() as cur:
+                    cur.execute(sql, sql_params)
+                    rows = cur.fetchall()
 
         results: list[tuple[MemoryEntry, float]] = []
         for row in rows:
@@ -2994,13 +3305,21 @@ class PostgresAdapter(AdapterABC):
         self,
         *,
         agent_ids: list[str] | None = None,
+        scope: SqlScope | None = None,
     ) -> list[dict[str, Any]]:
-        """Per-entity aggregates via GROUP BY — never loads entry values."""
+        """Per-entity aggregates via GROUP BY — never loads entry values.
+
+        *scope* is a visibility predicate (room co-member rules and the like)
+        that ``agent_ids`` alone cannot express; with it, a per-user dashboard
+        gets this query instead of a Python pass over every entry.
+        """
         conditions = ["namespace = %s", "branch = 'main'", "superseded_at IS NULL"]
         params: list[Any] = [self._namespace]
         if agent_ids is not None:
             conditions.append("agent_id = ANY(%s)")
             params.append(list(agent_ids))
+        if scope is not None:
+            scope.apply(conditions, params)
         # No entity_path argument to this one: it is unscoped by construction,
         # so shared namespaces are always excluded. It groups by entity_path,
         # which would otherwise list a shared namespace's topics as though
@@ -3044,6 +3363,63 @@ class PostgresAdapter(AdapterABC):
                 "hashed_count": r["hashed_count"],
                 "total_recalls": int(r["total_recalls"] or 0),
                 "recalled_tokens_saved": int(r["recalled_tokens_saved"] or 0),
+            }
+            for r in rows
+        ]
+
+    def agent_summaries(
+        self,
+        *,
+        agent_ids: list[str] | None = None,
+        scope: SqlScope | None = None,
+    ) -> list[dict[str, Any]]:
+        """Per-agent activity via GROUP BY — what ``GET /agents`` shows.
+
+        Entries written, distinct entities touched, first and last write, per
+        author, over live main-branch rows outside ``_system/`` (the same rows
+        the handler used to count after loading every entry into Python).
+        *agent_ids* narrows to the agents a caller may see; *scope* is a
+        visibility predicate for rules that a list of agents cannot express.
+        """
+        conditions = [
+            "namespace = %s",
+            "branch = 'main'",
+            "superseded_at IS NULL",
+            # A LIKE pattern, so the underscore is escaped: ``_system/`` and
+            # nothing else. Written with the doubled ``%`` psycopg requires.
+            "entity_path NOT LIKE '\\_system/%%'",
+            _EXCLUDE_SHARED_PATHS,
+        ]
+        params: list[Any] = [self._namespace]
+        if agent_ids is not None:
+            conditions.append("agent_id = ANY(%s)")
+            params.append(list(agent_ids))
+        if scope is not None:
+            scope.apply(conditions, params)
+        where = " AND ".join(conditions)
+
+        sql = f"""
+            SELECT agent_id,
+                   COUNT(*) AS entries_written,
+                   COUNT(DISTINCT entity_path) AS entities_touched,
+                   MIN(written_at) AS first_seen,
+                   MAX(written_at) AS last_active
+            FROM amfs_memory_entries
+            WHERE {where}
+            GROUP BY agent_id
+            ORDER BY COUNT(*) DESC, agent_id
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        return [
+            {
+                "agent_id": r["agent_id"],
+                "entries_written": int(r["entries_written"] or 0),
+                "entities_touched": int(r["entities_touched"] or 0),
+                "first_seen": r["first_seen"],
+                "last_active": r["last_active"],
             }
             for r in rows
         ]
@@ -3120,13 +3496,22 @@ class PostgresAdapter(AdapterABC):
         self,
         *,
         agent_ids: list[str] | None = None,
+        scope: SqlScope | None = None,
     ) -> dict[str, Any]:
-        """Extended aggregate stats in SQL (recalls, weekly deltas, types)."""
+        """Extended aggregate stats in SQL (recalls, weekly deltas, types).
+
+        *scope* plays the same role as in :meth:`entity_summaries`. It applies
+        to the entry aggregates only: the reuse-event query below is keyed by
+        account and reader agent, and an entry-visibility predicate has no
+        meaning over event rows.
+        """
         conditions = ["namespace = %s", "superseded_at IS NULL"]
         params: list[Any] = [self._namespace]
         if agent_ids is not None:
             conditions.append("agent_id = ANY(%s)")
             params.append(list(agent_ids))
+        if scope is not None:
+            scope.apply(conditions, params)
         # Unscoped by construction, like entity_summaries: there is no
         # entity_path argument to opt into a shared namespace, and the
         # breakdown below groups by entity_path. Without this, a shared
@@ -3420,6 +3805,12 @@ class PostgresAdapter(AdapterABC):
                     columns.append("task_embedding")
                     placeholders.append("%s")
                     params.append(f"[{','.join(str(v) for v in task_embedding)}]")
+                # The head of the request, already redacted by the SDK before
+                # the record reached this adapter (see migration 011).
+                if self._has_task_text_col and record.task_input:
+                    columns.append("task_text")
+                    placeholders.append("%s")
+                    params.append(record.task_input[:TASK_TEXT_CHARS])
                 cur.execute(
                     f"INSERT INTO amfs_outcomes ({', '.join(columns)}) "
                     f"VALUES ({', '.join(placeholders)})",
@@ -3639,6 +4030,192 @@ class PostgresAdapter(AdapterABC):
                 "environment": _jsonb(row.get("environment"), {}) or {},
                 "similarity": sim,
             })
+        return out
+
+    def recent_task_texts(self, entity_path: str, *, limit: int = 200) -> list[str]:
+        """The task texts of the most recent outcomes about ``entity_path``,
+        newest first — the background corpus ``keyword_coverage`` weights a
+        query's terms against (see ``amfs_core.ranking``).
+
+        Bounded by ``limit`` and read through the GIN index on ``entity_paths``
+        (009). Empty when the column is not provisioned or nothing has been
+        committed with a ``task_input`` here, in which case the caller weights
+        by the candidate pool alone, as before 011.
+        """
+        if not self._has_task_text_col or not self._has_action_cols or not entity_path:
+            return []
+        sql = """
+            SELECT task_text
+            FROM amfs_outcomes
+            WHERE namespace = %s AND task_text IS NOT NULL AND %s = ANY(entity_paths)
+            ORDER BY committed_at DESC
+            LIMIT %s
+        """
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, [self._namespace, entity_path, int(limit)])
+                rows = cur.fetchall()
+        return [str(r["task_text"]) for r in rows if r.get("task_text")]
+
+    def evidence_near(
+        self,
+        entry_keys: list[str],
+        embedding: list[float],
+        *,
+        per_key: int = 50,
+        min_similarity: float = 0.0,
+        tau: float | None = None,
+        min_weight: float | None = None,
+        recent: int = 5,
+    ) -> dict[str, dict[str, Any]]:
+        """The outcome record of each entry in ``entry_keys``, restricted to
+        outcomes whose task was like the one embedded.
+
+        Returns ``entry_key -> {"success", "failure", "n", "best_similarity",
+        "recent"}``. ``success`` and ``failure`` are weighted counts, the
+        weight of each outcome relative to the *nearest* one for that key:
+        ``exp(-(best - sim) / tau)``, the form ``neighbourhood_weights`` gives
+        the action priors and for the same reason — under a retrieval
+        embedder every task on an entity clears any absolute floor, but
+        within one query the nearest outcomes are the same kind of task and
+        the rest trail by a gap. An outcome 0.05 behind the best counts a
+        fifth, one 0.1 behind counts 4%, and rows under ``min_weight`` are
+        dropped rather than counted toward ``n``. ``tau`` and ``min_weight``
+        default to the priors' constants. ``recent`` is the newest
+        in-neighbourhood outcomes for the key, newest first, each ``{success,
+        similarity, committed_at}`` — the order the sums cannot carry, which
+        ``locally_discredited`` reads. Keys with no nearby outcome are absent.
+
+        Terminal outcomes credit the row's ``causal_entry_keys``; the failed
+        attempts inside ``attempts`` credit their own keys with a failure,
+        exactly as the propagation trigger applies them to the pooled columns
+        — so this is the pooled record, conditioned on the task, and nothing
+        more. ``min_similarity`` is an absolute floor under the relative
+        weighting: rows below it never enter, so a key whose only outcomes
+        are on unrelated tasks has no local record rather than a full-weight
+        one.
+
+        Bounded on both sides: ``per_key`` nearest outcomes per entry, over
+        the outcomes the GIN index on ``causal_entry_keys`` narrows to.
+        Empty when the store has no task embeddings.
+        """
+        if not self._has_outcome_embedding_col or not embedding or not entry_keys:
+            return {}
+        from amfs_core.actions import PRIORS_NEIGHBOURHOOD_MIN_W, PRIORS_NEIGHBOURHOOD_TAU
+
+        tau_ = float(PRIORS_NEIGHBOURHOOD_TAU if tau is None else tau)
+        min_w = float(PRIORS_NEIGHBOURHOOD_MIN_W if min_weight is None else min_weight)
+        vec = f"[{','.join(str(v) for v in embedding)}]"
+        keys = list(dict.fromkeys(entry_keys))
+        # Each row is unnested to (key, is_failure) pairs: the terminal outcome
+        # for every causal key, and a failure for every key inside a failed
+        # attempt. Rows are narrowed first by key overlap (indexed), then
+        # ranked per key by task similarity and cut at per_key, then weighted
+        # against the key's best match and cut again at min_weight. ``n``
+        # counts distinct outcomes, not credits: one outcome that names a key
+        # in a failed attempt and again as a causal key is one nearby task,
+        # and must not on its own clear LOCAL_EVIDENCE_MIN_N. ``recent`` is
+        # aggregated newest first with the failure credit ahead of the success
+        # credit of the same outcome, so the Python dedupe below keeps the
+        # failure: the entry misled an attempt on that task, whatever else it
+        # did afterwards.
+        sql = """
+            WITH near AS (
+                SELECT o.id AS outcome_id, o.outcome_type, o.causal_entry_keys, o.attempts,
+                       o.committed_at,
+                       1 - (o.task_embedding <=> %s::vector) AS similarity
+                FROM amfs_outcomes o
+                WHERE o.namespace = %s
+                  AND o.task_embedding IS NOT NULL
+                  AND (
+                      o.causal_entry_keys && %s::text[]
+                      OR EXISTS (
+                          SELECT 1
+                          FROM jsonb_array_elements(o.attempts) AS att,
+                               jsonb_array_elements_text(
+                                   COALESCE(att->'causal_entry_keys', '[]'::jsonb)
+                               ) AS ak
+                          WHERE ak = ANY(%s::text[])
+                      )
+                  )
+            ),
+            credited AS (
+                SELECT n.outcome_id, k AS entry_key,
+                       amfs_outcome_is_success(n.outcome_type) AS success,
+                       n.similarity, n.committed_at
+                FROM near n, unnest(n.causal_entry_keys) AS k
+                WHERE k = ANY(%s::text[])
+                UNION ALL
+                SELECT n.outcome_id, ak AS entry_key, FALSE AS success, n.similarity, n.committed_at
+                FROM near n,
+                     jsonb_array_elements(n.attempts) AS att,
+                     jsonb_array_elements_text(
+                         COALESCE(att->'causal_entry_keys', '[]'::jsonb)
+                     ) AS ak
+                WHERE ak = ANY(%s::text[])
+            ),
+            ranked AS (
+                SELECT outcome_id, entry_key, success, similarity, committed_at,
+                       row_number() OVER (PARTITION BY entry_key ORDER BY similarity DESC) AS rn,
+                       MAX(similarity) OVER (PARTITION BY entry_key) AS best
+                FROM credited
+                WHERE similarity >= %s
+            ),
+            weighted AS (
+                SELECT outcome_id, entry_key, success, similarity, committed_at, best,
+                       exp(-(best - similarity) / %s) AS w
+                FROM ranked
+                WHERE rn <= %s
+            )
+            SELECT entry_key,
+                   SUM(CASE WHEN success THEN w ELSE 0 END) AS success,
+                   SUM(CASE WHEN success THEN 0 ELSE w END) AS failure,
+                   COUNT(DISTINCT outcome_id) AS n,
+                   MAX(similarity) AS best_similarity,
+                   (array_agg(
+                        jsonb_build_object(
+                            'o', outcome_id, 's', success, 'sim', similarity,
+                            'at', to_char(committed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"')
+                        )
+                        ORDER BY committed_at DESC, success ASC
+                   ))[1:%s] AS recent
+            FROM weighted
+            WHERE w >= %s
+            GROUP BY entry_key
+        """
+        # ``recent`` is over-fetched (two credits per outcome at most) and
+        # deduped per outcome below.
+        params = [
+            vec, self._namespace, keys, keys, keys, keys, float(min_similarity),
+            tau_ if tau_ > 0 else 1e-9, int(per_key), int(max(1, recent)) * 2, min_w,
+        ]
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        out: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            seen: set[Any] = set()
+            recent_rows: list[dict[str, Any]] = []
+            for item in _jsonb(row.get("recent"), []) or []:
+                item = _jsonb(item, None)   # jsonb[] elements may arrive decoded or as text
+                if not isinstance(item, dict) or item.get("o") in seen:
+                    continue
+                seen.add(item.get("o"))
+                recent_rows.append({
+                    "success": bool(item.get("s")),
+                    "similarity": float(item.get("sim") or 0.0),
+                    "committed_at": item.get("at"),
+                })
+                if len(recent_rows) >= max(1, recent):
+                    break
+            out[row["entry_key"]] = {
+                "success": float(row["success"] or 0.0),
+                "failure": float(row["failure"] or 0.0),
+                "n": int(row["n"] or 0),
+                "best_similarity": float(row["best_similarity"] or 0.0),
+                "recent": recent_rows,
+            }
         return out
 
     def action_stats(
@@ -4343,36 +4920,51 @@ class PostgresAdapter(AdapterABC):
         digest_type: DigestType | None = None,
         namespace: str = "default",
         branch: str = "main",
+        *,
+        relevant_to: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[Digest]:
-        """List digests, optionally filtered by type and branch."""
+        """List digests, optionally filtered by type and branch.
+
+        ``relevant_to`` keeps only digests that name one of the given strings
+        — as their scope, or anywhere in their summary. The briefing scores a
+        digest only when the entity or agent it is asked about appears in one
+        of those two places, so this is the same set it would have kept after
+        loading everything, computed in the database instead of shipping every
+        digest on the account (each with its hot context) to score it in
+        Python. ``limit`` bounds the rows, most recently compiled first.
+        """
         account_id = self._get_current_account_id()
+        where = ["namespace = %s", "branch = %s"]
+        params: list[Any] = [namespace, branch]
+        if digest_type:
+            where.append("digest_type = %s")
+            params.append(digest_type.value)
+        if account_id:
+            where.append("account_id = %s")
+            params.append(account_id)
+        else:
+            where.append("account_id IS NULL")
+        terms = [t for t in (relevant_to or []) if t]
+        if terms:
+            # strpos rather than LIKE: no wildcard escaping, and an entity path
+            # is a literal substring of the JSON text whatever it contains.
+            where.append(
+                "(scope = ANY(%s) OR "
+                + " OR ".join("strpos(summary::text, %s) > 0" for _ in terms)
+                + ")"
+            )
+            params.append(terms)
+            params.extend(terms)
+        sql = f"""SELECT * FROM amfs_digests
+                  WHERE {" AND ".join(where)}
+                  ORDER BY compiled_at DESC"""
+        if limit is not None:
+            sql += " LIMIT %s"
+            params.append(int(limit))
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                if account_id:
-                    account_filter = "AND account_id = %s"
-                    base_params: list[Any] = [namespace, branch]
-                    extra_params: list[Any] = [account_id]
-                else:
-                    account_filter = "AND account_id IS NULL"
-                    base_params = [namespace, branch]
-                    extra_params = []
-
-                if digest_type:
-                    rows = cur.execute(
-                        f"""SELECT * FROM amfs_digests
-                           WHERE namespace = %s AND branch = %s AND digest_type = %s
-                           {account_filter}
-                           ORDER BY compiled_at DESC""",
-                        (*base_params, digest_type.value, *extra_params),
-                    ).fetchall()
-                else:
-                    rows = cur.execute(
-                        f"""SELECT * FROM amfs_digests
-                           WHERE namespace = %s AND branch = %s
-                           {account_filter}
-                           ORDER BY compiled_at DESC""",
-                        (*base_params, *extra_params),
-                    ).fetchall()
+                rows = cur.execute(sql, tuple(params)).fetchall()
         return [self._row_to_digest(r) for r in rows]
 
     @staticmethod

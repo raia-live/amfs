@@ -1,0 +1,26 @@
+-- Migration 011: the task text on the outcome row
+--
+-- `commit_outcome` has carried `task_input` — the request that started the
+-- work, in the words it arrived in — since the capture landed on the record,
+-- and 010 embeds it (`task_embedding`) so evidence can be conditioned on the
+-- task. The text itself was persisted only inside the sealed trace, where
+-- nothing on the retrieve path can read it.
+--
+-- Retrieve needs it as a background corpus. An agent's query for a task is
+-- phrased like the task ("returns service standard deploy correct step
+-- order"), so the words the query shares with an entry are of two kinds: the
+-- template the entity's tasks all share ("standard deploy … step order") and
+-- the words that vary from task to task ("returns"). Document statistics over
+-- a few dozen entries cannot tell them apart — early in an entity's life the
+-- template words are as rare among the entries as the subject is. Statistics
+-- over the entity's *past tasks* can: a word in every past task is template
+-- and identifies nothing; a word in few of them is what this task is about.
+-- `recent_task_texts` reads that corpus, bounded, through the GIN index on
+-- `entity_paths` (009).
+--
+-- Scanned before it gets here: the SDK redacts `task_input` at
+-- `commit_outcome` before the record reaches any adapter, and the server
+-- passes the record through unchanged. Cut to `TASK_TEXT_CHARS` (adapter) on
+-- write; the corpus is read for word statistics, not for content.
+
+ALTER TABLE amfs_outcomes ADD COLUMN IF NOT EXISTS task_text TEXT;

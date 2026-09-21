@@ -223,6 +223,97 @@ class TestContrastLesson:
         )
         assert ev.contrast_lesson(rec) is None
 
+    def test_lesson_carries_the_actions_and_the_task_when_the_record_has_them(self) -> None:
+        """What failed and what worked, as action keys, plus a task excerpt:
+        the fields a near-identical task needs to act on the pair. Optional —
+        a record without ``actions_taken`` yields the same lesson minus them."""
+        record = _record(
+            OutcomeType.SUCCESS,
+            ["svc/mod/good"],
+            attempts=[AttemptRecord(attempt=1, causal_entry_keys=["svc/mod/stale"])],
+        ).model_copy(update={
+            "actions_taken": [
+                {"index": 0, "action_key": "resolve:a", "success": False, "attempt": 1},
+                {"index": 2, "action_key": "resolve:b", "success": True, "attempt": None},
+            ],
+            "situation": "card declined for an annual plan",
+            "task_input": "x" * 500,
+        })
+        lesson = ev.contrast_lesson(record)
+        assert lesson["failed_actions"] == ["resolve:a"]
+        assert lesson["resolved_action"] == "resolve:b"
+        assert lesson["task_excerpt"] == "card declined for an annual plan"
+        bare = ev.contrast_lesson(_record(
+            OutcomeType.SUCCESS, ["svc/mod/good"],
+            attempts=[AttemptRecord(attempt=1, causal_entry_keys=["svc/mod/stale"])],
+        ))
+        assert bare["failed_actions"] == [] and bare["resolved_action"] is None
+        assert bare["task_excerpt"] is None
+        assert bare["avoid"] == lesson["avoid"] and bare["resolved_with"] == lesson["resolved_with"]
+
+    def test_replacements_read_the_shared_shape_only(self) -> None:
+        """``replaced_by`` comes from ``{avoid, resolved_with}`` and nothing
+        else, so a lesson written by the repair loop (no action fields) and one
+        written here resolve alike; non-lessons are skipped."""
+        def _lesson(key: str, value) -> MemoryEntry:
+            return MemoryEntry(
+                entity_path="svc/mod", key=key, value=value, confidence=0.8,
+                provenance=Provenance(agent_id="a", session_id="s", written_at=datetime.now(UTC)),
+            )
+        rich = _lesson(ev.contrast_lesson_key("o1"), {
+            "avoid": ["svc/mod/stale"], "resolved_with": ["svc/mod/good"],
+            "failed_actions": ["resolve:a"], "resolved_action": "resolve:b",
+        })
+        pointer = _lesson(ev.contrast_lesson_key("fix-9"), {
+            "avoid": ["svc/mod/stale", "svc/mod/older"], "resolved_with": ["svc/mod/corrected"],
+        })
+        plain = _lesson("fix-good", "a rule")
+        out = ev.replacements_from_lessons([plain, rich, pointer])
+        assert out == {
+            "svc/mod/stale": ["svc/mod/good", "svc/mod/corrected"],
+            "svc/mod/older": ["svc/mod/corrected"],
+        }
+
+
+class TestLocalRecord:
+    """The query-conditioned record ``evidence_near`` returns, read two ways."""
+
+    def _local(self, *recent: bool, n: int | None = None) -> dict:
+        s = sum(1.0 for r in recent if r)
+        f = sum(1.0 for r in recent if not r)
+        return {
+            "success": s, "failure": f, "n": n if n is not None else len(recent),
+            "best_similarity": 0.95,
+            "recent": [{"success": r, "similarity": 0.95, "committed_at": None} for r in recent],
+        }
+
+    def test_locally_discredited_needs_two_consecutive_recent_failures(self) -> None:
+        assert ev.locally_discredited(self._local(False, False)) is True
+        assert ev.locally_discredited(self._local(False, False, True, True, True)) is True
+        assert ev.locally_discredited(self._local(False)) is False, "one failure may be the agent's"
+        assert ev.locally_discredited(self._local(True, False, False)) is False, "a later success clears it"
+        assert ev.locally_discredited(self._local(False, True, False)) is False
+        assert ev.locally_discredited(None) is False
+
+    def test_a_record_without_the_order_never_discredits(self) -> None:
+        # An adapter predating ``recent``: the sums cannot say which came last.
+        assert ev.locally_discredited({"success": 0.0, "failure": 5.0, "n": 5}) is False
+
+    def test_one_nearby_outcome_enters_the_blend_at_a_third(self) -> None:
+        pooled = 0.9
+        blended, w = ev.blend_local_evidence(pooled, self._local(False))
+        assert w == pytest.approx(1 / 3)
+        assert blended < pooled and blended > 0.0, "moves the rank, does not flip the sign"
+        # Two nearby outcomes weigh what they always did.
+        _, w2 = ev.blend_local_evidence(pooled, self._local(False, False))
+        assert w2 == pytest.approx(0.5)
+        assert ev.blend_local_evidence(pooled, None) == (pooled, 0.0)
+        assert ev.blend_local_evidence(pooled, {"n": 0}) == (pooled, 0.0)
+
+    def test_rescue_still_needs_two(self) -> None:
+        assert ev.locally_valid(self._local(True)) is False
+        assert ev.locally_valid(self._local(True, True)) is True
+
 
 class TestStatus:
     def test_vocabulary(self) -> None:

@@ -382,6 +382,30 @@ def _call_compat(fn: Any, **kwargs: Any) -> Any:
     return fn(**kwargs)
 
 
+def _ttl_sweep_interval(adapter: AdapterABC) -> float | None:
+    """Seconds between client-side TTL sweeps, or ``None`` for no sweeper.
+
+    ``AMFS_TTL_SWEEP_INTERVAL`` decides when set (``0`` or a negative value
+    disables). Otherwise the sweeper runs every 300 s against a local store
+    (filesystem, direct Postgres) and not at all over HTTP: a hosted tenant
+    is swept by its server, and a client sweep there was one whole-tenant
+    listing per MCP process every five minutes — on a 25k-entry tenant 3-27 s
+    each, mostly timed out, and multiplied by every Claude/Cursor/Codex window
+    the user had open.
+    """
+    raw = os.environ.get("AMFS_TTL_SWEEP_INTERVAL")
+    if raw:
+        try:
+            interval = float(raw)
+        except ValueError:
+            logger.warning("AMFS_TTL_SWEEP_INTERVAL=%r is not a number; TTL sweep disabled", raw)
+            return None
+        return interval if interval > 0 else None
+    if type(adapter).__name__ == "HttpAdapter":
+        return None
+    return 300.0
+
+
 def _get_adapter() -> AdapterABC:
     """Lazily initialise the shared storage adapter (one per process)."""
     global _adapter
@@ -448,8 +472,7 @@ def _get_memory() -> AgentMemory:
         return _memories[name]
 
     adapter = _get_adapter()
-    ttl_interval_str = os.environ.get("AMFS_TTL_SWEEP_INTERVAL")
-    ttl_sweep_interval = float(ttl_interval_str) if ttl_interval_str else 300.0
+    ttl_sweep_interval = _ttl_sweep_interval(adapter)
 
     logger.info("AMFS MCP server — creating memory for agent_id=%s", name)
     mem = AgentMemory(
@@ -1234,7 +1257,8 @@ def amfs_retrieve(
     for scored, data in zip(results, _serialize_entries(s.entry for s in results)):
         if is_avoid(scored):
             e = scored.entry
-            avoid.append({
+            bd = scored.breakdown or {}
+            row: dict[str, Any] = {
                 "entity_path": e.entity_path,
                 "key": e.key,
                 "value": data.get("value"),
@@ -1243,7 +1267,17 @@ def amfs_retrieve(
                 "success_count": e.success_count,
                 "last_outcome": e.last_outcome,
                 "discredited_at": e.discredited_at.isoformat() if e.discredited_at else None,
-            })
+            }
+            # What replaced it, when the server knows (entries a contrast
+            # lesson names; the action the nearest contrast pair resolved
+            # with) and whether it is avoided for this query only.
+            if bd.get("replaced_by"):
+                row["replaced_by"] = list(bd["replaced_by"])
+            if bd.get("resolved_with_action"):
+                row["resolved_with_action"] = bd["resolved_with_action"]
+            if bd.get("locally_discredited"):
+                row["locally_discredited"] = True
+            avoid.append(row)
             continue
         data["_score"] = round(scored.score, 4)
         if compact:
@@ -1308,6 +1342,12 @@ def _attach_priors(payload: dict[str, Any], meta: dict[str, Any] | None) -> None
             "untried": list(priors.get("untried") or [])[:10],
             "n_outcomes": priors.get("n_outcomes", 0),
         }
+        contrasts = [
+            {k: c.get(k) for k in ("failed", "resolved_with", "weight", "outcome_ref")}
+            for c in (priors.get("contrasts") or [])[:3]
+        ]
+        if contrasts:
+            payload["priors"]["contrasts"] = contrasts
     if rec:
         payload["recommendation"] = rec
     if meta.get("regime_shift"):

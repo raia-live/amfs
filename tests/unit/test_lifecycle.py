@@ -148,3 +148,41 @@ class TestLifecycleManager:
 
         # The sweep should have written an archived version
         assert len(adapter.writes) >= 2  # original + at least one archived version
+
+
+class TestSweepAsksTheAdapterForExpiredRows:
+    """``sweep()`` reads ``list_expired`` where the adapter has it and lists
+    the store only where it does not. Over HTTP the listing was the whole
+    tenant once per client process per interval; the query is what a hosted
+    server sweeps with."""
+
+    def test_uses_list_expired_and_does_not_list(self) -> None:
+        class Querying(MockAdapter):
+            listed = 0
+
+            def list_expired(self, *, now, branch="main"):
+                assert now.tzinfo is not None
+                return [e for e in super().list() if e.ttl_at is not None and e.ttl_at <= now]
+
+            def list(self, *args, **kwargs):
+                Querying.listed += 1
+                return super().list(*args, **kwargs)
+
+        adapter = Querying()
+        adapter.write(_make_entry(key="expired", ttl_at=_now() - timedelta(hours=1)))
+        adapter.write(_make_entry(key="live", ttl_at=_now() + timedelta(hours=1)))
+        adapter.write(_make_entry(key="forever", ttl_at=None))
+        Querying.listed = 0
+
+        archived = LifecycleManager(adapter).sweep()
+
+        assert [e.key for e in archived] == ["expired"]
+        assert archived[0].confidence == 0.0 and archived[0].ttl_at is None
+        assert Querying.listed == 0
+
+    def test_falls_back_to_listing_without_list_expired(self) -> None:
+        adapter = MockAdapter()
+        adapter.write(_make_entry(key="expired", ttl_at=_now() - timedelta(hours=1)))
+        adapter.write(_make_entry(key="live", ttl_at=_now() + timedelta(hours=1)))
+
+        assert [e.key for e in LifecycleManager(adapter).sweep()] == ["expired"]

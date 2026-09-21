@@ -34,6 +34,9 @@ def make_arm(name: str) -> MemoryArm:
     if name == "senselab-nopriors":
         from .senselab_arm import SenseLabNoPriorsArm
         return SenseLabNoPriorsArm()
+    if name == "senselab-lean":
+        from .senselab_arm import SenseLabLeanArm
+        return SenseLabLeanArm()
     if name == "senselab-repair":
         from .senselab_arm import SenseLabRepairArm
         return SenseLabRepairArm()

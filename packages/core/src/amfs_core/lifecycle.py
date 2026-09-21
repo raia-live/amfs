@@ -55,9 +55,20 @@ class LifecycleManager:
         return self._thread is not None and self._thread.is_alive()
 
     def sweep(self) -> list[MemoryEntry]:
-        """Run a single TTL sweep. Returns list of archived entries."""
+        """Run a single TTL sweep. Returns list of archived entries.
+
+        Asks the adapter for the expired rows (``list_expired``) where it can
+        answer that with a query — the Postgres adapters do, from a partial
+        index on ``ttl_at`` — and otherwise lists the store and filters here.
+        The listing is what the filesystem adapter needs and what every
+        adapter did until 2026-09: over HTTP against a hosted tenant it was
+        the whole tenant every ``interval`` seconds per client process, which
+        on a 25k-entry store took 3-27 s, mostly timed out, and so never
+        archived anything either.
+        """
         now = datetime.now(timezone.utc)
-        entries = self._adapter.list()
+        list_expired = getattr(self._adapter, "list_expired", None)
+        entries = list_expired(now=now) if callable(list_expired) else self._adapter.list()
         archived: list[MemoryEntry] = []
 
         for entry in entries:
