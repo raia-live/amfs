@@ -98,6 +98,23 @@ describe("identity headers", () => {
     expect(JSON.parse(calls2[2]).branch).toBe("repair/fix-1");
   });
 
+  it("search names no branch for main either, so search and retrieve read the same memory", async () => {
+    mockFetch();
+    const calls3: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        calls3.push(String(init?.body));
+        return { ok: true, status: 200, json: async () => [], text: async () => "[]" } as unknown as Response;
+      })
+    );
+    const adapter = new HttpAdapter({ url: "http://s" });
+    await adapter.searchAsync({ query: "q", branch: "main" });
+    await adapter.searchAsync({ query: "q", branch: "repair/fix-1" });
+    expect(JSON.parse(calls3[0]).branch).toBeUndefined();
+    expect(JSON.parse(calls3[1]).branch).toBe("repair/fix-1");
+  });
+
   it("leaves an adapter without bind alone", () => {
     const mem = new AgentMemory("sre-agent");
     expect(typeof (mem.adapter as { bind?: unknown }).bind).toBe("undefined");

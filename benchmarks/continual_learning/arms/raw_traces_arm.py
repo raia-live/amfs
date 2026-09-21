@@ -65,15 +65,19 @@ class RawTracesArm(MemoryArm):
     def render(self, char_cap: int) -> str | None:
         if not self.transcripts:
             return None
+        # A contiguous window of the most recent episodes: walk newest-first
+        # and stop at the first one that does not fit, so what is omitted is
+        # exactly the oldest run of episodes the header says it is. Skipping a
+        # large middle episode and keeping older small ones would hand the
+        # control a gapped history while claiming a recent one.
         kept: list[str] = []
         used = 0
-        dropped = 0
         for t in reversed(self.transcripts):
             if used + len(t) > char_cap and kept:
-                dropped += 1
-                continue
+                break
             kept.append(t)
             used += len(t)
+        dropped = len(self.transcripts) - len(kept)
         kept.reverse()
         head = ("Transcripts of every earlier episode in this workspace, oldest first. Nothing has "
                 "been summarised or filtered; read them and draw your own conclusions.")
