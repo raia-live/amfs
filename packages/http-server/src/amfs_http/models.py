@@ -182,6 +182,16 @@ class RetrieveRequest(BaseModel):
     #: breakdown, importance dimensions, integrity fields, long values trimmed).
     #: Roughly a third of the tokens of the full payload.
     compact: bool = False
+    #: The asking run's environment — ``{"model", "agent_version", "runtime",
+    #: "platform"}`` — from the SDK's session or the MCP identity. A procedure
+    #: whose ``preconditions`` contradict it is dropped from the hits (it is a
+    #: way of doing the task somewhere else) and the priors weight outcomes
+    #: recorded under another environment less. Nothing changes when omitted.
+    environment: dict[str, str] | None = None
+    #: Say ``abstain`` in the recommendation when nothing in scope has been
+    #: tried or validated, instead of staying silent. Opt-in; with it a client
+    #: can tell "no guidance" from "guidance not requested".
+    abstain: bool = False
 
 
 class ContextRequest(BaseModel):

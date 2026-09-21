@@ -151,6 +151,64 @@ def test_recommend_is_silent_with_nothing_to_say() -> None:
     assert act.recommend({"tried": [], "untried": []}, top_hit_status="untested") is None
 
 
+def test_recommend_abstains_only_when_asked_and_only_on_weak_evidence() -> None:
+    """Opt-in: the silent case above must stay silent for callers that did not
+    ask. With ``abstain=True``, no priors and nothing validated in the hits is
+    said out loud; one validated hit or any prior turns it off."""
+    empty = {"tried": [], "untried": []}
+    rec = act.recommend(empty, top_hit_status="untested", abstain=True)
+    assert rec["mode"] == "abstain" and rec["suggested_action"] is None
+    assert "1 untested" in rec["why"]
+    rec = act.recommend(empty, abstain=True, hit_statuses=["untested", "contested", "discredited"])
+    assert rec["mode"] == "abstain"
+    # Nothing to rate at all: still silent (no hits, no priors).
+    assert act.recommend(empty, abstain=True) is None
+    # A validated hit acts; a winning prior acts; neither abstains.
+    assert act.recommend(empty, top_hit_status="validated", abstain=True)["mode"] == "act"
+    pr = {"tried": [{"action_key": "resolve:b", "won": 3, "lost": 0, "p": 0.8, "n": 3, "agents": 1}], "untried": []}
+    assert act.recommend(pr, top_hit_status="untested", abstain=True)["mode"] == "act"
+    # A thin prior (n=1) is still a prior: not abstain, not act — silent.
+    thin = {"tried": [{"action_key": "resolve:b", "won": 1, "lost": 0, "p": 0.67, "n": 1, "agents": 1}], "untried": []}
+    assert act.recommend(thin, top_hit_status="untested", abstain=True) is None
+
+
+def test_guidance_strength() -> None:
+    win = {"tried": [{"action_key": "a", "won": 3, "lost": 0, "p": 0.8, "n": 3}], "untried": []}
+    thin = {"tried": [{"action_key": "a", "won": 1, "lost": 0, "p": 0.67, "n": 1}], "untried": []}
+    assert act.guidance_strength(None, None) == "none"
+    assert act.guidance_strength(None, ["untested", "discredited"]) == "none"
+    assert act.guidance_strength(None, ["validated"]) == "strong"
+    assert act.guidance_strength(win, ["untested"]) == "strong"
+    assert act.guidance_strength(thin, ["untested"]) == "thin"
+    assert act.guidance_strength(None, ["validated"], regime_shift=True) == "thin"
+    assert act.guidance_strength(None, [], regime_shift=True) == "none"
+
+
+def test_aggregate_priors_down_weights_another_environment() -> None:
+    """A win under python3.9 counts for a python3.12 run, at half weight; a row
+    that reports no environment counts in full; no ``environment`` given
+    leaves every weight as it was."""
+    now = datetime.now(UTC)
+    rows = [
+        {"actions_taken": [{"action_key": "fix:pin", "success": True}], "committed_at": now,
+         "agent_id": "a", "session_metadata": {"runtime": "python3.9"}},
+        {"actions_taken": [{"action_key": "fix:pin", "success": False}], "committed_at": now,
+         "agent_id": "b", "session_metadata": {"runtime": "python3.12"}},
+        {"actions_taken": [{"action_key": "fix:pin", "success": True}], "committed_at": now,
+         "agent_id": "c"},
+    ]
+    plain = act.aggregate_priors(rows)["tried"][0]
+    scoped = act.aggregate_priors(rows, environment={"runtime": "python3.12"})["tried"][0]
+    # Counts are counts either way; the posterior moves with the weights.
+    assert plain["won"] == scoped["won"] == 2 and plain["lost"] == scoped["lost"] == 1
+    assert plain["p"] == pytest.approx((2 + 1) / (3 + 2), abs=1e-3)
+    assert scoped["p"] == pytest.approx((1.5 + 1) / (2.5 + 2), abs=1e-3)
+    assert scoped["p"] < plain["p"]
+    # Same runtime as the run: full weight, identical to plain.
+    same = act.aggregate_priors(rows, environment={"runtime": "python3.9"})["tried"][0]
+    assert same["p"] == pytest.approx((2 + 1) / (2.5 + 2), abs=1e-3)
+
+
 # ── SDK derivation at commit ───────────────────────────────────────────────
 
 

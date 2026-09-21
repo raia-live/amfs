@@ -43,6 +43,12 @@ ACT_MIN_P = 0.6
 ACT_MIN_N = 2
 EXPLORE_MAX_P = 0.4
 EXPLORE_MIN_N = 2
+#: Weight of an outcome recorded under a different model / runtime / agent
+#: version than the run asking. Kept well above zero: another runtime's win is
+#: still evidence, it just should not outvote a same-runtime loss.
+ENV_MISMATCH_WEIGHT = 0.5
+#: Evidence statuses of a top hit that carry no weight of their own.
+_WEAK_STATUSES = frozenset({"untested", "contested", "discredited"})
 
 _WHITESPACE = re.compile(r"\s")
 
@@ -195,6 +201,8 @@ def aggregate_priors(
     candidate_actions: Sequence[str] | None = None,
     now: datetime | None = None,
     daily_decay: float = PRIORS_DAILY_DECAY,
+    environment: Mapping[str, Any] | None = None,
+    env_mismatch_weight: float = ENV_MISMATCH_WEIGHT,
 ) -> dict[str, Any]:
     """Fold similar past outcomes into per-action priors.
 
@@ -203,8 +211,16 @@ def aggregate_priors(
     optional and multiplies the weight. Returns ``{"tried": [...], "untried":
     [...], "n_outcomes": int}`` with ``tried`` sorted by posterior descending and,
     within ties, by evidence.
+
+    When *environment* is given (``{"model": ..., "runtime": ...}``, see
+    ``amfs_core.models.environment_of``), a row whose ``session_metadata`` (or
+    ``environment``) names a different value for any of those keys is weighted
+    by *env_mismatch_weight*: what won under another runtime is evidence, but
+    weaker. Rows that report no environment are unaffected, and so is every
+    caller that passes none — the default output is unchanged.
     """
     now = now or datetime.now(timezone.utc)
+    env = {k: str(v).strip() for k, v in (environment or {}).items() if v}
     priors: dict[str, ActionPrior] = {}
     # newest first so last_3 fills in time order
     rows = sorted(outcomes, key=lambda r: _as_dt(r.get("committed_at")) or now, reverse=True)
@@ -212,6 +228,8 @@ def aggregate_priors(
         at = _as_dt(row.get("committed_at"))
         age_days = max(0.0, (now - at).total_seconds() / 86400.0) if at else 0.0
         w = (daily_decay ** age_days) * float(row.get("similarity", 1.0) or 1.0)
+        if env:
+            w *= _env_match(row, env, env_mismatch_weight)
         agent = str(row.get("agent_id") or "")
         for act in row.get("actions_taken") or []:
             key = str(act.get("action_key") or "")
@@ -239,6 +257,21 @@ def aggregate_priors(
         "untried": untried,
         "n_outcomes": len(rows),
     }
+
+
+def _env_match(row: Mapping[str, Any], env: Mapping[str, str], mismatch_weight: float) -> float:
+    """1.0 when the row's recorded environment agrees with *env* on every key
+    both report (or reports nothing); *mismatch_weight* otherwise."""
+    recorded = row.get("environment") or row.get("session_metadata") or {}
+    if not isinstance(recorded, Mapping):
+        return 1.0
+    for key, want in env.items():
+        have = recorded.get(key)
+        if have is None or str(have).strip() == "":
+            continue
+        if str(have).strip() != want:
+            return mismatch_weight
+    return 1.0
 
 
 def _as_dt(value: Any) -> datetime | None:
@@ -305,6 +338,8 @@ def recommend(
     top_hit_recent_failure: bool = False,
     regime_shift: bool = False,
     regime_shift_at: datetime | None = None,
+    abstain: bool = False,
+    hit_statuses: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     """Decide ``act`` / ``explore`` / ``escalate`` from priors and the top hit.
 
@@ -314,6 +349,14 @@ def recommend(
     ``candidate_actions`` — without knowing what could be tried, "everything
     failed" cannot be asserted, and a false escalate costs a task a retry
     would have won.
+
+    With ``abstain=True`` the "nothing to say" case is spelled out instead of
+    returning ``None`` when the evidence is weak: no priors at all and every
+    hit's evidence status (``hit_statuses``, or the top hit's alone) is
+    untested, contested or discredited. The agent is told so
+    (``{"mode": "abstain"}``) rather than left to read confidence into a list
+    of hits nothing has confirmed. Off by default so existing payloads do not
+    change.
 
     A regime shift skips the winning priors, because their wins may predate the
     change — except a winner whose latest take was *after* the shift and won
@@ -374,7 +417,43 @@ def recommend(
             "suggested_action": None,
             "why": "the only memory evidence is discredited and no candidate action is untried",
         }
+    if abstain and not tried and not regime_shift:
+        statuses = [s for s in (hit_statuses or ([top_hit_status] if top_hit_status else [])) if s]
+        if statuses and all(s in _WEAK_STATUSES for s in statuses):
+            counts: dict[str, int] = {}
+            for s in statuses:
+                counts[s] = counts.get(s, 0) + 1
+            described = ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
+            return {
+                "mode": "abstain",
+                "suggested_action": None,
+                "why": f"no action has been tried on similar tasks here and no hit is validated "
+                       f"({described}); treat what follows as hints, not guidance",
+            }
     return None
+
+
+def guidance_strength(
+    priors: Mapping[str, Any] | None,
+    hit_statuses: Sequence[str] | None,
+    *,
+    regime_shift: bool = False,
+) -> str:
+    """How much the served context is worth acting on: ``strong`` when a hit is
+    validated or an action has a winning record here; ``none`` when there is
+    nothing or only untested / contested / discredited evidence; ``thin``
+    otherwise (some evidence, none of it confirmed, or a regime shift in scope).
+    Pure; the briefing and the SDK's ``Guidance`` carry the label."""
+    tried = list((priors or {}).get("tried") or [])
+    statuses = [s for s in (hit_statuses or []) if s]
+    winners = [t for t in tried if float(t.get("p", 0)) >= ACT_MIN_P and int(t.get("n", 0)) >= ACT_MIN_N]
+    if regime_shift:
+        return "thin" if (tried or statuses) else "none"
+    if winners or "validated" in statuses:
+        return "strong"
+    if not tried and (not statuses or all(s in _WEAK_STATUSES for s in statuses)):
+        return "none"
+    return "thin"
 
 
 def render_priors(priors: Mapping[str, Any] | None, recommendation: Mapping[str, Any] | None) -> str:
@@ -407,6 +486,7 @@ __all__ = [
     "actions_taken",
     "aggregate_priors",
     "entity_paths_of",
+    "guidance_strength",
     "recommend",
     "render_priors",
     "stable_bucket",

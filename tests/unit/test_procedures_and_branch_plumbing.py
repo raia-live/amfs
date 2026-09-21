@@ -30,6 +30,10 @@ from amfs_core.models import (
     MemoryType,
     OutcomeType,
     Provenance,
+    SessionMetadata,
+    environment_of,
+    preconditions_status,
+    procedure_action_keys,
     procedure_issues,
 )
 from amfs_core.quality import HeuristicQualityEvaluator
@@ -84,10 +88,67 @@ class TestProcedureType:
             ("- issue new key\n- revoke old key", []),
             ("restart the worker", ["not_structured"]),
             (42, ["not_structured"]),
+            # The optional fields are shape-checked only when present.
+            ({**PROCEDURE, "effects": ["new key live"], "evidence": ["tr-1"],
+              "depends_on": [{"ref": "acme/support/procedure-issue", "version": 2}]}, []),
+            ({**PROCEDURE, "effects": "new key live"}, ["malformed_effects"]),
+            ({**PROCEDURE, "evidence": [1]}, ["malformed_evidence"]),
+            ({**PROCEDURE, "depends_on": ["acme/support/x"]}, ["malformed_depends_on"]),
+            ({**PROCEDURE, "depends_on": [{"version": 2}]}, ["malformed_depends_on"]),
+            # A step may name the tool call it expects; blank is malformed.
+            ({"goal": "x", "steps": [{"action": "run tests", "action_key": "shell:pytest"}]}, []),
+            ({"goal": "x", "steps": [{"action": "run tests", "action_key": " "}]},
+             ["malformed_step"]),
         ],
     )
     def test_procedure_issues(self, value: Any, expected: list[str]) -> None:
         assert procedure_issues(value) == expected
+
+    def test_procedure_action_keys_in_step_order(self) -> None:
+        value = {"goal": "x", "steps": [
+            {"action": "run tests", "action_key": "shell:pytest"},
+            "read the log",
+            {"action": "bump pin", "action_key": "edit:requirements"},
+        ]}
+        assert procedure_action_keys(value) == ["shell:pytest", "edit:requirements"]
+        assert procedure_action_keys(PROCEDURE) == []
+        assert procedure_action_keys("1. a\n2. b") == []
+
+    @pytest.mark.parametrize(
+        "preconditions, environment, expected",
+        [
+            # No environment preconditions: applies everywhere.
+            (["both keys accepted"], {"runtime": "python3.9"}, ("applicable", [])),
+            # No environment reported (the MCP case): nothing to contradict.
+            ({"runtime": "python3.12"}, {}, ("applicable", [])),
+            ({"runtime": "python3.12"}, {"runtime": "python3.12"}, ("applicable", [])),
+            ({"runtime": "python3.12"}, {"runtime": "python3.9"},
+             ("not_applicable", ["runtime: wants python3.12, run has python3.9"])),
+            # A list of accepted values, and a prefix match.
+            ({"runtime": ["python3.11", "python3.12"]}, {"runtime": "python3.11"},
+             ("applicable", [])),
+            ({"model": "claude-*"}, {"model": "claude-sonnet"}, ("applicable", [])),
+            ({"model": "claude-*"}, {"model": "gpt-4o"},
+             ("not_applicable", ["model: wants claude-*, run has gpt-4o"])),
+            # Constrains a key the run did not report.
+            ({"agent_version": "2.*"}, {"model": "gpt-4o"}, ("unknown", ["agent_version"])),
+            # Dict items inside a mixed list are read too.
+            (["lockfile present", {"platform": "linux"}], {"platform": "darwin"},
+             ("not_applicable", ["platform: wants linux, run has darwin"])),
+        ],
+    )
+    def test_preconditions_status(self, preconditions, environment, expected) -> None:
+        value = {**PROCEDURE, "preconditions": preconditions}
+        assert preconditions_status(value, environment) == expected
+
+    def test_environment_of_reads_the_declared_keys(self) -> None:
+        meta = SessionMetadata(model="gpt-4o", runtime="python3.12", agent_version="1.2",
+                               client_name="cursor")
+        assert environment_of(meta) == {
+            "model": "gpt-4o", "agent_version": "1.2", "runtime": "python3.12",
+        }
+        assert environment_of({"model": " m ", "runtime": "", "other": 1}) == {"model": "m"}
+        assert environment_of(None) == {}
 
     def test_quality_flags_a_procedure_without_steps(self) -> None:
         report = HeuristicQualityEvaluator().evaluate(
@@ -252,6 +313,59 @@ class TestBriefingProcedures:
         # Compact goes through the same lead digest.
         compact = service.briefing(entity_path="acme/rotate", compact=True)
         assert [r["key"] for r in compact[0].summary["procedures"]] == ["procedure-rotate"]
+
+    def test_environment_splits_applicable_from_not(self, world) -> None:
+        """A procedure that constrains the runtime is served to a run on that
+        runtime and set apart — with the failing precondition named — for a run
+        on another. Without an environment (MCP) everything stays applicable."""
+        mem, service, _ = world
+        mem.write("acme/support", "procedure-py312",
+                  {**PROCEDURE, "preconditions": {"runtime": "python3.12"}},
+                  confidence=0.8, memory_type=MemoryType.PROCEDURE)
+        mem.write("acme/support", "procedure-any", PROCEDURE, confidence=0.7,
+                  memory_type=MemoryType.PROCEDURE)
+        mem._read_tracker.clear()
+
+        lead = _lead(service.briefing(entity_path="acme/support"))
+        assert {r["key"] for r in lead.summary["procedures"]} == {
+            "procedure-py312", "procedure-any",
+        }
+        assert all(r["applicability"] == "applicable" for r in lead.summary["procedures"])
+        assert "procedures_not_applicable" not in lead.summary
+
+        lead = _lead(service.briefing(entity_path="acme/support",
+                                      environment={"runtime": "python3.9"}))
+        assert [r["key"] for r in lead.summary["procedures"]] == ["procedure-any"]
+        [row] = lead.summary["procedures_not_applicable"]
+        assert row["key"] == "procedure-py312"
+        assert row["applicability"] == "not_applicable"
+        assert row["applicability_detail"] == ["runtime: wants python3.12, run has python3.9"]
+
+        lead = _lead(service.briefing(entity_path="acme/support",
+                                      environment={"model": "gpt-4o"}))
+        by_key = {r["key"]: r for r in lead.summary["procedures"]}
+        assert by_key["procedure-py312"]["applicability"] == "unknown"
+        assert by_key["procedure-py312"]["applicability_detail"] == ["runtime"]
+
+        compact = service.briefing(entity_path="acme/support", compact=True,
+                                   environment={"runtime": "python3.9"})
+        assert [r["key"] for r in compact[0].summary["procedures_not_applicable"]] == [
+            "procedure-py312",
+        ]
+
+    def test_guidance_strength_follows_the_evidence(self, world) -> None:
+        """Untested notes rate ``none``; one validated entry rates ``strong``."""
+        mem, service, _ = world
+        lead = _lead(service.briefing(entity_path="acme/support"))
+        assert lead.summary["guidance_strength"] == "none"
+
+        mem.read("acme/support", "fix-rotate")
+        mem.commit_outcome("ok-strength", OutcomeType.SUCCESS)
+        lead = _lead(service.briefing(entity_path="acme/support"))
+        assert lead.summary["guidance_strength"] == "strong"
+        assert _lead(service.briefing(entity_path="acme/support", compact=True)).summary[
+            "guidance_strength"
+        ] == "strong"
 
     def test_discredited_procedure_is_not_repeated(self, world) -> None:
         mem, service, _ = world

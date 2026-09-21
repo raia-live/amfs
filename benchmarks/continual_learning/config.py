@@ -121,6 +121,20 @@ class Study:
     )
     long_horizon_scenarios: tuple[str, ...] = ("support", "diagnose")
     sweep_arms: tuple[str, ...] = ("senselab", "pgvector-diy+outcomes", "mem0")
+    # Recursive-learning proof (2026-09-20). Two protocols share the ``senselab-repair`` arm:
+    #   repair-vs-demote  ``ci-fix`` x {senselab, senselab-repair, raw-traces}: does the shipped
+    #                     repair loop beat demotion-only on success, unnecessary edits and cost,
+    #                     on a fixed model? The narrow intervention claim.
+    #   composition       ``fleet-disjoint`` x composition_arms: can partial discoveries held by
+    #                     different agents be combined into procedures none of them had, and does
+    #                     that beat the same model reading every raw trace?
+    # Both need a dev Pro deployment (``AMFS_PRO_URL``) with the repair agent enabled; they are
+    # not in the default grid. Run them with ``--arms`` / ``--scenarios`` explicitly.
+    repair_arms: tuple[str, ...] = ("senselab", "senselab-repair", "raw-traces")
+    composition_arms: tuple[str, ...] = ("raw-traces", "pgvector-diy", "senselab", "senselab-repair",
+                                         "senselab-compose")
+    composition_scenarios: tuple[str, ...] = ("fleet-disjoint",)
+    composition_seeds: tuple[int, ...] = (11, 23, 37, 41, 59, 73)
     distractor_levels: tuple[int, ...] = (0, 200, 2000)
     label_noise_levels: tuple[float, ...] = (0.0, 0.10)
     feedback_delay_levels: tuple[int, ...] = (0, 3)
@@ -133,6 +147,13 @@ STUDY = Study()
 # ---------------------------------------------------------------------------
 
 AMFS_HTTP_URL = env("AMFS_HTTP_URL") or "https://amfs-login.sense-lab.ai"
+# The Pro evaluation API (``/api/v1/eval``) the ``senselab-repair`` arm drives. Defaults to
+# the memory host; the arm refuses to run against anything that does not look like a dev
+# deployment (see ``pro_client.assert_dev``). ``AMFS_EVAL_API_KEY`` falls back to AMFS_API_KEY.
+AMFS_PRO_URL = env("AMFS_PRO_URL") or AMFS_HTTP_URL
+# ``raw-traces`` control arm: how much prior-episode transcript (in approximate tokens) the
+# agent gets in context. Oldest episodes are dropped first when the cap is hit.
+RAW_TRACES_TOKEN_CAP = int(env("CL_RAW_TRACES_TOKENS") or "20000")
 PG_DSN = env("CL_PG_DSN") or "postgresql://amfs:amfs@localhost:5433/clbench"
 EMBED_MODEL = env("CL_EMBED_MODEL") or "BAAI/bge-small-en-v1.5"
 
