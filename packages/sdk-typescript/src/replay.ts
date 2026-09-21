@@ -531,6 +531,31 @@ export class ReplayReceiver<M extends ReplayMemory = ReplayMemory> {
   }
 }
 
+/** Options shared by the fetch and Node handlers. */
+export interface HandlerOptions {
+  /** Where the receiver is mounted. Default `/amfs/replay`. */
+  path?: string;
+  /**
+   * Called with an error `handle()` did not expect (a `ReplayError` is
+   * answered with its own status and never reaches this). Default
+   * `console.error`. The response to the caller is a generic 500 either way:
+   * the message and stack of an internal error describe this server, not the
+   * request, and are not the caller's to read.
+   */
+  onError?: (err: unknown) => void;
+}
+
+const INTERNAL_ERROR = { ok: false, error: "internal error" } as const;
+
+function reportError(options: HandlerOptions | undefined, err: unknown): typeof INTERNAL_ERROR {
+  try {
+    (options?.onError ?? console.error)(err);
+  } catch {
+    // A failing error hook must not turn one 500 into another.
+  }
+  return INTERNAL_ERROR;
+}
+
 /**
  * A `(Request) => Promise<Response>` handler mounting `receiver` at `path` —
  * the shape Next.js route handlers, Hono, Bun.serve, Deno.serve and workers
@@ -538,7 +563,7 @@ export class ReplayReceiver<M extends ReplayMemory = ReplayMemory> {
  */
 export function createFetchHandler(
   receiver: ReplayReceiver<any>,
-  options?: { path?: string }
+  options?: HandlerOptions
 ): (request: Request) => Promise<Response> {
   const path = options?.path ?? "/amfs/replay";
   const json = (status: number, body: unknown) =>
@@ -553,7 +578,7 @@ export function createFetchHandler(
       const { status, body: answer } = await receiver.handle(request.headers, body);
       return json(status, answer);
     } catch (err) {
-      return json(500, { ok: false, error: String((err as Error)?.message ?? err) });
+      return json(500, reportError(options, err));
     }
   };
 }
@@ -565,7 +590,7 @@ export function createFetchHandler(
  */
 export async function serveReplay(
   receiver: ReplayReceiver<any>,
-  options?: { host?: string; port?: number; path?: string }
+  options?: HandlerOptions & { host?: string; port?: number }
 ): Promise<{ close(): void; address(): unknown }> {
   const specifier = "node:http";
   const http = (await import(/* @vite-ignore */ specifier)) as {
@@ -595,7 +620,7 @@ export async function serveReplay(
       receiver
         .handle(req.headers as Record<string, string | string[] | undefined>, body)
         .then(({ status, body: answer }) => send(status, answer))
-        .catch((err: unknown) => send(500, { ok: false, error: String((err as Error)?.message ?? err) }));
+        .catch((err: unknown) => send(500, reportError(options, err)));
     });
   });
   await new Promise<void>((resolve) => server.listen(options?.port ?? 8787, options?.host ?? "0.0.0.0", resolve));

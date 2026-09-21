@@ -70,6 +70,12 @@ def mem(monkeypatch) -> MagicMock:
     handle.read.return_value = _entry()
     handle.list.return_value = []
     handle.search.return_value = []
+    # /entries pages in SQL on any adapter with count_entries (a MagicMock has
+    # everything), and /outcomes commits on a per-request ``as_agent`` clone;
+    # both must land on this same mock for the assertions below to see them.
+    handle._adapter.list.return_value = []
+    handle._adapter.count_entries.return_value = 0
+    handle.as_agent.return_value = handle
     monkeypatch.setattr(server, "_memory", handle)
     monkeypatch.setattr(server, "_get_memory", lambda: handle)
     monkeypatch.setattr(server, "_async_adapter", None)
@@ -139,7 +145,10 @@ class TestReadsFollowTheRoute:
                 _auth=None,
             )
         )
-        assert mem.list.call_args.kwargs["branch"] == CANARY_BRANCH
+        # The SQL-paged read goes to the adapter directly; the Python-filtered
+        # one through AgentMemory.list. Either way the route decides the branch.
+        call = mem._adapter.list.call_args or mem.list.call_args
+        assert call.kwargs["branch"] == CANARY_BRANCH
 
     def test_aggregate(self, mem) -> None:
         asyncio.run(

@@ -16,7 +16,9 @@ HERE = Path(__file__).resolve().parent
 RESULTS_DIR = HERE / "results"
 # The benchmark's .env is authoritative: it overrides any key already exported in the shell,
 # so a stale ANTHROPIC_API_KEY/OPENAI_API_KEY in the environment cannot silently win.
-load_dotenv(HERE / ".env", override=True)
+# ``CL_ENV_FILE`` names another file — the way to point a run at a local SenseLab server
+# (AMFS_HTTP_URL / AMFS_API_KEY) without editing the production .env.
+load_dotenv(os.environ.get("CL_ENV_FILE") or HERE / ".env", override=True)
 
 
 def env(name: str, default: str | None = None, *, required: bool = False) -> str | None:

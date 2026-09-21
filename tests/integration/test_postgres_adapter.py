@@ -1438,6 +1438,38 @@ def test_the_async_adapter_lists_and_searches_a_branch_over_its_live_parent(adap
     ]
 
 
+def test_a_branch_count_agrees_with_its_paged_list_on_both_adapters(adapter) -> None:
+    """``count_entries`` is the ``total`` a paged ``/entries`` reports, so it
+    must read the branch through the same overlay ``list`` does: three rows
+    on the branch (two of them main's, seen through), two on main. A count of
+    the branch's own rows alone would stop a client paging to ``total`` early."""
+    branch = _branch_world(adapter)
+
+    assert adapter.count_entries("acme/pricing", branch=branch) == 3
+    assert adapter.count_entries("acme/pricing") == 2
+    assert adapter.count_entries("acme/pricing", branch=branch) == len(
+        adapter.list("acme/pricing", branch=branch)
+    )
+    page = adapter.list("acme/pricing", branch=branch, limit=2, offset=0)
+    rest = adapter.list("acme/pricing", branch=branch, limit=2, offset=2)
+    assert len(page) + len(rest) == 3
+
+    async def go():
+        a = await _async_adapter()
+        try:
+            return (
+                await a.count_entries("acme/pricing", branch=branch),
+                await a.count_entries("acme/pricing"),
+                len(await a.list("acme/pricing", branch=branch)),
+            )
+        finally:
+            await a.close()
+
+    on_branch, on_main, listed = _run(go())
+    assert (on_branch, on_main) == (3, 2)
+    assert on_branch == listed
+
+
 def test_the_async_adapter_reads_the_parent_live_and_a_ghost_branch_reads_nothing(adapter) -> None:
     from datetime import UTC, datetime
 
@@ -1528,3 +1560,158 @@ def test_the_async_semantic_search_sees_the_parent_through_the_overlay(adapter) 
         ("plans", {"tiers": ["starter", "team"]}),
         ("rate-limit", {"rpm": 30}),
     ]
+def test_list_digests_relevant_to_keeps_what_the_briefing_would_score(adapter) -> None:
+    """The briefing awards a digest points only when the entity or agent it is
+    asked about is its scope or appears in its summary. ``relevant_to`` is that
+    predicate in SQL, so a briefing loads that set rather than every digest on
+    the account; ``limit`` bounds it, newest first."""
+    import uuid
+    from datetime import UTC, datetime, timedelta
+
+    from amfs_core.models import Digest, DigestType
+
+    now = datetime.now(UTC)
+    # The fixture does not clear amfs_digests, so this test owns a namespace.
+    ns = f"digests-{uuid.uuid4().hex[:8]}"
+
+    def _d(dtype, scope, summary, age_min):
+        return Digest(
+            digest_type=dtype, scope=scope, summary=summary, entry_count=1,
+            source_agents=[], compiled_at=now - timedelta(minutes=age_min),
+            namespace=ns, branch="main",
+        )
+
+    adapter.upsert_digest(_d(DigestType.ENTITY, "acme/support", {"narrative": "n"}, 30))
+    adapter.upsert_digest(_d(DigestType.AGENT_BRIEF, "a1", {"entities_written": ["acme/support"]}, 20))
+    adapter.upsert_digest(_d(DigestType.SOURCE, "github", {"entities_touched": ["acme/billing"]}, 10))
+    adapter.upsert_digest(_d(DigestType.ENTITY, "acme/billing", {"narrative": "unrelated"}, 5))
+    # A path that is a prefix of the one asked about is not it.
+    adapter.upsert_digest(_d(DigestType.ENTITY, "acme/support-legacy", {"narrative": "x"}, 1))
+
+    everything = adapter.list_digests(namespace=ns)
+    assert len(everything) == 5
+
+    got = adapter.list_digests(namespace=ns, relevant_to=["acme/support"])
+    # strpos is a substring test, so the legacy digest's scope does not match
+    # (its summary does not name the path) but a summary naming the path does.
+    assert sorted(d.scope for d in got) == ["a1", "acme/support"]
+
+    got = adapter.list_digests(namespace=ns, relevant_to=["acme/support", "a1"])
+    assert sorted(d.scope for d in got) == ["a1", "acme/support"]
+
+    newest_first = adapter.list_digests(namespace=ns, relevant_to=["acme/support"], limit=1)
+    assert [d.scope for d in newest_first] == ["a1"]
+
+    # No terms: the plain listing, unchanged.
+    assert len(adapter.list_digests(namespace=ns, relevant_to=[], limit=None)) == 5
+    assert len(adapter.list_digests(namespace=ns, digest_type=DigestType.ENTITY)) == 3
+
+
+def test_list_scopes_matches_list_without_shipping_the_rows(adapter) -> None:
+    """``list_scopes`` is the distinct (entity_path, agent_id) of exactly the rows
+    ``list()`` returns — current versions only, shared ``@room/...`` paths
+    excluded — and ``list_digest_scopes`` the ``type:scope`` keys of the
+    tenant's digests. Both are what the catch-up scan compares."""
+    import uuid
+    from datetime import UTC, datetime
+
+    from amfs_core.models import Digest, DigestType, MemoryEntry, Provenance
+
+    def _w(path, key, agent):
+        adapter.write(MemoryEntry(entity_path=path, key=key, value="v", provenance=Provenance(agent_id=agent, session_id="s", written_at=datetime.now(UTC))))
+
+    _w("acme/support", "k1", "support-agent")
+    _w("acme/support", "k1", "support-agent")      # a second version: superseded, same scope
+    _w("acme/support", "k2", "other-agent")
+    _w("acme/billing", "k1", "webhook/github")
+    _w("@room/shared", "k1", "support-agent")       # shared path: excluded by the same guard list() uses
+
+    paths, agents = adapter.list_scopes()
+    listed = adapter.list()
+    assert paths == {e.entity_path for e in listed} == {"acme/support", "acme/billing"}
+    assert agents == {e.provenance.agent_id for e in listed} == {"support-agent", "other-agent", "webhook/github"}
+    assert adapter.list_scopes(branch="other") == (set(), set())
+
+    ns = f"ds-{uuid.uuid4().hex[:8]}"
+    adapter.upsert_digest(Digest(digest_type=DigestType.ENTITY, scope="acme/support", summary={"n": 1},
+                                 entry_count=1, source_agents=[], namespace=ns, branch="main"))
+    adapter.upsert_digest(Digest(digest_type=DigestType.AGENT_BRIEF, scope="support-agent", summary={},
+                                 entry_count=1, source_agents=[], namespace=ns, branch="main"))
+    assert adapter.list_digest_scopes(namespace=ns) == {"entity:acme/support", "agent_brief:support-agent"}
+    assert adapter.list_digest_scopes(namespace=ns, branch="other") == set()
+
+
+def test_list_expired_returns_only_current_rows_past_their_ttl(adapter) -> None:
+    """``list_expired`` is the TTL sweep's read: current versions on the branch
+    whose ``ttl_at`` has passed, oldest expiry first, shared paths excluded —
+    and after the sweep archives them (new version, no TTL) it finds nothing."""
+    from datetime import UTC, datetime, timedelta
+
+    from amfs_core.lifecycle import LifecycleManager
+    from amfs_core.models import MemoryEntry, Provenance
+
+    now = datetime.now(UTC)
+
+    def _w(path, key, ttl):
+        return adapter.write(MemoryEntry(entity_path=path, key=key, value="v", ttl_at=ttl,
+                                         provenance=Provenance(agent_id="a", session_id="s", written_at=now)))
+
+    _w("acme/support", "older", now - timedelta(hours=2))
+    _w("acme/support", "old", now - timedelta(hours=1))
+    _w("acme/support", "live", now + timedelta(hours=1))
+    _w("acme/support", "forever", None)
+    _w("@room/shared", "old", now - timedelta(hours=1))
+    _w("acme/billing", "renewed", now - timedelta(hours=1))
+    _w("acme/billing", "renewed", now + timedelta(hours=1))   # newer version: the old one is superseded
+
+    assert [e.key for e in adapter.list_expired(now=now)] == ["older", "old"]
+    assert adapter.list_expired(now=now, limit=1)[0].key == "older"
+    assert adapter.list_expired(now=now, branch="other") == []
+
+    archived = LifecycleManager(adapter).sweep()
+    assert sorted(e.key for e in archived) == ["old", "older"]
+    assert all(e.confidence == 0.0 and e.ttl_at is None for e in archived)
+    assert adapter.list_expired() == []
+    assert adapter.read("acme/support", "old").confidence == 0.0
+
+
+def test_outcome_task_text_is_stored_and_read_back_per_entity(adapter) -> None:
+    """``task_input`` reaches the outcome row as ``task_text`` — the head of
+    it, and only when given — and ``recent_task_texts`` reads an entity's
+    corpus newest first, bounded, without the other entity's tasks. This is
+    the background the lexical term weights a query against."""
+    import uuid
+    from datetime import UTC, datetime, timedelta
+
+    from amfs_core.models import OutcomeRecord, OutcomeType
+    from amfs_postgres.adapter import TASK_TEXT_CHARS
+
+    ns = f"tt-{uuid.uuid4().hex[:8]}"
+    here, there = f"{ns}/deploy", f"{ns}/billing"
+    t0 = datetime.now(UTC)
+    for i, (path, text) in enumerate([
+        (here, "Deploy request #1 for the returns service"),
+        (here, "Deploy request #2 for the pricing service"),
+        (here, None),
+        (there, "Refund ticket for order 77"),
+        (here, "x" * (TASK_TEXT_CHARS + 500)),
+    ]):
+        adapter.commit_outcome(OutcomeRecord(
+            outcome_ref=f"TT-{i}",
+            outcome_type=OutcomeType.SUCCESS,
+            committed_at=t0 + timedelta(seconds=i),
+            causal_entry_keys=[f"{path}/k{i}"],
+            entity_paths=[path],
+            agent_id="a",
+            task_input=text,
+        ))
+    got = adapter.recent_task_texts(here)
+    assert len(got) == 3, got
+    assert len(got[0]) == TASK_TEXT_CHARS  # newest first, cut at the bound
+    assert got[1:] == [
+        "Deploy request #2 for the pricing service",
+        "Deploy request #1 for the returns service",
+    ]
+    assert adapter.recent_task_texts(here, limit=1) == [got[0]]
+    assert adapter.recent_task_texts(there) == ["Refund ticket for order 77"]
+    assert adapter.recent_task_texts(f"{ns}/nowhere") == []

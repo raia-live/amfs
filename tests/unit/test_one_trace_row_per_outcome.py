@@ -160,17 +160,30 @@ def test_a_client_that_posts_no_trace_still_gets_its_row(handle) -> None:
     assert saved[0].session_id == handle.session_id
 
 
-def test_the_trace_is_still_built_when_it_is_not_written(handle) -> None:
+def test_the_trace_is_still_built_when_it_is_not_written(handle, monkeypatch) -> None:
     """Only the write is skipped.
 
-    ``_last_trace`` is what the seal path reaches for, and a caller may read it, so
-    suppressing the row must not mean there is no trace to hand on.
+    ``_last_trace`` is what the seal path reaches for, so suppressing the row
+    must not mean there is no trace to hand on. The commit runs on a per-request
+    handle (``as_agent``), so it is that handle's trace — the shared one carries
+    nothing across requests.
     """
+    committed_on: list = []
+    real = AgentMemory.commit_outcome
+
+    def _spy(self, *args, **kwargs):
+        committed_on.append(self)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(AgentMemory, "commit_outcome", _spy)
     _commit(trace_follows=True)
 
     assert not handle._adapter.saved
-    assert handle._last_trace is not None
-    assert handle._last_trace.outcome_ref == "deploy-142"
+    assert len(committed_on) == 1 and committed_on[0] is not handle
+    assert committed_on[0]._last_trace is not None
+    assert committed_on[0]._last_trace.outcome_ref == "deploy-142"
+    assert committed_on[0]._last_trace.agent_id == CALLER
+    assert getattr(handle, "_last_trace", None) is None
 
 
 def test_suppression_is_opt_in_for_everyone_else(tmp_path) -> None:

@@ -334,6 +334,8 @@ class CortexWorker:
             total_agents = 0
             total_entities = 0
 
+            total_expired = 0
+
             for tid in tenant_ids:
                 self._set_tenant_context(tid)
                 try:
@@ -341,8 +343,11 @@ class CortexWorker:
                     total_queued += queued
                     total_agents += n_agents
                     total_entities += n_entities
+                    total_expired += self._sweep_expired_for_current_tenant()
                 finally:
                     self._set_tenant_context(None)
+            if total_expired:
+                logger.info("Catchup: archived %d expired entries", total_expired)
 
             self._last_catchup = time.monotonic()
 
@@ -363,6 +368,30 @@ class CortexWorker:
         except Exception:
             logger.exception("Catchup scan failed")
 
+    def _sweep_expired_for_current_tenant(self) -> int:
+        """Archive the tenant's expired entries; the number archived.
+
+        The server-side half of TTL: with the MCP server no longer sweeping
+        over HTTP, a hosted tenant's expired entries are archived here, on
+        the catch-up cadence, through ``list_expired`` — an indexed read of
+        the rows that actually carry a ``ttl_at``. Adapters without it are
+        left alone: a listing-based sweep is what this replaces, and the
+        embedded deployments that use such adapters run their own
+        ``LifecycleManager``. Archiving writes a new version (confidence 0,
+        no TTL), so a second instance sweeping the same tenant a moment later
+        finds nothing.
+        """
+        adapter = self._compiler._adapter
+        if not callable(getattr(adapter, "list_expired", None)):
+            return 0
+        try:
+            from amfs_core.lifecycle import LifecycleManager
+
+            return len(LifecycleManager(adapter).sweep())
+        except Exception:
+            logger.exception("TTL sweep failed for tenant %s", self._get_tenant_context())
+            return 0
+
     def _catchup_for_current_tenant(self) -> tuple[int, int, int]:
         """Scan for missing digests under the currently-set tenant context.
 
@@ -374,20 +403,9 @@ class CortexWorker:
 
         tid = self._get_tenant_context()
 
-        entries = adapter.list(branch=branch)
-        entity_paths: set[str] = set()
-        agent_ids: set[str] = set()
-
-        for entry in entries:
-            entity_paths.add(entry.entity_path)
-            aid = entry.provenance.agent_id
-            if not aid.startswith(("webhook/", "external/")):
-                agent_ids.add(aid)
-
-        existing_digests = adapter.list_digests(namespace=namespace)
-        existing_scopes: set[str] = set()
-        for d in existing_digests:
-            existing_scopes.add(f"{d.digest_type.value}:{d.scope}")
+        entity_paths, agent_ids = self._scopes_present(adapter, branch)
+        agent_ids = {a for a in agent_ids if not a.startswith(("webhook/", "external/"))}
+        existing_scopes = self._digest_scopes_present(adapter, namespace, branch)
 
         queued = 0
         for aid in agent_ids:
@@ -409,6 +427,32 @@ class CortexWorker:
                 queued += 1
 
         return queued, len(agent_ids), len(entity_paths)
+
+    @staticmethod
+    def _scopes_present(adapter: Any, branch: str) -> tuple[set[str], set[str]]:
+        """Distinct entity paths and agent ids with current entries.
+
+        The Postgres adapter answers this with a ``GROUP BY`` (``list_scopes``);
+        every other adapter is asked for its entries. The scan used to call
+        ``adapter.list(branch=...)`` unconditionally, which on a large tenant
+        meant shipping and deserialising every row once per instance every
+        ``catchup_interval_s`` — the single heaviest query on a busy
+        deployment, and one whose cost grew with the store.
+        """
+        fn = getattr(adapter, "list_scopes", None)
+        if callable(fn):
+            paths, agents = fn(branch=branch)
+            return set(paths), set(agents)
+        entries = adapter.list(branch=branch)
+        return {e.entity_path for e in entries}, {e.provenance.agent_id for e in entries}
+
+    @staticmethod
+    def _digest_scopes_present(adapter: Any, namespace: str, branch: str) -> set[str]:
+        """``"<type>:<scope>"`` of every existing digest, keys only where the adapter can."""
+        fn = getattr(adapter, "list_digest_scopes", None)
+        if callable(fn):
+            return set(fn(namespace=namespace, branch=branch))
+        return {f"{d.digest_type.value}:{d.scope}" for d in adapter.list_digests(namespace=namespace)}
 
     def _maybe_catchup(self) -> None:
         """Periodically scan for missing digests as a lightweight safety net."""

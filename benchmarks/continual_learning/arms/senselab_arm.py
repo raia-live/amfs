@@ -42,12 +42,17 @@ Variants:
   ``senselab-nopriors``    the full protocol without action priors / recommendation / compact
                            payload (the grid-v2 wiring). The gap to ``senselab`` is what
                            action-level learning buys.
+  ``senselab-lean``        the full protocol with the briefing cut to its evidence sections
+                           (regime shift, discredited, validated, tried here, explore) — no
+                           hot-context previews. The retrieve that follows returns the same
+                           notes when they are relevant, so this measures what the previews
+                           cost in tokens against what they add in accuracy.
 
 Env: ``CL_SENSELAB_PRIORS=0`` turns priors off for every senselab arm (same as
-``senselab-nopriors``); ``CL_SENSELAB_SINCE=1`` makes repeat briefings incremental
-(``since=<last briefing for this agent>``) — off by default because a since-diff drops
-standing discredited rows from the briefing and the retrieve avoid list is then the only
-place the agent sees them.
+``senselab-nopriors``); ``CL_SENSELAB_SINCE=0`` turns off incremental repeat briefings
+(``since=<last briefing for this agent>``). On by default since the server's since-delta
+keeps the standing warnings (discredited rows and losing actions) whatever their age, so
+the delta is safe to act on and pays only for what changed.
 """
 
 from __future__ import annotations
@@ -119,7 +124,19 @@ class _PacedTimer:
 
 class _ThrottledHttpAdapter(HttpAdapter):
     """HttpAdapter paced by the global limiter, with patient 429 handling (the SDK's own
-    retry gives up after four quick attempts, which is not enough under sustained load)."""
+    retry gives up after four quick attempts, which is not enough under sustained load).
+
+    ``CL_SENSELAB_TIMEOUT`` (seconds, default the SDK's 30) sets the read timeout of the
+    per-episode client. Under a capacity-capped API tier the 30 s default turned queueing
+    delay into lost reflection notes; a longer timeout keeps the write and the latency is
+    still measured in ``memory_ms``."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if "timeout" not in kwargs and os.environ.get("CL_SENSELAB_TIMEOUT"):
+            import httpx
+
+            kwargs["timeout"] = httpx.Timeout(float(os.environ["CL_SENSELAB_TIMEOUT"]), connect=10.0)
+        super().__init__(*args, **kwargs)
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         for attempt in range(10):
@@ -149,9 +166,10 @@ def _ev(it: dict[str, Any]) -> str:
     return f" ({'; '.join(parts)})" if parts else ""
 
 
-def _render_briefing(digests: list[Any]) -> str | None:
+def _render_briefing(digests: list[Any], *, hot_context: bool = True) -> str | None:
     """Render what the agent reads at the top of a task. Evidence sections first — they are
-    the part of a briefing that only a system with outcomes can produce."""
+    the part of a briefing that only a system with outcomes can produce. ``hot_context=False``
+    leaves out the entry previews (``senselab-lean``)."""
     lines: list[str] = []
     for d in digests or []:
         summary = getattr(d, "summary", None)
@@ -174,7 +192,7 @@ def _render_briefing(digests: list[Any]) -> str | None:
                     continue
                 rep = it.get("replaced_by") or []
                 rep_s = f" Replaced by: {', '.join(map(str, rep[:3]))}." if rep else ""
-                lines.append(f"  - [{it.get('key')}]{_ev(it)}: {str(it.get('value_preview') or '')[:200]}{rep_s}")
+                lines.append(f"  - [{it.get('key')}]{_ev(it)}: {str(it.get('value_preview') or '')[:120]}{rep_s}")
         val = summary.get("validated")
         if isinstance(val, list) and val:
             lines.append("Validated by outcomes: " + ", ".join(
@@ -188,6 +206,8 @@ def _render_briefing(digests: list[Any]) -> str | None:
         if isinstance(explore, dict) and explore.get("suggested_action"):
             lines.append(f"Explore: try {explore['suggested_action']} first. {explore.get('why', '')}".rstrip())
         for k in ("hot_context", "entries", "facts", "patterns", "key_facts", "risks"):
+            if not hot_context:
+                break
             items = summary.get(k)
             if isinstance(items, list) and items:
                 for it in items[:8]:
@@ -218,6 +238,10 @@ class _SenseLabSession(EpisodeSession):
 
         self._attempts_marked = 0
         self._footer: str | None = None
+        # Entries the briefing already named as discredited. A retrieve's avoid list names
+        # them again; those rows are rendered as a reference to the briefing rather than
+        # carried twice in every call of the episode.
+        self._briefed_discredited: set[str] = set()
 
     def _timed(self):
         return _PacedTimer(self.acct)
@@ -251,7 +275,15 @@ class _SenseLabSession(EpisodeSession):
                 dropped += 1
         if dropped:
             self.acct.notes["briefing_digests_dropped"] = self.acct.notes.get("briefing_digests_dropped", 0) + dropped
-        text = _render_briefing(kept)
+        for d in kept:
+            summary = getattr(d, "summary", None)
+            if summary is None and isinstance(d, dict):
+                summary = d.get("summary")
+            disc = summary.get("discredited") if isinstance(summary, dict) else None
+            for it in (disc or [])[:6]:
+                if isinstance(it, dict) and it.get("key"):
+                    self._briefed_discredited.add(str(it["key"]))
+        text = _render_briefing(kept, hot_context=self.arm.briefing_hot_context)
         if text:
             self.acct.retrieved_bytes += len(text)
         return text
@@ -278,8 +310,11 @@ class _SenseLabSession(EpisodeSession):
         for r in rows:
             e = r.entry
             avoid = bool((r.breakdown or {}).get("_avoid"))
+            text = str(e.value)
+            if avoid and e.key in self._briefed_discredited:
+                text = "(discredited — see briefing above)"
             hits.append(MemoryHit(
-                key=e.key, text=str(e.value), score=float(r.score), confidence=float(e.confidence),
+                key=e.key, text=text, score=float(r.score), confidence=float(e.confidence),
                 evidence_status=getattr(e, "evidence_status", None) or "untested",
                 success_count=int(getattr(e, "success_count", 0) or 0),
                 failure_count=int(getattr(e, "failure_count", 0) or 0), avoid=avoid))
@@ -400,7 +435,9 @@ class SenseLabArm(MemoryArm):
     # action_key on the terminal record_action. CL_SENSELAB_PRIORS=0 turns it off.
     priors = os.environ.get("CL_SENSELAB_PRIORS", "1") not in ("0", "false", "no")
     # briefing(since=<last briefing this agent received>) — see the module docstring.
-    briefing_since = os.environ.get("CL_SENSELAB_SINCE", "0") in ("1", "true", "yes")
+    briefing_since = os.environ.get("CL_SENSELAB_SINCE", "1") not in ("0", "false", "no")
+    # Whether the rendered briefing carries the hot-context previews (``senselab-lean`` drops them).
+    briefing_hot_context = True
 
     def open(self, scope: str) -> None:
         super().open(scope)
@@ -502,6 +539,16 @@ class SenseLabAttemptsArm(SenseLabArm):
     name = "senselab-attempts"
     attempt_boundaries = False
     per_attempt_outcomes = True
+
+
+class SenseLabLeanArm(SenseLabArm):
+    """The full protocol with the briefing cut to its evidence sections. The runbook probe
+    put the protocol's token premium over ``pgvector`` at ~1.65x, most of it the three
+    hot-context previews carried on every call of the episode and then returned again by the
+    retrieve. The gap to ``senselab`` is what those previews cost and what they buy."""
+
+    name = "senselab-lean"
+    briefing_hot_context = False
 
 
 class SenseLabNoPriorsArm(SenseLabArm):

@@ -342,7 +342,22 @@ class HttpAdapter(AdapterABC):
         if include_superseded:
             params["include_superseded"] = "true"
         data = self._get("/api/v1/entries", **params)
-        return [_parse_entry(e) for e in data.get("entries", [])]
+        items = list(data.get("entries", []))
+        # A server with a default page size answers with the first page and
+        # the true ``total``; this method promises the whole list, so it pages
+        # on at the size the server chose. The default order is a stable key,
+        # so pages never overlap or skip.
+        total = data.get("total")
+        if isinstance(total, int) and items and total > len(items):
+            page = len(items)
+            while len(items) < total:
+                more = self._get(
+                    "/api/v1/entries", **params, limit=page, offset=len(items)
+                ).get("entries", [])
+                if not more:
+                    break
+                items.extend(more)
+        return [_parse_entry(e) for e in items]
 
     def watch(
         self,

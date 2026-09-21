@@ -428,6 +428,13 @@ CREATE INDEX IF NOT EXISTS idx_pr_reviews_pr
 -- deploy. The arithmetic is also implemented in amfs_core/evidence.py for the
 -- filesystem and S3 adapters; tests/unit/test_evidence.py pins the numbers.
 
+-- The two columns these indexes cover were added by migrations (008, 009),
+-- which run *after* this file. A store created before them has the table
+-- but not the column, and the index below then fails before the migration
+-- that would have added it gets its turn — so a deployment at 008 could not
+-- start on 009 code at all. No-ops where the column exists.
+ALTER TABLE amfs_memory_entries ADD COLUMN IF NOT EXISTS discredited_at TIMESTAMPTZ;
+ALTER TABLE amfs_outcomes ADD COLUMN IF NOT EXISTS entity_paths TEXT[] NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS idx_entries_discredited
     ON amfs_memory_entries (namespace, entity_path, discredited_at)
     WHERE discredited_at IS NOT NULL AND superseded_at IS NULL;

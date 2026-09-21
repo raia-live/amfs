@@ -199,3 +199,119 @@ def test_migration_is_idempotent_on_a_bootstrapped_database(adapter) -> None:
         assert cur.fetchone()["n"] == 1
         cur.execute("SELECT pronargs FROM pg_proc WHERE proname = 'amfs_apply_outcome_step'")
         assert cur.fetchone()["pronargs"] == 8
+
+
+def test_evidence_near_counts_outcomes_not_credits(adapter) -> None:
+    """One task that failed on a rule and then succeeded with the same rule
+    credits it twice — a failure from the attempt, a success from the terminal
+    outcome — but is one nearby task. ``n`` must say one, or a single task
+    would clear LOCAL_EVIDENCE_MIN_N by itself and override the pooled record."""
+    from amfs_core.models import AttemptRecord
+
+    emb = _Embedder()
+    adapter.write(_entry("rule"))
+    key = "acme/support/rule"
+    rec = _record(OutcomeType.SUCCESS, [key], paths=["acme/support"], situation="card declined")
+    rec = rec.model_copy(update={"attempts": [
+        AttemptRecord(attempt=1, outcome_type=OutcomeType.FAILURE, causal_entry_keys=[key], action_indices=[])
+    ]})
+    adapter.commit_outcome(rec)
+
+    near = adapter.evidence_near([key], emb.embed("card declined"))
+    assert near[key]["n"] == 1, near
+    assert near[key]["success"] == pytest.approx(1.0, abs=1e-6)
+    assert near[key]["failure"] == pytest.approx(1.0, abs=1e-6)
+
+    # A second task like it is the second outcome.
+    adapter.commit_outcome(_record(OutcomeType.SUCCESS, [key], paths=["acme/support"], situation="card declined"))
+    near = adapter.evidence_near([key], emb.embed("card declined"))
+    assert near[key]["n"] == 2 and near[key]["success"] == pytest.approx(2.0, abs=1e-6)
+    # A task about something else is orthogonal here and does not count.
+    adapter.commit_outcome(_record(OutcomeType.FAILURE, [key], paths=["acme/support"], situation="shipping delayed"))
+    near = adapter.evidence_near([key], emb.embed("card declined"), min_similarity=0.5)
+    assert near[key]["n"] == 2 and near[key]["failure"] == pytest.approx(1.0, abs=1e-6)
+
+
+class _GradedEmbedder:
+    """Three situations at chosen cosines to the query ``card declined``:
+    the same class phrased differently at 0.98, a neighbouring class at 0.88.
+    What a retrieval embedder does on an entity's tasks — every one clears an
+    absolute floor, and only the gap to the nearest tells the classes apart."""
+
+    dim = 384
+    # (cosine to e0, the axis the remainder goes on): the two card-declined
+    # phrasings share a plane, the refund class leans off on its own axis, so
+    # it sits 0.12-0.14 from both of them.
+    _COS = {
+        "card declined": (1.0, 1),
+        "card was declined at checkout": (0.98, 1),
+        "refund not received": (0.88, 2),
+    }
+
+    def embed(self, text: str) -> list[float]:
+        import math
+
+        vec = [0.0] * self.dim
+        spec = self._COS.get(text.strip().lower())
+        if spec is None:
+            vec[hash(text.strip().lower()) % self.dim] = 1.0
+            return vec
+        c, axis = spec
+        vec[0] = c
+        vec[axis] = math.sqrt(max(0.0, 1.0 - c * c))
+        return vec
+
+    def embed_value(self, value):
+        return self.embed(str(value))
+
+    def embed_batch(self, texts):
+        return [self.embed(t) for t in texts]
+
+
+def test_evidence_near_weights_by_gap_to_the_nearest_and_orders_the_recent(adapter) -> None:
+    """The local record is relative, like the priors: an outcome on the same
+    class of task counts in full, one a similarity gap away counts by
+    ``exp(-gap/tau)`` and falls out under the minimum weight — so a rule that
+    fails twice on one class is locally discredited for that class even
+    though it keeps succeeding on the class next door. ``recent`` carries the
+    order the sums cannot: newest first, in-neighbourhood only."""
+    from amfs_core.actions import PRIORS_NEIGHBOURHOOD_TAU
+    from amfs_core.evidence import locally_discredited
+
+    adapter._embedder = _GradedEmbedder()
+    emb = adapter._embedder
+    adapter.write(_entry("rule"))
+    key = "acme/support/rule"
+    paths = ["acme/support"]
+    # Neighbouring class: three successes, 0.12-0.14 behind the best match.
+    for _ in range(3):
+        adapter.commit_outcome(_record(OutcomeType.SUCCESS, [key], paths=paths, situation="refund not received"))
+    # Same class: one success long ago, then two failures.
+    adapter.commit_outcome(_record(OutcomeType.SUCCESS, [key], paths=paths, situation="card was declined at checkout"))
+    adapter.commit_outcome(_record(OutcomeType.FAILURE, [key], paths=paths, situation="card declined"))
+    adapter.commit_outcome(_record(OutcomeType.FAILURE, [key], paths=paths, situation="card was declined at checkout"))
+
+    near = adapter.evidence_near([key], emb.embed("card declined"))[key]
+    # The neighbouring class is 0.12 behind: exp(-0.12/0.03) ~ 0.018 < 0.1, dropped.
+    assert near["n"] == 3, near
+    assert near["best_similarity"] == pytest.approx(1.0, abs=1e-6)
+    w_same = pytest.approx(__import__("math").exp(-0.02 / PRIORS_NEIGHBOURHOOD_TAU), abs=1e-3)
+    assert near["success"] == w_same
+    assert near["failure"] == pytest.approx(1.0 + __import__("math").exp(-0.02 / PRIORS_NEIGHBOURHOOD_TAU), abs=1e-3)
+    assert [r["success"] for r in near["recent"]] == [False, False, True]
+    assert all(r["committed_at"] for r in near["recent"])
+    assert near["recent"][0]["committed_at"] >= near["recent"][1]["committed_at"]
+    assert locally_discredited(near) is True
+
+    # A later success on the same class clears it.
+    adapter.commit_outcome(_record(OutcomeType.SUCCESS, [key], paths=paths, situation="card declined"))
+    near = adapter.evidence_near([key], emb.embed("card declined"))[key]
+    assert [r["success"] for r in near["recent"]] == [True, False, False, True]
+    assert locally_discredited(near) is False
+
+    # Queried from the neighbouring class, the same rule reads as working:
+    # its three successes there are the neighbourhood and the card-declined
+    # failures are the ones a gap away.
+    near = adapter.evidence_near([key], emb.embed("refund not received"))[key]
+    assert near["n"] == 3 and near["failure"] == pytest.approx(0.0, abs=1e-3)
+    assert locally_discredited(near) is False

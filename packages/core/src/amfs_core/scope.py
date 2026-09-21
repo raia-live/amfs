@@ -33,7 +33,56 @@ the backslash, so no ``ESCAPE`` clause is needed to read the result back.
 
 from __future__ import annotations
 
-__all__ = ["covers", "descendants_sql", "normalize_scope"]
+from dataclasses import dataclass, field
+from typing import Any
+
+__all__ = ["SqlScope", "covers", "descendants_sql", "normalize_scope"]
+
+
+@dataclass(frozen=True)
+class SqlScope:
+    """A visibility rule as a SQL predicate over ``amfs_memory_entries``.
+
+    ``clause`` is a boolean expression that may reference the unqualified
+    columns ``agent_id`` and ``entity_path`` and uses ``%s`` placeholders for
+    every value in ``params``, in order. An adapter appends it to its own WHERE
+    conditions with ``AND (clause)`` so the database filters the rows, instead
+    of the caller materialising every row in the namespace and filtering them
+    in Python — which is what a 100K-entry account turns into a 20-second
+    request that holds the GIL for its neighbours.
+
+    The clause is written by the layer that knows the rule (a per-user room
+    visibility filter, say); the adapter treats it as a trusted fragment, the
+    same way :func:`descendants_sql` treats its column name. Values never go in
+    the clause, only in ``params``. ``None`` in an adapter signature means
+    "no scope": the caller may see every row.
+    """
+
+    clause: str
+    params: tuple[Any, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        # A tuple so the object is hashable and a caller's list is not shared.
+        object.__setattr__(self, "params", tuple(self.params))
+
+    def apply(self, conditions: list[str], params: list[Any]) -> None:
+        """Append this scope to a WHERE being built as parallel lists."""
+        conditions.append(f"({self.clause})")
+        params.extend(self.params)
+
+    @classmethod
+    def all_of(cls, *scopes: SqlScope | None) -> SqlScope | None:
+        """The conjunction of the given scopes, ignoring ``None``; ``None``
+        when there is nothing to conjoin. A row must satisfy every rule."""
+        present = [s for s in scopes if s is not None]
+        if not present:
+            return None
+        if len(present) == 1:
+            return present[0]
+        return cls(
+            " AND ".join(f"({s.clause})" for s in present),
+            tuple(p for s in present for p in s.params),
+        )
 
 
 def normalize_scope(prefix: str) -> str:

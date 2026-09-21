@@ -106,10 +106,19 @@ class _Handle:
 
     def __init__(self) -> None:
         self._tagger = types.SimpleNamespace(agent_id="server")
+        self.agent_id = "server"
         self.namespace = "test"
         self._adapter = types.SimpleNamespace(
             ensure_agent=lambda *a, **k: None, save_trace=lambda t: t
         )
+        self._read_tracker = types.SimpleNamespace(
+            causal_keys=[], terminal_causal_keys=[]
+        )
+
+    def as_agent(self, agent_id: str) -> "_Handle":
+        # The route commits on a per-request clone; this stub is stateless,
+        # so the clone is itself.
+        return self
 
     def commit_outcome(self, *a, **k):
         return []

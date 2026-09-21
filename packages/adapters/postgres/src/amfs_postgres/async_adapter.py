@@ -9,6 +9,7 @@ The sync PostgresAdapter, SDK, MCP, and Cortex are completely unaffected.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -16,10 +17,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from psycopg.rows import dict_row
-from psycopg_pool import AsyncConnectionPool
-
-from amfs_postgres._fts import or_tsquery
 from amfs_core.content import classify_artifact
 from amfs_core.exceptions import VersionConflictError
 from amfs_core.models import (
@@ -35,21 +32,33 @@ from amfs_core.models import (
     SearchQuery,
     SemanticQuery,
 )
-from amfs_core.scope import descendants_sql
+from amfs_core.scope import SqlScope, descendants_sql
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
+from amfs_postgres._fts import or_tsquery
 from amfs_postgres.adapter import (
-    PostgresAdapter,
     _BRANCH_SCOPE,
     _EVIDENCE_COLUMNS,
     _EVIDENCE_SELECT,
     _EXCLUDE_SHARED_PATHS,
     _REUSE_EVENT_INSERT_SQL,
+    PostgresAdapter,
     _evidence_params,
     _inherit_from_row,
+    _list_order_sql,
+    _paginate_sql,
     branch_scope_sql,
     connection_options,
     entry_select,
+    list_conditions,
     pool_bounds,
+)
+from amfs_postgres.knn import (
+    hnsw_scan_reset,
+    hnsw_scan_settings,
+    parse_pgvector_version,
+    use_hnsw_scan,
 )
 from amfs_postgres.tenant_gucs import areset_tenant_gucs
 
@@ -167,6 +176,7 @@ class AsyncPostgresAdapter:
         self._has_search_tsv = False
         self._has_is_artifact_col = False
         self._has_evidence_cols = False
+        self._pgvector_version: tuple[int, ...] | None = None
         connect_kwargs: dict[str, Any] = {"row_factory": dict_row, "autocommit": True}
         # The ceiling belongs here most of all. This adapter serves the hot-path
         # REST endpoints, so it holds the statements a caller is actually waiting
@@ -220,6 +230,17 @@ class AsyncPostgresAdapter:
                 self._has_evidence_cols = "success_count" in found
                 self._has_search_tsv = "search_tsv" in found
                 self._has_is_artifact_col = "is_artifact" in found
+                self._pgvector_version = None
+                if self._has_embedding_col:
+                    # Decides whether the account-wide vector search may take
+                    # the HNSW route (see amfs_postgres.knn).
+                    await cur.execute(
+                        "SELECT extversion FROM pg_extension WHERE extname = 'vector'"
+                    )
+                    row = await cur.fetchone()
+                    self._pgvector_version = parse_pgvector_version(
+                        row["extversion"] if row else None
+                    )
 
     # ── helpers (delegated to sync adapter statics) ─────────────────
 
@@ -458,33 +479,69 @@ class AsyncPostgresAdapter:
         *,
         include_superseded: bool = False,
         branch: str = "main",
+        scope: SqlScope | None = None,
+        agent_id: str | None = None,
+        order_by: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[MemoryEntry]:
-        # The branch condition is resolved once a connection is open (it may
-        # need the branch's parent); its params go right after the namespace.
-        conditions = ["namespace = %s"]
-        params: list[Any] = [self._namespace]
+        """Current entries, filtered, ordered and paged in SQL.
 
-        if entity_path is not None:
-            conditions.append("entity_path = %s")
-            params.append(entity_path)
-        else:
-            conditions.append(_EXCLUDE_SHARED_PATHS)
-
-        if not include_superseded:
-            conditions.append("superseded_at IS NULL")
-
+        The async twin of :meth:`PostgresAdapter.list`; see there for what the
+        keyword arguments beyond the ABC's mean. The WHERE comes from the same
+        ``list_conditions`` so the two adapters cannot drift, and *branch* is
+        read through the same overlay on its parent.
+        """
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
-                scope_sql, scope_params = await self._branch_scope(cur, branch)
-                where = " AND ".join([conditions[0], scope_sql, *conditions[1:]])
+                conditions, params = list_conditions(
+                    self._namespace,
+                    entity_path,
+                    include_superseded=include_superseded,
+                    branch=branch,
+                    scope=scope,
+                    agent_id=agent_id,
+                    branch_scope=await self._branch_scope(cur, branch),
+                )
+                where = " AND ".join(conditions)
                 query = (
                     f"SELECT {entry_select(self._has_is_artifact_col)} FROM amfs_memory_entries "
-                    f"WHERE {where} ORDER BY entity_path, key, version"
+                    f"WHERE {where} ORDER BY {_list_order_sql(order_by)}"
                 )
-                await cur.execute(query, [params[0], *scope_params, *params[1:]])
+                query, params = _paginate_sql(query, params, limit=limit, offset=offset)
+                await cur.execute(query, params)
                 rows = await cur.fetchall()
 
         return [self._row_to_entry(r) for r in rows]
+
+    async def count_entries(
+        self,
+        entity_path: str | None = None,
+        *,
+        include_superseded: bool = False,
+        branch: str = "main",
+        scope: SqlScope | None = None,
+        agent_id: str | None = None,
+    ) -> int:
+        """``COUNT(*)`` over exactly the rows :meth:`list` would return —
+        the same branch overlay included, so a page and its ``total`` agree."""
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                conditions, params = list_conditions(
+                    self._namespace,
+                    entity_path,
+                    include_superseded=include_superseded,
+                    branch=branch,
+                    scope=scope,
+                    agent_id=agent_id,
+                    branch_scope=await self._branch_scope(cur, branch),
+                )
+                where = " AND ".join(conditions)
+                await cur.execute(
+                    f"SELECT COUNT(*) AS n FROM amfs_memory_entries WHERE {where}", params
+                )
+                row = await cur.fetchone()
+        return int(row["n"]) if row else 0
 
     # ──────────────────────────────────────────────────────────────
     # 4. search
@@ -613,7 +670,14 @@ class AsyncPostgresAdapter:
         if not self._has_embedding_col:
             return []
 
-        query_vec = embedder.embed(query.text)
+        # The caller's vector when it has one; otherwise embed off the event
+        # loop. The embedder is an ONNX model and this method is awaited from
+        # request handlers, so embedding inline here stalled every other
+        # request on the process for the length of the inference.
+        if query.embedding is not None:
+            query_vec = query.embedding
+        else:
+            query_vec = await asyncio.to_thread(embedder.embed, query.text)
         vec_str = f"[{','.join(str(v) for v in query_vec)}]"
 
         # The branch condition is resolved once a connection is open; its
@@ -633,25 +697,53 @@ class AsyncPostgresAdapter:
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
+        if query.max_confidence is not None:
+            conditions.append("confidence <= %s")
+            params.append(query.max_confidence)
 
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
                 scope_sql, scope_params = await self._branch_scope(cur, branch)
-                where = " AND ".join(
-                    scope_sql if c is _BRANCH_SCOPE else c for c in conditions
-                )
-                sql = f"""
-                    SELECT *, 1 - (embedding <=> %s::vector) AS similarity
-                    FROM amfs_memory_entries
-                    WHERE {where}
-                    ORDER BY embedding <=> %s::vector
-                    LIMIT %s
-                """
-                await cur.execute(
-                    sql,
-                    [vec_str, params[0], *scope_params, *params[1:], vec_str, query.limit],
-                )
-                rows = await cur.fetchall()
+            where = " AND ".join(
+                scope_sql if c is _BRANCH_SCOPE else c for c in conditions
+            )
+            # Projected, not ``*``: the ranked rows do not need their own 1536-dim
+            # vectors shipped back only to be dropped by ``_row_to_entry`` — that
+            # was ~6 KB per candidate, per query variant.
+            sql = f"""
+                SELECT {entry_select(self._has_is_artifact_col)},
+                       1 - (embedding <=> %s::vector) AS similarity
+                FROM amfs_memory_entries
+                WHERE {where}
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+            """
+            sql_params = [vec_str, params[0], *scope_params, *params[1:], vec_str, query.limit]
+
+            rows: list[dict[str, Any]] | None = None
+            if use_hnsw_scan(entity_path=query.entity_path, version=self._pgvector_version):
+                # Account-wide: put this one statement on the HNSW index (see
+                # amfs_postgres.knn for the measurement and the rule). SET
+                # LOCAL scopes the settings to the transaction, so the pooled
+                # connection comes back exactly as it went out.
+                async with conn.transaction():
+                    await conn.execute(hnsw_scan_settings(query.limit))
+                    async with conn.cursor() as cur:
+                        await cur.execute(sql, sql_params)
+                        rows = await cur.fetchall()
+                    # Before the block ends, not after: when the checkout
+                    # already sits in the RLS wrapper's transaction this block
+                    # is a savepoint, SET LOCAL outlives it, and the exact
+                    # re-run below would inherit the index settings.
+                    await conn.execute(hnsw_scan_reset())
+                if len(rows) < query.limit:
+                    # The iterative scan gave up before the filter let enough
+                    # rows through; the exact scan below is complete.
+                    rows = None
+            if rows is None:
+                async with conn.cursor() as cur:
+                    await cur.execute(sql, sql_params)
+                    rows = await cur.fetchall()
 
         results: list[tuple[MemoryEntry, float]] = []
         for row in rows:

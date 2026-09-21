@@ -31,7 +31,8 @@ from .scenarios import make_scenario
 # until the instance is resized; the client-side limiter (AMFS_RPM) caps total request rate.
 _SL = int(os.environ.get("CL_SENSELAB_CONCURRENCY", "2"))
 _ARM_CONCURRENCY = {"mem0": 6, "zep": 8, "senselab": _SL, "senselab-episode": _SL,
-                    "senselab-nofeedback": _SL, "senselab-attempts": _SL, "senselab-nopriors": _SL}
+                    "senselab-nofeedback": _SL, "senselab-attempts": _SL, "senselab-nopriors": _SL,
+                    "senselab-lean": _SL}
 _sems: dict[str, threading.Semaphore] = {}
 _write_lock = threading.Lock()
 

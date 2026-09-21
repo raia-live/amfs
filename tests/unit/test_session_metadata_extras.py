@@ -374,11 +374,14 @@ def test_outcomes_endpoint_passes_client_session_metadata_to_commit_outcome() ->
 
     mem = SimpleNamespace(
         commit_outcome=_commit,
+        agent_id="server",
         _tagger=SimpleNamespace(agent_id="server"),
         _adapter=SimpleNamespace(ensure_agent=lambda *a, **k: None),
         namespace="default",
         _last_trace=None,
     )
+    # The route commits on a per-request clone; this stub is stateless.
+    mem.as_agent = lambda agent_id: mem
     originals = (
         http_server._get_memory, http_server._link_agent_owner_once,
         http_server._audit_log, http_server._auto_seal_trace,

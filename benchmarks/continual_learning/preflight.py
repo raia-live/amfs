@@ -609,15 +609,22 @@ def gate_explore_assignment() -> bool:
         _act(scope, action, False, _DECLINED[i], keys=["card-declined"], agent=f"cl-preflight-w{i}")
     time.sleep(1.0)
     cands = [f"resolve:{x}" for x in "abcde"]
+    untried = cands[2:]
+    # The contract is a deterministic per-agent assignment over the untried set (the same
+    # agent gets the same action on every server instance), not a random spread: six fixed
+    # names can legitimately land in two of three buckets. Check the assignment itself.
+    from amfs_core.actions import stable_bucket
+
+    agents = [f"cl-preflight-x{i}" for i in range(6)]
+    expected = [untried[stable_bucket(a, len(untried))] for a in agents]
     modes, picks = [], []
-    for i in range(6):
-        meta = _priors(scope, "card declined at checkout, works at other merchants", cands, agent=f"cl-preflight-x{i}")
+    for a in agents:
+        meta = _priors(scope, "card declined at checkout, works at other merchants", cands, agent=a)
         rec = meta.get("recommendation") or {}
         modes.append(rec.get("mode"))
         picks.append(rec.get("suggested_action"))
-    detail = {"scope": scope, "modes": modes, "suggested": picks}
-    ok = all(m == "explore" for m in modes) and len({p for p in picks if p}) >= 3 \
-        and all(p in cands[2:] for p in picks if p)
+    detail = {"scope": scope, "modes": modes, "suggested": picks, "expected": expected}
+    ok = all(m == "explore" for m in modes) and picks == expected and len(set(picks)) >= 2
     _gate("explore_assignment", bool(ok), detail)
     return bool(ok)
 
@@ -680,7 +687,7 @@ def gate_compact_budget() -> bool:
         full = adapter._post("/api/v1/retrieve", body)
         compact = adapter._post("/api/v1/retrieve", {**body, "compact": True})
     finally:
-        adapter.close()
+        adapter._client.close()
     rows_full = full if isinstance(full, list) else full.get("entries", [])
     rows_c = [e for e in (compact if isinstance(compact, list) else compact.get("entries", [])) if not e.get("_meta")]
     f_chars, c_chars = len(json.dumps(rows_full)), len(json.dumps(rows_c))
