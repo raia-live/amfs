@@ -312,6 +312,23 @@ describe("the receiver", () => {
     expect(bad.status).toBe(401);
   });
 
+  it("answers an unexpected error with a generic 500 and reports it to onError", async () => {
+    const { receiver } = world();
+    const boom = new Error("secret database dsn=postgres://user:pw@host/db");
+    receiver.handle = async () => {
+      throw boom;
+    };
+    const seen: unknown[] = [];
+    const handler = createFetchHandler(receiver, { onError: (e) => seen.push(e) });
+    const [headers, body] = await signed(payload());
+    const res = await handler(new Request("http://x/amfs/replay", { method: "POST", headers, body }));
+    expect(res.status).toBe(500);
+    const answer = await res.json();
+    expect(answer).toEqual({ ok: false, error: "internal error" });
+    expect(JSON.stringify(answer)).not.toContain("dsn=");
+    expect(seen).toEqual([boom]);
+  });
+
   it("serves over node:http", async () => {
     const { receiver, runs } = world();
     const server = await serveReplay(receiver, { host: "127.0.0.1", port: 0 });
