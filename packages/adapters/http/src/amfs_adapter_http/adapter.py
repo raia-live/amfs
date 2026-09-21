@@ -4,13 +4,22 @@ Every call carries the ``X-AMFS-API-Key`` header so that the server-side tenant
 middleware can enforce row-level security.  This adapter is intentionally
 **synchronous** (httpx sync client) because the MCP server tool functions are
 synchronous.
+
+A bound adapter (see :meth:`HttpAdapter.bind`) also carries the calling
+session's identity — ``X-AMFS-Agent-Id`` and ``X-AMFS-Session`` — on every
+request. Read routes take no agent or session in their query or body, so
+without these two headers a hosted server cannot tell which agent is reading,
+and cannot route the session onto a repair canary's memory branch.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
+import re
 import time
+from collections.abc import Mapping
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Any, Callable
@@ -110,6 +119,33 @@ def _raise_with_detail(resp: httpx.Response) -> None:
     resp.raise_for_status()
 
 
+#: Request header naming the agent the calling session acts as. The remote MCP
+#: gateway has sent it on every request since 0.1.23; a bound SDK adapter sends
+#: it too, so a hosted server can attribute reads — which carry no agent in
+#: their query or body — and look up the agent's live canary.
+AGENT_ID_HEADER = "X-AMFS-Agent-Id"
+#: Request header carrying the session id the SDK stamps on its trace. It is the
+#: key a hosted server hashes to put a session in the canary or control arm of a
+#: live repair canary, so every request of one session lands on the same arm; a
+#: session that does not send it is never routed.
+SESSION_HEADER = "X-AMFS-Session"
+
+_HEADER_UNSAFE = re.compile(r"[^\x20-\x7e]")
+
+
+def _header_value(value: Any) -> str | None:
+    """*value* as an HTTP header value, or ``None`` when nothing safe is left.
+
+    Header values are ASCII and single-line. An agent id is caller-chosen text
+    and may be neither, so anything outside printable ASCII is dropped rather
+    than letting ``httpx`` refuse the request over an attribution header.
+    """
+    if value is None:
+        return None
+    cleaned = _HEADER_UNSAFE.sub("", str(value)).strip()
+    return cleaned[:256] or None
+
+
 class HttpAdapter(AdapterABC):
     """Storage adapter that delegates to the AMFS HTTP/REST API.
 
@@ -129,6 +165,12 @@ class HttpAdapter(AdapterABC):
     # timeline event, so the SDK must not log it again (avoids double events).
     server_side_write_events: bool = True
 
+    #: Identity headers this handle adds to every request; empty until
+    #: :meth:`bind`. A class default so a handle built without ``__init__``
+    #: (subclasses and test doubles do) is simply unbound. Never mutated in
+    #: place — ``bind`` assigns a fresh dict on its copy.
+    _identity_headers: dict[str, str] = {}
+
     def __init__(
         self,
         base_url: str,
@@ -144,9 +186,41 @@ class HttpAdapter(AdapterABC):
             timeout=timeout or _TIMEOUT,
         )
 
+    # ── identity ───────────────────────────────────────────────────────
+
+    def bind(self, agent_id: str | None, session_id: str | None) -> HttpAdapter:
+        """A handle on the same connection that identifies itself as *agent_id* in *session_id*.
+
+        Cheap: a shallow copy sharing the ``httpx.Client`` (and its pool), with
+        its own identity headers merged into every request. ``AgentMemory``
+        calls this when it is built and again in ``as_agent``, so two handles on
+        one adapter never share an identity — which is why the headers live on
+        the handle and not on the shared client. Either id may be ``None``; the
+        header is then simply not sent.
+        """
+        bound = copy.copy(self)
+        headers: dict[str, str] = {}
+        agent = _header_value(agent_id)
+        session = _header_value(session_id)
+        if agent:
+            headers[AGENT_ID_HEADER] = agent
+        if session:
+            headers[SESSION_HEADER] = session
+        bound._identity_headers = headers
+        return bound
+
+    @property
+    def identity_headers(self) -> dict[str, str]:
+        """The identity headers this handle adds to every request (a copy)."""
+        return dict(self._identity_headers)
+
     # ── helpers ────────────────────────────────────────────────────────
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        if self._identity_headers:
+            # Under the caller's own headers: a per-call header (the MCP tool
+            # name, say) is more specific than the session's identity.
+            kwargs["headers"] = {**self._identity_headers, **(kwargs.get("headers") or {})}
         max_retries = 4
         for attempt in range(max_retries):
             resp = self._client.request(method, path, **kwargs)
@@ -418,8 +492,11 @@ class HttpAdapter(AdapterABC):
         # the entries written at the root of it, which is usually none of them.
         if getattr(query, "include_descendants", False):
             body["include_descendants"] = True
+        # Omitted for main, like every other read: a hosted canary routes a
+        # session by the branch it did *not* name, and a search that named
+        # main would read baseline memory while retrieve read the branch.
         branch = kwargs.get("branch")
-        if branch:
+        if branch and branch != "main":
             body["branch"] = branch
         data = self._post("/api/v1/search", body)
         self._capture_reuse_value()
@@ -448,6 +525,8 @@ class HttpAdapter(AdapterABC):
         candidate_actions: list[str] | None = None,
         situation: str | None = None,
         compact: bool | None = None,
+        environment: Mapping[str, Any] | None = None,
+        abstain: bool | None = None,
     ) -> list[tuple[MemoryEntry, float, dict[str, Any]]]:
         """Server-side semantic retrieval via POST /api/v1/retrieve.
 
@@ -456,6 +535,10 @@ class HttpAdapter(AdapterABC):
         (entry, score, breakdown) tuples; breakdown is empty on the server's
         lexical fallback. Artifacts (stored source files) are demoted by the
         server; pass ``include_artifacts=False`` to exclude them entirely.
+        *environment* (``{"model", "agent_version", "runtime"}``) lets the
+        server drop procedures whose preconditions contradict this run and
+        weight priors by it; *abstain* asks it to say so when nothing in scope
+        is worth acting on.
         """
         body: dict[str, Any] = {
             "query": query,
@@ -464,9 +547,13 @@ class HttpAdapter(AdapterABC):
             "semantic_weight": semantic_weight,
             "recency_weight": recency_weight,
             "confidence_weight": confidence_weight,
-            "branch": branch,
             "include_artifacts": include_artifacts,
         }
+        # Omitted for main, like every other read: a named ``main`` is an
+        # explicit choice the server honours over a routed canary branch, and
+        # retrieve is the recall path a canary most needs to route.
+        if branch and branch != "main":
+            body["branch"] = branch
         if entity_path:
             body["entity_path"] = entity_path
         # Sent only when set, so an older server that does not know the fields
@@ -489,6 +576,10 @@ class HttpAdapter(AdapterABC):
             body["situation"] = situation
         if compact is not None:
             body["compact"] = compact
+        if environment:
+            body["environment"] = {k: str(v) for k, v in environment.items() if v}
+        if abstain is not None:
+            body["abstain"] = abstain
         data = self._post("/api/v1/retrieve", body)
         self._capture_reuse_value()
         rows = data if isinstance(data, list) else data.get("entries", [])
@@ -946,6 +1037,7 @@ class HttpAdapter(AdapterABC):
         resp = self._client.put(
             f"/api/v1/agents/{quote(agent_id, safe='')}/profile",
             json=profile.model_dump(),
+            headers=self._identity_headers or None,
         )
         _raise_with_detail(resp)
         return Agent.model_validate(resp.json())
@@ -970,15 +1062,28 @@ class HttpAdapter(AdapterABC):
         credit_reuse: bool = False,
         compact: bool = False,
         since: datetime | None = None,
+        branch: str | None = None,
+        environment: Mapping[str, Any] | None = None,
     ) -> list[Digest]:
-        """Proxy briefing to the HTTP server which has full Cortex access."""
+        """Proxy briefing to the HTTP server which has full Cortex access.
+
+        *branch* is sent only when it is not the default, so a server that
+        predates the parameter still answers (it ignores unknown query params).
+        *environment* travels as ``env_<key>`` query parameters for the same
+        reason; the server marks procedures applicable or not against it.
+        """
         params: dict[str, Any] = {"limit": limit}
         if since is not None:
             params["since"] = since.isoformat()
+        for key, value in (environment or {}).items():
+            if value:
+                params[f"env_{key}"] = str(value)
         if entity_path:
             params["entity_path"] = entity_path
         if agent_id:
             params["agent_id"] = agent_id
+        if branch and branch != "main":
+            params["branch"] = branch
         # Sent only when asked for. The server treats a briefing as a real read
         # of what it surfaces, and that is true for an agent about to act on it
         # and false for a panel rendering it for a human, so the caller decides.

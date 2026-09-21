@@ -162,7 +162,10 @@ def test_compact_returns_only_the_lead_with_evidence(world) -> None:
         "validated",
         "discredited",
         "regime_shift",
+        "guidance_strength",
     }
     assert len(lead.summary["narrative"]) < 1000
     assert [v["key"] for v in lead.summary["validated"]] == ["fix-rotate"]
+    # A validated entry in scope is what makes guidance worth acting on.
+    assert lead.summary["guidance_strength"] == "strong"
     assert "risks" not in lead.summary and "who_to_ask" not in lead.summary

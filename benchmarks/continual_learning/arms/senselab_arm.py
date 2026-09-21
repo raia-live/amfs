@@ -559,3 +559,188 @@ class SenseLabNoPriorsArm(SenseLabArm):
     name = "senselab-nopriors"
     priors = False
     briefing_since = False
+
+
+# ---------------------------------------------------------------------------
+# senselab-repair: the shipped repair loop driven from the harness
+# ---------------------------------------------------------------------------
+
+REPAIR_JUDGE_ID = "cl-task-outcome"
+REPAIR_JUDGE_PROMPT = (
+    "You grade one run of an operations agent against the environment's own verdict. The "
+    "trace's decision summary and the last tool result state whether the task succeeded "
+    "(health checks green, CI green, case resolved) or failed (rolled back, still red, "
+    "rejected, escalated to a human, retry budget exhausted). Return FAIL when the run "
+    "ended in failure or escalation, PASS when it ended in success. Ignore how the agent "
+    "reasoned; the verdict is the environment's, and the point of grading is to name the "
+    "runs the repair loop should learn from. Scenario notes: {rubric}"
+)
+
+COMPOSE_PROMPT_SUFFIX = (
+    "\n\nBefore drafting, read the procedures already on the entity (read_procedures). When two "
+    "or more of them each cover part of the failure, compose one procedure whose steps chain "
+    "them: each step names the precondition it relies on and the effect it produces, so the "
+    "chain can be checked structurally — a step's preconditions must be met by the task or by "
+    "an earlier step's effects. Set depends_on to the component entries (key and version) the "
+    "composition rests on and evidence to the traces that support each component. Name any "
+    "assumption the components disagree on rather than papering over it."
+)
+
+
+class _SenseLabRepairSession(_SenseLabSession):
+    """The full protocol plus: after the outcome is sealed, hand the trace to the arm so the
+    repair loop can grade it and, on a failure, propose / test / ship a fix between episodes."""
+
+    def end(self, outcome: Outcome, *, task_input: str, response_text: str,
+            cited_keys: list[str]) -> None:
+        super().end(outcome, task_input=task_input, response_text=response_text, cited_keys=cited_keys)
+        trace = getattr(self.mem, "_last_trace", None)
+        trace_id = getattr(trace, "id", None) if trace is not None else None
+        if trace_id:
+            self.arm.pending.append({"agent_id": self.agent_id, "trace_id": str(trace_id),
+                                     "episode": self.episode, "success": outcome.success})
+        else:
+            self.acct.notes["repair_no_trace_id"] = True
+
+
+class SenseLabRepairArm(SenseLabArm):
+    """``senselab`` plus the Pro repair loop, run from the harness between episodes.
+
+    Every sealed trace is graded by one judge (the environment's verdict, not the agent's
+    self-report); a failing verdict proposes a fix; the fix's Tier 1 replay runs inline
+    (``POST /fixes/{id}/test?now=1``); a passed fix ships to memory (``auto_after_replay``
+    policy on the cell's agents, ``approve-memory`` as the fallback when the policy did not
+    apply). The shipped corrective entry or procedure is what the next episodes read.
+
+    Requires a dev Pro deployment with the repair agent enabled (``AMFS_EVAL_REPAIR_AGENT``
+    on the pro-api process). Pro calls are charged to the arm's ``extra_*`` accounting; the
+    judge and repair cost is reported from what the server returns (verdict ``cost_usd``),
+    so it is a lower bound where the server omits a figure.
+    """
+
+    name = "senselab-repair"
+    lever_override: str | None = None       # let the classifier choose the lever
+    repair_policy = "auto_after_replay"
+    compose = False
+
+    def open(self, scope: str) -> None:
+        super().open(scope)
+        from ..pro_client import ProClient, assert_dev
+
+        assert_dev(config.AMFS_HTTP_URL, config.AMFS_PRO_URL)
+        self.pro = ProClient()
+        self.pending: list[dict[str, Any]] = []
+        self._agents_ready: set[str] = set()
+        self._rubric = ""
+        self.repairs: list[dict[str, Any]] = []
+
+    def configure(self, scenario) -> None:
+        self._rubric = getattr(scenario, "judge_rubric", "") or "none"
+        if getattr(scenario, "procedural", False) and self.lever_override is None:
+            self.lever_override = "procedure"
+
+    def session(self, agent_id: str, episode: int) -> EpisodeSession:
+        return _SenseLabRepairSession(self, agent_id, episode)
+
+    def _ready(self, agent_id: str) -> None:
+        if agent_id in self._agents_ready:
+            return
+        self.pro.ensure_judge(REPAIR_JUDGE_ID, agent_id, "Task outcome (benchmark)",
+                              REPAIR_JUDGE_PROMPT.format(rubric=self._rubric[:1500]))
+        self.pro.set_repair_settings(agent_id, repair_policy=self.repair_policy)
+        if self.compose:
+            active = self.pro.get_repair_prompt(agent_id)
+            base = (active.get("active") or {}).get("prompt") if isinstance(active.get("active"), dict) else None
+            base = base or active.get("prompt") or ""
+            if COMPOSE_PROMPT_SUFFIX.strip() not in base:
+                self.pro.set_repair_prompt(agent_id, (base + COMPOSE_PROMPT_SUFFIX).strip())
+        self._agents_ready.add(agent_id)
+
+    def _repair_one(self, item: dict[str, Any], acct: ArmAccounting) -> dict[str, Any]:
+        from ..pro_client import ProApiError
+
+        rec: dict[str, Any] = {"episode": item["episode"], "agent_id": item["agent_id"], "trace_id": item["trace_id"]}
+        agent = item["agent_id"]
+        self._ready(agent)
+        graded = self.pro.judge(item["trace_id"], REPAIR_JUDGE_ID, agent_id=agent)
+        verdicts = [v for v in graded.get("verdicts", []) if isinstance(v, dict)]
+        for v in verdicts:
+            acct.extra_cost_usd += float(v.get("cost_usd") or 0.0)
+            acct.extra_prompt_tokens += int(v.get("input_tokens") or 0)
+            acct.extra_completion_tokens += int(v.get("output_tokens") or 0)
+        failing = [v for v in verdicts if v.get("verdict") == "fail"]
+        rec["verdict"] = (verdicts[0].get("verdict") if verdicts else None)
+        rec["judge_skipped"] = graded.get("skipped") or []
+        if not failing:
+            return rec
+        try:
+            fix = self.pro.propose(agent, verdict_id=str(failing[0]["id"]), lever_override=self.lever_override)
+        except ProApiError as e:
+            rec["propose_error"] = f"{e.status}: {str(e.detail)[:200]}"
+            return rec
+        fix_id = str(fix["id"])
+        rec.update(fix_id=fix_id, lever=fix.get("lever"), proposed_status=fix.get("status"))
+        try:
+            fix = self.pro.test_fix(fix_id, now=True)
+        except ProApiError as e:
+            rec["test_error"] = f"{e.status}: {str(e.detail)[:200]}"
+            return rec
+        if fix.get("status") in ("proposed", "testing"):
+            fix = self.pro.wait_tested(fix_id)
+        rec["tested_status"] = fix.get("status")
+        rec["test_result"] = (fix.get("test_result") or fix.get("last_test") or {}) if isinstance(fix, dict) else {}
+        if fix.get("status") == "test_passed":
+            # Policy should have shipped it; ship by hand when it did not.
+            try:
+                fix = self.pro.approve_memory(fix_id)
+                rec["shipped_by"] = "approve-memory"
+            except ProApiError as e:
+                rec["approve_error"] = f"{e.status}: {str(e.detail)[:200]}"
+        elif fix.get("status") in ("shipped", "live", "verified", "proven"):
+            rec["shipped_by"] = "policy"
+        rec["final_status"] = fix.get("status")
+        return rec
+
+    def after_episode(self, episode: int, llm) -> ArmAccounting | None:
+        from ..pro_client import ProApiError
+
+        items, self.pending = list(self.pending), []
+        failures = [it for it in items if not it["success"]]
+        if not failures:
+            return None
+        acct = ArmAccounting()
+        t0 = time.perf_counter()
+        done: list[dict[str, Any]] = []
+        for it in failures:
+            try:
+                rec = self._repair_one(it, acct)
+            except ProApiError as e:
+                rec = {"episode": it["episode"], "agent_id": it["agent_id"], "trace_id": it["trace_id"],
+                       "error": f"{e.status}: {str(e.detail)[:200]}"}
+            except Exception as e:  # noqa: BLE001
+                rec = {"episode": it["episode"], "agent_id": it["agent_id"], "trace_id": it["trace_id"],
+                       "error": f"{type(e).__name__}: {e}"[:200]}
+            done.append(rec)
+            acct.ops += 1
+        self.repairs.extend(done)
+        acct.memory_ms = (time.perf_counter() - t0) * 1000
+        acct.notes = {"repairs": done}
+        acct.notes["shipped_total"] = sum(1 for r in self.repairs if r.get("shipped_by"))
+        acct.notes["proposed_total"] = sum(1 for r in self.repairs if r.get("fix_id"))
+        return acct
+
+    def close(self) -> None:
+        try:
+            self.pro.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class SenseLabComposeArm(SenseLabRepairArm):
+    """``senselab-repair`` with the composition prompt installed on the cell's agents: the
+    repair agent reads the procedures already on the entity and composes them when each
+    covers part of the failure. The prototype composer of the fleet-disjoint experiment."""
+
+    name = "senselab-compose"
+    compose = True
+    lever_override = "procedure"

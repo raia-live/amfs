@@ -27,10 +27,28 @@ from amfs_core.models import (
 )
 from amfs_core.exceptions import StaleWriteError
 
-from amfs.memory import AgentMemory, MemoryScope
+from amfs.guidance import Guidance
+from amfs.memory import (
+    CANARY_ARM_ATTRIBUTE,
+    CANARY_FIX_ATTRIBUTE,
+    GUIDANCE_COUNT_ATTRIBUTE,
+    GUIDANCE_ID_ATTRIBUTE,
+    MEMORY_BRANCH_ATTRIBUTE,
+    SDK_STAMPED_ATTRIBUTES,
+    VERIFIED_BY_ATTRIBUTE,
+    AgentMemory,
+    MemoryScope,
+)
+from amfs.replay import ReplayReceiver, ReplayRequest, ReplayResult
+from amfs.run import Run
 
 __all__ = [
     "AgentMemory",
+    "Guidance",
+    "GUIDANCE_COUNT_ATTRIBUTE",
+    "GUIDANCE_ID_ATTRIBUTE",
+    "Run",
+    "VERIFIED_BY_ATTRIBUTE",
     "AMFSConfig",
     "ConflictPolicy",
     "ConsolidationProposal",
@@ -41,9 +59,16 @@ __all__ = [
     "Event",
     "LayerConfig",
     "MemoryEntry",
+    "CANARY_ARM_ATTRIBUTE",
+    "CANARY_FIX_ATTRIBUTE",
+    "MEMORY_BRANCH_ATTRIBUTE",
     "MemoryScope",
     "MemoryStats",
     "MemoryType",
+    "SDK_STAMPED_ATTRIBUTES",
+    "ReplayReceiver",
+    "ReplayRequest",
+    "ReplayResult",
     "OutcomeRecord",
     "OutcomeType",
     "Provenance",

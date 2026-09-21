@@ -8,15 +8,18 @@ memories, not just the most recently written.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from amfs_core.actions import guidance_strength as _guidance_strength
 from amfs_core.authority import rank_authors
 from amfs_core.evidence import DISCREDIT_THRESHOLD as _DISCREDIT_THRESHOLD
 from amfs_core.evidence import is_synthetic_key as _is_synthetic
 from amfs_core.evidence import regime_shifted as _regime_shifted
 from amfs_core.evidence import replacements_from_lessons as _replacements_from_lessons
 from amfs_core.models import Digest, DigestType, MemoryEntry, SearchQuery
+from amfs_core.models import preconditions_status as _preconditions_status
 
 if TYPE_CHECKING:
     from amfs_postgres.adapter import PostgresAdapter
@@ -24,6 +27,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _HOT_CONTEXT_LIMIT = 3
+#: Priority rows fetched for ``hot_context``. More than the section shows,
+#: because discredited, synthetic and procedure entries are dropped after the
+#: fetch; without headroom each one would cost the section a slot.
+_HOT_CONTEXT_SCAN_LIMIT = 12
 #: Rows scanned per evidence query; the sections themselves are shorter.
 _EVIDENCE_SCAN_LIMIT = 40
 _EVIDENCE_SECTION_LIMIT = 5
@@ -54,6 +61,39 @@ _ACTIONS_SECTION_LIMIT = 8
 def _preview(value: Any, limit: int = 160) -> str:
     text = value if isinstance(value, str) else str(value)
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _memory_type(entry: MemoryEntry) -> str:
+    mt = getattr(entry, "memory_type", None)
+    return str(getattr(mt, "value", mt) or "fact")
+
+
+def _procedure_goal(value: Any) -> str | None:
+    """The ``goal`` of a structured procedure, or ``None`` for free text."""
+    if isinstance(value, dict):
+        goal = value.get("goal")
+        return _preview(goal, 120) if isinstance(goal, str) and goal.strip() else None
+    return None
+
+
+def _hot_context_entries(entries: list[MemoryEntry]) -> list[MemoryEntry]:
+    """The priority rows that belong in ``hot_context``, in fetch order, capped
+    at the section's size.
+
+    Discredited entries are not "top priority" whatever their score says; they
+    go in the discredited section with what replaced them. Synthetic lessons
+    are folded into that section's ``replaced_by`` rather than shown as
+    knowledge in their own right. Procedures have the ``procedures`` section:
+    listing one here too would spend a slot meant for facts on a value that
+    is already shown in full a few lines down.
+    """
+    kept = [
+        e for e in entries
+        if e.discredited_at is None
+        and not _is_synthetic(e.key)
+        and _memory_type(e) != "procedure"
+    ]
+    return kept[:_HOT_CONTEXT_LIMIT]
 
 # Three authors, three keys each. This rides along on the one call every agent
 # is told to make first, so it is paying for itself in context window on every
@@ -105,8 +145,20 @@ class BriefingService:
         branch: str = "main",
         compact: bool = False,
         since: datetime | None = None,
+        environment: Mapping[str, Any] | None = None,
     ) -> list[Digest]:
         """Get a ranked list of relevant digests for the given context.
+
+        *environment* is the asking run's ``{"model", "agent_version",
+        "runtime", "platform"}`` (``amfs_core.models.environment_of``). When
+        given, each procedure in the lead digest is marked ``applicable``,
+        ``not_applicable`` (an environment precondition it states is contradicted;
+        such procedures move to ``procedures_not_applicable``) or ``unknown``
+        (it constrains a key the run did not report). Without it every
+        procedure is applicable, as before. The lead digest also carries
+        ``guidance_strength`` — ``strong`` / ``thin`` / ``none`` — so an agent
+        can tell a scope with validated knowledge from one with only untested
+        notes before it reads either.
 
         Ranking (OSS, rule-based):
         1. Direct entity match (highest)
@@ -137,6 +189,12 @@ class BriefingService:
         if compact:
             limit = 1
         all_digests = self._list_digests(entity_path, agent_id, branch)
+        if not all_digests and branch != "main":
+            # Digests are compiled per branch and a short-lived branch (a repair
+            # under review, a canary) rarely has its own. It reads memory as an
+            # overlay on main, so main's digests describe what it sees; the
+            # sections injected below are then re-read on the branch itself.
+            all_digests = self._list_digests(entity_path, agent_id, "main")
 
         scored: list[tuple[float, Digest]] = []
         now = datetime.now(timezone.utc)
@@ -157,8 +215,12 @@ class BriefingService:
                     self._inject_consolidation_notice(digests, entity_path, branch)
             else:
                 self._inject_standalone_hot_context(digests, entity_path, branch)
-            self._inject_evidence_sections(digests, entity_path, branch)
-            self._inject_action_sections(digests, entity_path)
+            hit_statuses = self._inject_evidence_sections(
+                digests, entity_path, branch, environment=environment
+            )
+            self._inject_action_sections(
+                digests, entity_path, hit_statuses, environment=environment
+            )
             if not compact:
                 self._inject_who_to_ask(digests, entity_path, agent_id, branch)
             if compact:
@@ -193,11 +255,24 @@ class BriefingService:
                 pass
         return self._adapter.list_digests(namespace=self._namespace, branch=branch)
 
-    def _inject_action_sections(self, digests: list[Digest], entity_path: str) -> None:
+    def _inject_action_sections(
+        self,
+        digests: list[Digest],
+        entity_path: str,
+        hit_statuses: list[str] | None = None,
+        *,
+        environment: Mapping[str, Any] | None = None,
+    ) -> None:
         """Attach ``tried_here`` to the lead digest: per-action won/lost on this
         entity from the outcome record (``amfs_core.actions``), plus ``explore``
         — the actions with a thin record, where another try is information.
-        Nothing is attached when the adapter keeps no outcome record."""
+        Nothing is attached when the adapter keeps no outcome record.
+        *hit_statuses* are the evidence statuses of the scope's entries, from
+        the evidence sections, so ``guidance_strength`` can be re-rated with
+        the action record included. *environment* is the caller's model /
+        agent_version / runtime; outcomes recorded under another are
+        down-weighted, as they are for ``retrieve`` priors."""
+        hit_statuses = list(hit_statuses or [])
         lead = self._lead_digest(digests, entity_path)
         if lead is None:
             return
@@ -211,12 +286,17 @@ class BriefingService:
             return
         if not rows:
             return
-        from amfs_core.actions import aggregate_priors
+        from amfs_core.actions import aggregate_priors, guidance_strength
 
-        priors = aggregate_priors(rows)
+        priors = aggregate_priors(rows, environment=environment)
         tried = priors.get("tried") or []
         if not tried:
             return
+        # The evidence sections rated the scope on entries alone; a winning
+        # action record is evidence too, so re-rate with the priors in hand.
+        lead.summary["guidance_strength"] = guidance_strength(
+            priors, hit_statuses, regime_shift=bool(lead.summary.get("regime_shift")),
+        )
         lead.summary["tried_here"] = [
             {
                 "action": t["action_key"],
@@ -272,7 +352,7 @@ class BriefingService:
         for d in digests:
             if d.digest_type != DigestType.ENTITY or d.scope != entity_path:
                 continue
-            for section in ("hot_context", "validated", "discredited", "tried_here"):
+            for section in ("hot_context", "validated", "discredited", "procedures", "tried_here"):
                 rows = d.summary.get(section)
                 if not isinstance(rows, list):
                     continue
@@ -372,18 +452,23 @@ class BriefingService:
         digests: list[Digest],
         entity_path: str,
         branch: str,
-    ) -> None:
-        """Attach ``validated``, ``discredited`` and ``regime_shift`` to the lead digest.
+        environment: Mapping[str, Any] | None = None,
+    ) -> list[str]:
+        """Attach ``validated``, ``discredited``, ``procedures``, ``regime_shift``
+        and ``guidance_strength`` to the lead digest.
 
         Two bounded queries over the scope: the highest-priority entries (for
         what has been confirmed) and the lowest-confidence ones (for what has
         been discredited — a discredited entry is under the threshold by
         construction, so ``max_confidence`` finds them without a new column in
         the search API). Any failure leaves the digest as it was.
+
+        Returns the evidence statuses of the entries seen, for the action
+        sections to fold into ``guidance_strength``.
         """
         lead = self._lead_digest(digests, entity_path)
         if lead is None:
-            return
+            return []
         try:
             top = self._search(
                 SearchQuery(
@@ -408,7 +493,7 @@ class BriefingService:
             )
         except Exception:
             logger.debug("Evidence sections failed for %s", entity_path, exc_info=True)
-            return
+            return []
 
         seen: dict[str, MemoryEntry] = {}
         for e in [*top, *low]:
@@ -437,6 +522,21 @@ class BriefingService:
 
         shifted = [e for e in self._regime_shift(entries) if not _is_synthetic(e.key)]
 
+        # Procedures are how to do the task, not facts about it, so they get a
+        # section of their own and ``_hot_context_entries`` keeps them out of
+        # the hot context. Validated first, then by confidence; discredited
+        # ones are already in the section above and are not repeated here.
+        procedures = sorted(
+            (
+                e for e in entries
+                if _memory_type(e) == "procedure"
+                and e.discredited_at is None
+                and not _is_synthetic(e.key)
+            ),
+            key=lambda e: (e.success_count, e.confidence),
+            reverse=True,
+        )[:_EVIDENCE_SECTION_LIMIT]
+
         lead.summary["validated"] = [
             {
                 "key": e.key,
@@ -461,6 +561,42 @@ class BriefingService:
             }
             for e in discredited
         ]
+        if procedures:
+            applicable_rows: list[dict[str, Any]] = []
+            not_applicable_rows: list[dict[str, Any]] = []
+            for e in procedures:
+                status, detail = _preconditions_status(e.value, environment)
+                row = {
+                    "key": e.key,
+                    "entity_path": e.entity_path,
+                    "confidence": round(e.confidence, 3),
+                    "evidence_status": e.evidence_status,
+                    "success_count": e.success_count,
+                    "failure_count": e.failure_count,
+                    "goal": _procedure_goal(e.value),
+                    "value_preview": _preview(e.value),
+                    "written_at": e.provenance.written_at.isoformat(),
+                    "last_outcome_at": (
+                        e.last_outcome_at.isoformat() if e.last_outcome_at else None
+                    ),
+                    "applicability": status,
+                }
+                if detail:
+                    row["applicability_detail"] = detail
+                if status == "not_applicable":
+                    not_applicable_rows.append(row)
+                else:
+                    applicable_rows.append(row)
+            if applicable_rows:
+                lead.summary["procedures"] = applicable_rows
+            if not_applicable_rows:
+                # Kept visible, apart: the agent should know a way exists and
+                # why it does not apply here, not just fail to find it.
+                lead.summary["procedures_not_applicable"] = not_applicable_rows
+        statuses = [e.evidence_status for e in entries if not _is_synthetic(e.key)]
+        lead.summary["guidance_strength"] = _guidance_strength(
+            None, statuses, regime_shift=bool(shifted)
+        )
         if shifted:
             lead.summary["regime_shift"] = {
                 "suspected": True,
@@ -482,6 +618,7 @@ class BriefingService:
                     "prefer entries validated since."
                 ),
             }
+        return statuses
 
     @staticmethod
     def _regime_shift(entries: list[MemoryEntry]) -> list[MemoryEntry]:
@@ -506,7 +643,11 @@ class BriefingService:
         lead = self._lead_digest(digests, entity_path)
         if lead is None:
             return digests[:1]
-        keep = ("narrative", "hot_context", "validated", "discredited", "regime_shift", "tried_here", "explore")
+        keep = (
+            "narrative", "hot_context", "validated", "discredited", "procedures",
+            "procedures_not_applicable", "regime_shift", "tried_here", "explore",
+            "guidance_strength",
+        )
         summary = {k: lead.summary[k] for k in keep if k in lead.summary}
         narrative = summary.get("narrative")
         if isinstance(narrative, str) and len(narrative) > _COMPACT_NARRATIVE_CHARS:
@@ -682,7 +823,7 @@ class BriefingService:
                 SearchQuery(
                     entity_path=entity_path,
                     sort_by="priority",
-                    limit=_HOT_CONTEXT_LIMIT,
+                    limit=_HOT_CONTEXT_SCAN_LIMIT,
                     # Working files shouldn't dominate the "what you know" context
                     # an agent reads at task start.
                     include_artifacts=False,
@@ -698,14 +839,9 @@ class BriefingService:
             logger.debug("Hot-context injection failed for %s", entity_path, exc_info=True)
             return
 
+        entries = _hot_context_entries(entries)
         if not entries:
             return
-
-        # Discredited entries are not "top priority" whatever their score says;
-        # they go in the discredited section with what replaced them. Synthetic
-        # lessons are folded into that section's ``replaced_by`` rather than
-        # shown as knowledge in their own right.
-        entries = [e for e in entries if e.discredited_at is None and not _is_synthetic(e.key)]
         hot_entries = [self._entry_brief(e) for e in entries]
 
         for d in digests:
@@ -729,7 +865,7 @@ class BriefingService:
                 SearchQuery(
                     entity_path=entity_path,
                     sort_by="priority",
-                    limit=_HOT_CONTEXT_LIMIT,
+                    limit=_HOT_CONTEXT_SCAN_LIMIT,
                     # Working files shouldn't dominate the "what you know" context
                     # an agent reads at task start.
                     include_artifacts=False,
@@ -746,21 +882,29 @@ class BriefingService:
         if not entries:
             return
 
-        # Discredited entries are not "top priority" whatever their score says;
-        # they go in the discredited section with what replaced them. Synthetic
-        # lessons are folded into that section's ``replaced_by`` rather than
-        # shown as knowledge in their own right.
-        entries = [e for e in entries if e.discredited_at is None and not _is_synthetic(e.key)]
+        # The digest is created whenever the scope holds *anything*, not only
+        # when something qualifies for the hot context: this is the lead digest
+        # the evidence sections attach to, and a scope whose knowledge is all
+        # procedures (or all discredited) still has a ``procedures`` or
+        # ``discredited`` section to show. Without it the agent would be
+        # briefed with an empty list.
+        fetched = len(entries)
+        entries = _hot_context_entries(entries)
         hot_entries = [self._entry_brief(e) for e in entries]
+        narrative = f"No compiled digest yet for {entity_path}. " + (
+            "Showing top priority entries."
+            if hot_entries
+            else "See the evidence sections below."
+        )
 
         digests.append(Digest(
             digest_type=DigestType.ENTITY,
             scope=entity_path,
             summary={
-                "narrative": f"No compiled digest yet for {entity_path}. Showing top priority entries.",
+                "narrative": narrative,
                 "hot_context": hot_entries,
             },
-            entry_count=len(entries),
+            entry_count=fetched,
             source_agents=[],
             compiled_at=datetime.now(timezone.utc),
             namespace=self._namespace,

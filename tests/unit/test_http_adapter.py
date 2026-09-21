@@ -96,6 +96,17 @@ class TestSearchForwardsDepth:
 
         assert calls[0]["body"]["branch"] == "feature-x"
 
+    def test_main_is_not_named_so_a_hosted_canary_can_route_the_session(self) -> None:
+        # Like read/list/retrieve/briefing: a session the SaaS layer put in a
+        # canary arm is routed by the branch it did *not* name. A search that
+        # said "main" would read baseline memory while retrieve read the fix.
+        adapter, calls = _make_adapter({
+            "POST /api/v1/search": {"entries": []},
+        })
+        adapter.search(SearchQuery(entity_path="svc"), branch="main")
+
+        assert "branch" not in calls[0]["body"]
+
     def test_include_artifacts_false_forwarded(self) -> None:
         # Dropping this flag made every SaaS caller's include_artifacts=False a
         # no-op, so a search could come back carrying whole source files.

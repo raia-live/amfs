@@ -49,6 +49,11 @@ from amfs_mcp.agent_id import detect_agent_id, detect_platform
 
 logger = logging.getLogger(__name__)
 
+#: ``memory_type`` strings an agent may pass, mapped to the enum. Derived from
+#: the enum so a new type (``procedure`` most recently) is accepted here the
+#: moment the core knows it; unknown strings fall back to ``fact``.
+_MEMORY_TYPES: dict[str, MemoryType] = {m.value: m for m in MemoryType}
+
 _INSTRUCTIONS = """\
 SenseLab is your persistent memory — it remembers ANYTHING the user wants to keep, across every session, tool, and machine. That includes **personal facts and preferences** (food, people, important dates, how they like things done) AND **work context** (decisions, patterns, code, runbooks). It is general-purpose memory for the whole person, NOT just a coding-agent tool.
 
@@ -111,7 +116,7 @@ you have no memory of something without checking first.
 2. **Recall**: `amfs_retrieve(query="...")` to find anything by meaning (no path/key needed); `amfs_search(query="...")` for filtered/keyword search; `amfs_read(path, key)` only when you know the exact coordinates; `amfs_graph_neighbors` for related entities.
 3. **Record decisions as they happen**: `amfs_record_context("user-decision", "User chose X over Y", source="chat")`. Only record meaningful decisions — not every micro-step.
 4. **Record actions as you take them**: `amfs_record_action("deploy_rollback", {"service": "checkout"})` right after a consequential action — deploy, rollback, refund, file edit, PR. Record failed ones too with `success=False`. AMFS sees only its own tools, so your other tools are invisible unless you record them.
-5. **Write knowledge**: `amfs_write("<repo>/<module>", "task-summary-<desc>", "<what and why>")`. Use `memory_type="belief"` for hypotheses, `"experience"` for actions taken.
+5. **Write knowledge**: `amfs_write("<repo>/<module>", "task-summary-<desc>", "<what and why>")`. Use `memory_type="belief"` for hypotheses, `"experience"` for actions taken, `"procedure"` for how to do a task (goal + ordered steps + what to do on failure).
 6. **Commit outcomes**: `amfs_commit_outcome("<ref>", "success", task_input="<the request that started this>", response_text="<your final answer to the user>")` after completing significant work. This is FREE and snapshots the full decision trace. Pass `task_input` whenever you have it — without it the trace records what you decided but not what you were asked. Pass `response_text` on every commit — SenseLab sees only its own tools, so what you told the user is invisible unless you hand it over here, and a judge grading the answer reads nothing otherwise.
 
 ## What to Save (worth 2 ops)
@@ -138,6 +143,7 @@ Use short hierarchical paths. For work: `{repo}/{service-or-module}` (e.g. `myap
 
 - **Patterns**: `amfs_write(..., "pattern-<name>", "...", pattern_refs=["related-key"])`
 - **Risks**: `amfs_write(..., "risk-<name>", "...", confidence=0.8, memory_type="belief")`
+- **Procedures**: `amfs_write(..., "procedure-<task>", '{"goal": "...", "steps": [...], "on_failure": "..."}', memory_type="procedure")` — the briefing lists these under `procedures`; follow one before re-deriving the method.
 - **Cross-agent reads**: `amfs_read_from("<agent_id>", ...)` for tracked knowledge transfer.
 
 ## Confidence Scale
@@ -684,6 +690,8 @@ def amfs_set_identity(
     model: str | None = None,
     client_name: str | None = None,
     tools_available: list[str] | None = None,
+    agent_version: str | None = None,
+    runtime: str | None = None,
     ctx: Context | None = None,
 ) -> str:
     """Set the agent identity for this conversation. CALL THIS FIRST before any other AMFS tool.
@@ -723,6 +731,12 @@ def amfs_set_identity(
         tools_available: Optional list of tool names available to you in this session
                          (e.g. ["Shell", "Read", "Write", "Grep"]). Helps AMFS understand
                          what capabilities drove a decision.
+        agent_version: Optional version of the agent or harness you run inside
+                       (e.g. "checkout-bot@2.3.1"). With `model` and `runtime` it
+                       is what lets a change in memory be told apart from a change
+                       in the agent, and what scopes procedures to this run.
+        runtime: Optional runtime the agent executes in (e.g. "python3.12/linux",
+                 "node20"). Same purpose as `agent_version`.
 
     Example: amfs_set_identity("tenant-isolation-agent", "Fixing RLS propagation for Pro tenancy", model="claude-4-opus")
     """
@@ -730,7 +744,7 @@ def amfs_set_identity(
     now = time.monotonic()
 
     # Build / update session metadata from explicit params + MCP context
-    if model or client_name or tools_available:
+    if model or client_name or tools_available or agent_version or runtime:
         if _session_metadata is None:
             _session_metadata = SessionMetadata()
         if model:
@@ -739,6 +753,10 @@ def amfs_set_identity(
             _session_metadata.client_name = client_name
         if tools_available:
             _session_metadata.tools_available = tools_available
+        if agent_version:
+            _session_metadata.agent_version = agent_version
+        if runtime:
+            _session_metadata.runtime = runtime
 
     if _session_metadata is None:
         _session_metadata = SessionMetadata()
@@ -934,6 +952,11 @@ def amfs_write(
     - When finding a bug or risk: key="risk-<name>", use memory_type="belief" for hypotheses
     - When making a non-obvious decision: key="decision-<topic>", include rationale
     - When logging actions: key="action-<desc>", use memory_type="experience" (decays slower)
+    - When you have worked out HOW to do a task so the next agent need not:
+      key="procedure-<task>", memory_type="procedure", value as JSON
+      {"goal": "...", "preconditions": [...], "steps": ["...", ...],
+       "on_failure": "...", "verify": "..."}. Procedures decay slowest and the
+      briefing lists them in their own section.
 
     DON'T write trivial info ("added a comment") — write things a colleague would need.
     Keep values concise but informative. Think of it as a note to a future agent.
@@ -944,7 +967,8 @@ def amfs_write(
         value: The knowledge to store — can be plain text or JSON string
         confidence: How confident you are (1.0=verified, 0.7-0.9=high, 0.4-0.6=hypothesis, <0.4=speculative)
         pattern_refs: Optional list of related pattern keys for cross-referencing
-        memory_type: One of "fact" (default, normal decay), "belief" (decays faster), or "experience" (decays slower)
+        memory_type: One of "fact" (default, normal decay), "belief" (decays faster),
+            "experience" (decays slower) or "procedure" (how to do a task; decays slowest)
         artifact_refs: Optional list of external artifact references. Each dict
             should have "uri" (required), and optionally "media_type", "label",
             "size_bytes".
@@ -966,8 +990,7 @@ def amfs_write(
     except (json.JSONDecodeError, TypeError):
         pass
 
-    type_map = {"fact": MemoryType.FACT, "belief": MemoryType.BELIEF, "experience": MemoryType.EXPERIENCE}
-    mt = type_map.get(memory_type.lower(), MemoryType.FACT)
+    mt = _MEMORY_TYPES.get(memory_type.lower(), MemoryType.FACT)
 
     parsed_artifact_refs = [
         ArtifactRef.model_validate(r) for r in (artifact_refs or [])
@@ -1175,8 +1198,12 @@ def amfs_retrieve(
             about this entity and how it went (`tried`: action, won/n, agents;
             `untried`) — and a `recommendation`: `act` (a validated rule or a
             winning action), `explore` (an untried action picked for you, so a
-            fleet spreads its search), or `escalate` (every candidate action has
-            failed here). Read it before choosing an action.
+            fleet spreads its search), `escalate` (every candidate action has
+            failed here) or `abstain` (nothing here has been tried or
+            validated — treat the hits as hints and say so). Read it before
+            choosing an action. `guidance_strength` rates the whole answer
+            `strong` / `thin` / `none`; `not_applicable` lists procedures whose
+            environment preconditions this run contradicts.
         candidate_actions: The actions you could take, as `tool:action` keys
             (e.g. ["resolve:resend_email", "resolve:refund"]). Lets the priors
             name the untried ones and the recommendation say `escalate`.
@@ -1219,6 +1246,9 @@ def amfs_retrieve(
         candidate_actions=candidate_actions,
         situation=situation,
         compact=compact,
+        # An agent that asked for a recommendation should be told when there is
+        # none worth giving, not left to read confidence into untested hits.
+        abstain=include_priors,
     )
     priors_meta = getattr(mem, "last_priors", None) if include_priors else None
 
@@ -1670,6 +1700,8 @@ def amfs_commit_outcome(
     response_text: str | None = None,
     entity_path: str | None = None,
     situation: str | None = None,
+    verified_by: str | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> str:
     """Record an outcome and auto-link it to everything read this session.
 
@@ -1709,8 +1741,18 @@ def amfs_commit_outcome(
             on that entity find this outcome and the actions you recorded.
         situation: Optional short label for the kind of task ("card-declined
             ticket"), so similar tasks find each other.
+        verified_by: Optional. Who or what decided the outcome when it was not
+            you: "ci" (the pipeline went green), "human" (the user confirmed),
+            "verifier" (a check you ran), "customer". An outcome with it is
+            external evidence; one without is your own declaration, and the
+            two are weighed differently when a fix is judged. Leave it out
+            when you are the one calling it a success.
+        evidence: Optional small dict of pointers to that source, e.g.
+            {"run_id": "1234", "url": "https://ci/..."}. Scalars only.
 
     Example: amfs_commit_outcome("task-42", "success")
+    Example: amfs_commit_outcome("PR-456", "success", verified_by="ci",
+                                 evidence={"run_id": "98765"})
     Example: amfs_commit_outcome("INC-2047", "success", task_input="API p99 latency above 2s in us-east")
     Example: amfs_commit_outcome("INC-2047", "success",
                                  task_input="API p99 latency above 2s in us-east",
@@ -1746,6 +1788,10 @@ def amfs_commit_outcome(
         commit_kwargs["entity_path"] = entity_path
     if situation:
         commit_kwargs["situation"] = situation
+    if verified_by:
+        commit_kwargs["verified_by"] = verified_by
+    if evidence:
+        commit_kwargs["evidence"] = dict(evidence)
     entries = mem.commit_outcome(outcome_ref, otype, **commit_kwargs)
     trace = getattr(mem, "_last_trace", None)
     result: dict[str, Any] = {
@@ -2248,18 +2294,27 @@ def amfs_briefing(
         compact: Return only the lead entity digest with its hot context and
             evidence sections — `validated` (entries every outcome confirmed),
             `discredited` (entries a failure gated, with `replaced_by` where a
-            later success is known) and `regime_shift` (long-validated entries
+            later success is known), `procedures` (how to do tasks in this
+            scope, validated first) and `regime_shift` (long-validated entries
             that recently started failing). A fraction of the tokens; use it at
             the top of every task.
         since: ISO-8601 timestamp. Return only what changed after it in the
-            list sections (hot context, validated, discredited, tried_here) —
-            the delta since your last briefing, at a fraction of the tokens.
+            list sections (hot context, validated, discredited, procedures,
+            tried_here) — the delta since your last briefing, at a fraction of
+            the tokens.
 
     Read the evidence sections first: act on `validated` entries, avoid
     `discredited` ones, and treat a `regime_shift` warning as "verify before
-    reusing anything here". `tried_here` is what agents *did* on this entity
-    and how each action went (won/n, agents); `explore.avoid` lists actions
-    that keep failing here — do not repeat them without a reason.
+    reusing anything here". When `procedures` names one for your task, follow
+    it (read the full entry with `amfs_read`) rather than re-deriving the
+    method; `procedures_not_applicable` lists ways that exist but whose
+    environment preconditions this run contradicts (the detail names which).
+    `tried_here` is what agents *did* on this entity and how each
+    action went (won/n, agents); `explore.avoid` lists actions that keep
+    failing here — do not repeat them without a reason. `guidance_strength`
+    rates the scope — `strong` (validated knowledge or a winning action),
+    `thin` (evidence, none confirmed) or `none` (only untested notes): with
+    `none`, treat what you read as hints and say so rather than following it.
 
     Example: amfs_briefing(entity_path="checkout-service", compact=True)
     """
@@ -2438,8 +2493,9 @@ def amfs_commit_batch(
             if "confidence" in w:
                 kwargs["confidence"] = w["confidence"]
             if "memory_type" in w:
-                type_map = {"fact": MemoryType.FACT, "belief": MemoryType.BELIEF, "experience": MemoryType.EXPERIENCE}
-                kwargs["memory_type"] = type_map.get(str(w["memory_type"]).lower(), MemoryType.FACT)
+                kwargs["memory_type"] = _MEMORY_TYPES.get(
+                    str(w["memory_type"]).lower(), MemoryType.FACT
+                )
             if "shared" in w:
                 kwargs["shared"] = w["shared"]
             if "pattern_refs" in w:

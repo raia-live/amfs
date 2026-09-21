@@ -186,12 +186,20 @@ class MemoryArm:
     name: str = "base"
     learns_from_outcomes: bool = False
     has_memory: bool = True
+    # Arms without memory tools that still hand the agent a briefing (the raw-traces control).
+    briefs: bool = False
 
     def open(self, scope: str) -> None:
         """Prepare an isolated namespace for one (scenario, seed)."""
         self.scope = scope
         # (due_episode, callable) pairs for the delayed-feedback sweep; drained by the runner
         self.deferred: list[tuple[int, Any]] = []
+
+    def configure(self, scenario) -> None:
+        """Called once per cell after ``open`` with the scenario about to run, for arms whose
+        side machinery needs to know the domain (the repair arm's judge rubric and lever).
+        The default ignores it; arms must not read task truths from it."""
+        return None
 
     def drain_deferred(self, before_episode: int) -> None:
         """Deliver outcomes whose delay has elapsed (due <= before_episode)."""

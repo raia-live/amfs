@@ -34,6 +34,7 @@ from amfs_core.exclusions import (
     AGENT_ID_NOT_EXCLUDED_SQL,
     ENTITY_PATH_NOT_EXCLUDED_SQL,
 )
+from amfs_core.actions import recorded_environment
 from amfs_core.evidence import cited_entries, outcome_model
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
@@ -110,6 +111,33 @@ logger = logging.getLogger(__name__)
 # collapse, so '@%%/%%' matches exactly what '@%/%' does.
 _EXCLUDE_SHARED_PATHS = "entity_path NOT LIKE '@%%/%%'"
 
+# Stands in for the branch condition in a WHERE list until a connection is open
+# and ``PostgresAdapter._branch_scope`` can resolve the branch's parent. Compared
+# by identity, so it can never collide with a real SQL fragment.
+_BRANCH_SCOPE = "<branch scope>"
+
+
+def branch_scope_sql(branch: str, parent: str | None) -> tuple[str, list[Any]]:
+    """The ``WHERE`` fragment reading *branch* as an overlay on *parent*, with
+    its parameters in order: the branch's own live rows, plus the parent's live
+    row for every ``(entity_path, key)`` the branch has not touched. With no
+    parent (``main``, or a branch the adapter has no record of) it is the plain
+    branch filter. Shared by both adapters; see ``PostgresAdapter._branch_scope``
+    for why the parent is read live rather than as of the branch point.
+    """
+    if parent is None:
+        return "branch = %s", [branch]
+    return (
+        "(branch = %s OR (branch = %s AND NOT EXISTS ("
+        "SELECT 1 FROM amfs_memory_entries b"
+        " WHERE b.namespace = amfs_memory_entries.namespace"
+        " AND b.branch = %s"
+        " AND b.entity_path = amfs_memory_entries.entity_path"
+        " AND b.key = amfs_memory_entries.key"
+        " AND b.superseded_at IS NULL)))",
+        [branch, parent, branch],
+    )
+
 # Benchmark and system rows, kept out of the aggregates that describe how much
 # memory an account has. The predicates come from amfs_core.exclusions so that
 # this and the Python aggregate cannot answer differently; see that module.
@@ -163,15 +191,25 @@ def list_conditions(
     branch: str,
     scope: SqlScope | None,
     agent_id: str | None,
+    branch_scope: tuple[str, list[Any]] | None = None,
 ) -> tuple[list[str], list[Any]]:
     """The WHERE behind ``list()`` and ``count_entries()`` on both adapters.
 
     One definition so a page and the ``total`` it reports cannot disagree
     about which rows exist, and so the shared-namespace guard is applied to
     the unscoped read in one place (``tests/test_shared_path_scoping.py``).
+
+    *branch_scope* replaces the plain ``branch = %s`` predicate with the
+    overlay fragment from :func:`branch_scope_sql` (a branch's own live rows
+    plus the parent's for every key it has not touched) — the adapters pass
+    it once they hold a cursor to look the parent up on.
     """
-    conditions = ["namespace = %s", "branch = %s"]
-    params: list[Any] = [namespace, branch]
+    if branch_scope is not None:
+        branch_sql, branch_params = branch_scope
+    else:
+        branch_sql, branch_params = "branch = %s", [branch]
+    conditions = ["namespace = %s", branch_sql]
+    params: list[Any] = [namespace, *branch_params]
 
     if entity_path is not None:
         conditions.append("entity_path = %s")
@@ -723,6 +761,7 @@ class PostgresAdapter(AdapterABC):
         self._has_validators_col = False
         self._has_action_cols = False
         self._has_outcome_embedding_col = False
+        self._has_outcome_env_col = False
         self._has_task_text_col = False
         self._pgvector_version: tuple[int, ...] | None = None
         # When an embedder is provided, embeddings are computed at write time and
@@ -1225,6 +1264,14 @@ class PostgresAdapter(AdapterABC):
         cur.execute(_OUTCOME_EVIDENCE_SQL)
         # Action-level learning (trigger v4): see migration 009.
         cur.execute(_ACTION_PRIORS_SQL)
+        # The environment an outcome was recorded in (model / agent_version /
+        # runtime / platform, see amfs_core.models.ENVIRONMENT_KEYS), so priors
+        # can down-weight what won under another runtime. Derived at commit
+        # from the record's session metadata, which already travels with it.
+        cur.execute("""
+            ALTER TABLE amfs_outcomes
+            ADD COLUMN IF NOT EXISTS environment JSONB
+        """)
         # Query-conditioned evidence: see migration 010.
         cur.execute(_LOCAL_EVIDENCE_SQL)
         # The task text on outcomes: see migration 011.
@@ -1675,17 +1722,50 @@ class PostgresAdapter(AdapterABC):
                     """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'amfs_outcomes'
-                      AND column_name IN ('actions_taken', 'task_embedding', 'task_text')
+                      AND column_name IN (
+                        'actions_taken', 'task_embedding', 'environment', 'task_text'
+                      )
                     """,
                 )
                 found = {row["column_name"] for row in cur.fetchall()}
                 self._has_action_cols = "actions_taken" in found
                 self._has_outcome_embedding_col = "task_embedding" in found
+                self._has_outcome_env_col = "environment" in found
                 self._has_task_text_col = "task_text" in found
 
     # ------------------------------------------------------------------
     # read
     # ------------------------------------------------------------------
+
+    def _parent_branch(self, cur: Any, branch: str) -> str | None:
+        """The parent a non-main *branch* overlays, or ``None`` for ``main``
+        and for a branch the adapter has no record of."""
+        if branch == "main":
+            return None
+        row = cur.execute(
+            "SELECT parent_branch FROM amfs_branches WHERE namespace = %s AND name = %s",
+            (self._namespace, branch),
+        ).fetchone()
+        if not row:
+            return None
+        return str(row["parent_branch"] or "main")
+
+    def _branch_scope(self, cur: Any, branch: str) -> tuple[str, list[Any]]:
+        """The ``WHERE`` fragment that reads *branch* as an overlay on its parent.
+
+        A branch is a delta: its own live rows, and for every ``(entity_path,
+        key)`` it has not touched, the parent's **live** row. Live, not the
+        parent as of ``branched_at`` — a session pointed at a repair branch or
+        a canary must see the same memory a session on ``main`` sees, differing
+        only in the entries the branch changed; a snapshot would drift from
+        ``main`` for as long as the branch lives and confound the comparison.
+        ``main`` itself, and a branch with no record, read their own rows only.
+
+        The fragment is :func:`branch_scope_sql`; the async adapter builds the
+        same one from its own parent lookup, so the two read paths cannot
+        disagree about what a branch sees.
+        """
+        return branch_scope_sql(branch, self._parent_branch(cur, branch))
 
     def read(
         self,
@@ -1709,23 +1789,20 @@ class PostgresAdapter(AdapterABC):
                 )
                 row = cur.fetchone()
 
-                if row is None and branch != "main":
-                    branch_info = cur.execute(
-                        "SELECT parent_branch, branched_at FROM amfs_branches WHERE namespace = %s AND name = %s",
-                        (self._namespace, branch),
-                    ).fetchone()
-                    if branch_info:
+                if row is None:
+                    # Not on the branch: the parent's live row, per the overlay
+                    # semantics in ``_branch_scope``.
+                    parent = self._parent_branch(cur, branch)
+                    if parent is not None:
                         cur.execute(
                             """
                             SELECT * FROM amfs_memory_entries
                             WHERE namespace = %s AND branch = %s
                               AND entity_path = %s AND key = %s
                               AND superseded_at IS NULL
-                              AND written_at <= %s
                             ORDER BY version DESC LIMIT 1
                             """,
-                            (self._namespace, branch_info["parent_branch"],
-                             entity_path, key, branch_info["branched_at"]),
+                            (self._namespace, parent, entity_path, key),
                         )
                         row = cur.fetchone()
 
@@ -2176,24 +2253,28 @@ class PostgresAdapter(AdapterABC):
         - *limit*/*offset* page the result in the query. Filtering happens
           before paging by construction, so a caller can never page past rows
           its scope hides.
-        """
-        conditions, params = list_conditions(
-            self._namespace,
-            entity_path,
-            include_superseded=include_superseded,
-            branch=branch,
-            scope=scope,
-            agent_id=agent_id,
-        )
-        where = " AND ".join(conditions)
-        query = (
-            f"SELECT {entry_select(self._has_is_artifact_col, self._has_validators_col)} "
-            f"FROM amfs_memory_entries WHERE {where} ORDER BY {_list_order_sql(order_by)}"
-        )
-        query, params = _paginate_sql(query, params, limit=limit, offset=offset)
 
+        *branch* is read as an overlay on its parent (``_branch_scope``): a
+        repair branch or a canary lists the same memory ``main`` does, apart
+        from the entries it changed.
+        """
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
+                conditions, params = list_conditions(
+                    self._namespace,
+                    entity_path,
+                    include_superseded=include_superseded,
+                    branch=branch,
+                    scope=scope,
+                    agent_id=agent_id,
+                    branch_scope=self._branch_scope(cur, branch),
+                )
+                where = " AND ".join(conditions)
+                query = (
+                    f"SELECT {entry_select(self._has_is_artifact_col, self._has_validators_col)} "
+                    f"FROM amfs_memory_entries WHERE {where} ORDER BY {_list_order_sql(order_by)}"
+                )
+                query, params = _paginate_sql(query, params, limit=limit, offset=offset)
                 cur.execute(query, params)
                 rows = cur.fetchall()
 
@@ -2286,18 +2367,20 @@ class PostgresAdapter(AdapterABC):
         """``COUNT(*)`` over exactly the rows :meth:`list` would return.
 
         The ``total`` a paged listing reports, computed without fetching a row.
+        Same branch overlay as :meth:`list`, so the two cannot disagree.
         """
-        conditions, params = list_conditions(
-            self._namespace,
-            entity_path,
-            include_superseded=include_superseded,
-            branch=branch,
-            scope=scope,
-            agent_id=agent_id,
-        )
-        where = " AND ".join(conditions)
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
+                conditions, params = list_conditions(
+                    self._namespace,
+                    entity_path,
+                    include_superseded=include_superseded,
+                    branch=branch,
+                    scope=scope,
+                    agent_id=agent_id,
+                    branch_scope=self._branch_scope(cur, branch),
+                )
+                where = " AND ".join(conditions)
                 cur.execute(f"SELECT COUNT(*) AS n FROM amfs_memory_entries WHERE {where}", params)
                 row = cur.fetchone()
         return int(row["n"]) if row else 0
@@ -2349,8 +2432,10 @@ class PostgresAdapter(AdapterABC):
         col_ready = getattr(self, "_has_is_artifact_col", False)
         tsq_sql, tsq_params = or_tsquery(query.query) if use_fts else ("", [])
 
-        conditions = ["namespace = %s", "branch = %s", "superseded_at IS NULL"]
-        params: list[Any] = [self._namespace, branch]
+        # The branch scope is resolved on the connection below (it may need the
+        # branch's parent); a placeholder keeps its position in the WHERE.
+        conditions = ["namespace = %s", _BRANCH_SCOPE, "superseded_at IS NULL"]
+        params: list[Any] = [self._namespace]
 
         if query.depth < 3:
             conditions.append("tier <= %s")
@@ -2422,18 +2507,23 @@ class PostgresAdapter(AdapterABC):
         elif not col_ready:
             fetch_limit = min(max(fetch_limit, query.limit * 3), 1000)
 
-        where = " AND ".join(conditions)
-        sql = f"""
-            SELECT {entry_select(col_ready, self._has_validators_col)} FROM amfs_memory_entries
-            WHERE {where}
-            ORDER BY {order}
-            LIMIT %s
-        """
         params.append(fetch_limit)
 
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, params)
+                scope_sql, scope_params = self._branch_scope(cur, branch)
+                where = " AND ".join(
+                    scope_sql if c is _BRANCH_SCOPE else c for c in conditions
+                )
+                sql = f"""
+                    SELECT {entry_select(col_ready, self._has_validators_col)} FROM amfs_memory_entries
+                    WHERE {where}
+                    ORDER BY {order}
+                    LIMIT %s
+                """
+                # The scope's params sit where its placeholder sits: right
+                # after the namespace.
+                cur.execute(sql, [params[0], *scope_params, *params[1:]])
                 rows = cur.fetchall()
 
         entries = [self._row_to_entry(r) for r in rows]
@@ -3705,6 +3795,12 @@ class PostgresAdapter(AdapterABC):
                         list(record.entity_paths or []),
                         record.situation,
                     ]
+                if getattr(self, "_has_outcome_env_col", False):
+                    env = recorded_environment({"session_metadata": record.session_metadata or {}})
+                    if env:
+                        columns.append("environment")
+                        placeholders.append("%s::jsonb")
+                        params.append(json.dumps(env))
                 task_embedding = self._outcome_embedding(record)
                 if task_embedding is not None:
                     columns.append("task_embedding")
@@ -3907,9 +4003,10 @@ class PostgresAdapter(AdapterABC):
         if since is not None:
             conditions.append("committed_at >= %s")
             params.append(since)
+        env_col = ", environment" if getattr(self, "_has_outcome_env_col", False) else ""
         sql = f"""
             SELECT outcome_ref, outcome_type, committed_at, agent_id, actions_taken, situation,
-                   1 - (task_embedding <=> %s::vector) AS similarity
+                   1 - (task_embedding <=> %s::vector) AS similarity{env_col}
             FROM amfs_outcomes
             WHERE {" AND ".join(conditions)}
             ORDER BY task_embedding <=> %s::vector
@@ -3931,6 +4028,7 @@ class PostgresAdapter(AdapterABC):
                 "agent_id": row["agent_id"],
                 "situation": row.get("situation"),
                 "actions_taken": _jsonb(row.get("actions_taken"), []),
+                "environment": _jsonb(row.get("environment"), {}) or {},
                 "similarity": sim,
             })
         return out
@@ -4137,8 +4235,9 @@ class PostgresAdapter(AdapterABC):
         if since is not None:
             conditions.append("committed_at >= %s")
             params.append(since)
+        env_col = ", environment" if getattr(self, "_has_outcome_env_col", False) else ""
         sql = f"""
-            SELECT outcome_ref, outcome_type, committed_at, agent_id, actions_taken, situation
+            SELECT outcome_ref, outcome_type, committed_at, agent_id, actions_taken, situation{env_col}
             FROM amfs_outcomes
             WHERE {" AND ".join(conditions)}
             ORDER BY committed_at DESC
@@ -4155,6 +4254,7 @@ class PostgresAdapter(AdapterABC):
             "agent_id": row["agent_id"],
             "situation": row.get("situation"),
             "actions_taken": _jsonb(row.get("actions_taken"), []),
+            "environment": _jsonb(row.get("environment"), {}) or {},
             "similarity": 1.0,
         } for row in rows]
 

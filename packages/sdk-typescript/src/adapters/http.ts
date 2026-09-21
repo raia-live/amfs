@@ -13,6 +13,26 @@ export interface HttpAdapterOptions {
   headers?: Record<string, string>;
 }
 
+/**
+ * Request header naming the agent the calling session acts as. Read routes
+ * carry no agent in their query or body, so without it a hosted server cannot
+ * attribute a read or look up the agent's live repair canary.
+ */
+export const AGENT_ID_HEADER = "X-AMFS-Agent-Id";
+/**
+ * Request header carrying the session id the SDK stamps on its trace — the key
+ * a hosted server hashes to keep one session on one arm of a live canary. A
+ * session that does not send it is never routed.
+ */
+export const SESSION_HEADER = "X-AMFS-Session";
+
+/** `value` as a header value (printable ASCII, single line), or undefined. */
+function headerValue(value: string | undefined | null): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const cleaned = String(value).replace(/[^\x20-\x7e]/g, "").trim().slice(0, 256);
+  return cleaned || undefined;
+}
+
 function snakeToCamel(str: string): string {
   return str.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
 }
@@ -45,6 +65,37 @@ export class HttpAdapter implements AmfsAdapter {
     if (opts.apiKey) {
       this.headers["X-AMFS-API-Key"] = opts.apiKey;
     }
+    this.opts = opts;
+  }
+
+  private readonly opts: HttpAdapterOptions;
+
+  /**
+   * An adapter on the same server that identifies itself as `agentId` in
+   * `sessionId` on every request. `AgentMemory` calls this when it is built, so
+   * two memories sharing one adapter never share an identity. Either id may be
+   * omitted; the header is then simply not sent.
+   */
+  bind(agentId: string | undefined, sessionId: string | undefined): HttpAdapter {
+    const identity: Record<string, string> = {};
+    const agent = headerValue(agentId);
+    const session = headerValue(sessionId);
+    if (agent) identity[AGENT_ID_HEADER] = agent;
+    if (session) identity[SESSION_HEADER] = session;
+    return new HttpAdapter({
+      ...this.opts,
+      agentId: agentId ?? this.opts.agentId,
+      headers: { ...this.opts.headers, ...identity },
+    });
+  }
+
+  /** The identity headers this adapter adds to every request (a copy). */
+  get identityHeaders(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const name of [AGENT_ID_HEADER, SESSION_HEADER]) {
+      if (this.headers[name]) out[name] = this.headers[name];
+    }
+    return out;
   }
 
   private async fetch<T>(
@@ -78,11 +129,15 @@ export class HttpAdapter implements AmfsAdapter {
 
   async readAsync(
     entityPath: string,
-    key: string
+    key: string,
+    options?: { branch?: string }
   ): Promise<MemoryEntry | null> {
+    const params = new URLSearchParams();
+    if (options?.branch && options.branch !== "main") params.set("branch", options.branch);
+    const qs = params.toString();
     try {
       return await this.fetch<MemoryEntry>(
-        `/api/v1/entries/${encodeURIComponent(entityPath)}/${encodeURIComponent(key)}`
+        `/api/v1/entries/${encodeURIComponent(entityPath)}/${encodeURIComponent(key)}${qs ? `?${qs}` : ""}`
       );
     } catch {
       return null;
@@ -130,11 +185,12 @@ export class HttpAdapter implements AmfsAdapter {
 
   async listAsync(
     entityPath?: string,
-    options?: { includeSuperseded?: boolean }
+    options?: { includeSuperseded?: boolean; branch?: string }
   ): Promise<MemoryEntry[]> {
     const params = new URLSearchParams();
     if (entityPath) params.set("entity_path", entityPath);
     if (options?.includeSuperseded) params.set("include_superseded", "true");
+    if (options?.branch && options.branch !== "main") params.set("branch", options.branch);
     const qs = params.toString();
     const data = await this.fetch<{ entries: MemoryEntry[] } | MemoryEntry[]>(
       `/api/v1/entries${qs ? `?${qs}` : ""}`
@@ -169,7 +225,8 @@ export class HttpAdapter implements AmfsAdapter {
         ...(query.patternRef ? { pattern_ref: query.patternRef } : {}),
         ...(query.sortBy ? { sort_by: query.sortBy } : {}),
         ...(query.depth != null ? { depth: query.depth } : {}),
-        ...(query.branch ? { branch: query.branch } : {}),
+        // Omitted for main, like every other read, so a hosted canary can route the session.
+        ...(query.branch && query.branch !== "main" ? { branch: query.branch } : {}),
       }),
     });
   }
@@ -239,6 +296,12 @@ export class HttpAdapter implements AmfsAdapter {
      * these onto the trace it seals for this outcome.
      */
     sessionMetadata?: Record<string, unknown>;
+    /** The request the run answered — what a judge and training read the trace through. */
+    taskInput?: string | null;
+    /** The agent's answer, in full. */
+    responseText?: string | null;
+    /** The actions taken, as `{tool_name, arguments}` rows. */
+    toolCalls?: Array<Record<string, unknown>>;
   }): Promise<unknown> {
     const agentId = record.agentId ?? this.agentId;
     return this.fetch("/api/v1/outcomes", {
@@ -253,6 +316,9 @@ export class HttpAdapter implements AmfsAdapter {
         ...(record.sessionMetadata && Object.keys(record.sessionMetadata).length
           ? { session_metadata: record.sessionMetadata }
           : {}),
+        ...(record.taskInput != null ? { task_input: record.taskInput } : {}),
+        ...(record.responseText != null ? { response_text: record.responseText } : {}),
+        ...(record.toolCalls?.length ? { tool_calls: record.toolCalls } : {}),
       }),
     });
   }
@@ -267,11 +333,22 @@ export class HttpAdapter implements AmfsAdapter {
 
   async briefingAsync(options?: {
     entityPath?: string;
+    agentId?: string;
     limit?: number;
+    /** Lead digest only, with its evidence sections; a fraction of the tokens. */
+    compact?: boolean;
+    /** Only what changed after this ISO-8601 moment in the list sections. */
+    since?: string;
+    /** Brief from a memory branch other than `main` (a repair branch, a canary). */
+    branch?: string;
   }): Promise<unknown> {
     const params = new URLSearchParams();
     if (options?.entityPath) params.set("entity_path", options.entityPath);
+    if (options?.agentId) params.set("agent_id", options.agentId);
     if (options?.limit) params.set("limit", String(options.limit));
+    if (options?.compact) params.set("compact", "true");
+    if (options?.since) params.set("since", options.since);
+    if (options?.branch && options.branch !== "main") params.set("branch", options.branch);
     const qs = params.toString();
     return this.fetch(`/api/v1/briefing${qs ? `?${qs}` : ""}`);
   }
@@ -378,7 +455,9 @@ export class HttpAdapter implements AmfsAdapter {
         recency_weight: options?.recencyWeight ?? 0.3,
         confidence_weight: options?.confidenceWeight ?? 0.2,
         include_artifacts: options?.includeArtifacts ?? true,
-        branch: options?.branch ?? "main",
+        // Omitted for main, like every other read: a named main is an explicit
+        // choice the server honours over a routed canary branch.
+        ...(options?.branch && options.branch !== "main" ? { branch: options.branch } : {}),
         ...(options?.entityPath ? { entity_path: options.entityPath } : {}),
       }),
     });

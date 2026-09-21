@@ -30,6 +30,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, timezone
+from collections.abc import Mapping
 from typing import Any
 
 import uvicorn
@@ -71,6 +72,7 @@ from amfs_core.models import (
     MemoryEntry,
     SearchQuery,
     SemanticQuery,
+    SessionMetadata,
 )
 from amfs_core.pagination import (
     InvalidCursorError,
@@ -957,6 +959,7 @@ def _priors_for_retrieve(
     text: str,
     embedder: Any,
     candidate_actions: list[str] | None,
+    environment: Mapping[str, Any] | None = None,
     query_vector: list[float] | None = None,
 ) -> dict[str, Any] | None:
     """Action priors for ``entity_path`` on tasks like ``text``.
@@ -973,6 +976,9 @@ def _priors_for_retrieve(
     Synchronous, and blocking on the sync adapter: callers on the event loop
     run it through ``_offload``. ``query_vector`` is the caller's embedding of
     ``text`` when it has one, so the model is not run a second time.
+    *environment* down-weights outcomes recorded under another model /
+    runtime / agent version (the rows carry ``session_metadata`` or an
+    ``environment`` column when the adapter returns it).
     """
     from amfs_core.actions import (
         PRIORS_K,
@@ -1012,7 +1018,9 @@ def _priors_for_retrieve(
             rows = []
     if not rows:
         return None
-    block = aggregate_priors(rows, candidate_actions=candidate_actions)
+    block = aggregate_priors(
+        rows, candidate_actions=candidate_actions, environment=environment or None
+    )
     block["source"] = source
     block["entity_path"] = entity_path
     if source == "similar_outcomes" and rows:
@@ -1026,6 +1034,94 @@ def _priors_for_retrieve(
 def _get_visibility_filter(request: Request):
     """Return the UserVisibilityFilter from request.state, or None."""
     return getattr(request.state, "visibility_filter", None)
+
+
+#: ``request.state`` attribute a layer in front of these routes may set to move
+#: a session's *reads* onto a memory branch it never named. The SaaS layer sets
+#: it when the calling session is in the canary arm of a live repair canary.
+MEMORY_BRANCH_STATE = "memory_branch"
+#: ``request.state`` attribute holding attributes the same layer wants on the
+#: sealed trace — which canary the session was in and which arm. Merged
+#: server-side, after the caller's bag has been validated, so they are exempt
+#: from the client cap and cannot be forged from the body.
+TRACE_ATTRIBUTES_STATE = "trace_attributes"
+
+
+def _effective_branch(request: Request | None, branch: str | None) -> str:
+    """The branch a read should hit: the caller's when named, else routed, else main.
+
+    A caller that names a branch always gets that branch — an explicit
+    ``branch=main`` from a canary session still reads main, which is what a
+    repair tool inspecting the baseline needs. A caller that names none reads
+    whatever ``request.state.memory_branch`` says, which is how a session the
+    SaaS layer put in a canary arm reads the proposal without knowing it, and
+    ``main`` when nothing is set — the behaviour every route had before.
+
+    Reads only. Writes and commits never consult this: a canary session reads
+    its branch and writes main, because what the agent learns during the test
+    is the user's, not the proposal's.
+    """
+    # ``isinstance`` rather than truthiness: a handler invoked in-process (Pro
+    # composes several, and the tests do) receives the ``Query(...)`` sentinel
+    # as its default, and that object is truthy without being a branch.
+    if isinstance(branch, str) and branch.strip():
+        return branch.strip()
+    state = getattr(request, "state", None) if request is not None else None
+    routed = getattr(state, MEMORY_BRANCH_STATE, None) if state is not None else None
+    if isinstance(routed, str) and routed.strip():
+        return routed.strip()
+    return "main"
+
+
+#: Attribute keys only the routing layer may set. When it has made a decision
+#: for the request (``trace_attributes`` is present, even empty) a client's own
+#: claims under these keys are dropped: a session nothing routed must not be
+#: able to vote in a canary it was not in.
+ROUTED_ONLY_ATTRIBUTES = frozenset({"canary_fix_id", "canary_arm"})
+
+
+def _routed_trace_attributes(request: Request | None) -> dict[str, Any] | None:
+    """Attributes the layer in front of this route wants on the sealed trace.
+
+    ``None`` when no layer made a decision for this request; a dict — possibly
+    empty — when one did. Values are coerced to scalars the trace store
+    accepts; anything else is dropped rather than failing the commit.
+    """
+    state = getattr(request, "state", None) if request is not None else None
+    raw = getattr(state, TRACE_ATTRIBUTES_STATE, None) if state is not None else None
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            out[key.strip().lower()] = value
+    return out
+
+
+def _merge_routed_attributes(
+    request: Request | None, attributes: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """*attributes* with the routed stamps on top; ``None`` stays ``None`` when nothing is added.
+
+    The server's values win. A client must not be able to put itself in the
+    canary arm by sending ``canary_arm`` in its own bag, and the tally reads
+    only these keys to decide which arm a trace belongs to — so once the
+    routing layer has spoken for a request, the client's claims under those
+    keys are dropped even when the layer's answer was "not routed".
+    """
+    routed = _routed_trace_attributes(request)
+    if routed is None:
+        return attributes
+    merged = {
+        k: v for k, v in (attributes or {}).items()
+        if str(k).strip().lower() not in ROUTED_ONLY_ATTRIBUTES
+    }
+    merged.update(routed)
+    if not merged and attributes is None:
+        return None
+    return merged
 
 
 def _active_visibility_filter(request: Request):
@@ -1451,7 +1547,7 @@ async def read_entry_by_query(
     request: Request,
     entity_path: str = Query(...),
     key: str = Query(...),
-    branch: str = Query("main"),
+    branch: str | None = Query(None),
     response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -1483,7 +1579,7 @@ async def read_entry(
     request: Request,
     entity_path: str,
     key: str,
-    branch: str = Query("main"),
+    branch: str | None = Query(None),
     response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -1494,9 +1590,10 @@ async def _read_entry(
     request: Request,
     entity_path: str,
     key: str,
-    branch: str,
+    branch: str | None,
     response: Response | None = None,
 ) -> dict[str, Any]:
+    branch = _effective_branch(request, branch)
     mem = _get_memory()
     credited = False
     if _async_adapter is not None:
@@ -1542,10 +1639,11 @@ async def entry_quality(
     request: Request,
     entity_path: str,
     key: str,
-    branch: str = Query("main"),
+    branch: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Compute a quality report for a stored entry on demand."""
+    branch = _effective_branch(request, branch)
     mem = _get_memory()
     # Read straight from the adapter — this is an internal/dashboard inspection,
     # not an agent recall, so it must NOT increment recall_count (doing so
@@ -1657,11 +1755,7 @@ async def write_entry(
 ) -> dict[str, Any]:
     mem = _get_memory()
 
-    type_map = {
-        "fact": MemoryType.FACT,
-        "belief": MemoryType.BELIEF,
-        "experience": MemoryType.EXPERIENCE,
-    }
+    type_map = {m.value: m for m in MemoryType}
     mt = type_map.get(req.memory_type.lower(), MemoryType.FACT)
 
     # The caller's identity lives on a per-request handle. This block awaits
@@ -1900,7 +1994,7 @@ async def write_entry(
 async def list_entries(
     request: Request,
     entity_path: str | None = Query(None),
-    branch: str = Query("main"),
+    branch: str | None = Query(None),
     include_superseded: bool = Query(False),
     limit: int | None = Query(None, ge=1, le=10_000),
     offset: int = Query(0, ge=0),
@@ -1920,6 +2014,7 @@ async def list_entries(
         "[TLS-DIAG] /entries tls_account=%s state_account=%s state_user=%s has_tenant_ctx=%s",
         _tls_acct, _state_acct, _state_user, _has_ctx,
     )
+    branch = _effective_branch(request, branch)
     mem = _get_memory()
     if limit is None and ENTRIES_DEFAULT_LIMIT > 0:
         limit = ENTRIES_DEFAULT_LIMIT
@@ -2116,7 +2211,7 @@ async def aggregate_entries_endpoint(
         )
 
     mem = _get_memory()
-    entries = mem.list(req.entity_path, branch=req.branch)
+    entries = mem.list(req.entity_path, branch=_effective_branch(request, req.branch))
 
     vis = _get_visibility_filter(request)
     if vis is not None and vis.should_filter():
@@ -2286,7 +2381,7 @@ async def search_entries(
     response: Response = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> list[dict[str, Any]]:
-    branch = getattr(req, "branch", "main") or "main"
+    branch = _effective_branch(request, getattr(req, "branch", None))
     sq = SearchQuery(
         query=req.query,
         entity_path=req.entity_path,
@@ -2404,10 +2499,10 @@ async def retrieve_entries(
     """
     from datetime import datetime as _dt, timezone as _tz
 
-    from amfs_core.content import ARTIFACT_PENALTY, classify_artifact
+    from amfs_core.content import ARTIFACT_PENALTY, PROCEDURE_BOOST, classify_artifact
     from amfs_core.query_norm import normalize_temporal
 
-    branch = req.branch or "main"
+    branch = _effective_branch(request, req.branch)
     vis = _get_visibility_filter(request)
     embedder = _get_server_embedder()
 
@@ -2721,9 +2816,13 @@ async def retrieve_entries(
     keyword_weight = 0.15
     evidence_weight = req.evidence_weight
 
+    def _is_procedure(e: MemoryEntry) -> bool:
+        mt = getattr(e, "memory_type", None)
+        return str(getattr(mt, "value", mt)) == MemoryType.PROCEDURE.value
+
     def _composite(
         relevance: float, recency: float, conf: float, keyword: float, artifact: bool,
-        evidence: float = 0.0,
+        evidence: float = 0.0, procedure: bool = False,
     ) -> float:
         """The composite score, in one place because step 8 recomputes it.
 
@@ -2738,6 +2837,9 @@ async def retrieve_entries(
         outcomes; this term is what separates an author's untested 0.9 from a
         0.9 that has been confirmed a dozen times, and what pushes an entry
         with a mixed record below both.
+
+        *procedure* applies ``PROCEDURE_BOOST``: at equal relevance, how to do
+        the task ranks above a fact about it.
         """
         score = composite_score(
             relevance=relevance,
@@ -2752,7 +2854,34 @@ async def retrieve_entries(
             evidence_weight=evidence_weight,
             anchored=anchored,
         )
-        return score * ARTIFACT_PENALTY if artifact else score
+        if artifact:
+            score *= ARTIFACT_PENALTY
+        if procedure:
+            score *= PROCEDURE_BOOST
+        return score
+
+    # Environment scoping: a procedure whose stated environment preconditions
+    # contradict the asking run (``{"runtime": "python3.12"}`` against a
+    # python3.9 run) is a way of doing the task somewhere else. It is dropped
+    # from the hits and named in ``_meta.not_applicable`` so the agent knows a
+    # way exists. Without an environment on the request nothing is dropped.
+    environment = {k: v for k, v in (req.environment or {}).items() if v}
+    not_applicable: list[dict[str, Any]] = []
+    if environment:
+        from amfs_core.models import preconditions_status as _preconditions_status
+
+        kept_env: dict[Any, Any] = {}
+        for ck, slot in candidates.items():
+            entry = slot["entry"]
+            if _is_procedure(entry):
+                status, detail = _preconditions_status(entry.value, environment)
+                if status == "not_applicable":
+                    not_applicable.append({
+                        "entity_path": entry.entity_path, "key": entry.key, "why": detail,
+                    })
+                    continue
+            kept_env[ck] = slot
+        candidates = kept_env
 
     scored: list[tuple[MemoryEntry, float, dict[str, Any]]] = []
     for slot in candidates.values():
@@ -2769,6 +2898,7 @@ async def retrieve_entries(
             recency = 0.0
         conf = float(entry.confidence)
         artifact = _is_artifact(entry)
+        procedure = _is_procedure(entry)
         pooled = _evidence_signal(entry)
         local = local_evidence.get(entry.entry_key)
         evidence, local_w = _blend_local_evidence(pooled, local)
@@ -2790,6 +2920,7 @@ async def retrieve_entries(
             "evidence": evidence,
             "evidence_status": status,
             "is_artifact": artifact,
+            "is_procedure": procedure,
         }
         if local_w > 0.0 and local is not None:
             bd["evidence_local"] = {
@@ -2798,7 +2929,11 @@ async def retrieve_entries(
                 "n": int(local.get("n", 0)),
                 "weight": round(local_w, 3),
             }
-        scored.append((entry, _composite(sim, recency, conf, keyword, artifact, evidence), bd))
+        scored.append((
+            entry,
+            _composite(sim, recency, conf, keyword, artifact, evidence, procedure),
+            bd,
+        ))
 
     scored.sort(key=lambda t: t[1], reverse=True)
 
@@ -2846,6 +2981,7 @@ async def retrieve_entries(
                     _composite(
                         norm, bd["recency"], bd["confidence"], bd["keyword"],
                         bd["is_artifact"], bd.get("evidence", 0.0),
+                        bd.get("is_procedure", False),
                     ),
                     {**bd, "rerank": rs, "rerank_normalised": norm,
                      "rerank_absolute": absolute_score,
@@ -2990,6 +3126,7 @@ async def retrieve_entries(
             text=priors_text,
             embedder=embedder,
             candidate_actions=req.candidate_actions,
+            environment=environment,
             query_vector=priors_vec,
         )
         top = head[0][0] if head else None
@@ -3082,6 +3219,7 @@ async def retrieve_entries(
         top_shifted = bool(
             top is not None and not top_rescued and _regime_shifted(top, now=now)
         )
+        hit_statuses = [str(e.evidence_status) for e, _, _ in head if e.evidence_status]
         recommendation = _recommend(
             priors,
             agent_id=req.agent_id or "",
@@ -3094,12 +3232,19 @@ async def retrieve_entries(
             top_hit_shifted=top_shifted,
             regime_shift=shifted_local,
             regime_shift_at=_shift_at(shifted_local_entries),
+            abstain=req.abstain,
+            hit_statuses=hit_statuses,
             # ``action_stats`` is every outcome on the entity, no similarity:
             # a record that can name a winner but is not about this kind of
             # task, so a shift read over it does not send the agent exploring.
             priors_are_local=(priors or {}).get("source") != "action_stats",
         )
-        if priors is not None or recommendation is not None or shifted:
+        if (
+            priors is not None or recommendation is not None or shifted
+            or req.abstain or not_applicable
+        ):
+            from amfs_core.actions import guidance_strength as _guidance_strength
+
             meta = {
                 "_meta": True,
                 "priors": priors,
@@ -3108,7 +3253,19 @@ async def retrieve_entries(
                 "regime_shift_scope": (
                     "query" if shifted_local else ("entity" if shifted else None)
                 ),
+                # Rated over the query-scoped shift, like the recommendation:
+                # a rule that stopped working for another class of task does
+                # not thin the guidance for this one.
+                "guidance_strength": _guidance_strength(
+                    priors, hit_statuses, regime_shift=shifted_local
+                ),
             }
+            if not_applicable:
+                meta["not_applicable"] = not_applicable
+    if meta is None and not_applicable:
+        # No priors asked for, but the environment dropped a procedure: say so
+        # in the same trailing element, so the client learns a way exists.
+        meta = {"_meta": True, "not_applicable": not_applicable}
 
     # 11b. Under a query-scoped shift — a rule the query is about has stopped
     #      working — the alternatives to the leader that the record has
@@ -4361,6 +4518,10 @@ async def commit_outcome(
         raise HTTPException(
             status_code=422, detail=f"session_metadata.attributes: {exc}"
         ) from exc
+    # After validation, never before: the routing layer's stamps (which canary
+    # this session was in, and which arm) are the server's, so they are exempt
+    # from the client's key cap and overwrite anything the body claimed.
+    client_attributes = _merge_routed_attributes(request, client_attributes) or {}
     client_llm_calls = client_meta.get("llm_calls")
     if not isinstance(client_llm_calls, list):
         client_llm_calls = []
@@ -4674,6 +4835,33 @@ async def save_trace(
                 session_id=trace.session_id,
             ),
         })
+    raw_meta = body.get("session_metadata") if isinstance(body, dict) else None
+    # The routing layer's stamps, on the same footing as in /outcomes: this is
+    # the other request a routed session's trace can arrive on, and a canary
+    # arm that is stamped on one path and not the other is a tally that counts
+    # SDK sessions in neither arm. Written onto the trace that is saved and onto
+    # the raw metadata that is sealed, since the seal prefers the raw body when
+    # there is one and the trace's own metadata when there is not. Through the
+    # same merge as /outcomes, so a decided-but-unrouted request (``{}``) drops
+    # the client's own canary claims here too — this is the path every
+    # HttpAdapter commit seals on, since ``trace_follows`` skips the other.
+    if _routed_trace_attributes(req) is not None:
+        meta = trace.session_metadata or SessionMetadata()
+        existing = getattr(meta, "attributes", None)
+        merged = _merge_routed_attributes(
+            req, dict(existing) if isinstance(existing, dict) else {}
+        )
+        trace = trace.model_copy(
+            update={"session_metadata": meta.model_copy(update={"attributes": merged or {}})}
+        )
+        if isinstance(raw_meta, dict):
+            raw_attrs = raw_meta.get("attributes")
+            raw_meta = {
+                **raw_meta,
+                "attributes": _merge_routed_attributes(
+                    req, dict(raw_attrs) if isinstance(raw_attrs, dict) else {}
+                ) or {},
+            }
     # Both DB round trips off the event loop; the seal takes its own lock on
     # the trace store, and nothing here reads the shared handle's tracker, so
     # unlike /outcomes this path needs no serialisation of its own.
@@ -4684,7 +4872,6 @@ async def save_trace(
     # is sealed, so the immutable copy carries the persisted id; the raw body is
     # passed alongside because ``model_validate`` above dropped the
     # ``session_metadata`` keys the Pro recorder's spans travel in.
-    raw_meta = body.get("session_metadata") if isinstance(body, dict) else None
     immutable_trace_id = await _offload(
         _db_executor, _auto_seal_trace, mem, saved, session_metadata=raw_meta
     )
@@ -8015,6 +8202,11 @@ async def get_briefing(
     credit_reuse: bool = Query(False),
     compact: bool = Query(False),
     since: datetime | None = Query(None),
+    branch: str | None = Query(None),
+    env_model: str | None = Query(None),
+    env_agent_version: str | None = Query(None),
+    env_runtime: str | None = Query(None),
+    env_platform: str | None = Query(None),
     # See retrieve_entries: injected on the type, defaulted so the handler stays
     # callable in-process without one.
     response: Response = None,
@@ -8025,6 +8217,11 @@ async def get_briefing(
     *compact* returns only the lead entity digest with its hot context and
     evidence sections, narrative trimmed. *since* trims the list sections to
     what changed after that moment — the delta since the last briefing.
+    *branch* reads the hot context and evidence sections from that memory
+    branch instead of ``main`` — how a repair branch or a canary is briefed
+    before it is merged. The ``env_*`` parameters describe the asking run;
+    with them each procedure in the lead digest is marked applicable or not
+    against its environment preconditions.
 
     *credit_reuse* books the briefing as a real read of the knowledge it
     surfaces. It is off by default and has to be asked for, because the same
@@ -8042,6 +8239,21 @@ async def get_briefing(
     }
     if since is not None:
         briefing_kwargs["since"] = since
+    environment = {
+        k: v for k, v in (
+            ("model", env_model), ("agent_version", env_agent_version),
+            ("runtime", env_runtime), ("platform", env_platform),
+        ) if v
+    }
+    if environment:
+        briefing_kwargs["environment"] = environment
+    # Resolved through the routing hook like every other read, then passed only
+    # when it is not main so a server-side ``briefing`` that predates the
+    # keyword keeps working (``mem.briefing`` here is always current, but the
+    # in-process callers in Pro compose this handler with their own memory).
+    branch = _effective_branch(request, branch)
+    if branch != "main":
+        briefing_kwargs["branch"] = branch
     digests = mem.briefing(**briefing_kwargs)
 
     vis = _get_visibility_filter(request)
@@ -8051,7 +8263,7 @@ async def get_briefing(
     # After visibility filtering, never before: an entry the caller may not see
     # must not be credited to them either.
     if credit_reuse:
-        await _credit_briefing_reuse(response, request, digests)
+        await _credit_briefing_reuse(response, request, digests, branch=branch)
 
     return {
         "digests": [d.model_dump(mode="json") for d in digests],

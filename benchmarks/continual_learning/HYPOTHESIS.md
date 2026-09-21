@@ -233,6 +233,45 @@ used only for free-text answers and is blind to the arm.
 Distractor entries in the store: 0 / 200 / 2000. Outcome label noise: 0% / 10%.
 Feedback delay: 0 / 3 episodes.
 
+## Recursive-learning protocols (added 2026-09-20; not in the default grid)
+
+Two protocols share one new arm. Both need a dev Pro deployment (`AMFS_PRO_URL`) with the
+repair agent enabled; the arm refuses any host that does not look like dev.
+
+**Arms**
+
+- `senselab-repair` — `senselab` plus the shipped repair loop, driven from the harness between
+  episodes: every sealed trace is graded by one judge on the environment's verdict; a failing
+  verdict proposes a fix; its Tier 1 replay runs inline; a passed fix ships to memory
+  (`auto_after_replay`). The next episodes read the corrective entry or procedure.
+- `senselab-compose` — `senselab-repair` with the composition prompt on the repair agent: read
+  the procedures already on the entity and compose them when each covers part of the failure.
+- `raw-traces` — the "model already knew" control: no memory system; the transcripts of every
+  prior episode in the cell (task, tool calls, results, verdict) in context, newest last, under
+  a token cap. Whatever it gets right, the base model got right from raw experience.
+
+**Protocol 1 — repair vs demote (the narrow intervention claim).** `ci-fix` × {`senselab`,
+`senselab-repair`, `raw-traces`}, fixed model, core seeds. `senselab` can only demote a stale
+lesson through outcomes; `senselab-repair` can also write the corrective entry. Read:
+success, `unnecessary_edits` (terminal edit calls that did not resolve the task — a change
+the agent made to the world and then had to undo), attempts to first success, latency, cost
+including Pro calls. Claim: repair beats demotion-only on success *and* unnecessary edits at
+comparable cost. Falsified if the repaired arm is not better on both, or if `raw-traces`
+matches it.
+
+**Protocol 2 — composition (the experiment that can kill the idea).** `fleet-disjoint` ×
+{`raw-traces`, `pgvector-diy`, `senselab`, `senselab-repair`, `senselab-compose`}, 6 seeds.
+Three agents share one store under three fictional payment policies the base model cannot
+know; in the discovery phase each agent sees only its own policy's cases and is told the
+policy in full when it fails; in the composition phase the cases trigger two or all three
+policies and failures name only an error code. One trap is deliberate: the naive
+concatenation of two discoveries (`hold, rotate_key, retry`) fails with `KEY-FROZEN`. Read:
+success on `tags.phase == "composition"` by rule set, `flags.trap_naive_concat`, attempts to
+first success per rule set, whether the lesson that carried a composition was written by a
+peer, cost. Go on the composition engine only if a SenseLab arm beats `raw-traces` on the
+composition tasks at comparable cost; `pgvector-diy` is the dream-style (LLM consolidation,
+no outcomes) baseline.
+
 ## What would falsify us
 
 - If `senselab-nofeedback` matches `senselab`, the loop is not doing the work.

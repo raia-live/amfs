@@ -432,6 +432,62 @@ with AgentMemory(agent_id="deploy-agent", adapter=adapter) as mem:
 
 If the Cortex is not running, `briefing()` returns an empty list — your agent code can safely call it without checking.
 
+### Environment scoping
+
+`briefing()` and `retrieve()` send the run's environment — `model`, `agent_version`, `runtime`, `platform` — read from the session (`set_session_metadata`, or `set_session_attributes` with those keys). A procedure whose `preconditions` name a different environment (`{"runtime": "python3.12"}` against a python3.9 run) is set apart as `procedures_not_applicable` in the briefing and dropped from retrieve hits (named in the trailing `_meta.not_applicable`), with the failing precondition spelled out. The lead digest and `_meta` also carry `guidance_strength` — `strong` (validated knowledge or a winning action here), `thin`, or `none` (only untested notes). Pass `environment={}` to send nothing.
+
+---
+
+## Guidance: the three seams (`Run`)
+
+You control your agent's code; SenseLab does not. `amfs.Run` is the smallest way to wire it in — three calls at three points of a task — and it closes the loop that makes memory improve: guidance in, actions out, outcome in.
+
+```python
+from amfs import AgentMemory, Run
+
+mem = AgentMemory(agent_id="ci-bot", adapter=adapter)
+run = Run(mem)
+
+# 1. Before the agent acts: guidance scoped to this run.
+guidance = run.begin(
+    "fix the failing CI on PR 42",
+    entity_path="acme/ci",
+    model="gpt-4o", agent_version="ci-bot@1.4.0", runtime="python3.12",
+    candidate_actions=["shell:pip_install", "edit:requirements", "shell:pytest"],
+)
+if guidance.should_inject():          # strength is "strong" or "thin"
+    system_prompt = guidance.text + "\n\n" + system_prompt
+
+# 2. After each consequential tool call: record it; on failure, ask for a hint.
+hint = run.on_tool_result(
+    "shell", {"cmd": "pip install -r requirements.txt"},
+    result=stderr, success=False, action_key="shell:pip_install",
+)
+if hint is not None and hint.should_inject():
+    messages.append({"role": "system", "content": hint.text})
+
+# When the approach you were following did not work and you switch:
+run.attempt_failed("pinning urllib3 did not resolve the conflict")
+
+# 3. When the run ends: the outcome, and who decided it.
+run.complete(True, verified_by="ci", evidence={"run_id": "98765"},
+             response_text=final_answer)
+```
+
+`Guidance` carries:
+
+| Field | Meaning |
+|-------|---------|
+| `text` | Rendered blocks — procedures first, then memory context, then `Not for this run`, then priors and the recommendation — in the same shape a tuned model is trained on (`amfs_core.render`). |
+| `strength` | `strong` / `thin` / `none`. `should_inject()` is true for the first two. |
+| `procedures` / `not_applicable` | Procedures that apply to this run, and those whose environment preconditions it contradicts (with `applicability_detail`). Never inject one from `not_applicable`. |
+| `recommendation` | `act` / `explore` / `escalate` / `abstain` with `suggested_action` and `why`; `priors` holds the per-action record. |
+| `guidance_id` | Names what was served (branch, entries and versions, render version). Stamped on the session as `guidance_id` / `guidance_count`, so the sealed trace says which guidance the agent saw. |
+
+`verified_by` on `complete()` (or `commit_outcome()`) says who decided the outcome when the agent did not — `"ci"`, `"human"`, `"verifier"`, `"customer"`. It travels as the `verified_by` session attribute with `evidence_<key>` pointers; the repair loop weighs a verified outcome differently from an agent's own declaration, and holds automatic promotion until enough outcomes carry it.
+
+`Run(mem, assign_branch=fn)` takes an optional hook `(agent_id, unit) -> branch | None` for a canary assignment; when it names a branch, the run reads memory from it and writes stay on `main`.
+
 ---
 
 ## Snapshots

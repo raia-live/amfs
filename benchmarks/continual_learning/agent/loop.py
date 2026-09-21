@@ -87,6 +87,10 @@ class EpisodeRecord:
     memory: dict[str, Any]
     wall_ms: float
     steps: int
+    #: Terminal calls to the scenario's ``edit_tools`` that did not resolve the task: each is a
+    #: change the agent made to the world that it then had to undo or supersede. The narrow
+    #: intervention claim (Phase 0.A) is measured on this, not only on success.
+    unnecessary_edits: int = 0
     explanation: str = ""
     judge_score: int | None = None
     error: str | None = None
@@ -146,12 +150,16 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
     deferred = False
     transcript: list[dict[str, Any]] = []
     terminal_names = {t.name for t in scenario.tools if t.terminal}
+    edit_tools = set(getattr(scenario, "edit_tools", ()) or ())
+    edit_calls = 0
     tools = [t.schema() for t in scenario.tools] + (MEMORY_TOOLS if arm.has_memory else [])
     session.candidate_actions = candidate_actions(scenario)
 
     messages: list[dict[str, Any]] = [{"role": "system", "content": scenario.system_prompt(arm.has_memory)}]
     try:
-        brief = session.briefing() if arm.has_memory else None
+        # ``briefs`` lets a control arm without memory tools (raw-traces) still put text in
+        # front of the agent before the task.
+        brief = session.briefing() if (arm.has_memory or getattr(arm, "briefs", False)) else None
         user = task.prompt
         if brief:
             user += "\n\nBriefing from your knowledge base (compiled before this task):\n" + brief
@@ -198,6 +206,8 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
                     if res.terminal:
                         attempts += 1
                         answers.append(res.answer)
+                        if name in edit_tools:
+                            edit_calls += 1
                         ok = scenario.noisy(bool(res.success))
                         flags.update(res.flags)
                         cited = [str(k) for k in (args.get("used_memory_keys") or [])][:10]
@@ -286,6 +296,8 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
         stale_in_context=sum(1 for h in all_hits if not h.avoid and _mentions_stale(h, task)),
         discredited_served=sum(1 for h in all_hits if h.avoid), cited_keys=cited, written_keys=written, flags=flags,
         tags=task.tags, usage=asdict(usage), reflection_usage=asdict(r_usage), memory=session.acct.as_dict(),
-        wall_ms=(time.perf_counter() - t0) * 1000, steps=steps, explanation=explanation, error=error,
+        wall_ms=(time.perf_counter() - t0) * 1000, steps=steps,
+        unnecessary_edits=max(0, edit_calls - (1 if success else 0)),
+        explanation=explanation, error=error,
         transcript=transcript,
     )

@@ -37,6 +37,15 @@ def make_arm(name: str) -> MemoryArm:
     if name == "senselab-lean":
         from .senselab_arm import SenseLabLeanArm
         return SenseLabLeanArm()
+    if name == "senselab-repair":
+        from .senselab_arm import SenseLabRepairArm
+        return SenseLabRepairArm()
+    if name == "senselab-compose":
+        from .senselab_arm import SenseLabComposeArm
+        return SenseLabComposeArm()
+    if name == "raw-traces":
+        from .raw_traces_arm import RawTracesArm
+        return RawTracesArm()
     if name == "pgvector-diy+outcomes":
         from .pgvector_arm import PgVectorDiyOutcomesArm
         return PgVectorDiyOutcomesArm()

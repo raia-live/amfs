@@ -103,7 +103,7 @@ AMFS is GitHub for agent memory, split into two layers. The open-source core giv
 | **Core Memory Primitives** | | |
 | Copy-on-Write versioning | Yes | Yes |
 | Confidence scoring with outcome back-propagation | Yes | Yes |
-| Memory types (fact, belief, experience) | Yes | Yes |
+| Memory types (fact, belief, experience, procedure) | Yes | Yes |
 | Type-specific confidence decay | Yes | Yes |
 | Provenance tiers (production-validated → manual) | Yes | Yes |
 | Temporal queries (`history`) | Yes | Yes |
@@ -280,7 +280,7 @@ The open-source layer ([github.com/raia-live/amfs](https://github.com/raia-live/
 
 ### Key Primitives
 
-**Memory Types** — Every entry is classified as `fact`, `belief`, or `experience`, each with its own decay rate:
+**Memory Types** — Every entry is classified as `fact`, `belief`, `experience` or `procedure`, each with its own decay rate:
 
 ```python
 from amfs import AgentMemory, MemoryType
@@ -290,7 +290,20 @@ mem = AgentMemory(agent_id="my-agent")
 mem.write("svc", "config", {"pool": 10}, memory_type=MemoryType.FACT)
 mem.write("svc", "hypothesis", "Likely N+1", memory_type=MemoryType.BELIEF)
 mem.write("svc", "action-log", "Added index", memory_type=MemoryType.EXPERIENCE)
+mem.write(
+    "svc", "procedure-rotate-key",
+    {
+        "goal": "Rotate the svc API key without dropping traffic",
+        "preconditions": ["both keys accepted by the gateway"],
+        "steps": ["issue new key", "deploy readers with both", "revoke old key"],
+        "on_failure": "re-enable the old key; it is valid for 24h after revocation",
+        "verify": "no 401s in the gateway log for 10 minutes",
+    },
+    memory_type=MemoryType.PROCEDURE,
+)
 ```
+
+A procedure is *how to do a task* — a goal, ordered steps, and what to do when one fails. It decays slowest (outcomes, not age, retire it), the briefing lists procedures in their own `procedures` section, and `retrieve` ranks one slightly above a fact of equal relevance. The write-time quality report flags a procedure with no goal or steps as `procedure_incomplete`.
 
 **Provenance Tiers** — Entries are automatically ranked by quality based on how they were created:
 

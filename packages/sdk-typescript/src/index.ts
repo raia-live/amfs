@@ -2,12 +2,18 @@
  * @senselab-ai/amfs — Agent Memory File System TypeScript SDK
  */
 
-export { AgentMemory, MemoryScope } from "./memory.js";
+export { AgentMemory, MemoryScope, BRANCH_ENV, MEMORY_BRANCH_ATTRIBUTE } from "./memory.js";
 export type { AgentMemoryOptions, SearchOptions, MemoryStats } from "./memory.js";
 export type { AmfsAdapter, WatchHandle } from "./adapter.js";
 export { createWatchHandle } from "./adapter.js";
 export { InMemoryAdapter } from "./adapters/filesystem.js";
-export { HttpAdapter, toDecisionTrace, toDecisionTracePage } from "./adapters/http.js";
+export {
+  AGENT_ID_HEADER,
+  HttpAdapter,
+  SESSION_HEADER,
+  toDecisionTrace,
+  toDecisionTracePage,
+} from "./adapters/http.js";
 export type {
   HttpAdapterOptions,
   DecisionTrace,
@@ -20,6 +26,7 @@ export type {
 export {
   validateSessionAttributes,
   SESSION_ATTRIBUTES_MAX_KEYS,
+  SDK_STAMPED_ATTRIBUTES,
   SESSION_ATTRIBUTE_KEY_MAX_LEN,
   SESSION_ATTRIBUTE_VALUE_MAX_LEN,
 } from "./session.js";
@@ -35,8 +42,38 @@ export { CausalTagger, CoWEngine } from "./engine.js";
 export { ReadTracker } from "./tracker.js";
 export type { ExternalContext } from "./tracker.js";
 export { OutcomeBackPropagator } from "./outcome.js";
+export {
+  ReplayReceiver,
+  ReplayError,
+  SignatureError,
+  PayloadError,
+  parseReplayRequest,
+  signReplayBody,
+  verifyReplaySignature,
+  replayAttributes,
+  replayOutcomeRef,
+  createFetchHandler,
+  commitAttributes,
+  serveReplay,
+  CASE_ID_ATTRIBUTE,
+  EVENT_PING,
+  EVENT_REPLAY_REQUESTED,
+  SIGNATURE_HEADER,
+  EVENT_HEADER,
+  DELIVERY_HEADER,
+} from "./replay.js";
+export type {
+  ReplayRequest,
+  ReplayResult,
+  ReplayAnswer,
+  ReplayMemory,
+  ReplayReceiverOptions,
+  ReplayResponse,
+  HeaderBag,
+} from "./replay.js";
 export { defaultConfig } from "./config.js";
 export {
+  MemoryType,
   OutcomeType,
   OUTCOME_MULTIPLIERS,
 } from "./models.js";

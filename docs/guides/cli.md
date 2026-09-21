@@ -133,6 +133,25 @@ See the [SaaS Connection Guide](/amfs/guides/saas/) and [Environment Variables](
 
 ---
 
+## Replay Receiver
+
+`amfs replay` answers SenseLab's replay webhook — the repair loop asking your
+agent to run a test case with its memory on a repair branch and commit how it
+went. Name the runner as `module:function`:
+
+```bash
+export AMFS_REPLAY_SECRET=whsec_…
+amfs replay serve --run my_agent.replay:run --port 8787
+amfs replay simulate http://localhost:8787/amfs/replay --ping
+```
+
+`serve` acknowledges each request with `202` and runs the agent on a worker
+thread (`--inline` to run inside the request); `simulate` sends one signed
+request so the path can be tested without the SaaS side. See the
+[Replay Webhook guide](/amfs/guides/replay-webhook/).
+
+---
+
 ## MCP Server
 
 The MCP server has its own executable:

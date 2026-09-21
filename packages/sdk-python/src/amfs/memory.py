@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import math
+import os
 import threading
 import uuid
 from collections import defaultdict
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timezone
 from pathlib import Path
@@ -26,6 +29,7 @@ from amfs_core.exceptions import StaleWriteError
 from amfs_core.lifecycle import LifecycleManager
 from amfs_core import evidence as _evidence
 from amfs_core.models import (
+    ENVIRONMENT_KEYS,
     AttemptRecord,
     Commit,
     ConflictPolicy,
@@ -51,6 +55,7 @@ from amfs_core.models import (
     SessionMetadata,
     ToolCall,
     TraceEntry,
+    environment_of,
 )
 from amfs_core.outcome import OutcomeBackPropagator
 
@@ -58,6 +63,49 @@ from amfs.config import load_config_or_default
 from amfs.factory import create_adapter_from_config
 
 logger = logging.getLogger(__name__)
+
+#: Environment variable naming the branch an ``AgentMemory`` starts on when the
+#: constructor is not given one. Read once, at construction.
+BRANCH_ENV = "AMFS_BRANCH"
+
+#: The session attribute a committed outcome carries when the memory was on a
+#: branch other than ``main``: the trace says which memory it read. This is
+#: what a canary and a customer replay are graded through — a run of the same
+#: prompt on ``main`` never read the fix and does not count — so the SDK
+#: stamps it rather than leaving it to every caller to remember.
+MEMORY_BRANCH_ATTRIBUTE = "memory_branch"
+#: The two stamps a hosted server puts on a trace when the session was routed
+#: through a live repair canary: which fix was under test, and which arm the
+#: session sat in (``"canary"`` read the fix's branch, ``"control"`` read
+#: main). Both arms are stamped so the tally compares like with like and a
+#: session nothing routed is in neither. The SDK never sets these itself —
+#: they are the server's — but it must recognise them: they arrive in the
+#: merged bag at commit and must not count against the caller's cap.
+CANARY_FIX_ATTRIBUTE = "canary_fix_id"
+CANARY_ARM_ATTRIBUTE = "canary_arm"
+
+
+def _bind_adapter(adapter: AdapterABC, tagger: CausalTagger) -> AdapterABC:
+    """*adapter* identifying itself as *tagger*'s agent and session, when it can.
+
+    Duck-typed on ``bind`` so the in-memory, filesystem and Postgres adapters
+    are returned untouched: only a transport that talks to a server has any
+    identity to declare. Never raises — a handle that cannot be bound is a
+    handle that works exactly as it did before.
+    """
+    bind = getattr(adapter, "bind", None)
+    if not callable(bind):
+        return adapter
+    try:
+        bound = bind(tagger.agent_id, tagger.session_id)
+    except Exception:  # noqa: BLE001 - attribution must not break construction
+        logger.debug("adapter.bind failed — continuing unbound", exc_info=True)
+        return adapter
+    # A ``bind`` that hands back nothing usable — a test double's catch-all,
+    # a wrapper that forgot to return — leaves the handle as it was rather
+    # than replacing the adapter with ``None``.
+    return bound if bound is not None else adapter
+
 
 _sdk_bg_executor: ThreadPoolExecutor | None = None
 _sdk_bg_lock = threading.Lock()
@@ -97,17 +145,28 @@ SESSION_ATTRIBUTE_VALUE_MAX_LEN = 256
 _ATTRIBUTE_SCALARS = (str, int, float, bool)
 
 
+#: Attribute keys the SDK stamps itself, which do not count against
+#: ``SESSION_ATTRIBUTES_MAX_KEYS``: a caller's bag at the cap is still
+#: accepted — locally and by the server, which validates with the same
+#: function — for the branch it ran on.
+SDK_STAMPED_ATTRIBUTES = frozenset({
+    MEMORY_BRANCH_ATTRIBUTE, CANARY_FIX_ATTRIBUTE, CANARY_ARM_ATTRIBUTE,
+})
+
+
 def _check_attribute_count(attributes: dict[str, Any], what: str = "session attributes") -> None:
-    """``ValueError`` when *attributes* holds more than ``SESSION_ATTRIBUTES_MAX_KEYS``.
+    """``ValueError`` when *attributes* holds more than ``SESSION_ATTRIBUTES_MAX_KEYS``
+    caller keys (``SDK_STAMPED_ATTRIBUTES`` are not counted).
 
     Applied to each incoming bag and again to every merge (the session bag as
     it grows, and the trace's bag of identity metadata + session bag + commit
     attributes): a per-call check alone lets three bags of 20 become one of 60.
     """
-    if len(attributes) > SESSION_ATTRIBUTES_MAX_KEYS:
+    count = sum(1 for k in attributes if str(k).strip().lower() not in SDK_STAMPED_ATTRIBUTES)
+    if count > SESSION_ATTRIBUTES_MAX_KEYS:
         raise ValueError(
             f"at most {SESSION_ATTRIBUTES_MAX_KEYS} {what} are allowed "
-            f"(got {len(attributes)})"
+            f"(got {count})"
         )
 
 
@@ -148,6 +207,40 @@ def validate_session_attributes(attributes: Any) -> dict[str, str | int | float 
             raise ValueError(
                 f"attribute {key!r} exceeds {SESSION_ATTRIBUTE_VALUE_MAX_LEN} characters"
             )
+        out[key] = value
+    return out
+
+
+#: Attribute the outcome's source travels under, and the prefix its pointers use.
+VERIFIED_BY_ATTRIBUTE = "verified_by"
+EVIDENCE_ATTRIBUTE_PREFIX = "evidence_"
+#: Attribute the served guidance is named under (``amfs_core.render.guidance_id``)
+#: and the count of guidances a session was handed.
+GUIDANCE_ID_ATTRIBUTE = "guidance_id"
+GUIDANCE_COUNT_ATTRIBUTE = "guidance_count"
+
+
+def provenance_attributes(
+    verified_by: str | None, evidence: Mapping[str, Any] | None
+) -> dict[str, str | int | float | bool]:
+    """The session attributes an outcome's provenance travels as: ``verified_by``
+    and one ``evidence_<key>`` per pointer, scalars only (a nested value is
+    JSON-encoded, and anything past the value cap is trimmed with a marker —
+    a pointer, unlike a customer id, loses nothing that matters to a cut).
+    Empty when neither is given, so the common commit is unchanged."""
+    out: dict[str, str | int | float | bool] = {}
+    if isinstance(verified_by, str) and verified_by.strip():
+        out[VERIFIED_BY_ATTRIBUTE] = verified_by.strip().lower()
+    for raw_key, value in (evidence or {}).items():
+        key = f"{EVIDENCE_ATTRIBUTE_PREFIX}{str(raw_key).strip().lower()}"
+        if value is None or len(key) > SESSION_ATTRIBUTE_KEY_MAX_LEN:
+            continue
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            continue
+        if not isinstance(value, _ATTRIBUTE_SCALARS):
+            value = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+        if isinstance(value, str) and len(value) > SESSION_ATTRIBUTE_VALUE_MAX_LEN:
+            value = value[: SESSION_ATTRIBUTE_VALUE_MAX_LEN - 1] + "…"
         out[key] = value
     return out
 
@@ -218,6 +311,34 @@ def _metadata_to_dict(meta: Any) -> dict[str, Any]:
     if isinstance(meta, dict):
         return dict(meta)
     return {}
+
+
+def _call_shedding_unknown_keywords(
+    fn: Callable[..., Any], kwargs: dict[str, Any], *, optional: tuple[str, ...]
+) -> Any:
+    """Call *fn* with *kwargs*, dropping one *optional* keyword per ``TypeError``
+    until the call is accepted.
+
+    Adapters are pluggable and versioned separately, so an older one rejects a
+    keyword a newer SDK sends. Dropping every optional keyword on the first
+    ``TypeError`` would answer a request for a compact delta briefing on a
+    branch with a full briefing of ``main``; dropping only what the adapter
+    does not know keeps the rest of the request intact. A ``TypeError`` that
+    names none of the optional keywords still present is the adapter's own
+    and is re-raised.
+    """
+    present = [name for name in optional if name in kwargs]
+    while True:
+        try:
+            return fn(**kwargs)
+        except TypeError as exc:
+            if not present:
+                raise
+            message = str(exc)
+            named = [name for name in present if f"'{name}'" in message]
+            drop = named[0] if named else present[0]
+            present.remove(drop)
+            kwargs = {k: v for k, v in kwargs.items() if k != drop}
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +432,7 @@ class AgentMemory:
         conflict_policy: ConflictPolicy = ConflictPolicy.LAST_WRITE_WINS,
         on_conflict: Callable[[MemoryEntry, MemoryEntry, Any], Any] | None = None,
         importance_evaluator: Any | None = None,
+        branch: str | None = None,
     ) -> None:
         self._config = load_config_or_default(config_path)
 
@@ -320,6 +442,11 @@ class AgentMemory:
             self._adapter = create_adapter_from_config(self._config)
 
         self._tagger = CausalTagger(agent_id, session_id)
+        # An adapter that talks to a server over HTTP identifies this handle's
+        # agent and session on every request, so a hosted server can attribute
+        # reads and keep the whole session on one arm of a live repair canary.
+        # Bound per handle rather than on the adapter: see ``as_agent``.
+        self._adapter = _bind_adapter(self._adapter, self._tagger)
         self._read_tracker = ReadTracker()
         self._engine = CoWEngine(self._adapter, self._tagger, self._read_tracker)
         self._propagator = OutcomeBackPropagator(self._adapter)
@@ -328,7 +455,10 @@ class AgentMemory:
         self._conflict_policy = conflict_policy
         self._on_conflict = on_conflict
         self._importance_evaluator = importance_evaluator
-        self._branch = "main"
+        # The branch every read and write goes to unless the call names one.
+        # ``branch=`` wins, then ``AMFS_BRANCH`` — how a process is pointed at
+        # a repair branch or a canary without a code change — then ``main``.
+        self._branch = (branch or os.environ.get(BRANCH_ENV) or "main").strip() or "main"
         self._session_metadata: SessionMetadata | None = None
         # Buffered separately from ``_session_metadata`` — which callers (and the
         # MCP server) reassign wholesale — and merged into it at commit time.
@@ -367,6 +497,13 @@ class AgentMemory:
         """The attribute bag the next ``commit_outcome`` will stamp on its trace."""
         return dict(self._session_attributes)
 
+    def clear_session_attributes(self) -> None:
+        """Drop the attribute bag waiting for the next ``commit_outcome``, as
+        the commit itself does afterwards. For a caller that must fit its own
+        keys under the cap ahead of what a run set — the replay receiver's
+        grader keys, say."""
+        self._session_attributes = {}
+
     @property
     def session_llm_calls(self) -> list[dict[str, Any]]:
         """The LLM calls recorded since the last ``commit_outcome``."""
@@ -375,6 +512,25 @@ class AgentMemory:
     @property
     def namespace(self) -> str:
         return self._config.namespace
+
+    @property
+    def branch(self) -> str:
+        """The branch reads and writes go to unless a call names another."""
+        return self._branch
+
+    def checkout(self, branch: str | None) -> str:
+        """Point this memory at *branch* for every later read and write that
+        does not name one; ``None`` or blank means ``main``. Returns the
+        branch now active.
+
+        The same thing ``branch=`` does at construction, for a memory that
+        already exists: a hosted gateway moves a long-lived session onto a
+        repair branch while a canary runs and back to ``main`` when it ends,
+        without rebuilding the session and losing its causal chain. Nothing
+        is read or written by the call itself.
+        """
+        self._branch = (branch or "main").strip() or "main"
+        return self._branch
 
     @property
     def adapter(self) -> AdapterABC:
@@ -416,7 +572,11 @@ class AgentMemory:
         clone = copy.copy(self)
         clone._tagger = CausalTagger(agent_id, self._tagger.session_id)
         clone._read_tracker = ReadTracker()
-        clone._engine = CoWEngine(self._adapter, clone._tagger, clone._read_tracker)
+        # Same connection, this identity: an HTTP adapter carries the agent on
+        # its requests, and the shared one carries ours.
+        clone._adapter = _bind_adapter(self._adapter, clone._tagger)
+        clone._engine = CoWEngine(clone._adapter, clone._tagger, clone._read_tracker)
+        clone._propagator = OutcomeBackPropagator(clone._adapter)
         # Session state belongs to the session that built it, and a trace is
         # sealed per handle: sharing these would let an impersonated write show
         # up in the caller's trace, which is the confusion this method exists to
@@ -690,6 +850,7 @@ class AgentMemory:
         recall_config: RecallConfig | None = None,
         depth: int = 3,
         include_artifacts: bool = True,
+        branch: str | None = None,
     ) -> list[MemoryEntry] | list[ScoredEntry]:
         """Search across all entities with rich filters.
 
@@ -706,10 +867,14 @@ class AgentMemory:
 
         *depth* controls progressive retrieval across memory tiers:
           1 = HOT only, 2 = HOT + WARM, 3 = all tiers (default).
+
+        *branch* defaults to the active branch. Adapters that are not
+        branch-aware (filesystem, S3) search their single store.
         """
         from amfs_core.embedder import cosine_similarity
 
         paths = entity_paths or ([entity_path] if entity_path else [None])
+        resolved_branch = branch or self._branch
 
         seen_keys: set[str] = set()
         merged: list[MemoryEntry] = []
@@ -728,7 +893,7 @@ class AgentMemory:
                 depth=depth,
                 include_artifacts=include_artifacts,
             )
-            for entry in self._adapter.search(sq):
+            for entry in self._adapter_search(sq, resolved_branch):
                 if entry.entry_key not in seen_keys:
                     if not entry.shared and entry.provenance.agent_id != self.agent_id:
                         continue
@@ -816,6 +981,20 @@ class AgentMemory:
         scored.sort(key=lambda s: s.score, reverse=True)
         return scored
 
+    def _adapter_search(self, query: SearchQuery, branch: str) -> list[MemoryEntry]:
+        """``adapter.search`` on *branch* when the adapter takes one.
+
+        ``main`` is every adapter's default, so it is never sent; a non-default
+        branch is, and an adapter that rejects the keyword (filesystem, S3)
+        is searched without it rather than failing the call.
+        """
+        if not branch or branch == "main":
+            return self._adapter.search(query)
+        try:
+            return self._adapter.search(query, branch=branch)
+        except TypeError:
+            return self._adapter.search(query)
+
     def semantic_search(
         self,
         text: str,
@@ -856,6 +1035,9 @@ class AgentMemory:
         candidate_actions: list[str] | None = None,
         situation: str | None = None,
         compact: bool = False,
+        branch: str | None = None,
+        environment: Mapping[str, Any] | None = None,
+        abstain: bool = False,
     ) -> list[ScoredEntry]:
         """Rank memories by meaning for a natural-language query.
 
@@ -875,8 +1057,20 @@ class AgentMemory:
         so it can name the untried ones; ``situation`` labels the kind of task.
         ``compact=True`` trims each hit to the fields an agent acts on. Both are
         server-side features; the local adapters return entries without them.
+
+        *branch* defaults to the active branch (``checkout``), so an agent on
+        a repair branch retrieves what that branch says, not what ``main`` does.
+
+        *environment* is the run's ``{"model", "agent_version", "runtime"}``;
+        it defaults to what the session already knows (:meth:`environment`),
+        so a session that set ``agent_version`` and ``runtime`` gets procedures
+        scoped to them without passing anything here. Pass ``{}`` to send none.
+        *abstain* asks the server to say so in the recommendation when nothing
+        in scope has been tried or validated.
         """
         cfg = recall_config or RecallConfig()
+        resolved_branch = branch or self._branch
+        env = dict(environment) if environment is not None else self.environment()
 
         adapter_retrieve = getattr(self._adapter, "retrieve", None)
         if callable(adapter_retrieve):
@@ -890,20 +1084,42 @@ class AgentMemory:
                         "situation": situation,
                         "compact": compact,
                     }
-                rows = adapter_retrieve(
-                    query,
-                    entity_path=entity_path,
-                    min_confidence=min_confidence,
-                    limit=limit,
-                    semantic_weight=cfg.semantic_weight,
-                    recency_weight=cfg.recency_weight,
-                    confidence_weight=cfg.confidence_weight,
-                    include_artifacts=include_artifacts,
-                    evidence_weight=cfg.evidence_weight,
-                    include_discredited=cfg.include_discredited,
-                    include_avoid=cfg.include_avoid,
-                    adaptive_k=cfg.adaptive_k,
-                    **extra,
+                # Sent only when there is something to send, so an adapter that
+                # predates the keywords is never handed them.
+                if env:
+                    extra["environment"] = env
+                if abstain:
+                    extra["abstain"] = True
+                # Sent only off the default: every adapter's retrieve defaults
+                # to main, and an older one without the keyword would otherwise
+                # raise TypeError here and fall back to local scoring for every
+                # call, not just branched ones.
+                if resolved_branch and resolved_branch != "main":
+                    extra["branch"] = resolved_branch
+                # Shed the keywords an older adapter does not know one at a
+                # time, as ``briefing`` does: once identity or ``Run.begin``
+                # fills the environment it is sent on every call, and a
+                # ``TypeError`` here would otherwise turn every retrieve into
+                # the local fallback.
+                rows = _call_shedding_unknown_keywords(
+                    adapter_retrieve,
+                    {
+                        "query": query,
+                        "entity_path": entity_path,
+                        "min_confidence": min_confidence,
+                        "limit": limit,
+                        "semantic_weight": cfg.semantic_weight,
+                        "recency_weight": cfg.recency_weight,
+                        "confidence_weight": cfg.confidence_weight,
+                        "include_artifacts": include_artifacts,
+                        "evidence_weight": cfg.evidence_weight,
+                        "include_discredited": cfg.include_discredited,
+                        "include_avoid": cfg.include_avoid,
+                        "adaptive_k": cfg.adaptive_k,
+                        **extra,
+                    },
+                    optional=("environment", "abstain", "branch", "situation",
+                              "compact", "candidate_actions", "include_priors"),
                 )
                 scored = [
                     ScoredEntry(entry=entry, score=score, breakdown=breakdown or {})
@@ -923,6 +1139,7 @@ class AgentMemory:
             limit=limit,
             recall_config=cfg,
             include_artifacts=include_artifacts,
+            branch=resolved_branch,
         )
         self._record_retrieval_reuse(query, entity_path, result)  # type: ignore[arg-type]
         return result  # type: ignore[return-value]
@@ -1329,6 +1546,8 @@ class AgentMemory:
         entity_paths: list[str] | None = None,
         situation: str | None = None,
         actions_taken: list[dict[str, Any]] | None = None,
+        verified_by: str | None = None,
+        evidence: Mapping[str, Any] | None = None,
     ) -> list[MemoryEntry]:
         """Record an outcome and back-propagate confidence changes.
 
@@ -1339,6 +1558,14 @@ class AgentMemory:
         *situation* is an optional label for the kind of task. *actions_taken*
         is derived from the recorded actions, the attempts and the final action
         index unless given explicitly — see ``amfs_core.actions.actions_taken``.
+
+        *verified_by* says where the outcome came from when the agent did not
+        decide it itself — ``"ci"``, ``"human"``, ``"verifier"``, ``"customer"``.
+        An outcome with it is external evidence; one without is the agent's own
+        declaration, and the repair loop's canary treats the two differently.
+        *evidence* is a small bag of pointers to that source (``{"run_id": ...,
+        "url": ...}``). Both travel as session attributes — ``verified_by`` and
+        ``evidence_<key>`` — so they reach the sealed trace on every path.
 
         If *causal_entry_keys* is ``None``, automatically uses the session's
         read log — every entry this agent read becomes a causal link. When
@@ -1388,7 +1615,9 @@ class AgentMemory:
         ``_last_trace``; only the write is skipped.
         """
         # Validated first so a bad bag fails before anything is written.
-        commit_attributes = validate_session_attributes(attributes)
+        commit_attributes = validate_session_attributes(
+            {**(attributes or {}), **provenance_attributes(verified_by, evidence)}
+        )
         explicit_calls = [
             c for c in (_normalize_llm_call(lc) for lc in (llm_calls or [])) if c is not None
         ]
@@ -1817,6 +2046,11 @@ class AgentMemory:
             **self._session_attributes,
             **commit_attributes,
         }
+        # The stamp is exempt from the cap (``SDK_STAMPED_ATTRIBUTES``), here
+        # and on the server, so a bag at the limit is not refused for the
+        # branch it ran on; a caller who set the attribute themselves wins.
+        if self._branch != "main":
+            attributes.setdefault(MEMORY_BRANCH_ATTRIBUTE, self._branch)
         _check_attribute_count(attributes, "the merged session attributes")
         existing_calls = data.get(SESSION_LLM_CALLS_KEY)
         llm_calls = [
@@ -1866,6 +2100,22 @@ class AgentMemory:
         _check_attribute_count(merged, "the session attribute bag")
         self._session_attributes = merged
         return dict(self._session_attributes)
+
+    def environment(self) -> dict[str, str]:
+        """The run's environment as the session knows it: ``model``,
+        ``agent_version``, ``runtime`` and ``platform``, read from the session
+        metadata (``set_identity`` / ``set_session_metadata``) and overridden by
+        the session attributes of the same names (``set_session_attributes``).
+        This is what ``briefing`` and ``retrieve`` send by default so procedures
+        are scoped to this run, and what the canary's confounder check reads
+        off the trace. Empty when nothing is known."""
+        env = environment_of(getattr(self, "_session_metadata", None))
+        attributes = getattr(self, "_session_attributes", None) or {}
+        for key in ENVIRONMENT_KEYS:
+            value = attributes.get(key)
+            if isinstance(value, str) and value.strip():
+                env[key] = value.strip()
+        return env
 
     def record_llm_call(
         self,
@@ -2404,6 +2654,7 @@ class AgentMemory:
         credit_reuse: bool = False,
         compact: bool = False,
         since: datetime | None = None,
+        environment: Mapping[str, Any] | None = None,
     ) -> list:
         """Get a ranked briefing of compiled knowledge digests.
 
@@ -2412,6 +2663,8 @@ class AgentMemory:
         trimmed — what an agent needs at the top of a task, at a fraction of
         the tokens. *since* trims the list sections to what changed after that
         moment: the delta since the last briefing, not the whole scope again.
+        *environment* defaults to the session's (:meth:`environment`); with it
+        the lead digest marks each procedure applicable or not to this run.
 
         Returns pre-compiled Digest objects from the Cortex, ranked by
         relevance to the given entity or agent context.
@@ -2437,11 +2690,15 @@ class AgentMemory:
         """
         # Prefer the adapter's native briefing when available (e.g. HttpAdapter
         # proxies to the server which has full Cortex + Postgres access).
+        resolved_agent = agent_id or self.agent_id
+        resolved_branch = branch or self._branch
+        env = dict(environment) if environment is not None else self.environment()
+
         adapter_briefing = getattr(self._adapter, "briefing", None)
         if callable(adapter_briefing):
             kwargs: dict = {
                 "entity_path": entity_path,
-                "agent_id": agent_id or self.agent_id,
+                "agent_id": resolved_agent,
                 "limit": limit,
             }
             # Passed only when asked for, and only to an adapter that knows the
@@ -2453,17 +2710,20 @@ class AgentMemory:
                 kwargs["compact"] = True
             if since is not None:
                 kwargs["since"] = since
-            try:
-                digests = adapter_briefing(**kwargs)
-            except TypeError:
-                kwargs.pop("credit_reuse", None)
-                kwargs.pop("compact", None)
-                kwargs.pop("since", None)
-                digests = adapter_briefing(**kwargs)
+            if env:
+                kwargs["environment"] = env
+            # The active branch used to be dropped on this path, so a client
+            # that had checked out a branch was briefed from main.
+            if resolved_branch and resolved_branch != "main":
+                kwargs["branch"] = resolved_branch
+            digests = _call_shedding_unknown_keywords(
+                adapter_briefing, kwargs,
+                # Newest keyword first: an adapter that predates ``branch`` is
+                # far more likely to know ``compact`` and ``since`` than the
+                # other way round, and each retry costs one round-trip.
+                optional=("environment", "branch", "since", "compact", "credit_reuse"),
+            )
             return self._book_briefing_lineage(digests, credit_reuse)
-
-        resolved_agent = agent_id or self.agent_id
-        resolved_branch = branch or self._branch
 
         try:
             from amfs_cortex.briefing import BriefingService
@@ -2474,6 +2734,9 @@ class AgentMemory:
                 adapter=self._adapter,
                 namespace=self.namespace,
             )
+            service_kwargs: dict[str, Any] = {}
+            if env:
+                service_kwargs["environment"] = env
             return self._book_briefing_lineage(
                 service.briefing(
                     entity_path=entity_path,
@@ -2482,6 +2745,7 @@ class AgentMemory:
                     branch=resolved_branch,
                     compact=compact,
                     since=since,
+                    **service_kwargs,
                 ),
                 credit_reuse,
             )
