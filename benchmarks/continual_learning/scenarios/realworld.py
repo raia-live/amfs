@@ -536,6 +536,7 @@ CI_CHANGES: dict[str, str] = {"flaky-integration": "edit_generated_file", "audit
 
 class CiFixScenario(Scenario):
     name = "ci-fix"
+    edit_tools = ("fix",)
     agent_base = "ci-agent"
     role = "You are a coding agent keeping CI green on the acme/platform repository. Fix the failing check with one action."
 

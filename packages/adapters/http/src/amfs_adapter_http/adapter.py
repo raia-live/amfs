@@ -19,6 +19,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Mapping
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Any, Callable
@@ -506,6 +507,8 @@ class HttpAdapter(AdapterABC):
         candidate_actions: list[str] | None = None,
         situation: str | None = None,
         compact: bool | None = None,
+        environment: Mapping[str, Any] | None = None,
+        abstain: bool | None = None,
     ) -> list[tuple[MemoryEntry, float, dict[str, Any]]]:
         """Server-side semantic retrieval via POST /api/v1/retrieve.
 
@@ -514,6 +517,10 @@ class HttpAdapter(AdapterABC):
         (entry, score, breakdown) tuples; breakdown is empty on the server's
         lexical fallback. Artifacts (stored source files) are demoted by the
         server; pass ``include_artifacts=False`` to exclude them entirely.
+        *environment* (``{"model", "agent_version", "runtime"}``) lets the
+        server drop procedures whose preconditions contradict this run and
+        weight priors by it; *abstain* asks it to say so when nothing in scope
+        is worth acting on.
         """
         body: dict[str, Any] = {
             "query": query,
@@ -551,6 +558,10 @@ class HttpAdapter(AdapterABC):
             body["situation"] = situation
         if compact is not None:
             body["compact"] = compact
+        if environment:
+            body["environment"] = {k: str(v) for k, v in environment.items() if v}
+        if abstain is not None:
+            body["abstain"] = abstain
         data = self._post("/api/v1/retrieve", body)
         self._capture_reuse_value()
         rows = data if isinstance(data, list) else data.get("entries", [])
@@ -1034,15 +1045,21 @@ class HttpAdapter(AdapterABC):
         compact: bool = False,
         since: datetime | None = None,
         branch: str | None = None,
+        environment: Mapping[str, Any] | None = None,
     ) -> list[Digest]:
         """Proxy briefing to the HTTP server which has full Cortex access.
 
         *branch* is sent only when it is not the default, so a server that
         predates the parameter still answers (it ignores unknown query params).
+        *environment* travels as ``env_<key>`` query parameters for the same
+        reason; the server marks procedures applicable or not against it.
         """
         params: dict[str, Any] = {"limit": limit}
         if since is not None:
             params["since"] = since.isoformat()
+        for key, value in (environment or {}).items():
+            if value:
+                params[f"env_{key}"] = str(value)
         if entity_path:
             params["entity_path"] = entity_path
         if agent_id:

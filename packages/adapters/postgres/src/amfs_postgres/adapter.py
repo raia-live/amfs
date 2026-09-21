@@ -28,6 +28,7 @@ from amfs_core.exclusions import (
     AGENT_ID_NOT_EXCLUDED_SQL,
     ENTITY_PATH_NOT_EXCLUDED_SQL,
 )
+from amfs_core.actions import recorded_environment
 from amfs_core.evidence import cited_entries, outcome_model
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
@@ -663,6 +664,7 @@ class PostgresAdapter(AdapterABC):
         self._has_validators_col = False
         self._has_action_cols = False
         self._has_outcome_embedding_col = False
+        self._has_outcome_env_col = False
         # When an embedder is provided, embeddings are computed at write time and
         # persisted, so ANN retrieval (semantic_search / pgvector HNSW) works
         # without a separate backfill pass. embedding_dim must match the column
@@ -1154,6 +1156,14 @@ class PostgresAdapter(AdapterABC):
         cur.execute(_OUTCOME_EVIDENCE_SQL)
         # Action-level learning (trigger v4): see migration 009.
         cur.execute(_ACTION_PRIORS_SQL)
+        # The environment an outcome was recorded in (model / agent_version /
+        # runtime / platform, see amfs_core.models.ENVIRONMENT_KEYS), so priors
+        # can down-weight what won under another runtime. Derived at commit
+        # from the record's session metadata, which already travels with it.
+        cur.execute("""
+            ALTER TABLE amfs_outcomes
+            ADD COLUMN IF NOT EXISTS environment JSONB
+        """)
         # task_embedding on outcomes follows the entries' embedding dimension,
         # so it is derived here rather than declared in the migration.
         cur.execute(
@@ -1577,12 +1587,13 @@ class PostgresAdapter(AdapterABC):
                     """
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'amfs_outcomes'
-                      AND column_name IN ('actions_taken', 'task_embedding')
+                      AND column_name IN ('actions_taken', 'task_embedding', 'environment')
                     """,
                 )
                 found = {row["column_name"] for row in cur.fetchall()}
                 self._has_action_cols = "actions_taken" in found
                 self._has_outcome_embedding_col = "task_embedding" in found
+                self._has_outcome_env_col = "environment" in found
 
     # ------------------------------------------------------------------
     # read
@@ -3398,6 +3409,12 @@ class PostgresAdapter(AdapterABC):
                         list(record.entity_paths or []),
                         record.situation,
                     ]
+                if getattr(self, "_has_outcome_env_col", False):
+                    env = recorded_environment({"session_metadata": record.session_metadata or {}})
+                    if env:
+                        columns.append("environment")
+                        placeholders.append("%s::jsonb")
+                        params.append(json.dumps(env))
                 task_embedding = self._outcome_embedding(record)
                 if task_embedding is not None:
                     columns.append("task_embedding")
@@ -3594,9 +3611,10 @@ class PostgresAdapter(AdapterABC):
         if since is not None:
             conditions.append("committed_at >= %s")
             params.append(since)
+        env_col = ", environment" if getattr(self, "_has_outcome_env_col", False) else ""
         sql = f"""
             SELECT outcome_ref, outcome_type, committed_at, agent_id, actions_taken, situation,
-                   1 - (task_embedding <=> %s::vector) AS similarity
+                   1 - (task_embedding <=> %s::vector) AS similarity{env_col}
             FROM amfs_outcomes
             WHERE {" AND ".join(conditions)}
             ORDER BY task_embedding <=> %s::vector
@@ -3618,6 +3636,7 @@ class PostgresAdapter(AdapterABC):
                 "agent_id": row["agent_id"],
                 "situation": row.get("situation"),
                 "actions_taken": _jsonb(row.get("actions_taken"), []),
+                "environment": _jsonb(row.get("environment"), {}) or {},
                 "similarity": sim,
             })
         return out
@@ -3638,8 +3657,9 @@ class PostgresAdapter(AdapterABC):
         if since is not None:
             conditions.append("committed_at >= %s")
             params.append(since)
+        env_col = ", environment" if getattr(self, "_has_outcome_env_col", False) else ""
         sql = f"""
-            SELECT outcome_ref, outcome_type, committed_at, agent_id, actions_taken, situation
+            SELECT outcome_ref, outcome_type, committed_at, agent_id, actions_taken, situation{env_col}
             FROM amfs_outcomes
             WHERE {" AND ".join(conditions)}
             ORDER BY committed_at DESC
@@ -3656,6 +3676,7 @@ class PostgresAdapter(AdapterABC):
             "agent_id": row["agent_id"],
             "situation": row.get("situation"),
             "actions_taken": _jsonb(row.get("actions_taken"), []),
+            "environment": _jsonb(row.get("environment"), {}) or {},
             "similarity": 1.0,
         } for row in rows]
 

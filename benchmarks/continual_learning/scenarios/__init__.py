@@ -10,6 +10,7 @@ _REGISTRY: dict[str, type[Scenario]] | None = None
 def registry() -> dict[str, type[Scenario]]:
     global _REGISTRY
     if _REGISTRY is None:
+        from .compose import DisjointFleetScenario
         from .diagnose import DiagnoseScenario, SizingScenario
         from .drift import DriftFactScenario, DriftToolScenario
         from .handoff import HandoffScenario
@@ -22,6 +23,7 @@ def registry() -> dict[str, type[Scenario]]:
             RunbookScenario, UnknownsScenario, FleetScenario, DriftFactScenario, DriftToolScenario,
             TriageScenario, HandoffScenario, DiagnoseScenario, SizingScenario,
             SupportScenario, ConciergeScenario, RetentionScenario, OrderOpsScenario, CiFixScenario, AnalyticsScenario,
+            DisjointFleetScenario,
         )}
     return _REGISTRY
 

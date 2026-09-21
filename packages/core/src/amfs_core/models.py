@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -111,18 +112,40 @@ MEMORY_TYPE_DECAY_MULTIPLIERS: dict[MemoryType, float] = {
 #: Keys a procedure's value is expected to carry when it is a dict. The
 #: quality evaluator reports what is missing; nothing rejects the write.
 PROCEDURE_REQUIRED_FIELDS: tuple[str, ...] = ("goal", "steps")
-PROCEDURE_OPTIONAL_FIELDS: tuple[str, ...] = ("preconditions", "on_failure", "verify")
+PROCEDURE_OPTIONAL_FIELDS: tuple[str, ...] = (
+    "preconditions",
+    "on_failure",
+    "verify",
+    # What holds after the procedure ran, so a later procedure can rely on it.
+    "effects",
+    # The procedures this one chains, as ``{"ref": "<entity>/<key>", "version": n}``.
+    "depends_on",
+    # Trace or outcome ids the procedure was distilled from.
+    "evidence",
+)
+
+#: Keys of a ``preconditions`` dict that name the run's environment rather than
+#: the task. ``{"runtime": "python3.12"}`` says the procedure applies only there;
+#: a string precondition ("the repo has a lockfile") is about the task and is
+#: matched by nobody but the agent.
+PROCEDURE_ENVIRONMENT_PRECONDITIONS: tuple[str, ...] = (
+    "model", "agent_version", "runtime", "platform",
+)
 
 
 def procedure_issues(value: Any) -> list[str]:
     """What a procedure value is missing, as short issue codes.
 
     A procedure is a dict with a ``goal`` and a non-empty ``steps`` list (each
-    step a non-blank string or a dict with a non-blank ``action``), optionally
-    ``preconditions``, ``on_failure`` and ``verify``. A plain string is
-    accepted when it reads as a numbered or bulleted list of at least two
-    steps; anything else is ``not_structured``. Pure; used by
-    ``amfs_core.quality``.
+    step a non-blank string or a dict with a non-blank ``action`` and, optionally,
+    an ``action_key`` naming the tool call the step expects — the hook adherence
+    and step-level attribution key on), optionally ``preconditions``,
+    ``on_failure``, ``verify``, ``effects``, ``depends_on`` and ``evidence``. The
+    optional fields are validated for shape only when present: ``effects`` and
+    ``evidence`` are lists of strings, ``depends_on`` a list of ``{"ref", "version"}``
+    dicts. A plain string is accepted when it reads as a numbered or bulleted
+    list of at least two steps; anything else is ``not_structured``. Pure; used
+    by ``amfs_core.quality``.
     """
     if isinstance(value, dict):
         out: list[str] = []
@@ -136,15 +159,122 @@ def procedure_issues(value: Any) -> list[str]:
             for step in steps:
                 text = step.get("action") if isinstance(step, dict) else step
                 if isinstance(text, str) and text.strip():
+                    if isinstance(step, dict) and "action_key" in step:
+                        key = step.get("action_key")
+                        if key is not None and (not isinstance(key, str) or not key.strip()):
+                            out.append("malformed_step")
+                            break
                     continue
                 out.append("malformed_step")
                 break
+        for field in ("effects", "evidence"):
+            if field in value and value[field] is not None:
+                items = value[field]
+                if not isinstance(items, list) or not all(
+                    isinstance(i, str) and i.strip() for i in items
+                ):
+                    out.append(f"malformed_{field}")
+        deps = value.get("depends_on")
+        if deps is not None:
+            ok = isinstance(deps, list) and all(
+                isinstance(d, dict)
+                and isinstance(d.get("ref"), str)
+                and d["ref"].strip()
+                and (d.get("version") is None or isinstance(d.get("version"), int))
+                for d in deps
+            )
+            if not ok:
+                out.append("malformed_depends_on")
         return out
     if isinstance(value, str):
         lines = [ln.strip() for ln in value.splitlines() if ln.strip()]
         listed = [ln for ln in lines if _PROCEDURE_STEP_LINE.match(ln)]
         return [] if len(listed) >= 2 else ["not_structured"]
     return ["not_structured"]
+
+
+def procedure_action_keys(value: Any) -> list[str]:
+    """The ``action_key`` each dict step of a procedure names, in order, skipping
+    steps that name none. Empty for string procedures. Pure."""
+    if not isinstance(value, dict):
+        return []
+    steps = value.get("steps")
+    if not isinstance(steps, list):
+        return []
+    out: list[str] = []
+    for step in steps:
+        if isinstance(step, dict):
+            key = step.get("action_key")
+            if isinstance(key, str) and key.strip():
+                out.append(key.strip())
+    return out
+
+
+def preconditions_status(
+    value: Any, environment: Mapping[str, Any] | None
+) -> tuple[str, list[str]]:
+    """Whether a procedure applies to a run in *environment*.
+
+    Returns ``("applicable", [])`` when the procedure states no environment
+    preconditions, when *environment* is empty (nothing to check against — the
+    MCP case), or when every stated one matches. Returns
+    ``("not_applicable", ["runtime: wants python3.12, run has python3.9"])`` on
+    an explicit mismatch, and ``("unknown", ["runtime"])`` when the procedure
+    constrains a key the environment does not report.
+
+    Environment preconditions live in ``value["preconditions"]`` either as a
+    dict (``{"runtime": "python3.12"}``; a list of accepted values is allowed)
+    or, inside a list of preconditions, as dict items of the same shape. String
+    preconditions describe the task and are never matched here. Matching is
+    exact after ``strip()``, or a prefix match when the constraint ends in
+    ``*`` (``"claude-*"``). Pure.
+    """
+    if not isinstance(value, dict):
+        return "applicable", []
+    constraints: dict[str, list[str]] = {}
+    raw = value.get("preconditions")
+    items: list[Any]
+    if isinstance(raw, dict):
+        items = [raw]
+    elif isinstance(raw, list):
+        items = [i for i in raw if isinstance(i, dict)]
+    else:
+        items = []
+    for item in items:
+        for key in PROCEDURE_ENVIRONMENT_PRECONDITIONS:
+            if key not in item or item[key] is None:
+                continue
+            wanted = item[key]
+            values = wanted if isinstance(wanted, list) else [wanted]
+            cleaned = [str(v).strip() for v in values if str(v).strip()]
+            if cleaned:
+                constraints.setdefault(key, []).extend(cleaned)
+    if not constraints:
+        return "applicable", []
+    env = {k: str(v).strip() for k, v in (environment or {}).items() if v is not None}
+    if not env:
+        return "applicable", []
+    unknown: list[str] = []
+    mismatched: list[str] = []
+    for key, wanted in constraints.items():
+        have = env.get(key)
+        if not have:
+            unknown.append(key)
+            continue
+        if any(_precondition_matches(w, have) for w in wanted):
+            continue
+        mismatched.append(f"{key}: wants {' or '.join(wanted)}, run has {have}")
+    if mismatched:
+        return "not_applicable", mismatched
+    if unknown:
+        return "unknown", unknown
+    return "applicable", []
+
+
+def _precondition_matches(wanted: str, have: str) -> bool:
+    if wanted.endswith("*"):
+        return have.startswith(wanted[:-1])
+    return wanted == have
 
 
 #: ``- step``, ``* step``, ``• step``, ``1. step``, ``1) step``.
@@ -888,6 +1018,42 @@ class SessionMetadata(BaseModel):
     tools_available: list[str] = Field(default_factory=list)
     mcp_client_id: str | None = None
     mcp_session_id: str | None = None
+    #: The customer's agent's own version and runtime (``"checkout-bot@2.3.1"``,
+    #: ``"python3.12/linux"``). Together with ``model`` these are the confounders
+    #: a canary or a before/after comparison must hold stable: a change in the
+    #: agent that coincides with a change in its memory would otherwise be
+    #: credited to the memory. Declared here so they survive validation and
+    #: are lifted to reserved trace attributes; both are optional.
+    agent_version: str | None = None
+    runtime: str | None = None
+    #: Where the terminal outcome came from, when the agent did not decide it
+    #: itself: ``"ci"``, ``"human"``, ``"verifier"``, ``"customer"``. An outcome
+    #: that carries ``verified_by`` is external evidence; one without is the
+    #: agent's own declaration. ``evidence`` is a small free-form bag for the
+    #: pointer (``{"run_id": ..., "url": ...}``).
+    verified_by: str | None = None
+    evidence: dict[str, Any] | None = None
+
+
+#: The ``SessionMetadata`` keys that describe the run's environment. A
+#: procedure's ``preconditions`` may constrain any of them; serving code matches
+#: the two (see ``preconditions_status``).
+ENVIRONMENT_KEYS: tuple[str, ...] = ("model", "agent_version", "runtime", "platform")
+
+
+def environment_of(metadata: Mapping[str, Any] | BaseModel | None) -> dict[str, str]:
+    """The environment a session ran in, as ``{key: value}`` for the
+    :data:`ENVIRONMENT_KEYS` that are set. Accepts a ``SessionMetadata``, a plain
+    dict of attributes, or ``None`` (an empty environment)."""
+    if metadata is None:
+        return {}
+    data = metadata.model_dump() if isinstance(metadata, BaseModel) else dict(metadata)
+    out: dict[str, str] = {}
+    for key in ENVIRONMENT_KEYS:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = value.strip()
+    return out
 
 
 class AgentProfile(BaseModel):

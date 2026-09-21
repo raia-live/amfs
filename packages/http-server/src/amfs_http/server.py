@@ -26,6 +26,7 @@ import secrets
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, timezone
+from collections.abc import Mapping
 from typing import Any
 
 import uvicorn
@@ -787,13 +788,16 @@ def _priors_for_retrieve(
     text: str,
     embedder: Any,
     candidate_actions: list[str] | None,
+    environment: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Action priors for ``entity_path`` on tasks like ``text``.
 
     Nearest committed outcomes by task embedding when the store can do that;
     otherwise the most recent outcomes about the entity. ``None`` when the
     adapter has no outcome record at all (filesystem, S3), so the caller sends
-    nothing rather than an empty block.
+    nothing rather than an empty block. *environment* down-weights outcomes
+    recorded under another model / runtime / agent version (the rows carry
+    ``session_metadata`` when the adapter returns it).
     """
     from amfs_core.actions import (
         PRIORS_K,
@@ -827,7 +831,9 @@ def _priors_for_retrieve(
             rows = []
     if not rows and not candidate_actions:
         return None
-    block = aggregate_priors(rows, candidate_actions=candidate_actions)
+    block = aggregate_priors(
+        rows, candidate_actions=candidate_actions, environment=environment or None
+    )
     block["source"] = source
     block["entity_path"] = entity_path
     return block
@@ -2323,6 +2329,29 @@ async def retrieve_entries(
             score *= PROCEDURE_BOOST
         return score
 
+    # Environment scoping: a procedure whose stated environment preconditions
+    # contradict the asking run (``{"runtime": "python3.12"}`` against a
+    # python3.9 run) is a way of doing the task somewhere else. It is dropped
+    # from the hits and named in ``_meta.not_applicable`` so the agent knows a
+    # way exists. Without an environment on the request nothing is dropped.
+    environment = {k: v for k, v in (req.environment or {}).items() if v}
+    not_applicable: list[dict[str, Any]] = []
+    if environment:
+        from amfs_core.models import preconditions_status as _preconditions_status
+
+        kept_env: dict[Any, Any] = {}
+        for ck, slot in candidates.items():
+            entry = slot["entry"]
+            if _is_procedure(entry):
+                status, detail = _preconditions_status(entry.value, environment)
+                if status == "not_applicable":
+                    not_applicable.append({
+                        "entity_path": entry.entity_path, "key": entry.key, "why": detail,
+                    })
+                    continue
+            kept_env[ck] = slot
+        candidates = kept_env
+
     scored: list[tuple[MemoryEntry, float, dict[str, Any]]] = []
     for slot in candidates.values():
         entry = slot["entry"]
@@ -2527,6 +2556,7 @@ async def retrieve_entries(
             text=req.situation or topical,
             embedder=embedder,
             candidate_actions=req.candidate_actions,
+            environment=environment,
         )
         top = head[0][0] if head else None
         recent_failure = bool(
@@ -2575,6 +2605,7 @@ async def retrieve_entries(
             ),
             default=None,
         )
+        hit_statuses = [str(e.evidence_status) for e, _, _ in head if e.evidence_status]
         recommendation = _recommend(
             priors,
             agent_id=req.agent_id or "",
@@ -2583,14 +2614,28 @@ async def retrieve_entries(
             top_hit_recent_failure=recent_failure,
             regime_shift=shifted,
             regime_shift_at=shift_at,
+            abstain=req.abstain,
+            hit_statuses=hit_statuses,
         )
-        if priors is not None or recommendation is not None:
-            out.append({
+        if priors is not None or recommendation is not None or req.abstain or not_applicable:
+            from amfs_core.actions import guidance_strength as _guidance_strength
+
+            meta: dict[str, Any] = {
                 "_meta": True,
                 "priors": priors,
                 "recommendation": recommendation,
                 "regime_shift": shifted,
-            })
+                "guidance_strength": _guidance_strength(
+                    priors, hit_statuses, regime_shift=shifted
+                ),
+            }
+            if not_applicable:
+                meta["not_applicable"] = not_applicable
+            out.append(meta)
+    elif not_applicable:
+        # No priors asked for, but the environment dropped a procedure: say so
+        # in the same trailing element, so the client learns a way exists.
+        out.append({"_meta": True, "not_applicable": not_applicable})
     return out
 
 
@@ -7242,6 +7287,10 @@ async def get_briefing(
     compact: bool = Query(False),
     since: datetime | None = Query(None),
     branch: str | None = Query(None),
+    env_model: str | None = Query(None),
+    env_agent_version: str | None = Query(None),
+    env_runtime: str | None = Query(None),
+    env_platform: str | None = Query(None),
     # See retrieve_entries: injected on the type, defaulted so the handler stays
     # callable in-process without one.
     response: Response = None,
@@ -7254,7 +7303,9 @@ async def get_briefing(
     what changed after that moment — the delta since the last briefing.
     *branch* reads the hot context and evidence sections from that memory
     branch instead of ``main`` — how a repair branch or a canary is briefed
-    before it is merged.
+    before it is merged. The ``env_*`` parameters describe the asking run;
+    with them each procedure in the lead digest is marked applicable or not
+    against its environment preconditions.
 
     *credit_reuse* books the briefing as a real read of the knowledge it
     surfaces. It is off by default and has to be asked for, because the same
@@ -7272,6 +7323,14 @@ async def get_briefing(
     }
     if since is not None:
         briefing_kwargs["since"] = since
+    environment = {
+        k: v for k, v in (
+            ("model", env_model), ("agent_version", env_agent_version),
+            ("runtime", env_runtime), ("platform", env_platform),
+        ) if v
+    }
+    if environment:
+        briefing_kwargs["environment"] = environment
     # Resolved through the routing hook like every other read, then passed only
     # when it is not main so a server-side ``briefing`` that predates the
     # keyword keeps working (``mem.briefing`` here is always current, but the

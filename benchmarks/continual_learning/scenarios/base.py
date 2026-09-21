@@ -64,6 +64,10 @@ class Scenario:
     judge_rubric: str = ""
     agent_base: str = "agent"
     fleet_size: int = 1  # >1: episodes are handled round-robin by N distinct agent identities on one store
+    # Terminal tools whose every call changes the world (an edit, a deploy). The loop counts the
+    # calls that did not resolve the task as ``unnecessary_edits``; empty for scenarios whose
+    # terminal call is an answer rather than a change.
+    edit_tools: tuple[str, ...] = ()
 
     def __init__(self, seed: int, episodes: int, *, distractors: int = 0,
                  label_noise: float = 0.0, feedback_delay: int = 0, fleet: int = 0,

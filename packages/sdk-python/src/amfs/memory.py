@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import math
 import os
 import threading
 import uuid
 from collections import defaultdict
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timezone
 from pathlib import Path
@@ -26,6 +28,7 @@ from amfs_core.exceptions import StaleWriteError
 from amfs_core.lifecycle import LifecycleManager
 from amfs_core import evidence as _evidence
 from amfs_core.models import (
+    ENVIRONMENT_KEYS,
     AttemptRecord,
     Commit,
     ConflictPolicy,
@@ -51,6 +54,7 @@ from amfs_core.models import (
     SessionMetadata,
     ToolCall,
     TraceEntry,
+    environment_of,
 )
 from amfs_core.outcome import OutcomeBackPropagator
 
@@ -202,6 +206,40 @@ def validate_session_attributes(attributes: Any) -> dict[str, str | int | float 
             raise ValueError(
                 f"attribute {key!r} exceeds {SESSION_ATTRIBUTE_VALUE_MAX_LEN} characters"
             )
+        out[key] = value
+    return out
+
+
+#: Attribute the outcome's source travels under, and the prefix its pointers use.
+VERIFIED_BY_ATTRIBUTE = "verified_by"
+EVIDENCE_ATTRIBUTE_PREFIX = "evidence_"
+#: Attribute the served guidance is named under (``amfs_core.render.guidance_id``)
+#: and the count of guidances a session was handed.
+GUIDANCE_ID_ATTRIBUTE = "guidance_id"
+GUIDANCE_COUNT_ATTRIBUTE = "guidance_count"
+
+
+def provenance_attributes(
+    verified_by: str | None, evidence: Mapping[str, Any] | None
+) -> dict[str, str | int | float | bool]:
+    """The session attributes an outcome's provenance travels as: ``verified_by``
+    and one ``evidence_<key>`` per pointer, scalars only (a nested value is
+    JSON-encoded, and anything past the value cap is trimmed with a marker —
+    a pointer, unlike a customer id, loses nothing that matters to a cut).
+    Empty when neither is given, so the common commit is unchanged."""
+    out: dict[str, str | int | float | bool] = {}
+    if isinstance(verified_by, str) and verified_by.strip():
+        out[VERIFIED_BY_ATTRIBUTE] = verified_by.strip().lower()
+    for raw_key, value in (evidence or {}).items():
+        key = f"{EVIDENCE_ATTRIBUTE_PREFIX}{str(raw_key).strip().lower()}"
+        if value is None or len(key) > SESSION_ATTRIBUTE_KEY_MAX_LEN:
+            continue
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            continue
+        if not isinstance(value, _ATTRIBUTE_SCALARS):
+            value = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+        if isinstance(value, str) and len(value) > SESSION_ATTRIBUTE_VALUE_MAX_LEN:
+            value = value[: SESSION_ATTRIBUTE_VALUE_MAX_LEN - 1] + "…"
         out[key] = value
     return out
 
@@ -978,6 +1016,8 @@ class AgentMemory:
         situation: str | None = None,
         compact: bool = False,
         branch: str | None = None,
+        environment: Mapping[str, Any] | None = None,
+        abstain: bool = False,
     ) -> list[ScoredEntry]:
         """Rank memories by meaning for a natural-language query.
 
@@ -1000,9 +1040,17 @@ class AgentMemory:
 
         *branch* defaults to the active branch (``checkout``), so an agent on
         a repair branch retrieves what that branch says, not what ``main`` does.
+
+        *environment* is the run's ``{"model", "agent_version", "runtime"}``;
+        it defaults to what the session already knows (:meth:`environment`),
+        so a session that set ``agent_version`` and ``runtime`` gets procedures
+        scoped to them without passing anything here. Pass ``{}`` to send none.
+        *abstain* asks the server to say so in the recommendation when nothing
+        in scope has been tried or validated.
         """
         cfg = recall_config or RecallConfig()
         resolved_branch = branch or self._branch
+        env = dict(environment) if environment is not None else self.environment()
 
         adapter_retrieve = getattr(self._adapter, "retrieve", None)
         if callable(adapter_retrieve):
@@ -1016,26 +1064,42 @@ class AgentMemory:
                         "situation": situation,
                         "compact": compact,
                     }
+                # Sent only when there is something to send, so an adapter that
+                # predates the keywords is never handed them.
+                if env:
+                    extra["environment"] = env
+                if abstain:
+                    extra["abstain"] = True
                 # Sent only off the default: every adapter's retrieve defaults
                 # to main, and an older one without the keyword would otherwise
                 # raise TypeError here and fall back to local scoring for every
                 # call, not just branched ones.
                 if resolved_branch and resolved_branch != "main":
                     extra["branch"] = resolved_branch
-                rows = adapter_retrieve(
-                    query,
-                    entity_path=entity_path,
-                    min_confidence=min_confidence,
-                    limit=limit,
-                    semantic_weight=cfg.semantic_weight,
-                    recency_weight=cfg.recency_weight,
-                    confidence_weight=cfg.confidence_weight,
-                    include_artifacts=include_artifacts,
-                    evidence_weight=cfg.evidence_weight,
-                    include_discredited=cfg.include_discredited,
-                    include_avoid=cfg.include_avoid,
-                    adaptive_k=cfg.adaptive_k,
-                    **extra,
+                # Shed the keywords an older adapter does not know one at a
+                # time, as ``briefing`` does: once identity or ``Run.begin``
+                # fills the environment it is sent on every call, and a
+                # ``TypeError`` here would otherwise turn every retrieve into
+                # the local fallback.
+                rows = _call_shedding_unknown_keywords(
+                    adapter_retrieve,
+                    {
+                        "query": query,
+                        "entity_path": entity_path,
+                        "min_confidence": min_confidence,
+                        "limit": limit,
+                        "semantic_weight": cfg.semantic_weight,
+                        "recency_weight": cfg.recency_weight,
+                        "confidence_weight": cfg.confidence_weight,
+                        "include_artifacts": include_artifacts,
+                        "evidence_weight": cfg.evidence_weight,
+                        "include_discredited": cfg.include_discredited,
+                        "include_avoid": cfg.include_avoid,
+                        "adaptive_k": cfg.adaptive_k,
+                        **extra,
+                    },
+                    optional=("environment", "abstain", "branch", "situation",
+                              "compact", "candidate_actions", "include_priors"),
                 )
                 scored = [
                     ScoredEntry(entry=entry, score=score, breakdown=breakdown or {})
@@ -1462,6 +1526,8 @@ class AgentMemory:
         entity_paths: list[str] | None = None,
         situation: str | None = None,
         actions_taken: list[dict[str, Any]] | None = None,
+        verified_by: str | None = None,
+        evidence: Mapping[str, Any] | None = None,
     ) -> list[MemoryEntry]:
         """Record an outcome and back-propagate confidence changes.
 
@@ -1472,6 +1538,14 @@ class AgentMemory:
         *situation* is an optional label for the kind of task. *actions_taken*
         is derived from the recorded actions, the attempts and the final action
         index unless given explicitly — see ``amfs_core.actions.actions_taken``.
+
+        *verified_by* says where the outcome came from when the agent did not
+        decide it itself — ``"ci"``, ``"human"``, ``"verifier"``, ``"customer"``.
+        An outcome with it is external evidence; one without is the agent's own
+        declaration, and the repair loop's canary treats the two differently.
+        *evidence* is a small bag of pointers to that source (``{"run_id": ...,
+        "url": ...}``). Both travel as session attributes — ``verified_by`` and
+        ``evidence_<key>`` — so they reach the sealed trace on every path.
 
         If *causal_entry_keys* is ``None``, automatically uses the session's
         read log — every entry this agent read becomes a causal link. When
@@ -1521,7 +1595,9 @@ class AgentMemory:
         ``_last_trace``; only the write is skipped.
         """
         # Validated first so a bad bag fails before anything is written.
-        commit_attributes = validate_session_attributes(attributes)
+        commit_attributes = validate_session_attributes(
+            {**(attributes or {}), **provenance_attributes(verified_by, evidence)}
+        )
         explicit_calls = [
             c for c in (_normalize_llm_call(lc) for lc in (llm_calls or [])) if c is not None
         ]
@@ -2004,6 +2080,22 @@ class AgentMemory:
         _check_attribute_count(merged, "the session attribute bag")
         self._session_attributes = merged
         return dict(self._session_attributes)
+
+    def environment(self) -> dict[str, str]:
+        """The run's environment as the session knows it: ``model``,
+        ``agent_version``, ``runtime`` and ``platform``, read from the session
+        metadata (``set_identity`` / ``set_session_metadata``) and overridden by
+        the session attributes of the same names (``set_session_attributes``).
+        This is what ``briefing`` and ``retrieve`` send by default so procedures
+        are scoped to this run, and what the canary's confounder check reads
+        off the trace. Empty when nothing is known."""
+        env = environment_of(getattr(self, "_session_metadata", None))
+        attributes = getattr(self, "_session_attributes", None) or {}
+        for key in ENVIRONMENT_KEYS:
+            value = attributes.get(key)
+            if isinstance(value, str) and value.strip():
+                env[key] = value.strip()
+        return env
 
     def record_llm_call(
         self,
@@ -2542,6 +2634,7 @@ class AgentMemory:
         credit_reuse: bool = False,
         compact: bool = False,
         since: datetime | None = None,
+        environment: Mapping[str, Any] | None = None,
     ) -> list:
         """Get a ranked briefing of compiled knowledge digests.
 
@@ -2550,6 +2643,8 @@ class AgentMemory:
         trimmed — what an agent needs at the top of a task, at a fraction of
         the tokens. *since* trims the list sections to what changed after that
         moment: the delta since the last briefing, not the whole scope again.
+        *environment* defaults to the session's (:meth:`environment`); with it
+        the lead digest marks each procedure applicable or not to this run.
 
         Returns pre-compiled Digest objects from the Cortex, ranked by
         relevance to the given entity or agent context.
@@ -2577,6 +2672,7 @@ class AgentMemory:
         # proxies to the server which has full Cortex + Postgres access).
         resolved_agent = agent_id or self.agent_id
         resolved_branch = branch or self._branch
+        env = dict(environment) if environment is not None else self.environment()
 
         adapter_briefing = getattr(self._adapter, "briefing", None)
         if callable(adapter_briefing):
@@ -2594,6 +2690,8 @@ class AgentMemory:
                 kwargs["compact"] = True
             if since is not None:
                 kwargs["since"] = since
+            if env:
+                kwargs["environment"] = env
             # The active branch used to be dropped on this path, so a client
             # that had checked out a branch was briefed from main.
             if resolved_branch and resolved_branch != "main":
@@ -2603,7 +2701,7 @@ class AgentMemory:
                 # Newest keyword first: an adapter that predates ``branch`` is
                 # far more likely to know ``compact`` and ``since`` than the
                 # other way round, and each retry costs one round-trip.
-                optional=("branch", "since", "compact", "credit_reuse"),
+                optional=("environment", "branch", "since", "compact", "credit_reuse"),
             )
             return self._book_briefing_lineage(digests, credit_reuse)
 
@@ -2616,6 +2714,9 @@ class AgentMemory:
                 adapter=self._adapter,
                 namespace=self.namespace,
             )
+            service_kwargs: dict[str, Any] = {}
+            if env:
+                service_kwargs["environment"] = env
             return self._book_briefing_lineage(
                 service.briefing(
                     entity_path=entity_path,
@@ -2624,6 +2725,7 @@ class AgentMemory:
                     branch=resolved_branch,
                     compact=compact,
                     since=since,
+                    **service_kwargs,
                 ),
                 credit_reuse,
             )

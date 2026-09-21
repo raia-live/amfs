@@ -8,15 +8,18 @@ memories, not just the most recently written.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from amfs_core.actions import guidance_strength as _guidance_strength
 from amfs_core.authority import rank_authors
 from amfs_core.evidence import DISCREDIT_THRESHOLD as _DISCREDIT_THRESHOLD
 from amfs_core.evidence import SYNTHETIC_KEY_PREFIXES as _SYNTHETIC_PREFIXES
 from amfs_core.evidence import is_synthetic_key as _is_synthetic
 from amfs_core.evidence import regime_shifted as _regime_shifted
 from amfs_core.models import Digest, DigestType, MemoryEntry, SearchQuery
+from amfs_core.models import preconditions_status as _preconditions_status
 
 if TYPE_CHECKING:
     from amfs_postgres.adapter import PostgresAdapter
@@ -124,8 +127,20 @@ class BriefingService:
         branch: str = "main",
         compact: bool = False,
         since: datetime | None = None,
+        environment: Mapping[str, Any] | None = None,
     ) -> list[Digest]:
         """Get a ranked list of relevant digests for the given context.
+
+        *environment* is the asking run's ``{"model", "agent_version",
+        "runtime", "platform"}`` (``amfs_core.models.environment_of``). When
+        given, each procedure in the lead digest is marked ``applicable``,
+        ``not_applicable`` (an environment precondition it states is contradicted;
+        such procedures move to ``procedures_not_applicable``) or ``unknown``
+        (it constrains a key the run did not report). Without it every
+        procedure is applicable, as before. The lead digest also carries
+        ``guidance_strength`` — ``strong`` / ``thin`` / ``none`` — so an agent
+        can tell a scope with validated knowledge from one with only untested
+        notes before it reads either.
 
         Ranking (OSS, rule-based):
         1. Direct entity match (highest)
@@ -182,8 +197,12 @@ class BriefingService:
                     self._inject_consolidation_notice(digests, entity_path, branch)
             else:
                 self._inject_standalone_hot_context(digests, entity_path, branch)
-            self._inject_evidence_sections(digests, entity_path, branch)
-            self._inject_action_sections(digests, entity_path)
+            hit_statuses = self._inject_evidence_sections(
+                digests, entity_path, branch, environment=environment
+            )
+            self._inject_action_sections(
+                digests, entity_path, hit_statuses, environment=environment
+            )
             if not compact:
                 self._inject_who_to_ask(digests, entity_path, agent_id, branch)
             if compact:
@@ -193,11 +212,24 @@ class BriefingService:
 
         return digests
 
-    def _inject_action_sections(self, digests: list[Digest], entity_path: str) -> None:
+    def _inject_action_sections(
+        self,
+        digests: list[Digest],
+        entity_path: str,
+        hit_statuses: list[str] | None = None,
+        *,
+        environment: Mapping[str, Any] | None = None,
+    ) -> None:
         """Attach ``tried_here`` to the lead digest: per-action won/lost on this
         entity from the outcome record (``amfs_core.actions``), plus ``explore``
         — the actions with a thin record, where another try is information.
-        Nothing is attached when the adapter keeps no outcome record."""
+        Nothing is attached when the adapter keeps no outcome record.
+        *hit_statuses* are the evidence statuses of the scope's entries, from
+        the evidence sections, so ``guidance_strength`` can be re-rated with
+        the action record included. *environment* is the caller's model /
+        agent_version / runtime; outcomes recorded under another are
+        down-weighted, as they are for ``retrieve`` priors."""
+        hit_statuses = list(hit_statuses or [])
         lead = self._lead_digest(digests, entity_path)
         if lead is None:
             return
@@ -211,12 +243,17 @@ class BriefingService:
             return
         if not rows:
             return
-        from amfs_core.actions import aggregate_priors
+        from amfs_core.actions import aggregate_priors, guidance_strength
 
-        priors = aggregate_priors(rows)
+        priors = aggregate_priors(rows, environment=environment)
         tried = priors.get("tried") or []
         if not tried:
             return
+        # The evidence sections rated the scope on entries alone; a winning
+        # action record is evidence too, so re-rate with the priors in hand.
+        lead.summary["guidance_strength"] = guidance_strength(
+            priors, hit_statuses, regime_shift=bool(lead.summary.get("regime_shift")),
+        )
         lead.summary["tried_here"] = [
             {
                 "action": t["action_key"],
@@ -347,18 +384,23 @@ class BriefingService:
         digests: list[Digest],
         entity_path: str,
         branch: str,
-    ) -> None:
-        """Attach ``validated``, ``discredited`` and ``regime_shift`` to the lead digest.
+        environment: Mapping[str, Any] | None = None,
+    ) -> list[str]:
+        """Attach ``validated``, ``discredited``, ``procedures``, ``regime_shift``
+        and ``guidance_strength`` to the lead digest.
 
         Two bounded queries over the scope: the highest-priority entries (for
         what has been confirmed) and the lowest-confidence ones (for what has
         been discredited — a discredited entry is under the threshold by
         construction, so ``max_confidence`` finds them without a new column in
         the search API). Any failure leaves the digest as it was.
+
+        Returns the evidence statuses of the entries seen, for the action
+        sections to fold into ``guidance_strength``.
         """
         lead = self._lead_digest(digests, entity_path)
         if lead is None:
-            return
+            return []
         try:
             top = self._search(
                 SearchQuery(
@@ -383,7 +425,7 @@ class BriefingService:
             )
         except Exception:
             logger.debug("Evidence sections failed for %s", entity_path, exc_info=True)
-            return
+            return []
 
         seen: dict[str, MemoryEntry] = {}
         for e in [*top, *low]:
@@ -452,8 +494,11 @@ class BriefingService:
             for e in discredited
         ]
         if procedures:
-            lead.summary["procedures"] = [
-                {
+            applicable_rows: list[dict[str, Any]] = []
+            not_applicable_rows: list[dict[str, Any]] = []
+            for e in procedures:
+                status, detail = _preconditions_status(e.value, environment)
+                row = {
                     "key": e.key,
                     "entity_path": e.entity_path,
                     "confidence": round(e.confidence, 3),
@@ -466,9 +511,24 @@ class BriefingService:
                     "last_outcome_at": (
                         e.last_outcome_at.isoformat() if e.last_outcome_at else None
                     ),
+                    "applicability": status,
                 }
-                for e in procedures
-            ]
+                if detail:
+                    row["applicability_detail"] = detail
+                if status == "not_applicable":
+                    not_applicable_rows.append(row)
+                else:
+                    applicable_rows.append(row)
+            if applicable_rows:
+                lead.summary["procedures"] = applicable_rows
+            if not_applicable_rows:
+                # Kept visible, apart: the agent should know a way exists and
+                # why it does not apply here, not just fail to find it.
+                lead.summary["procedures_not_applicable"] = not_applicable_rows
+        statuses = [e.evidence_status for e in entries if not _is_synthetic(e.key)]
+        lead.summary["guidance_strength"] = _guidance_strength(
+            None, statuses, regime_shift=bool(shifted)
+        )
         if shifted:
             lead.summary["regime_shift"] = {
                 "suspected": True,
@@ -490,6 +550,7 @@ class BriefingService:
                     "prefer entries validated since."
                 ),
             }
+        return statuses
 
     @staticmethod
     def _regime_shift(entries: list[MemoryEntry]) -> list[MemoryEntry]:
@@ -526,7 +587,8 @@ class BriefingService:
             return digests[:1]
         keep = (
             "narrative", "hot_context", "validated", "discredited", "procedures",
-            "regime_shift", "tried_here", "explore",
+            "procedures_not_applicable", "regime_shift", "tried_here", "explore",
+            "guidance_strength",
         )
         summary = {k: lead.summary[k] for k in keep if k in lead.summary}
         narrative = summary.get("narrative")

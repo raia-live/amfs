@@ -126,6 +126,7 @@ def run_cell(cell: Cell, out_path: Path, *, keep_transcript: bool, retry_budget:
     scenario.agent_base = f"{scenario.agent_base}-{suffix}"
     with _sem(cell.arm):
         arm.open(scope)
+        arm.configure(scenario)
         seed_ms = 0.0
         try:
             if arm.has_memory:
