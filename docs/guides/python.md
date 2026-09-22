@@ -476,18 +476,31 @@ run.attempt_failed("pinning urllib3 did not resolve the conflict",
 run.complete(True, verified_by="ci", evidence={"run_id": "98765"},
              response_text=final_answer,
              causal_entry_keys=cited or [guidance.top_key])
+
+# 4. What this run learned, as a claim the record can follow.
+run.learn("pip install fails on a urllib3/requests conflict", "edit:requirements", True,
+          "pinning urllib3<2 resolves it; re-running the install does not")
 ```
 
-**Name what the agent acted on.** `begin` serves several entries and the agent follows one. `causal_entry_keys` on `attempt_failed` and `complete` sends the outcome to that one; left unnamed, *every* entry read since the last boundary is charged, and a correct lesson that merely shared the context with a wrong one loses confidence alongside it — enough of that and the briefing flags a regime shift that never happened. Ask your model to return the keys it used (add a `used_memory_keys` field to its structured output; the keys appear as `entity/key` in the rendered text), intersect them with `guidance.entry_keys`, and fall back to `guidance.top_key`. Bare keys are qualified with the run's `entity_path`; `[]` credits nothing.
+**Name what the agent acted on.** `begin` serves several entries and the agent follows one. `causal_entry_keys` on `attempt_failed` and `complete` sends the outcome to that one; left unnamed, *every* entry read since the last boundary is charged, and a correct lesson that merely shared the context with a wrong one loses confidence alongside it — enough of that and the briefing flags a regime shift that never happened. Ask your model to return the keys it used (add a `used_memory_keys` field to its structured output; the keys appear as `entity/key` in the rendered text), intersect them with `guidance.entry_keys`, and fall back to `guidance.top_key`. When the agent took an action a lesson recommended, `guidance.lessons_claiming(action)` gives the keys of the lessons that claimed it — the causal keys without asking the model. Bare keys are qualified with the run's `entity_path`; `[]` credits nothing.
+
+**Follow the plan, not just the first action.** `guidance.plan` is the order to try actions in for the whole budget: the recommendation's action first, then what has a winning record on tasks like this, then the untried candidates — never an action that failed here. `suggested_action` is one attempt's worth of advice; an agent with three attempts that follows it and fails is otherwise back on its own instinct, which on tasks like this has already failed. The rendered text carries the same order (`Try in this order: …`) and names what not to spend an attempt on.
+
+**Write lessons as claims.** `run.learn(situation, action, worked, text)` writes a structured lesson: *situation* is the kind of task, *action* the `tool:action` key, *worked* the verdict, *text* your agent's words. The claim is `(situation, action, worked)`; the words may change every time. A restated lesson inherits its outcome record instead of opening an untested version, so eight confirmations stay eight, a discredited lesson does not come back clean, and the regime-shift reading — which needs the second failure in a row to land on the same record as the first — can fire. The key is one per situation (`learned-<slug>-<hash>`), so the lesson that said an action worked and the later one that says it did not are versions of one entry. Renders as `When: <situation>. <action> worked. <text>`.
+
+**Memory being down is not your agent being down.** If the retrieve behind `begin()` fails (a timeout, a 5xx), `begin` returns empty guidance with `error` set instead of raising; the run continues without guidance and `complete()` still seals the outcome. `on_tool_result` returns `None` in the same case.
 
 `Guidance` carries:
 
 | Field | Meaning |
 |-------|---------|
-| `text` | Rendered blocks — procedures first, then memory context, then `Not for this run`, then priors and the recommendation — in the same shape a tuned model is trained on (`amfs_core.render`). |
+| `text` | Rendered blocks — procedures first, then memory context, then `Not for this run`, then priors, the recommendation, what not to retry, and the plan — in the same shape a tuned model is trained on (`amfs_core.render`). |
 | `strength` | `strong` / `thin` / `none`. `should_inject()` is true for the first two. |
 | `procedures` / `not_applicable` | Procedures that apply to this run, and those whose environment preconditions it contradicts (with `applicability_detail`). Never inject one from `not_applicable`. |
-| `recommendation` | `act` / `explore` / `escalate` / `abstain` with `suggested_action` and `why`; `priors` holds the per-action record. |
+| `recommendation` | `act` / `explore` / `escalate` / `abstain` with `suggested_action`, `why` and `plan`; `priors` holds the per-action record. |
+| `plan` / `next_action` | The order to try actions in (see above); `next_action` is its first entry. Computed from the priors when the server sent none. |
+| `lessons` / `lessons_claiming(action)` | The structured lessons this run was shown, and the keys of those that claimed *action* worked — the causal keys for an outcome of taking it. |
+| `error` | Why the guidance is empty when memory could not be reached; `None` when the read succeeded. |
 | `guidance_id` | Names what was served (branch, entries and versions, render version). Stamped on the session as `guidance_id` / `guidance_count`, so the sealed trace says which guidance the agent saw. |
 
 `model`, `agent_version` and `runtime` on `begin()` are the run's environment. They scope procedures to this run, and they are stamped on the sealed trace (`model` as its own field as well as an attribute) — which is what the repair loop's feedback contract reads: an automatic policy ships and rolls back fixes only when enough of your runs record which model and which version of your agent ran them, or a model swap on your side would be blamed on the fix. Pass them on every `begin`.

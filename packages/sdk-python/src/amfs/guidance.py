@@ -18,14 +18,23 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
-from amfs_core.actions import guidance_strength, pooled_classes, priors_local, render_priors
+from amfs_core.actions import (
+    guidance_strength,
+    plan_actions,
+    pooled_classes,
+    priors_local,
+    render_priors,
+)
+from amfs_core.lessons import lesson_of
 from amfs_core.render import (
     ContextEntry,
-    guidance_id as _guidance_id,
     render_context,
     render_procedures,
+)
+from amfs_core.render import (
+    guidance_id as _guidance_id,
 )
 
 #: Strength labels, in order of how much an agent should lean on the text.
@@ -61,6 +70,15 @@ class Guidance:
     recommendation: dict[str, Any] | None = None
     #: Whether the scope shows a regime shift (long-validated rules failing).
     regime_shift: bool = False
+    #: Why the guidance is empty when memory could not be reached: the
+    #: transport error, as text. ``None`` when the read succeeded (an empty
+    #: guidance with no error means memory had nothing to say).
+    error: str | None = None
+    #: The actions the run said it could take, when it said so. A plan computed
+    #: on the client (:attr:`plan`) is drawn from these only: a retry that asks
+    #: for guidance over the actions it has not tried must not be handed the
+    #: one that just failed because the situation's record has it as a winner.
+    candidate_actions: list[str] | None = None
 
     @property
     def mode(self) -> str | None:
@@ -70,6 +88,79 @@ class Guidance:
     @property
     def suggested_action(self) -> str | None:
         return (self.recommendation or {}).get("suggested_action")
+
+    @property
+    def plan(self) -> list[str]:
+        """The order to try actions in, for the whole budget — the
+        recommendation's action first, then what has a winning record here,
+        then the untried candidates, never what failed here (see
+        :func:`amfs_core.actions.plan_actions`). Computed from the priors
+        when the server did not send one. Empty when there is nothing to order."""
+        if self.mode not in ("act", "explore"):
+            # An abstain, or no recommendation at all: the record here is not
+            # about this task, and an order drawn from it would be advice with
+            # nothing behind it.
+            return []
+        sent = (self.recommendation or {}).get("plan")
+        if isinstance(sent, list) and sent:
+            plan = [str(a) for a in sent]
+        elif self.priors:
+            plan = plan_actions(
+                self.priors, self.recommendation, candidate_actions=self.candidate_actions,
+            )
+        else:
+            return []
+        if self.candidate_actions:
+            allowed = set(self.candidate_actions)
+            plan = [a for a in plan if a in allowed]
+        return plan
+
+    @property
+    def next_action(self) -> str | None:
+        """The first action of the plan, or the suggested action, or ``None``.
+        Never an action outside :attr:`candidate_actions` when the run named
+        them: a suggestion the run said it cannot (or will not again) take is
+        no next action."""
+        plan = self.plan
+        if plan:
+            return plan[0]
+        suggested = self.suggested_action
+        if suggested and self.candidate_actions and suggested not in self.candidate_actions:
+            return None
+        return suggested
+
+    @property
+    def lessons(self) -> list[dict[str, Any]]:
+        """The structured lessons among the shown entries, each as ``{"key":
+        "entity_path/key", "situation", "action", "worked", "text",
+        "evidence_status"}`` in rendered order. What :meth:`amfs.run.Run.learn`
+        wrote and this run was shown."""
+        out: list[dict[str, Any]] = []
+        for e in self.shown:
+            lesson = lesson_of(e.value)
+            if lesson is None:
+                continue
+            out.append({
+                "key": f"{e.entity_path}/{e.key}",
+                "situation": lesson["situation"],
+                "action": lesson["action"],
+                "worked": lesson["worked"],
+                "text": lesson.get("text"),
+                "evidence_status": e.evidence_status,
+            })
+        return out
+
+    def lessons_claiming(self, action: str, *, worked: bool = True) -> list[str]:
+        """Keys of the shown lessons that claim *action* worked (or, with
+        ``worked=False``, did not). The causal keys for an outcome of taking
+        that action: a run that took ``fix:fix_code`` because a lesson said
+        so credits — or charges — that lesson and not the others it was
+        shown. Pass the result as *causal_entry_keys* to
+        :meth:`amfs.run.Run.complete` or :meth:`amfs.run.Run.attempt_failed`."""
+        return [
+            lesson["key"] for lesson in self.lessons
+            if lesson["action"] == action and bool(lesson["worked"]) is worked
+        ]
 
     @property
     def is_empty(self) -> bool:
@@ -107,6 +198,16 @@ class Guidance:
         can inject on ``not is_empty`` instead."""
         return not self.is_empty and self.strength != "none"
 
+    @classmethod
+    def unavailable(cls, error: str, *, branch: str = "main") -> Guidance:
+        """The guidance for a run whose memory read failed: empty, strength
+        ``none``, the error kept. The agent runs on its own for this task,
+        which is what it did before memory; the alternative — an exception
+        out of ``begin`` — took the whole worker thread down on the demo when
+        one ``/search`` timed out."""
+        return cls(text="", strength="none", guidance_id=_guidance_id([], branch=branch),
+                   branch=branch, error=error)
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "guidance_id": self.guidance_id,
@@ -118,6 +219,8 @@ class Guidance:
             "not_applicable": [p.get("key") for p in self.not_applicable],
             "entries": [f"{e.entity_path}/{e.key}" for e in self.entries],
             "regime_shift": self.regime_shift,
+            "plan": self.plan,
+            "error": self.error,
         }
 
     # ------------------------------------------------------------------
@@ -133,6 +236,7 @@ class Guidance:
         meta: Mapping[str, Any] | None = None,
         branch: str = "main",
         entity_path: str | None = None,
+        candidate_actions: Sequence[str] | None = None,
     ) -> Guidance:
         """Assemble guidance from what the SDK already returns.
 
@@ -189,7 +293,7 @@ class Guidance:
                 why = "; ".join(str(d) for d in (p.get("applicability_detail") or []))
                 lines.append(f"- {p.get('entity_path')}/{p.get('key')}" + (f" ({why})" if why else ""))
             blocks.append("Not for this run:\n" + "\n".join(lines))
-        priors_block = render_priors(priors, recommendation)
+        priors_block = render_priors(priors, recommendation, candidate_actions=candidate_actions)
         if priors_block:
             blocks.append(priors_block)
         if regime_shift:
@@ -212,6 +316,7 @@ class Guidance:
             priors=priors if isinstance(priors, dict) else None,
             recommendation=recommendation if isinstance(recommendation, dict) else None,
             regime_shift=regime_shift,
+            candidate_actions=[str(a) for a in candidate_actions] if candidate_actions else None,
         )
 
 

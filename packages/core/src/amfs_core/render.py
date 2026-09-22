@@ -22,6 +22,7 @@ from typing import Any
 
 from .actions import action_key as _action_key
 from .evidence import is_synthetic_key, is_training_excluded_key
+from .lessons import lesson_of, render_lesson
 
 #: Confidence buckets, in the order they render. Coarse on purpose: a prompt keyed
 #: on the second decimal of an evidence posterior would make near-identical
@@ -53,7 +54,7 @@ PROCEDURE_TYPE = "procedure"
 #: Version of the rendering below. The managed-models renderer keeps its own
 #: ``RENDERER_VERSION`` and re-exports these functions; this one lets a
 #: ``guidance_id`` name the shape of the text it hashes.
-RENDER_VERSION = "v4"
+RENDER_VERSION = "v5"   # v5: structured lessons render as their claim
 
 
 def confidence_bucket(confidence: float) -> str:
@@ -116,7 +117,18 @@ class ContextEntry:
             f"({confidence_bucket(self.confidence)}, {self.evidence_label()})"
         )
 
+    @property
+    def is_lesson(self) -> bool:
+        """A structured lesson (:mod:`amfs_core.lessons`): a claim on
+        ``(situation, action, worked)`` with the agent's words after it."""
+        return lesson_of(self.value) is not None
+
     def render(self) -> str:
+        if self.is_lesson:
+            # The claim first, in a fixed shape: the same lesson renders the
+            # same line whatever the agent's phrasing, so a model sees one
+            # example per lesson and the guidance id names one claim.
+            return f"- {self._heading()}: {render_lesson(self.value)}"
         return f"- {self._heading()}: {_stringify(self.value)}"
 
     def render_procedure(self) -> str:

@@ -189,12 +189,36 @@ def test_a_winner_that_lost_its_last_three_is_not_acted_on() -> None:
     assert rec["suggested_action"] in stale["untried"]
     assert rec["stopped_working"] == ["fix:rerun_job"]
     assert "stopped working" in rec["why"] and "8/11" in rec["why"]
-    # Two losses are not a streak: the lifetime record still stands.
-    fresh = {"tried": [_prior("fix:rerun_job", 8, 10, ["lost", "lost", "won"])], "untried": ["fix:fix_code"]}
+    # One loss against a run of wins is forgiven: the lifetime record still stands.
+    fresh = {"tried": [_prior("fix:rerun_job", 8, 9, ["lost", "won", "won"])], "untried": ["fix:fix_code"]}
     assert act.recommend(fresh, candidate_actions=cands)["mode"] == "act"
     # The streak shows in the rendered line, so the agent reads it without the recommendation.
     assert "fix:rerun_job 8/11, lost last 3" in act.render_priors(stale, None)
     assert "lost last" not in act.render_priors(fresh, None)
+
+
+def test_a_validated_winner_that_lost_its_last_two_has_turned() -> None:
+    """The action-level regime rule, the same line ``regime_shifted`` draws for
+    entries: one failure against a run of wins is forgiven, the second in a row
+    is not. Ops-queue CI demo, 2026-09-22: after the change ``rerun_job`` 3/4
+    with its newest take lost was still ``act`` on the next flaky task, and the
+    one after; three CI runs a task until the third loss. The entry-level rule
+    never fired because the agent had rewritten its lesson ("no fix known") and
+    the rewrite opened a claim with an empty record; the situation's action
+    record keeps every take."""
+    cands = ["fix:rerun_job", "fix:fix_code", "fix:edit_generated_file"]
+    two = {"tried": [_prior("fix:rerun_job", 8, 10, ["lost", "lost", "won"])], "untried": ["fix:fix_code", "fix:edit_generated_file"]}
+    rec = act.recommend(two, agent_id="a", candidate_actions=cands)
+    assert act.turned(two["tried"][0])
+    assert rec["mode"] == "explore"
+    assert rec["stopped_working"] == ["fix:rerun_job"]
+    assert "lost its last 2" in rec["why"]
+    assert "fix:rerun_job 8/10, lost last 2" in act.render_priors(two, None)
+    # Not a *validated* action: a 1/3 that lost twice is a poor record, not a turn.
+    thin = {"tried": [_prior("fix:rerun_job", 1, 3, ["lost", "lost", "won"])], "untried": ["fix:fix_code"]}
+    assert not act.turned(thin["tried"][0])
+    # The strength label reads the same rule: a turned winner is not strong.
+    assert act.guidance_strength(two, []) == "thin"
 
 
 def test_an_action_tried_once_and_lost_does_not_block_explore() -> None:
@@ -562,6 +586,159 @@ def test_recommend_abstains_over_a_pooled_record_instead_of_naming_either_class_
     assert act.recommend(pr, agent_id="x") is None
     # A pooled record is not strong guidance, whatever its winners' ratios.
     assert act.guidance_strength(pr, ["untested"]) == "thin"
+
+
+def _two_classes_apart():
+    """The same neighbourhood as measured on the live demo (2026-09-22): the
+    backend PRs sit at weight ~1.0 against a backend query, the UI PRs — same
+    jest check, a UI file changed — at 0.25-0.38. The UI class is a neighbour
+    the query resembles, not a second class under the same description."""
+    return act.neighbourhood_weights([
+        _contrast_row("fix:update_snapshots", "fix:fix_code", sim=0.96, days_ago=4, ref="nonui-1"),
+        _contrast_row("fix:fix_code", "fix:update_snapshots", sim=0.93, days_ago=3, ref="ui-1"),
+        _contrast_row("fix:update_snapshots", "fix:fix_code", sim=0.96, days_ago=2, ref="nonui-2"),
+        _contrast_row("fix:fix_code", "fix:update_snapshots", sim=0.93, days_ago=1, ref="ui-2"),
+    ])
+
+
+def test_a_neighbouring_class_at_lower_weight_is_not_a_pooled_contradiction() -> None:
+    pr = act.aggregate_priors(_two_classes_apart())
+    ws = sorted({round(c["weight"], 2) for c in pr["contrasts"]})
+    assert ws[0] < act.POOLED_WEIGHT_RATIO * ws[-1], "the fixture must keep the classes apart in weight"
+    assert act.pooled_classes(pr["contrasts"]) is None
+    # The neighbourhood-weighted record names this class's fix: fix_code's two
+    # wins weigh 1.0 each, its two losses on the UI PRs ~0.37 each.
+    by = {t["action_key"]: t for t in pr["tried"]}
+    assert by["fix:fix_code"]["p"] >= act.ACT_MIN_P > by["fix:update_snapshots"]["p"]
+    assert by["fix:fix_code"]["lost_w"] < by["fix:fix_code"]["won_w"]
+    rec = act.recommend(pr, agent_id="x", abstain=True)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "fix:fix_code"
+    assert act.guidance_strength(pr, []) == "strong"
+    # And the UI PR's newest loss for fix_code does not turn the backend
+    # contrast: a loss weighing 0.37 against a pair weighing 1.0.
+    text = act.render_priors(pr, rec)
+    assert "alternating over time" not in text
+    assert "fix:update_snapshots failed and fix:fix_code resolved it" in text
+
+
+def test_a_loss_as_near_as_the_contrast_still_turns_it() -> None:
+    """The flip case the weight rule must not undo: B resolved a task, then lost
+    on an equally near one. Newest-wins stands."""
+    pr = act.aggregate_priors(act.neighbourhood_weights([
+        _contrast_row("resolve:a", "resolve:b", sim=0.95, days_ago=2),
+        _row([("resolve:b", False)], sim=0.95, days_ago=1),
+    ]))
+    by = {t["action_key"]: t for t in pr["tried"]}
+    assert by["resolve:b"]["lost_w"] >= act.POOLED_WEIGHT_RATIO * pr["contrasts"][0]["weight"]
+    rec = act.recommend(pr, agent_id="x")
+    assert rec is None or rec["suggested_action"] != "resolve:b"
+
+
+def test_a_lone_winner_is_acted_on_when_everything_else_tried_has_failed() -> None:
+    """Ops-queue CI demo, 2026-09-22, task 29: the changed class had been solved
+    once (edit_generated_file 1/1) and every other action was 0/n or on a
+    streak. With ``ACT_MIN_N`` alone there was nothing to say, and the task was
+    brute-forced again and missed."""
+    cands = ["fix:rerun_job", "fix:fix_code", "fix:run_formatter", "fix:edit_generated_file",
+             "fix:regen_migrations", "fix:add_audit_exception"]
+    pr = {"tried": [_prior("fix:edit_generated_file", 1, 1, ["won"], p=0.66),
+                    _prior("fix:rerun_job", 3, 6, ["lost", "lost", "lost"], p=0.5),
+                    _prior("fix:run_formatter", 0, 1, ["lost"], p=0.34),
+                    _prior("fix:fix_code", 0, 3, ["lost", "lost", "lost"], p=0.2)],
+          "untried": ["fix:regen_migrations", "fix:add_audit_exception"]}
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "fix:edit_generated_file"
+    assert "only action that has worked" in rec["why"] and "fix:fix_code 0/3" in rec["why"]
+    assert rec["plan"][0] == "fix:edit_generated_file"
+    # One win with nothing else tried is a hint, not the best of the known options.
+    alone = {"tried": [_prior("fix:edit_generated_file", 1, 1, ["won"], p=0.66)], "untried": cands[:2]}
+    assert act.recommend(alone, agent_id="a", candidate_actions=cands) is None
+    # A lone win whose newest take lost is not a winner either.
+    turned = dict(pr, tried=[_prior("fix:edit_generated_file", 1, 2, ["lost", "won"], p=0.5)] + pr["tried"][1:])
+    rec = act.recommend(turned, agent_id="a", candidate_actions=cands)
+    assert rec is None or rec["suggested_action"] != "fix:edit_generated_file"
+    # Not read over the entity-wide fallback: one win there is not known to be about this task.
+    assert act.recommend(pr, agent_id="a", candidate_actions=cands, priors_are_local=False) is None
+
+
+def test_the_plan_covers_the_budget_and_never_repeats_what_failed_here() -> None:
+    """Task 23 of the same run: ``act -> rerun_job`` (3/4, newest lost — one loss,
+    forgiven), then the agent's own second and third choices were fix_code
+    (already 0/2 on this situation) and a guess. The plan puts the untried
+    actions second and third and the known failures last."""
+    cands = ["fix:rerun_job", "fix:fix_code", "fix:run_formatter", "fix:update_snapshots",
+             "fix:regen_migrations", "fix:bump_dependency", "fix:add_audit_exception", "fix:edit_generated_file"]
+    pr = {"tried": [_prior("fix:rerun_job", 3, 4, ["lost", "won", "won"]),
+                    _prior("fix:fix_code", 0, 2, ["lost", "lost"]),
+                    _prior("fix:run_formatter", 0, 1, ["lost"])],
+          "untried": ["fix:update_snapshots", "fix:regen_migrations", "fix:bump_dependency",
+                      "fix:add_audit_exception", "fix:edit_generated_file"]}
+    rec = act.recommend(pr, agent_id="ci-agent-a", candidate_actions=cands)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "fix:rerun_job"
+    plan = rec["plan"]
+    assert plan[0] == "fix:rerun_job"
+    assert len(plan) == len(set(plan)) <= act.PLAN_MAX
+    assert set(plan[1:]) <= set(pr["untried"]), "second and third choices are untried actions, not known failures"
+    assert "fix:fix_code" not in plan
+    # Two agents on the same problem start their exploration at different actions.
+    other = act.recommend(pr, agent_id="ci-agent-b", candidate_actions=cands)["plan"]
+    assert other[0] == plan[0] and other[1:] != plan[1:]
+    # Restricted to the candidates the caller still has (a retry after rerun_job
+    # failed): the plan is over those, and the recommendation's action leads.
+    left = [a for a in cands if a != "fix:rerun_job"]
+    rec = act.recommend(pr, agent_id="ci-agent-a", candidate_actions=left)
+    assert "fix:rerun_job" not in rec["plan"] and rec["plan"]
+    # Under a turned winner the explore pick leads and the turned action is not
+    # ahead of the untried ones.
+    two = dict(pr, tried=[_prior("fix:rerun_job", 3, 5, ["lost", "lost", "won"])] + pr["tried"][1:])
+    rec = act.recommend(two, agent_id="ci-agent-a", candidate_actions=cands)
+    assert rec["mode"] == "explore" and rec["plan"][0] == rec["suggested_action"]
+    assert rec["plan"].index("fix:rerun_job") > 2 if "fix:rerun_job" in rec["plan"] else True
+    # No priors, no plan; a bare untried list still yields one.
+    assert act.plan_actions(None) == []
+    assert act.plan_actions({"tried": [], "untried": ["a", "b"]}, agent_id="x") == ["a", "b"] or \
+        act.plan_actions({"tried": [], "untried": ["a", "b"]}, agent_id="x") == ["b", "a"]
+
+
+def test_render_priors_gives_the_order_and_what_not_to_retry() -> None:
+    cands = ["fix:rerun_job", "fix:fix_code", "fix:edit_generated_file", "fix:regen_migrations"]
+    pr = {"tried": [_prior("fix:rerun_job", 3, 4, ["lost", "won", "won"]),
+                    _prior("fix:fix_code", 0, 2, ["lost", "lost"])],
+          "untried": ["fix:edit_generated_file", "fix:regen_migrations"]}
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    text = act.render_priors(pr, rec)
+    assert "Do not spend an attempt on: fix:fix_code (0/2)" in text
+    assert "Try in this order: fix:rerun_job -> fix:" in text
+    assert text.index("Recommendation:") < text.index("Try in this order")
+    # A turned winner is named as such in the avoid line.
+    two = dict(pr, tried=[_prior("fix:rerun_job", 3, 5, ["lost", "lost", "won"])] + pr["tried"][1:])
+    text = act.render_priors(two, act.recommend(two, agent_id="a", candidate_actions=cands))
+    assert "fix:rerun_job (3/5, stopped working)" in text
+    # Escalate: nothing to try, no order given.
+    firm = {"tried": [_prior("fix:a", 0, 3, ["lost"] * 3), _prior("fix:b", 0, 3, ["lost"] * 3)], "untried": []}
+    rec = act.recommend(firm, agent_id="a", candidate_actions=["fix:a", "fix:b"])
+    assert rec["mode"] == "escalate"
+    assert "Do not spend" not in act.render_priors(firm, rec)
+    # The order names candidates only, whether computed here or sent by the server.
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    text = act.render_priors(pr, rec, candidate_actions=["fix:edit_generated_file", "fix:regen_migrations"])
+    assert "fix:rerun_job" not in text.split("Try in this order:")[1]
+    sent = dict(rec, plan=["fix:rerun_job", "fix:edit_generated_file", "fix:regen_migrations"])
+    text = act.render_priors(pr, sent, candidate_actions=["fix:edit_generated_file", "fix:regen_migrations"])
+    assert "Try in this order: fix:edit_generated_file -> fix:regen_migrations." in text
+    # The recommendation line does not name a barred action either, and the
+    # untried list is drawn from the candidates: a retry's text names nothing
+    # it has ruled out.
+    assert rec["suggested_action"] == "fix:rerun_job"
+    assert "Recommendation: act." in text and "-> fix:rerun_job" not in text
+    with_untried = dict(pr, untried=["fix:rerun_job", "fix:regen_migrations"])
+    text = act.render_priors(with_untried, rec, candidate_actions=["fix:edit_generated_file", "fix:regen_migrations"])
+    assert "Not yet tried here: fix:regen_migrations\n" in text
+    # No recommendation, or an abstain: the record is shown, no order is given.
+    assert "Try in this order" not in act.render_priors(pr, None)
+    assert "Do not spend" not in act.render_priors(pr, None)
+    assert "Try in this order" not in act.render_priors(pr, {"mode": "abstain", "why": "pooled"})
+    assert "Tried on similar tasks here" in act.render_priors(pr, None)
 
 
 def test_render_priors_states_the_contradiction_once() -> None:
