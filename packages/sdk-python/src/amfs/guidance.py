@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from amfs_core.actions import guidance_strength, render_priors
+from amfs_core.actions import guidance_strength, pooled_classes, priors_local, render_priors
 from amfs_core.render import (
     ContextEntry,
     guidance_id as _guidance_id,
@@ -254,11 +254,19 @@ def _strength(
     """The server's label when it sent one, else computed from what we have.
     ``strong`` from either source wins; otherwise the weaker of the two is
     taken, because a scope the briefing rated ``none`` is not made ``thin`` by
-    hits the retrieve happened to find."""
-    labels = [
-        s for s in (lead.get("guidance_strength"), meta.get("guidance_strength"))
-        if s in STRENGTHS
-    ]
+    hits the retrieve happened to find.
+
+    One exception: when the retrieve's own neighbourhood is pooled — its
+    priors say near-identical tasks here were resolved by contradicting
+    actions and ``recommend`` abstained — the briefing's ``strong`` does not
+    stand. That label is rated over the entity's whole record, and the winner
+    it saw is the very action that won on the other class half the time; the
+    retrieve is the reading scoped to this task, and it says ``thin``."""
+    briefing_label = lead.get("guidance_strength")
+    retrieve_label = meta.get("guidance_strength")
+    if _neighbourhood_pooled(meta, priors) and retrieve_label in STRENGTHS:
+        return retrieve_label
+    labels = [s for s in (briefing_label, retrieve_label) if s in STRENGTHS]
     if not labels:
         statuses = [e.evidence_status for e in entries]
         return guidance_strength(
@@ -267,6 +275,19 @@ def _strength(
     if "strong" in labels:
         return "strong"
     return "none" if "none" in labels else "thin"
+
+
+def _neighbourhood_pooled(meta: Mapping[str, Any], priors: Any) -> bool:
+    """Whether the retrieve's local priors describe two kinds of task pooled
+    under one description: the recommendation carries ``pooled`` when the
+    caller asked to be told, and the contrasts say so themselves when it did
+    not. Entity-wide priors are never read for it (see ``priors_local``)."""
+    rec = meta.get("recommendation")
+    if isinstance(rec, Mapping) and rec.get("pooled"):
+        return True
+    if not isinstance(priors, Mapping) or not priors_local(priors):
+        return False
+    return pooled_classes(list(priors.get("contrasts") or [])) is not None
 
 
 __all__ = ["Guidance", "STRENGTHS"]
