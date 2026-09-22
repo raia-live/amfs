@@ -29,7 +29,10 @@ dependencies = [
     # agent's private keys. Either way the floor is what makes the rule real.
     "amfs-core>=0.3.37",
     "fastapi>=0.115",
-    "uvicorn[standard]>=0.32",
+    # 0.37 is where uvicorn.run() grew timeout_worker_healthcheck, which
+    # main() passes unconditionally; on anything older that is a TypeError
+    # before the first socket is bound, one worker or twenty.
+    "uvicorn[standard]>=0.37",
     "sse-starlette>=2.0",
     "httpx>=0.27",
 ]

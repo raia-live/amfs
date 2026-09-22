@@ -154,6 +154,21 @@ def test_main_passes_the_healthcheck_window_to_uvicorn(monkeypatch, no_db) -> No
     assert ran.get("timeout_worker_healthcheck") == 90
 
 
+def test_the_uvicorn_floor_is_where_the_healthcheck_argument_appeared() -> None:
+    """main() passes timeout_worker_healthcheck unconditionally; uvicorn grew it in 0.37.0.
+
+    The lock resolves higher, so this guards the *declared* floor, which is
+    what anyone installing the package against their own pins gets.
+    """
+    import re
+    from pathlib import Path
+
+    pyproject = (Path(server.__file__).parents[2] / "pyproject.toml").read_text()
+    m = re.search(r'"uvicorn\[standard\]>=(\d+)\.(\d+)', pyproject)
+    assert m, "uvicorn floor not declared"
+    assert (int(m.group(1)), int(m.group(2))) >= (0, 37)
+
+
 @pytest.mark.parametrize("raw,expected", [("1", True), ("true", True), ("YES", True), ("on", True),
                                           ("0", False), ("", False), ("false", False)])
 def test_env_flag(monkeypatch, raw, expected) -> None:
