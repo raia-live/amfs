@@ -15,11 +15,15 @@ Three things had to hold before ``--workers`` above one was safe:
 from __future__ import annotations
 
 import argparse
+import ast
 import builtins
 import inspect
 import io
 import os
 import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from amfs_http import server
@@ -263,6 +267,244 @@ def test_sync_bodied_routes_are_plain_def(name) -> None:
     )
     src = inspect.getsource(fn)
     assert "await " not in src, f"{name} gained an await; make it async def again"
+
+
+# Routes that are async without awaiting anything, on purpose: the health
+# probes must answer even when every threadpool token is taken, and ``stream``
+# subscribes an asyncio queue that has to be created on the serving loop.
+LOOP_ROUTES_WITHOUT_AWAIT = {"root", "health", "health_v1", "stream"}
+
+
+def _route_handlers() -> list[ast.AsyncFunctionDef | ast.FunctionDef]:
+    tree = ast.parse(Path(inspect.getsourcefile(server)).read_text())
+    out = []
+    for node in tree.body:
+        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            continue
+        for d in node.decorator_list:
+            if isinstance(d, ast.Call) and getattr(d.func, "attr", "") in (
+                "get", "post", "put", "delete", "patch",
+            ):
+                out.append(node)
+                break
+    return out
+
+
+def test_no_route_is_async_def_without_an_await() -> None:
+    """The Agents page froze prod for 160 s per load through this hole.
+
+    ``recompute_clusters``, ``list_agents_enriched`` and ``reuse_summary`` were
+    ``async def`` with fully synchronous bodies, so a minutes-long compile ran
+    on the event loop and every other request on the instance waited. An
+    await-less ``async def`` route is always this bug: FastAPI would run the
+    same body on the threadpool if it were a plain ``def``.
+    """
+    offenders = []
+    for node in _route_handlers():
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        if node.name in LOOP_ROUTES_WITHOUT_AWAIT:
+            continue
+        awaits = any(
+            isinstance(x, (ast.Await, ast.AsyncFor, ast.AsyncWith))
+            for x in ast.walk(node)
+        )
+        if not awaits:
+            offenders.append(node.name)
+    assert offenders == [], (
+        "async def routes with no await run their whole body on the event loop; "
+        f"make them plain def (or add them to LOOP_ROUTES_WITHOUT_AWAIT with a reason): {offenders}"
+    )
+    assert len(_route_handlers()) > 100, "the route scan found too little to be trusted"
+
+
+def test_the_allowlisted_loop_routes_still_exist_and_are_async() -> None:
+    names = {n.name for n in _route_handlers() if isinstance(n, ast.AsyncFunctionDef)}
+    assert LOOP_ROUTES_WITHOUT_AWAIT <= names
+
+
+# ── Cluster recompute: one compile at a time, reused within the window ────
+
+
+class _ClusterCompileSpy:
+    def __init__(self, calls: list, gate: threading.Event | None = None):
+        self.calls, self.gate = calls, gate
+
+    def __call__(self, *, adapter, namespace):
+        return self
+
+    def compile(self, scope):
+        self.calls.append((scope, threading.current_thread().name))
+        if self.gate is not None:
+            self.gate.wait(5)
+
+
+def _wire_recompute(monkeypatch, calls, gate=None):
+    from amfs_postgres.adapter import PostgresAdapter
+
+    adapter = object.__new__(PostgresAdapter)
+    mem = SimpleNamespace(_adapter=adapter, namespace="acct-1")
+    monkeypatch.setattr(server, "_get_memory", lambda: mem)
+    import amfs_cortex.compiler as compiler_mod
+
+    monkeypatch.setattr(compiler_mod, "DigestCompiler", _ClusterCompileSpy(calls, gate))
+    server._cluster_recompute_last.clear()
+
+
+def _req(account_id: str | None = None):
+    state = SimpleNamespace()
+    if account_id is not None:
+        state.account_id = account_id
+    return SimpleNamespace(state=state)
+
+
+def test_recompute_is_a_plain_def_and_compiles_once_per_window(monkeypatch) -> None:
+    calls: list = []
+    _wire_recompute(monkeypatch, calls)
+    assert not inspect.iscoroutinefunction(server.recompute_clusters)
+
+    assert server.recompute_clusters(_req()) == {"ok": True}
+    assert server.recompute_clusters(_req()) == {"ok": True, "skipped": "recent"}
+    assert server.recompute_clusters(_req(), force=True) == {"ok": True}
+    assert [c[0] for c in calls] == ["cluster:account:acct-1"] * 2
+
+
+def test_recompute_window_expires(monkeypatch) -> None:
+    calls: list = []
+    _wire_recompute(monkeypatch, calls)
+    monkeypatch.setattr(server, "_CLUSTER_RECOMPUTE_MIN_INTERVAL_S", 0.0)
+    server.recompute_clusters(_req())
+    server.recompute_clusters(_req())
+    assert len(calls) == 2
+
+
+def test_recompute_window_is_per_tenant_account(monkeypatch) -> None:
+    """Multi-tenant prod runs every account under one namespace behind RLS.
+
+    One account's compile must not mark the next account on the same instance
+    as fresh; the tenant middleware's ``request.state.account_id`` keys the
+    window, and a single-tenant server (no account on the request) falls back
+    to the namespace.
+    """
+    calls: list = []
+    _wire_recompute(monkeypatch, calls)
+    assert server.recompute_clusters(_req("acct-A")) == {"ok": True}
+    assert server.recompute_clusters(_req("acct-B")) == {"ok": True}
+    assert server.recompute_clusters(_req("acct-A")) == {"ok": True, "skipped": "recent"}
+    assert server.recompute_clusters(_req("acct-B")) == {"ok": True, "skipped": "recent"}
+    assert server.recompute_clusters(_req()) == {"ok": True}, "no account: its own window"
+    assert len(calls) == 3
+
+
+def test_recompute_window_follows_the_rls_tenant_context(monkeypatch) -> None:
+    """Pro traffic names the account on the RLS ContextVar, not only on
+    ``request.state``; the compile runs under that context, so the window is
+    keyed by it first, and the request state is only the fallback."""
+    from amfs_postgres import tenant_context as tc
+
+    calls: list = []
+    _wire_recompute(monkeypatch, calls)
+    tc.set_tls_tenant_account_id("acct-rls-A")
+    try:
+        assert server.recompute_clusters(_req()) == {"ok": True}
+        assert server.recompute_clusters(_req()) == {"ok": True, "skipped": "recent"}
+        # A stale state.account_id does not override the context the compile used.
+        assert server.recompute_clusters(_req("acct-other")) == {"ok": True, "skipped": "recent"}
+        tc.set_tls_tenant_account_id("acct-rls-B")
+        assert server.recompute_clusters(_req()) == {"ok": True}
+    finally:
+        tc.clear_tls_tenant_account_id()
+    assert server.recompute_clusters(_req("acct-rls-A")) == {"ok": True, "skipped": "recent"}, (
+        "without an RLS context the request state names the same account"
+    )
+    assert len(calls) == 2
+
+
+def test_concurrent_recomputes_do_not_stack(monkeypatch) -> None:
+    """Two Agents-page mounts at once: one compile runs, the other reuses it."""
+    calls: list = []
+    gate = threading.Event()
+    _wire_recompute(monkeypatch, calls, gate)
+    results: list = []
+    t1 = threading.Thread(target=lambda: results.append(server.recompute_clusters(_req())))
+    t1.start()
+    for _ in range(100):
+        if calls:
+            break
+        time.sleep(0.01)
+    t2 = threading.Thread(target=lambda: results.append(server.recompute_clusters(_req())))
+    t2.start()
+    time.sleep(0.05)
+    assert len(calls) == 1, "the second call must wait for the first, not compile alongside it"
+    gate.set()
+    t1.join(5); t2.join(5)
+    assert len(calls) == 1
+    assert sorted(r.get("skipped", "") for r in results) == ["", "recent"]
+
+
+# ── Acting for an agent never touches the shared tagger ─────────────────────
+
+
+def test_no_route_swaps_the_shared_tagger() -> None:
+    """The race Bugbot named on #440.
+
+    ``mem._tagger.agent_id = X ... finally: restore`` was atomic only while the
+    body ran on the event loop. On the threadpool two requests interleave and
+    a commit is signed with a neighbour's identity. Every route that acts for
+    an agent goes through ``AgentMemory.as_agent`` (a per-request handle with
+    its own tagger) instead; ``write_entry`` sets the session on *its handle*,
+    which is the one assignment allowed.
+    """
+    src = Path(inspect.getsourcefile(server)).read_text()
+    assert "_tagger.agent_id =" not in src
+    assert "mem._tagger.session_id =" not in src
+    assert src.count("_tagger.session_id =") == 2, "only per-request handles set a session"
+
+
+def test_commit_acts_through_a_handle_not_the_shared_tagger(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    class _Tx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def write(self, *a, **k):
+            seen["wrote"] = a
+
+        commit = SimpleNamespace(id="c-1", model_dump=lambda mode="json": {"id": "c-1"})
+        entries = ["one"]
+
+    class _Handle:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+            self._tagger = SimpleNamespace(agent_id=agent_id, session_id="sess-h")
+
+        def transaction(self, message):
+            seen["tx"] = (self._tagger.agent_id, self._tagger.session_id, message)
+            return _Tx()
+
+    shared = SimpleNamespace(
+        agent_id="http-server",
+        namespace="default",
+        _tagger=SimpleNamespace(agent_id="http-server", session_id="sess-0"),
+        _adapter=SimpleNamespace(ensure_agent=lambda *a, **k: None),
+        as_agent=lambda aid: _Handle(aid),
+        transaction=lambda message: pytest.fail("the shared handle must not commit"),
+    )
+    monkeypatch.setattr(server, "_get_memory", lambda: shared)
+    monkeypatch.setattr(server, "_link_agent_owner_once", lambda *a, **k: None)
+    body = {
+        "message": "m", "agent_id": "alice", "session_id": "sess-9",
+        "writes": [{"entity_path": "acme/x", "key": "k", "value": "v"}],
+    }
+    server.create_commit(body, SimpleNamespace(headers={}), None)
+
+    assert seen["tx"] == ("alice", "sess-9", "m")
+    assert seen["wrote"] == ("acme/x", "k", "v")
+    assert (shared._tagger.agent_id, shared._tagger.session_id) == ("http-server", "sess-0")
 
 
 def test_a_sync_route_runs_off_the_event_loop(monkeypatch) -> None:
