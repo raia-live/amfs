@@ -382,6 +382,40 @@ class TestLessonsAndPlan:
         assert "Try in this order: fix:rerun_job -> fix:" in computed.text
         assert Guidance.build().plan == [] and Guidance.build().next_action is None
 
+    def test_no_plan_without_an_act_or_explore(self) -> None:
+        """An abstain, or no recommendation at all, says the record here is not
+        about this task. On the ops-queue demo a plan drawn from it anyway led
+        with the untried candidates in a stable order and the agent read it as
+        memory telling it what to do — on a class memory had never seen."""
+        priors = {"tried": [{"action_key": "fix:bump_dependency", "won": 1, "lost": 0, "n": 1, "p": 1.0,
+                             "last_3": ["won"], "agents": 1}],
+                  "untried": ["fix:regen_migrations", "fix:add_audit_exception"], "source": "similar_outcomes"}
+        silent = Guidance.build(meta={"priors": priors})
+        assert silent.plan == [] and silent.next_action is None
+        assert "Try in this order" not in silent.text and "Do not spend" not in silent.text
+        abstained = Guidance.build(meta={"priors": priors, "recommendation": {"mode": "abstain", "why": "pooled"}})
+        assert abstained.plan == [] and abstained.next_action is None
+        assert "Try in this order" not in abstained.text
+
+    def test_a_computed_plan_is_drawn_from_the_candidates_only(self) -> None:
+        """A retry asks for guidance over the actions it has not tried. The
+        situation's record still has the action that just failed as a winner;
+        the plan must not hand it back (the demo's retry hint led with the
+        action that had just failed, three tasks running)."""
+        priors = {"tried": [{"action_key": "fix:bump_dependency", "won": 3, "lost": 1, "n": 4, "p": 0.7,
+                             "last_3": ["lost", "won", "won"], "agents": 1}],
+                  "untried": ["fix:regen_migrations", "fix:add_audit_exception"], "source": "similar_outcomes"}
+        rec = {"mode": "explore", "suggested_action": "fix:regen_migrations", "why": ""}
+        g = Guidance.build(meta={"priors": priors, "recommendation": rec},
+                           candidate_actions=["fix:regen_migrations", "fix:add_audit_exception"])
+        assert g.plan and "fix:bump_dependency" not in g.plan
+        assert g.candidate_actions == ["fix:regen_migrations", "fix:add_audit_exception"]
+        # A plan the server sent is filtered the same way.
+        sent = Guidance.build(meta={"priors": priors, "recommendation": dict(
+            rec, plan=["fix:regen_migrations", "fix:bump_dependency", "fix:add_audit_exception"])},
+            candidate_actions=["fix:regen_migrations", "fix:add_audit_exception"])
+        assert sent.plan == ["fix:regen_migrations", "fix:add_audit_exception"]
+
     def test_begin_survives_a_memory_read_failure(self, mem) -> None:
         """One ``/search`` read timeout took a demo worker thread down with an
         unhandled exception out of ``begin``. Memory being down is not the

@@ -1382,6 +1382,61 @@ def test_a_branch_the_adapter_never_recorded_reads_only_itself(adapter) -> None:
 
 
 # ---------------------------------------------------------------------------
+def test_a_branch_can_write_a_key_main_already_has_within_one_account(adapter) -> None:
+    """Versions are numbered per branch, so ``(entity, key, 1)`` exists on main
+    and again on every branch that writes the key. ``uq_entry_version`` has to
+    include ``branch`` for that to be legal. It did not, and the hosted store
+    — where every row carries an ``account_id`` — raised ``UniqueViolation`` on
+    the first branch write of any key main already had; the repair loop's
+    branch open failed and every fix fell back to writing main on Ship. The
+    existing branch tests never saw it because this adapter leaves
+    ``account_id`` NULL and NULLs are distinct under UNIQUE — so this test gives
+    the column a default, the way the hosted store fills it."""
+    import uuid as _uuid
+    from datetime import UTC, datetime
+
+    import psycopg
+    from amfs_core.models import Branch, MemoryEntry, Provenance
+
+    account = str(_uuid.uuid4())
+    conn = psycopg.connect(PG_DSN, autocommit=True)
+    conn.execute(
+        f"ALTER TABLE amfs_memory_entries ALTER COLUMN account_id SET DEFAULT '{account}'::uuid"
+    )
+    try:
+        def entry(key, value, *, branch="main"):
+            return MemoryEntry(
+                entity_path="agents/ci-agent-a", key=key, value=value, version=1, branch=branch,
+                confidence=0.9,
+                provenance=Provenance(agent_id="repair", session_id="s", written_at=datetime.now(UTC)),
+            )
+
+        adapter.write(entry("procedure-ci-fix", {"steps": ["call fix"]}))
+        adapter.write(entry("procedure-ci-fix", {"steps": ["fix:rerun_job"]}))  # main v2
+        adapter.create_branch(Branch(
+            namespace="test", name="repair/one", parent_branch="main",
+            branched_at=datetime.now(UTC), created_by="repair-agent",
+        ))
+        on_branch = adapter.write(entry("procedure-ci-fix", {"steps": ["fix:regen"]}, branch="repair/one"))
+        assert on_branch.version == 1, "a branch numbers its own versions"
+        # A second branch, the same key: another version 1 in the same account.
+        adapter.create_branch(Branch(
+            namespace="test", name="repair/two", parent_branch="main",
+            branched_at=datetime.now(UTC), created_by="repair-agent",
+        ))
+        adapter.write(entry("procedure-ci-fix", {"steps": ["fix:edit"]}, branch="repair/two"))
+        rows = conn.execute(
+            "SELECT branch, version FROM amfs_memory_entries WHERE key = 'procedure-ci-fix' "
+            "AND account_id = %s::uuid ORDER BY branch, version", (account,),
+        ).fetchall()
+        assert rows == [("main", 1), ("main", 2), ("repair/one", 1), ("repair/two", 1)]
+        # Main still versions on from its own newest, not from the branches'.
+        assert adapter.write(entry("procedure-ci-fix", {"steps": ["fix:x"]})).version == 3
+    finally:
+        conn.execute("ALTER TABLE amfs_memory_entries ALTER COLUMN account_id DROP DEFAULT")
+        conn.close()
+
+
 # The same overlay through the async adapter — the path the HTTP server's
 # /search, /retrieve and /entries actually run (Bugbot on #427: the overlay
 # had been wired into the sync adapter only, so a hosted session on a repair

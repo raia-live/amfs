@@ -1439,6 +1439,16 @@ class PostgresAdapter(AdapterABC):
         # Multi-tenant unique constraints: include account_id so different
         # tenants can have entries/agents/branches/tags with the same names.
         #
+        # ``uq_entry_version`` also includes ``branch``: versions are numbered
+        # per branch — ``write`` reads the newest row on *its* branch and adds
+        # one, ``merge_branch`` renumbers onto the parent — so the same
+        # (entity, key, version) legitimately exists on main and on every
+        # branch that has written the key. Without ``branch`` in the constraint
+        # the first write of an existing key on a fresh branch raised
+        # ``UniqueViolation`` (seen 2026-09-22: the repair loop could not open a
+        # branch for a procedure key an earlier fix had already written, and
+        # every fix fell back to "writes to main on Ship", which is no canary).
+        #
         # Each DROP+ADD pair runs inside an explicit transaction (BEGIN/COMMIT)
         # so that if ADD fails, the DROP is rolled back and the old constraint
         # stays in place.  The pool uses autocommit=True, so without an
@@ -1447,8 +1457,8 @@ class PostgresAdapter(AdapterABC):
             (
                 "amfs_memory_entries",
                 "uq_entry_version",
-                "UNIQUE (namespace, entity_path, key, version, account_id)",
-                ["namespace", "entity_path", "key", "version", "account_id"],
+                "UNIQUE (namespace, branch, entity_path, key, version, account_id)",
+                ["namespace", "branch", "entity_path", "key", "version", "account_id"],
             ),
             (
                 "amfs_agents",

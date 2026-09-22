@@ -719,6 +719,11 @@ def test_render_priors_gives_the_order_and_what_not_to_retry() -> None:
     rec = act.recommend(firm, agent_id="a", candidate_actions=["fix:a", "fix:b"])
     assert rec["mode"] == "escalate"
     assert "Do not spend" not in act.render_priors(firm, rec)
+    # No recommendation, or an abstain: the record is shown, no order is given.
+    assert "Try in this order" not in act.render_priors(pr, None)
+    assert "Do not spend" not in act.render_priors(pr, None)
+    assert "Try in this order" not in act.render_priors(pr, {"mode": "abstain", "why": "pooled"})
+    assert "Tried on similar tasks here" in act.render_priors(pr, None)
 
 
 def test_render_priors_states_the_contradiction_once() -> None:

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 from amfs_core.actions import (
     guidance_strength,
@@ -74,6 +74,11 @@ class Guidance:
     #: transport error, as text. ``None`` when the read succeeded (an empty
     #: guidance with no error means memory had nothing to say).
     error: str | None = None
+    #: The actions the run said it could take, when it said so. A plan computed
+    #: on the client (:attr:`plan`) is drawn from these only: a retry that asks
+    #: for guidance over the actions it has not tried must not be handed the
+    #: one that just failed because the situation's record has it as a winner.
+    candidate_actions: list[str] | None = None
 
     @property
     def mode(self) -> str | None:
@@ -91,12 +96,24 @@ class Guidance:
         then the untried candidates, never what failed here (see
         :func:`amfs_core.actions.plan_actions`). Computed from the priors
         when the server did not send one. Empty when there is nothing to order."""
+        if self.mode not in ("act", "explore"):
+            # An abstain, or no recommendation at all: the record here is not
+            # about this task, and an order drawn from it would be advice with
+            # nothing behind it.
+            return []
         sent = (self.recommendation or {}).get("plan")
         if isinstance(sent, list) and sent:
-            return [str(a) for a in sent]
-        if not self.priors:
+            plan = [str(a) for a in sent]
+        elif self.priors:
+            plan = plan_actions(
+                self.priors, self.recommendation, candidate_actions=self.candidate_actions,
+            )
+        else:
             return []
-        return plan_actions(self.priors, self.recommendation)
+        if self.candidate_actions:
+            allowed = set(self.candidate_actions)
+            plan = [a for a in plan if a in allowed]
+        return plan
 
     @property
     def next_action(self) -> str | None:
@@ -211,6 +228,7 @@ class Guidance:
         meta: Mapping[str, Any] | None = None,
         branch: str = "main",
         entity_path: str | None = None,
+        candidate_actions: Sequence[str] | None = None,
     ) -> Guidance:
         """Assemble guidance from what the SDK already returns.
 
@@ -290,6 +308,7 @@ class Guidance:
             priors=priors if isinstance(priors, dict) else None,
             recommendation=recommendation if isinstance(recommendation, dict) else None,
             regime_shift=regime_shift,
+            candidate_actions=[str(a) for a in candidate_actions] if candidate_actions else None,
         )
 
 

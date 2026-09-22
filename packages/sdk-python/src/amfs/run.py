@@ -168,7 +168,7 @@ class Run:
             return guidance
         guidance = Guidance.build(
             digests=digests, hits=hits, meta=self.memory.last_priors,
-            branch=branch, entity_path=entity_path,
+            branch=branch, entity_path=entity_path, candidate_actions=self._candidate_actions,
         )
         self._stamp(guidance)
         return guidance
@@ -233,12 +233,13 @@ class Run:
         if success or not guide_on_failure or not self.entity_path:
             return None
         query = f"{tool_name} failed: {text[:HINT_RESULT_CHARS]}"
+        candidates = list(candidate_actions or self._candidate_actions or []) or None
         try:
             hits = self.memory.retrieve(
                 query,
                 entity_path=self.entity_path,
                 include_priors=True,
-                candidate_actions=candidate_actions or self._candidate_actions,
+                candidate_actions=candidates,
                 situation=self._situation,
                 compact=True,
                 limit=HINT_LIMIT,
@@ -250,6 +251,7 @@ class Run:
         guidance = Guidance.build(
             hits=hits, meta=self.memory.last_priors,
             branch=self.memory.branch, entity_path=self.entity_path,
+            candidate_actions=candidates,
         )
         if guidance.is_empty:
             return None

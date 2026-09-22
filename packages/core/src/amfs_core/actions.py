@@ -1211,6 +1211,15 @@ def render_priors(
     # does not re-try its instinct: on the ops-queue demo the second and third
     # attempts after a recommended action failed were actions already 0/n on
     # the exact situation.
+    # Only behind an act or explore: an abstain (or no recommendation at all)
+    # says the record here is not about this task — pooled classes, a
+    # neighbourhood match — and an order drawn from it would be advice with
+    # nothing behind it. Measured on the ops-queue demo (2026-09-22): a plan
+    # rendered under no recommendation led with the untried candidates in a
+    # stable order, and the agent read it as memory telling it what to do.
+    mode = (recommendation or {}).get("mode")
+    if mode not in ("act", "explore"):
+        return "\n".join(lines)
     plan = list((recommendation or {}).get("plan") or []) or (
         plan_actions(priors, recommendation, priors_are_local=local) if priors else []
     )
@@ -1222,9 +1231,9 @@ def render_priors(
     avoid = [
         f"{t['action_key']} ({t['won']}/{t['n']}, stopped working)" for t in stopped[:3]
     ] + [f"{t['action_key']} (0/{t['n']})" for t in failed[:5]]
-    if avoid and (recommendation or {}).get("mode") != "escalate":
+    if avoid:
         lines.append("Do not spend an attempt on: " + "; ".join(avoid) + " — these failed on tasks like this.")
-    if len(plan) > 1 or (plan and (recommendation or {}).get("mode") not in ("act",)):
+    if len(plan) > 1 or (plan and mode != "act"):
         lines.append(
             "Try in this order: " + " -> ".join(plan)
             + ". Take the first; if it fails, the next. Do not repeat an action that failed on this task."

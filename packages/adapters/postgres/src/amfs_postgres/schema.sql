@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS amfs_memory_entries (
     superseded_at TIMESTAMPTZ,
     account_id UUID,
     CONSTRAINT uq_entry_version UNIQUE (namespace, entity_path, key, version, account_id)
+    -- widened to include ``branch`` by the adapter's constraint migration (versions are per branch)
 );
 
 CREATE INDEX IF NOT EXISTS idx_entries_current
