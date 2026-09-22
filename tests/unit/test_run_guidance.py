@@ -317,6 +317,91 @@ class TestRun:
         assert g2.branch == "main"
 
 
+class TestLessonsAndPlan:
+    def test_learn_writes_a_structured_lesson_whose_record_survives_a_rewrite(self, mem) -> None:
+        """The reflection step restates its lesson every task. As prose, each
+        restatement opened an untested version; as a claim on (situation,
+        action, worked), the record follows the claim and the words are free."""
+        from amfs_core.lessons import lesson_key, lesson_of
+
+        run = Run(mem)
+        run.begin("jest snapshot failed on a backend PR", entity_path="acme/ci")
+        entry = run.learn("jest snapshot failed, backend-only PR", "fix:fix_code", True,
+                          "the snapshot caught a real regression in the totals")
+        assert entry.key == lesson_key("jest snapshot failed, backend-only PR")
+        assert entry.key.startswith("learned-") and entry.entity_path == "acme/ci"
+        lesson = lesson_of(entry.value)
+        assert lesson and lesson["action"] == "fix:fix_code" and lesson["worked"] is True
+        # Give the claim a record, then restate it in other words.
+        mem._adapter.write(entry.model_copy(update={"success_count": 3, "outcome_count": 3,
+                                                    "evidence_status": "validated"}))
+        again = run.learn("jest snapshot failed, backend-only PR", "fix:fix_code", True,
+                          "fixing the code is right; regenerating hides the bug")
+        assert again.key == entry.key
+        assert again.success_count == 3 and again.evidence_status == "validated"
+        # A different verdict is a new claim, and starts untested.
+        flipped = run.learn("jest snapshot failed, backend-only PR", "fix:fix_code", False,
+                            "the fix stopped working after the jest upgrade")
+        assert flipped.key == entry.key and flipped.success_count == 0
+        assert flipped.evidence_status != "validated"
+
+    def test_a_lesson_renders_as_its_claim_and_names_the_causal_keys(self, mem) -> None:
+        run = Run(mem)
+        run.begin("jest snapshot failed on a backend PR", entity_path="acme/ci")
+        run.learn("jest snapshot failed, backend-only PR", "fix:fix_code", True, "real regression")
+        run.learn("jest snapshot failed, UI PR", "fix:update_snapshots", True, "intended change")
+        run.learn("flaky webhook timeout", "fix:rerun_job", False, "no longer flaky, a real hang")
+        g = Run(mem).begin("jest snapshot failed on a backend PR", entity_path="acme/ci", limit=10)
+        assert "When: jest snapshot failed, backend-only PR. fix:fix_code worked. real regression" in g.text
+        keys = {lesson["action"]: lesson["key"] for lesson in g.lessons}
+        assert set(keys) >= {"fix:fix_code", "fix:update_snapshots"}
+        assert g.lessons_claiming("fix:fix_code") == [keys["fix:fix_code"]]
+        assert g.lessons_claiming("fix:update_snapshots") == [keys["fix:update_snapshots"]]
+        assert g.lessons_claiming("fix:rerun_job") == []
+        if "fix:rerun_job" in keys:
+            assert g.lessons_claiming("fix:rerun_job", worked=False) == [keys["fix:rerun_job"]]
+
+    def test_learn_needs_an_entity(self, mem) -> None:
+        with pytest.raises(ValueError):
+            Run(mem).learn("x", "fix:a", True)
+        entry = Run(mem).learn("x", "fix:a", True, entity_path="acme/other")
+        assert entry.entity_path == "acme/other"
+
+    def test_plan_is_read_from_the_recommendation_or_computed_from_the_priors(self) -> None:
+        priors = {"tried": [{"action_key": "fix:rerun_job", "won": 3, "lost": 1, "n": 4, "p": 0.7,
+                             "last_3": ["lost", "won", "won"], "agents": 1}],
+                  "untried": ["fix:edit_generated_file", "fix:regen_migrations"], "source": "similar_outcomes"}
+        sent = Guidance.build(meta={"priors": priors, "recommendation": {
+            "mode": "act", "suggested_action": "fix:rerun_job", "why": "", "plan": ["fix:rerun_job", "fix:regen_migrations"]}})
+        assert sent.plan == ["fix:rerun_job", "fix:regen_migrations"] and sent.next_action == "fix:rerun_job"
+        # An older server sends no plan: the SDK orders the priors itself.
+        computed = Guidance.build(meta={"priors": priors, "recommendation": {
+            "mode": "act", "suggested_action": "fix:rerun_job", "why": ""}})
+        assert computed.plan[0] == "fix:rerun_job"
+        assert set(computed.plan[1:]) == set(priors["untried"])
+        assert "Try in this order: fix:rerun_job -> fix:" in computed.text
+        assert Guidance.build().plan == [] and Guidance.build().next_action is None
+
+    def test_begin_survives_a_memory_read_failure(self, mem) -> None:
+        """One ``/search`` read timeout took a demo worker thread down with an
+        unhandled exception out of ``begin``. Memory being down is not the
+        agent being down: the run gets empty guidance that says why, and the
+        outcome still seals."""
+        def broken(*a, **kw):
+            raise TimeoutError("read timed out")
+
+        mem.retrieve = broken  # type: ignore[method-assign]
+        run = Run(mem)
+        g = run.begin("pip install fails", entity_path="acme/ci")
+        assert g.is_empty and g.strength == "none" and not g.should_inject()
+        assert g.error and "TimeoutError" in g.error
+        assert run.guidances == [g]
+        # A failure hint is a bonus: it comes back as None, not an exception.
+        assert run.on_tool_result("shell", {"cmd": "pip install"}, "boom", success=False) is None
+        run.complete(False)
+        assert run.completed
+
+
 def test_provenance_attributes_shape() -> None:
     assert provenance_attributes(None, None) == {}
     out = provenance_attributes(" Human ", {"Run ID": 12, "nested": {"a": 1}, "skip": None,

@@ -700,9 +700,19 @@ EVIDENCE_FIELDS: tuple[str, ...] = (
 
 def same_claim(a: Any, b: Any) -> bool:
     """Two values that say the same thing, allowing for the JSON round trip
-    (dict key order, int/float) that a stored value has been through."""
+    (dict key order, int/float) that a stored value has been through.
+
+    Two structured lessons (:mod:`amfs_core.lessons`) make the same claim when
+    their ``(situation, action, worked)`` agree, whatever their text: the
+    text is the agent's words for the claim, and a rewrite of the words must
+    not open a new record."""
     if a == b:
         return True
+    from .lessons import lesson_claim
+
+    claim_a = lesson_claim(a)
+    if claim_a is not None:
+        return claim_a == lesson_claim(b)
     try:
         import json
 

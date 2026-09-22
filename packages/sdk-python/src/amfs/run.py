@@ -51,6 +51,7 @@ import logging
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from amfs_core.lessons import lesson_key, make_lesson
 from amfs_core.models import ENVIRONMENT_KEYS, MemoryEntry, OutcomeType
 
 from amfs.guidance import Guidance
@@ -146,16 +147,25 @@ class Run:
         except Exception:  # noqa: BLE001 - a briefing is a bonus, the retrieve is the floor
             logger.debug("briefing unavailable for %s", entity_path, exc_info=True)
             digests = []
-        hits = self.memory.retrieve(
-            self.task_input,
-            entity_path=entity_path,
-            include_priors=True,
-            candidate_actions=self._candidate_actions,
-            situation=situation,
-            compact=True,
-            limit=limit,
-            abstain=True,
-        )
+        try:
+            hits = self.memory.retrieve(
+                self.task_input,
+                entity_path=entity_path,
+                include_priors=True,
+                candidate_actions=self._candidate_actions,
+                situation=situation,
+                compact=True,
+                limit=limit,
+                abstain=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - memory down is not the agent down
+            # The run goes on without guidance, as it would have before
+            # memory; the outcome still seals and teaches the next run. One
+            # read timeout must not take the customer's worker with it.
+            logger.warning("guidance unavailable for %s: %s", entity_path, exc)
+            guidance = Guidance.unavailable(f"{type(exc).__name__}: {exc}", branch=branch)
+            self.guidances.append(guidance)
+            return guidance
         guidance = Guidance.build(
             digests=digests, hits=hits, meta=self.memory.last_priors,
             branch=branch, entity_path=entity_path,
@@ -223,16 +233,20 @@ class Run:
         if success or not guide_on_failure or not self.entity_path:
             return None
         query = f"{tool_name} failed: {text[:HINT_RESULT_CHARS]}"
-        hits = self.memory.retrieve(
-            query,
-            entity_path=self.entity_path,
-            include_priors=True,
-            candidate_actions=candidate_actions or self._candidate_actions,
-            situation=self._situation,
-            compact=True,
-            limit=HINT_LIMIT,
-            abstain=True,
-        )
+        try:
+            hits = self.memory.retrieve(
+                query,
+                entity_path=self.entity_path,
+                include_priors=True,
+                candidate_actions=candidate_actions or self._candidate_actions,
+                situation=self._situation,
+                compact=True,
+                limit=HINT_LIMIT,
+                abstain=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - a hint is a bonus; see begin()
+            logger.warning("failure hint unavailable for %s: %s", self.entity_path, exc)
+            return None
         guidance = Guidance.build(
             hits=hits, meta=self.memory.last_priors,
             branch=self.memory.branch, entity_path=self.entity_path,
@@ -291,6 +305,49 @@ class Run:
             if key not in out:
                 out.append(key)
         return out
+
+    # ------------------------------------------------------------------
+    # learn
+    # ------------------------------------------------------------------
+
+    def learn(
+        self,
+        situation: str,
+        action: str,
+        worked: bool,
+        text: str | None = None,
+        *,
+        key: str | None = None,
+        entity_path: str | None = None,
+        confidence: float = 0.9,
+        **extra: Any,
+    ) -> MemoryEntry:
+        """Write what this run learned as a structured lesson.
+
+        A lesson claims that *action* did or did not resolve *situation*
+        (``worked``); *text* is the agent's words for why, and may say
+        anything. The claim is what the outcome record follows: a later run
+        that restates the lesson — same situation, same action, same verdict,
+        different words — inherits the record instead of opening an untested
+        version, so eight confirmations stay eight and a discredited lesson
+        does not come back clean. That is what makes the regime-shift reading
+        possible: it needs the second failure in a row to land on the same
+        record as the first.
+
+        *key* defaults to ``learned-<slug of the situation>-<hash>``: one key
+        per situation, so the positive lesson and the "does not work" lesson
+        that replaces it are versions of the same entry, and the briefing's
+        ``discredited`` / ``replaced_by`` reading works. Pass your own to key
+        on something else. Renders as ``When: <situation>. <action> worked.
+        <text>`` in the next run's guidance (:mod:`amfs_core.lessons`).
+        """
+        value = make_lesson(situation, action, worked, text, **extra)
+        path = entity_path or self.entity_path
+        if not path:
+            raise ValueError("learn() needs an entity_path; call begin() first or pass one")
+        return self.memory.write(
+            path, key or lesson_key(value["situation"]), value, confidence=confidence
+        )
 
     # ------------------------------------------------------------------
     # complete
