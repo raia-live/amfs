@@ -93,7 +93,8 @@ def test_main_hands_the_flag_to_the_workers_through_the_environment(monkeypatch,
         server,
         "_parse_args",
         lambda: argparse.Namespace(
-            host="127.0.0.1", port=0, reload=False, workers=2, with_cortex=True
+            host="127.0.0.1", port=0, reload=False, workers=2, with_cortex=True,
+            worker_healthcheck_timeout=120,
         ),
     )
     monkeypatch.setattr(
@@ -106,6 +107,51 @@ def test_main_hands_the_flag_to_the_workers_through_the_environment(monkeypatch,
 
     assert os.environ.get("AMFS_WITH_CORTEX") == "1"
     assert ran.get("workers") == 2
+
+
+# ── Worker health check ──────────────────────────────────────────────────
+#
+# uvicorn's multi-worker supervisor kills any worker that misses a ping for
+# ``timeout_worker_healthcheck`` seconds (default 5) and respawns it. A fresh
+# worker on a busy 2-vCPU instance takes longer than that to import the module
+# and load the models, so with the default one slot per instance was killed
+# every 8 seconds and never served a request (2026-09-21). The server must pass
+# a realistic window through, and it must be tunable without a code change.
+
+
+def test_worker_healthcheck_default_is_two_minutes(monkeypatch) -> None:
+    monkeypatch.delenv("AMFS_HTTP_WORKER_HEALTHCHECK_S", raising=False)
+    monkeypatch.setattr("sys.argv", ["amfs-http"])
+    args = server._parse_args()
+    assert args.worker_healthcheck_timeout == server.DEFAULT_WORKER_HEALTHCHECK_S == 120
+
+
+def test_worker_healthcheck_reads_the_environment_and_the_flag(monkeypatch) -> None:
+    monkeypatch.setenv("AMFS_HTTP_WORKER_HEALTHCHECK_S", "45")
+    monkeypatch.setattr("sys.argv", ["amfs-http"])
+    assert server._parse_args().worker_healthcheck_timeout == 45
+    monkeypatch.setattr("sys.argv", ["amfs-http", "--worker-healthcheck-timeout", "7"])
+    assert server._parse_args().worker_healthcheck_timeout == 7
+
+
+def test_main_passes_the_healthcheck_window_to_uvicorn(monkeypatch, no_db) -> None:
+    monkeypatch.setattr(
+        server,
+        "_parse_args",
+        lambda: argparse.Namespace(
+            host="127.0.0.1", port=0, reload=False, workers=2, with_cortex=False,
+            worker_healthcheck_timeout=90,
+        ),
+    )
+    # uvicorn really accepts it under that name: a typo would be swallowed by
+    # the stand-in below and only surface as a TypeError in production.
+    assert "timeout_worker_healthcheck" in inspect.signature(server.uvicorn.run).parameters
+    ran: dict = {}
+    monkeypatch.setattr(server.uvicorn, "run", lambda *a, **k: ran.update(k))
+
+    server.main()
+
+    assert ran.get("timeout_worker_healthcheck") == 90
 
 
 @pytest.mark.parametrize("raw,expected", [("1", True), ("true", True), ("YES", True), ("on", True),
