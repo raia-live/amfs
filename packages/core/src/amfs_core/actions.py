@@ -585,8 +585,25 @@ def recommend(
     all_tried_failed_firm = bool(tried) and len(losers) == len(tried)
 
     if priors_are_local:
+        contrasts = list((priors or {}).get("contrasts") or [])
+        # Near-identical outcomes that contradict each other over time are two
+        # classes of task pooled under one description: neither the contrast
+        # rule nor the per-action winners can name the fix for *this* one, and
+        # ``act`` here is the other class's fix every second time. Said out
+        # loud when the caller asked to be told; silent otherwise, which is
+        # still better than the wrong action.
+        pooled = pooled_classes(contrasts)
+        if pooled is not None:
+            if not abstain:
+                return None
+            return {
+                "mode": "abstain",
+                "suggested_action": None,
+                "pooled": pooled,
+                "why": _pooled_why(pooled),
+            }
         from_contrast = _act_from_contrast(
-            list((priors or {}).get("contrasts") or []),
+            contrasts,
             tried,
             winners,
             regime_shift=regime_shift,
@@ -689,7 +706,8 @@ def guidance_strength(
     """How much the served context is worth acting on: ``strong`` when a hit is
     validated or an action has a winning record here; ``none`` when there is
     nothing or only untested / contested / discredited evidence; ``thin``
-    otherwise (some evidence, none of it confirmed, or a regime shift in scope).
+    otherwise (some evidence, none of it confirmed, a regime shift in scope,
+    or a record that :func:`pooled_classes` says is about two kinds of task).
     Pure; the briefing and the SDK's ``Guidance`` carry the label."""
     tried = list((priors or {}).get("tried") or [])
     statuses = [s for s in (hit_statuses or []) if s]
@@ -701,6 +719,9 @@ def guidance_strength(
     ]
     if regime_shift:
         return "thin" if (tried or statuses) else "none"
+    if pooled_classes(list((priors or {}).get("contrasts") or [])) is not None:
+        # A winner over a pooled record won on the other class half the time.
+        return "thin"
     if winners or "validated" in statuses:
         return "strong"
     if not tried and (not statuses or all(s in _WEAK_STATUSES for s in statuses)):
@@ -712,6 +733,77 @@ def _recently_failing(prior: Mapping[str, Any]) -> bool:
     """The action lost its newest ``RECENT_FAIL_STREAK`` outcomes (all the record keeps)."""
     last = list(prior.get("last_3") or [])
     return len(last) >= RECENT_FAIL_STREAK and all(x == "lost" for x in last[:RECENT_FAIL_STREAK])
+
+
+def pooled_classes(
+    contrasts: Sequence[Mapping[str, Any]],
+    *,
+    min_weight: float = CONTRAST_MIN_W,
+) -> dict[str, Any] | None:
+    """Two kinds of task the query text does not tell apart, read from the
+    near-identical contrasts contradicting each other *over time*.
+
+    A contrast says "on this kind of task A failed and B resolved it". When
+    another near-identical contrast says the opposite — B failed and A
+    resolved it — one of two things is true: the rule flipped (a regime
+    change: every old outcome says B, every new one says A), or the
+    neighbourhood holds two classes of task that share a description and
+    differ in the fix (the outcomes alternate: B, A, B). The order
+    distinguishes them. A single reversal is read as a flip and left to the
+    newest-wins rule; two or more reversals are a pooled neighbourhood, and
+    no action can be recommended from it — the record is right about both
+    classes and wrong about which one this is.
+
+    Measured on the ops-queue CI demo (2026-09-21): a UI snapshot PR and a
+    backend PR failing the same jest snapshot test differ by one path token,
+    embed within 0.02 of each other, and ``act`` named the other class's fix
+    on every third task — three first-try losses in twelve, each with the
+    correct note for the exact symptom sitting in the same guidance.
+
+    Returns ``{"actions": [A, B], "sequence": [...resolved_with in time
+    order...], "reversals": n, "outcome_refs": [...]}`` or ``None``.
+    """
+    near = [
+        c for c in contrasts
+        if float(c.get("weight") or 0.0) >= min_weight
+        and c.get("resolved_with") and c.get("failed")
+    ]
+    if len(near) < 3:
+        return None
+    resolved_by: dict[str, list[Mapping[str, Any]]] = {}
+    for c in near:
+        resolved_by.setdefault(str(c["resolved_with"]), []).append(c)
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+    for a, a_rows in resolved_by.items():
+        for b, b_rows in resolved_by.items():
+            if b <= a:
+                continue
+            a_over_b = any(b in [str(x) for x in (c.get("failed") or [])] for c in a_rows)
+            b_over_a = any(a in [str(x) for x in (c.get("failed") or [])] for c in b_rows)
+            if not (a_over_b and b_over_a):
+                continue
+            ordered = sorted(a_rows + b_rows, key=lambda c: _as_dt(c.get("committed_at")) or floor)
+            sequence = [str(c["resolved_with"]) for c in ordered]
+            reversals = sum(1 for i in range(1, len(sequence)) if sequence[i] != sequence[i - 1])
+            if reversals >= 2:
+                return {
+                    "actions": [a, b],
+                    "sequence": sequence,
+                    "reversals": reversals,
+                    "outcome_refs": [c.get("outcome_ref") for c in ordered],
+                }
+    return None
+
+
+def _pooled_why(pooled: Mapping[str, Any]) -> str:
+    a, b = pooled["actions"]
+    seq = list(pooled.get("sequence") or [])
+    return (
+        f"outcomes on near-identical tasks here disagree: {a} resolved what {b} failed and "
+        f"{b} resolved what {a} failed, alternating over time "
+        f"({seq.count(a)}x {a}, {seq.count(b)}x {b}) — two kinds of task share this "
+        "description; decide from what distinguishes this one, not from the action record"
+    )
 
 
 def _act_from_contrast(
@@ -796,7 +888,13 @@ def render_priors(priors: Mapping[str, Any] | None, recommendation: Mapping[str,
         c for c in ((priors or {}).get("contrasts") or [])
         if float(c.get("weight") or 0.0) >= CONTRAST_MIN_W
     ]
-    for c in contrasts[:2]:
+    pooled = pooled_classes(contrasts)
+    if pooled is not None and not (recommendation or {}).get("pooled"):
+        # Two "near-identical" lines that contradict each other read as a
+        # coin toss; one line that names the contradiction reads as a warning.
+        # (When the recommendation is the abstain that says the same, it says it.)
+        lines.append(_pooled_why(pooled)[0].upper() + _pooled_why(pooled)[1:] + ".")
+    for c in ([] if pooled is not None else contrasts[:2]):
         failed = ", ".join(str(a) for a in (c.get("failed") or [])[:3])
         if failed and c.get("resolved_with"):
             lines.append(
@@ -828,6 +926,7 @@ __all__ = [
     "aggregate_priors",
     "entity_paths_of",
     "guidance_strength",
+    "pooled_classes",
     "recommend",
     "render_priors",
     "stable_bucket",

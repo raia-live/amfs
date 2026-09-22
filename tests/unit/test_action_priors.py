@@ -466,6 +466,79 @@ def test_under_a_regime_shift_the_contrast_must_postdate_it() -> None:
     assert act.recommend(pr, agent_id="x", regime_shift=True, regime_shift_at=None) is None
 
 
+def _pooled_rows():
+    """The ops-queue CI demo's snapshot neighbourhood: a backend PR (fix_code
+    resolves what update_snapshots failed) and a UI PR (the reverse) share a
+    description, and the queue alternates between them."""
+    return act.neighbourhood_weights([
+        _contrast_row("fix:update_snapshots", "fix:fix_code", sim=0.96, days_ago=3, ref="nonui-1"),
+        _contrast_row("fix:fix_code", "fix:update_snapshots", sim=0.95, days_ago=2, ref="ui-1"),
+        _contrast_row("fix:update_snapshots", "fix:fix_code", sim=0.96, days_ago=1, ref="nonui-2"),
+    ])
+
+
+def test_pooled_classes_reads_an_alternating_contradiction_and_not_a_single_flip() -> None:
+    pr = act.aggregate_priors(_pooled_rows())
+    pooled = act.pooled_classes(pr["contrasts"])
+    assert pooled is not None
+    assert sorted(pooled["actions"]) == ["fix:fix_code", "fix:update_snapshots"]
+    assert pooled["sequence"] == ["fix:fix_code", "fix:update_snapshots", "fix:fix_code"]
+    assert pooled["reversals"] == 2
+    # One reversal is the shape of a rule that flipped, not of two classes:
+    # every old outcome says A, every new one says B. Left to newest-wins.
+    flip = act.aggregate_priors(act.neighbourhood_weights([
+        _contrast_row("fix:b", "fix:a", sim=0.96, days_ago=4, ref="old-1"),
+        _contrast_row("fix:b", "fix:a", sim=0.96, days_ago=3, ref="old-2"),
+        _contrast_row("fix:a", "fix:b", sim=0.96, days_ago=1, ref="new-1"),
+    ]))
+    assert act.pooled_classes(flip["contrasts"]) is None
+    rec = act.recommend(flip, agent_id="x", abstain=True)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "fix:b", "the newest contrast wins a flip"
+    # Two contrasts that merely name different resolvers without contradicting
+    # each other (A over C, B over D) are not a pooled record either.
+    apart = act.aggregate_priors(act.neighbourhood_weights([
+        _contrast_row("fix:c", "fix:a", sim=0.96, days_ago=3),
+        _contrast_row("fix:d", "fix:b", sim=0.96, days_ago=2),
+        _contrast_row("fix:c", "fix:a", sim=0.96, days_ago=1),
+    ]))
+    assert act.pooled_classes(apart["contrasts"]) is None
+    # A far contrast does not take part.
+    far = act.aggregate_priors(act.neighbourhood_weights([
+        _contrast_row("fix:b", "fix:a", sim=0.96, days_ago=3),
+        _contrast_row("fix:a", "fix:b", sim=0.88, days_ago=2),
+        _contrast_row("fix:b", "fix:a", sim=0.96, days_ago=1),
+    ]))
+    assert act.pooled_classes(far["contrasts"]) is None
+
+
+def test_recommend_abstains_over_a_pooled_record_instead_of_naming_either_class_fix() -> None:
+    pr = act.aggregate_priors(_pooled_rows())
+    by = {t["action_key"]: t for t in pr["tried"]}
+    # Without the rule, fix_code (2/3) is a winner and the newest contrast
+    # resolves with it: ``act -> fix_code`` on a UI PR, the wrong class's fix.
+    assert by["fix:fix_code"]["won"] == 2 and by["fix:fix_code"]["p"] >= act.ACT_MIN_P
+    rec = act.recommend(pr, agent_id="x", abstain=True)
+    assert rec["mode"] == "abstain" and rec["suggested_action"] is None
+    assert rec["pooled"]["reversals"] == 2
+    assert "fix:fix_code resolved what fix:update_snapshots failed" in rec["why"]
+    assert "two kinds of task share this description" in rec["why"]
+    # Without abstain the caller gets silence, not the other class's fix.
+    assert act.recommend(pr, agent_id="x") is None
+    # A pooled record is not strong guidance, whatever its winners' ratios.
+    assert act.guidance_strength(pr, ["untested"]) == "thin"
+
+
+def test_render_priors_states_the_contradiction_once() -> None:
+    pr = act.aggregate_priors(_pooled_rows())
+    text = act.render_priors(pr, act.recommend(pr, agent_id="x", abstain=True))
+    assert "On a near-identical task here" not in text, "two contradicting lines read as a coin toss"
+    assert text.count("alternating over time") == 1
+    assert "Recommendation: abstain." in text
+    # No recommendation given (caller without abstain): the warning still shows, once.
+    text = act.render_priors(pr, None)
+    assert text.count("alternating over time") == 1 and "Recommendation" not in text
+
+
 def test_render_priors_names_the_near_identical_contrast() -> None:
     pr = act.aggregate_priors(act.neighbourhood_weights([_contrast_row("resolve:a", "resolve:b", sim=0.95)]))
     text = act.render_priors(pr, act.recommend(pr, agent_id="x"))
