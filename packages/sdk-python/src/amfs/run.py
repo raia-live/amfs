@@ -251,7 +251,7 @@ class Run:
         summary: str | None = None,
         *,
         outcome_type: OutcomeType | str = OutcomeType.MINOR_FAILURE,
-        causal_entry_keys: list[str] | None = None,
+        causal_entry_keys: list[str | None] | None = None,
     ) -> None:
         """Close the approach just tried as failed before trying another.
 
@@ -271,7 +271,7 @@ class Run:
             causal_entry_keys=self._qualify(causal_entry_keys),
         )
 
-    def _qualify(self, keys: list[str] | None) -> list[str] | None:
+    def _qualify(self, keys: list[str | None] | None) -> list[str] | None:
         """``entity_path/key`` for every key, qualifying bare ones with the
         run's entity. ``None`` stays ``None`` (the caller declined to name
         anything, and ``AgentMemory`` falls back to the read window)."""
@@ -279,6 +279,10 @@ class Run:
             return None
         out: list[str] = []
         for key in keys:
+            # ``cited or [guidance.top_key]`` yields ``[None]`` on empty
+            # guidance; a None is "nothing to name", not an entry called None.
+            if key is None:
+                continue
             key = str(key).strip()
             if not key:
                 continue
@@ -303,7 +307,7 @@ class Run:
         response_text: str | None = None,
         attributes: Mapping[str, Any] | None = None,
         decision_summary: str | None = None,
-        causal_entry_keys: list[str] | None = None,
+        causal_entry_keys: list[str | None] | None = None,
     ) -> list[MemoryEntry]:
         """Commit the run's outcome and seal its trace.
 

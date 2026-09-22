@@ -215,6 +215,35 @@ class TestRun:
         assert run.complete(True, causal_entry_keys=[]) == []
         assert mem.read("acme/ci", "fix-pin").success_count == 0
 
+    def test_a_none_key_is_nothing_to_name_not_an_entry_called_none(self, mem) -> None:
+        """``cited or [guidance.top_key]`` yields ``[None]`` on empty guidance;
+        that must not become ``entity/None`` and must not fall back to the
+        read window either — the caller named nothing on purpose."""
+        run = Run(mem)
+        assert run._qualify([None, "", " fix-pin "]) == ["fix-pin"]  # no entity yet: bare key kept as is
+        run.begin("pip install fails", entity_path="acme/ci")
+        assert run._qualify([None, "", " fix-pin "]) == ["acme/ci/fix-pin"]
+        assert run._qualify([None]) == []
+        run.on_tool_result("shell", {"cmd": "pip install"}, "boom", success=False, guide_on_failure=False)
+        run.attempt_failed("nothing followed", causal_entry_keys=[None])
+        assert run.complete(True, causal_entry_keys=[None]) == []
+        meta = mem._last_trace.session_metadata.model_dump()
+        assert meta["attempts"][0]["causal_entry_keys"] == []
+        assert mem.read("acme/ci", "fix-pin").success_count == 0
+        assert mem.read("acme/ci", "fix-pin").failure_count == 0
+
+    def test_entry_keys_and_top_key_name_only_what_was_rendered(self, mem) -> None:
+        """A synthetic lesson can outrank every authored note and still be
+        omitted by the renderer; the agent never saw it, so it is not the
+        fallback blame."""
+        mem.write("acme/ci", "lesson-contrast-ep9", {"kind": "contrast", "avoid": ["x"]}, confidence=0.99)
+        mem._read_tracker.clear()
+        g = Run(mem).begin("pip install fails", entity_path="acme/ci")
+        assert any(e.key == "lesson-contrast-ep9" for e in g.entries)
+        assert "acme/ci/lesson-contrast-ep9" not in g.text
+        assert "acme/ci/lesson-contrast-ep9" not in g.entry_keys
+        assert g.top_key == "acme/ci/fix-pin"
+
     def test_assign_branch_hook_checks_out_and_falls_back(self, mem) -> None:
         seen = []
 
