@@ -1,6 +1,6 @@
 [project]
 name = "amfs-http-server"
-version = "0.3.43"
+version = "0.3.44"
 description = "AMFS HTTP/REST API server with SSE support"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -13,7 +13,7 @@ dependencies = [
     # this tree is what test_dependency_floors forbids.
     # 0.5.18 for AgentMemory.as_agent, which the agent detail page calls to list
     # an agent's entries as that agent rather than as the server.
-    "amfs>=0.5.28",
+    "amfs>=0.5.29",
     # 0.3.23 is real in the silent way: the write path calls
     # adapter.scope_counts(), which is a default on AdapterABC from 0.3.23. On an
     # older core the adapters that do not override it — filesystem, S3 — have no
@@ -27,7 +27,7 @@ dependencies = [
     # unexpected keyword, _scope_block swallows it, and the block disappears —
     # while an adapter that ignored the argument instead would name another
     # agent's private keys. Either way the floor is what makes the rule real.
-    "amfs-core>=0.3.37",
+    "amfs-core>=0.3.38",
     "fastapi>=0.115",
     # 0.37 is where uvicorn.run() grew timeout_worker_healthcheck, which
     # main() passes unconditionally; on anything older that is a TypeError
