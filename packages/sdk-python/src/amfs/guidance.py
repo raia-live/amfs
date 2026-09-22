@@ -117,9 +117,17 @@ class Guidance:
 
     @property
     def next_action(self) -> str | None:
-        """The first action of the plan, or the suggested action, or ``None``."""
+        """The first action of the plan, or the suggested action, or ``None``.
+        Never an action outside :attr:`candidate_actions` when the run named
+        them: a suggestion the run said it cannot (or will not again) take is
+        no next action."""
         plan = self.plan
-        return plan[0] if plan else self.suggested_action
+        if plan:
+            return plan[0]
+        suggested = self.suggested_action
+        if suggested and self.candidate_actions and suggested not in self.candidate_actions:
+            return None
+        return suggested
 
     @property
     def lessons(self) -> list[dict[str, Any]]:
@@ -285,7 +293,7 @@ class Guidance:
                 why = "; ".join(str(d) for d in (p.get("applicability_detail") or []))
                 lines.append(f"- {p.get('entity_path')}/{p.get('key')}" + (f" ({why})" if why else ""))
             blocks.append("Not for this run:\n" + "\n".join(lines))
-        priors_block = render_priors(priors, recommendation)
+        priors_block = render_priors(priors, recommendation, candidate_actions=candidate_actions)
         if priors_block:
             blocks.append(priors_block)
         if regime_shift:

@@ -410,11 +410,26 @@ class TestLessonsAndPlan:
                            candidate_actions=["fix:regen_migrations", "fix:add_audit_exception"])
         assert g.plan and "fix:bump_dependency" not in g.plan
         assert g.candidate_actions == ["fix:regen_migrations", "fix:add_audit_exception"]
-        # A plan the server sent is filtered the same way.
+        # The rendered order — what the agent actually reads — is filtered too.
+        assert "Try in this order:" in g.text
+        assert "fix:bump_dependency" not in g.text.split("Try in this order:")[1]
+        # A plan the server sent is filtered the same way, in the plan and in the text.
         sent = Guidance.build(meta={"priors": priors, "recommendation": dict(
             rec, plan=["fix:regen_migrations", "fix:bump_dependency", "fix:add_audit_exception"])},
             candidate_actions=["fix:regen_migrations", "fix:add_audit_exception"])
         assert sent.plan == ["fix:regen_migrations", "fix:add_audit_exception"]
+        assert "fix:bump_dependency" not in sent.text.split("Try in this order:")[1]
+        # A suggestion outside the candidates is no next action either: a server
+        # asked without candidates may suggest the winner the retry has just
+        # tried; the run must not be handed it back.
+        stale = Guidance.build(meta={"priors": priors, "recommendation": {
+            "mode": "act", "suggested_action": "fix:bump_dependency", "why": "",
+            "plan": ["fix:bump_dependency"]}}, candidate_actions=["fix:regen_migrations"])
+        assert stale.plan == [] and stale.next_action is None
+        assert "Try in this order" not in stale.text
+        unfiltered = Guidance.build(meta={"priors": priors, "recommendation": {
+            "mode": "act", "suggested_action": "fix:bump_dependency", "why": ""}})
+        assert unfiltered.next_action == "fix:bump_dependency"
 
     def test_begin_survives_a_memory_read_failure(self, mem) -> None:
         """One ``/search`` read timeout took a demo worker thread down with an

@@ -719,6 +719,13 @@ def test_render_priors_gives_the_order_and_what_not_to_retry() -> None:
     rec = act.recommend(firm, agent_id="a", candidate_actions=["fix:a", "fix:b"])
     assert rec["mode"] == "escalate"
     assert "Do not spend" not in act.render_priors(firm, rec)
+    # The order names candidates only, whether computed here or sent by the server.
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    text = act.render_priors(pr, rec, candidate_actions=["fix:edit_generated_file", "fix:regen_migrations"])
+    assert "fix:rerun_job" not in text.split("Try in this order:")[1]
+    sent = dict(rec, plan=["fix:rerun_job", "fix:edit_generated_file", "fix:regen_migrations"])
+    text = act.render_priors(pr, sent, candidate_actions=["fix:edit_generated_file", "fix:regen_migrations"])
+    assert "Try in this order: fix:edit_generated_file -> fix:regen_migrations." in text
     # No recommendation, or an abstain: the record is shown, no order is given.
     assert "Try in this order" not in act.render_priors(pr, None)
     assert "Do not spend" not in act.render_priors(pr, None)

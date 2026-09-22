@@ -1162,12 +1162,18 @@ def render_priors(
     recommendation: Mapping[str, Any] | None,
     *,
     priors_are_local: bool | None = None,
+    candidate_actions: Sequence[str] | None = None,
 ) -> str:
     """One compact block for an agent's context. Empty string when nothing to show.
 
     Contrasts — and the pooled-classes warning read from them — are shown only
     over local priors (*priors_are_local*, else :func:`priors_local` on the
-    block): the entity-wide fallback is not known to be about this task."""
+    block): the entity-wide fallback is not known to be about this task.
+
+    *candidate_actions*, when given, are the only actions the order may name:
+    a retry asking over the actions it has not tried must not be told to try
+    the one that just failed because the situation's record has it as a
+    winner, whether the plan was computed here or sent by the server."""
     if not priors and not recommendation:
         return ""
     local = priors_local(priors) if priors_are_local is None else priors_are_local
@@ -1221,8 +1227,13 @@ def render_priors(
     if mode not in ("act", "explore"):
         return "\n".join(lines)
     plan = list((recommendation or {}).get("plan") or []) or (
-        plan_actions(priors, recommendation, priors_are_local=local) if priors else []
+        plan_actions(
+            priors, recommendation, priors_are_local=local, candidate_actions=candidate_actions,
+        ) if priors else []
     )
+    if candidate_actions:
+        allowed = set(candidate_actions)
+        plan = [a for a in plan if a in allowed]
     stopped = [t for t in tried if _stopped_working(t) and int(t.get("won", 0)) > 0]
     failed = [
         t for t in tried
