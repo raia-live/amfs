@@ -15,11 +15,15 @@ Three things had to hold before ``--workers`` above one was safe:
 from __future__ import annotations
 
 import argparse
+import ast
 import builtins
 import inspect
 import io
 import os
 import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from amfs_http import server
@@ -263,6 +267,130 @@ def test_sync_bodied_routes_are_plain_def(name) -> None:
     )
     src = inspect.getsource(fn)
     assert "await " not in src, f"{name} gained an await; make it async def again"
+
+
+# Routes that are async without awaiting anything, on purpose: the health
+# probes must answer even when every threadpool token is taken, and ``stream``
+# subscribes an asyncio queue that has to be created on the serving loop.
+LOOP_ROUTES_WITHOUT_AWAIT = {"root", "health", "health_v1", "stream"}
+
+
+def _route_handlers() -> list[ast.AsyncFunctionDef | ast.FunctionDef]:
+    tree = ast.parse(Path(inspect.getsourcefile(server)).read_text())
+    out = []
+    for node in tree.body:
+        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            continue
+        for d in node.decorator_list:
+            if isinstance(d, ast.Call) and getattr(d.func, "attr", "") in (
+                "get", "post", "put", "delete", "patch",
+            ):
+                out.append(node)
+                break
+    return out
+
+
+def test_no_route_is_async_def_without_an_await() -> None:
+    """The Agents page froze prod for 160 s per load through this hole.
+
+    ``recompute_clusters``, ``list_agents_enriched`` and ``reuse_summary`` were
+    ``async def`` with fully synchronous bodies, so a minutes-long compile ran
+    on the event loop and every other request on the instance waited. An
+    await-less ``async def`` route is always this bug: FastAPI would run the
+    same body on the threadpool if it were a plain ``def``.
+    """
+    offenders = []
+    for node in _route_handlers():
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        if node.name in LOOP_ROUTES_WITHOUT_AWAIT:
+            continue
+        awaits = any(
+            isinstance(x, (ast.Await, ast.AsyncFor, ast.AsyncWith))
+            for x in ast.walk(node)
+        )
+        if not awaits:
+            offenders.append(node.name)
+    assert offenders == [], (
+        "async def routes with no await run their whole body on the event loop; "
+        f"make them plain def (or add them to LOOP_ROUTES_WITHOUT_AWAIT with a reason): {offenders}"
+    )
+    assert len(_route_handlers()) > 100, "the route scan found too little to be trusted"
+
+
+def test_the_allowlisted_loop_routes_still_exist_and_are_async() -> None:
+    names = {n.name for n in _route_handlers() if isinstance(n, ast.AsyncFunctionDef)}
+    assert LOOP_ROUTES_WITHOUT_AWAIT <= names
+
+
+# ── Cluster recompute: one compile at a time, reused within the window ────
+
+
+class _ClusterCompileSpy:
+    def __init__(self, calls: list, gate: threading.Event | None = None):
+        self.calls, self.gate = calls, gate
+
+    def __call__(self, *, adapter, namespace):
+        return self
+
+    def compile(self, scope):
+        self.calls.append((scope, threading.current_thread().name))
+        if self.gate is not None:
+            self.gate.wait(5)
+
+
+def _wire_recompute(monkeypatch, calls, gate=None):
+    from amfs_postgres.adapter import PostgresAdapter
+
+    adapter = object.__new__(PostgresAdapter)
+    mem = SimpleNamespace(_adapter=adapter, namespace="acct-1")
+    monkeypatch.setattr(server, "_get_memory", lambda: mem)
+    import amfs_cortex.compiler as compiler_mod
+
+    monkeypatch.setattr(compiler_mod, "DigestCompiler", _ClusterCompileSpy(calls, gate))
+    server._cluster_recompute_last.clear()
+
+
+def test_recompute_is_a_plain_def_and_compiles_once_per_window(monkeypatch) -> None:
+    calls: list = []
+    _wire_recompute(monkeypatch, calls)
+    assert not inspect.iscoroutinefunction(server.recompute_clusters)
+
+    assert server.recompute_clusters() == {"ok": True}
+    assert server.recompute_clusters() == {"ok": True, "skipped": "recent"}
+    assert server.recompute_clusters(force=True) == {"ok": True}
+    assert [c[0] for c in calls] == ["cluster:account:acct-1"] * 2
+
+
+def test_recompute_window_expires(monkeypatch) -> None:
+    calls: list = []
+    _wire_recompute(monkeypatch, calls)
+    monkeypatch.setattr(server, "_CLUSTER_RECOMPUTE_MIN_INTERVAL_S", 0.0)
+    server.recompute_clusters()
+    server.recompute_clusters()
+    assert len(calls) == 2
+
+
+def test_concurrent_recomputes_do_not_stack(monkeypatch) -> None:
+    """Two Agents-page mounts at once: one compile runs, the other reuses it."""
+    calls: list = []
+    gate = threading.Event()
+    _wire_recompute(monkeypatch, calls, gate)
+    results: list = []
+    t1 = threading.Thread(target=lambda: results.append(server.recompute_clusters()))
+    t1.start()
+    for _ in range(100):
+        if calls:
+            break
+        time.sleep(0.01)
+    t2 = threading.Thread(target=lambda: results.append(server.recompute_clusters()))
+    t2.start()
+    time.sleep(0.05)
+    assert len(calls) == 1, "the second call must wait for the first, not compile alongside it"
+    gate.set()
+    t1.join(5); t2.join(5)
+    assert len(calls) == 1
+    assert sorted(r.get("skipped", "") for r in results) == ["", "recent"]
 
 
 def test_a_sync_route_runs_off_the_event_loop(monkeypatch) -> None:

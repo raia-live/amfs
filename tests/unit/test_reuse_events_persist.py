@@ -513,7 +513,6 @@ def test_an_adapter_predating_the_agent_filter_degrades_instead_of_failing():
     out the endpoint entirely, including the account-wide answer that still works
     perfectly. Only the narrowed question is refused.
     """
-    import asyncio
 
     from amfs_http import server as srv
 
@@ -535,8 +534,8 @@ def test_an_adapter_predating_the_agent_filter_degrades_instead_of_failing():
     original = srv._get_memory
     srv._get_memory = lambda: _Memory()  # type: ignore[assignment]
     try:
-        narrowed = asyncio.run(srv.reuse_summary(_EndpointRequest(), agent="some-agent"))
-        account_wide = asyncio.run(srv.reuse_summary(_EndpointRequest()))
+        narrowed = srv.reuse_summary(_EndpointRequest(), agent="some-agent")
+        account_wide = srv.reuse_summary(_EndpointRequest())
     finally:
         srv._get_memory = original  # type: ignore[assignment]
 

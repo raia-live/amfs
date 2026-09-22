@@ -1610,7 +1610,7 @@ async def health_v1() -> dict[str, str]:
 
 
 @app.get("/api/v1/auth/whoami")
-async def whoami(
+def whoami(
     request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -2304,7 +2304,7 @@ async def list_entity_summaries(
 
 
 @app.post("/api/v1/aggregate")
-async def aggregate_entries_endpoint(
+def aggregate_entries_endpoint(
     request: Request,
     req: AggregateRequest,
     _auth: str | None = Depends(verify_api_key),
@@ -3545,7 +3545,7 @@ async def get_stats(
 
 
 @app.post("/api/v1/verify")
-async def verify_integrity(
+def verify_integrity(
     request: Request,
     body: dict[str, Any] = {},
     _auth: str | None = Depends(verify_api_key),
@@ -3576,7 +3576,7 @@ _COMMIT_WRITE_OPTIONS = ("confidence", "memory_type", "pattern_refs", "shared")
 
 
 @app.post("/api/v1/commits")
-async def create_commit(
+def create_commit(
     body: dict[str, Any],
     request: Request,
     _auth: str | None = Depends(verify_api_key),
@@ -3704,7 +3704,7 @@ async def create_commit(
 
 
 @app.get("/api/v1/commits")
-async def list_commits(
+def list_commits(
     request: Request,
     limit: int = Query(50, ge=1, le=500),
     branch: str | None = Query(None),
@@ -3752,7 +3752,7 @@ async def list_commits(
 
 
 @app.get("/api/v1/commits/{commit_id}")
-async def get_commit(
+def get_commit(
     request: Request,
     commit_id: str,
     _auth: str | None = Depends(verify_api_key),
@@ -3769,7 +3769,7 @@ async def get_commit(
 
 
 @app.post("/api/v1/merge-base")
-async def merge_base(
+def merge_base(
     body: dict[str, Any],
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -3939,7 +3939,7 @@ def _infer_tags(
 
 
 @app.put("/api/v1/agents/{agent_id:path}/profile")
-async def update_agent_profile(
+def update_agent_profile(
     request: Request,
     agent_id: str,
     body: dict[str, Any],
@@ -3960,7 +3960,7 @@ async def update_agent_profile(
 
 
 @app.put("/api/v1/agents/{agent_id:path}/capabilities")
-async def update_agent_capabilities(
+def update_agent_capabilities(
     request: Request,
     agent_id: str,
     body: dict[str, Any],
@@ -3976,7 +3976,7 @@ async def update_agent_capabilities(
 
 
 @app.put("/api/v1/agents/{agent_id:path}/contracts")
-async def update_agent_contracts(
+def update_agent_contracts(
     request: Request,
     agent_id: str,
     body: dict[str, Any],
@@ -3992,7 +3992,7 @@ async def update_agent_contracts(
 
 
 @app.get("/api/v1/agents/discover")
-async def discover_agents(
+def discover_agents(
     request: Request,
     capability: str | None = Query(None),
     entity_path: str | None = Query(None),
@@ -4027,7 +4027,7 @@ def _require_entry_visible(request: Request, entity_path: str, key: str) -> None
 
 
 @app.post("/api/v1/diff")
-async def compute_diff(
+def compute_diff(
     request: Request,
     body: dict[str, Any],
     _auth: str | None = Depends(verify_api_key),
@@ -4042,7 +4042,7 @@ async def compute_diff(
 
 
 @app.post("/api/v1/patches")
-async def create_patch(
+def create_patch(
     request: Request,
     body: dict[str, Any],
     _auth: str | None = Depends(verify_api_key),
@@ -4787,7 +4787,7 @@ async def commit_outcome(
 
 
 @app.get("/api/v1/outcomes")
-async def list_outcomes(
+def list_outcomes(
     request: Request,
     entity_path: str | None = Query(None),
     since: str | None = Query(None),
@@ -4815,7 +4815,7 @@ async def list_outcomes(
 
 
 @app.post("/api/v1/context")
-async def record_context(
+def record_context(
     req: ContextRequest,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -4825,7 +4825,7 @@ async def record_context(
 
 
 @app.get("/api/v1/explain")
-async def explain(
+def explain(
     request: Request,
     outcome_ref: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
@@ -4997,7 +4997,7 @@ async def save_trace(
 # NOTE: must be registered before /api/v1/traces/{trace_id} so "share-stats"
 # isn't captured as a trace_id.
 @app.get("/api/v1/traces/share-stats")
-async def get_share_stats(
+def get_share_stats(
     request: Request,
     since: datetime | None = Query(None),
     pair_limit: int = Query(20, ge=1, le=100),
@@ -5034,7 +5034,7 @@ async def get_trace(
 
 
 @app.post("/api/v1/traces/{trace_id}/explain")
-async def explain_trace(
+def explain_trace(
     request: Request,
     trace_id: str,
     _auth: str | None = Depends(verify_api_key),
@@ -5442,7 +5442,7 @@ async def list_agents(
 
 
 @app.get("/api/v1/reuse")
-async def reuse_summary(
+def reuse_summary(
     request: Request,
     days: int = 7,
     limit: int = 10,
@@ -5519,7 +5519,7 @@ async def reuse_summary(
 
 
 @app.get("/api/v1/agents/{agent_id:path}/memory-graph")
-async def agent_memory_graph(
+def agent_memory_graph(
     request: Request,
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
@@ -5690,7 +5690,7 @@ async def agent_cross_reads(
 
 
 @app.get("/api/v1/agents/{agent_id:path}/recall/{entity_path:path}/{key}")
-async def agent_recall(
+def agent_recall(
     request: Request,
     agent_id: str,
     entity_path: str,
@@ -5720,7 +5720,7 @@ async def agent_recall(
 
 
 @app.get("/api/v1/agents/{agent_id:path}/entries")
-async def agent_entries(
+def agent_entries(
     request: Request,
     agent_id: str,
     entity_path: str | None = Query(None),
@@ -5741,7 +5741,7 @@ async def agent_entries(
 
 
 @app.get("/api/v1/agents/{agent_id:path}/read-from/{source_agent_id}/{entity_path:path}/{key}")
-async def agent_read_from(
+def agent_read_from(
     request: Request,
     agent_id: str,
     source_agent_id: str,
@@ -5973,7 +5973,7 @@ class LogEventRequest(BaseModel):
 
 
 @app.post("/api/v1/timeline/events")
-async def log_timeline_event(
+def log_timeline_event(
     request: Request,
     body: LogEventRequest,
     _auth: str | None = Depends(verify_api_key),
@@ -6024,7 +6024,7 @@ class UpsertGraphEdgeRequest(BaseModel):
 
 
 @app.post("/api/v1/graph/edges")
-async def upsert_graph_edge_endpoint(
+def upsert_graph_edge_endpoint(
     body: UpsertGraphEdgeRequest,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -6048,7 +6048,7 @@ async def upsert_graph_edge_endpoint(
 
 
 @app.get("/api/v1/agents/enriched")
-async def list_agents_enriched(
+def list_agents_enriched(
     request: Request,
     histograms: bool = True,
     _auth: str | None = Depends(verify_api_key),
@@ -6078,7 +6078,7 @@ async def list_agents_enriched(
 
 
 @app.get("/api/v1/agent-groups")
-async def list_agent_groups(
+def list_agent_groups(
     request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -6151,7 +6151,7 @@ async def update_agent_group_endpoint(
 
 
 @app.delete("/api/v1/agent-groups/{group_id}")
-async def delete_agent_group_endpoint(
+def delete_agent_group_endpoint(
     group_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -6226,7 +6226,7 @@ async def reorder_agent_groups_endpoint(
 
 
 @app.get("/api/v1/agent-groups/suggestions")
-async def agent_group_suggestions(
+def agent_group_suggestions(
     request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -6263,7 +6263,7 @@ async def agent_group_suggestions(
 
 
 @app.post("/api/v1/agent-groups/suggestions/{cluster_id}/accept", status_code=201)
-async def accept_cluster_suggestion(
+def accept_cluster_suggestion(
     cluster_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -6302,7 +6302,7 @@ async def accept_cluster_suggestion(
 
 
 @app.post("/api/v1/agent-groups/suggestions/{cluster_id}/dismiss")
-async def dismiss_cluster_suggestion_endpoint(
+def dismiss_cluster_suggestion_endpoint(
     cluster_id: str,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -6312,32 +6312,57 @@ async def dismiss_cluster_suggestion_endpoint(
     return {"dismissed": True}
 
 
+# The cluster compile walks every agent in the namespace and is pure Python
+# CPU — minutes on an account with thousands of agents. The dashboard's Agents
+# page POSTs it on every mount, so without a guard two tabs or one reload queue
+# a second full compile behind the first while the process is pinned at one
+# core. One compile at a time per process, and a compile that finished within
+# the window is reused rather than repeated; the caller's ``ok`` is unchanged
+# because it only ever waited for the suggestions to be refreshed.
+_CLUSTER_RECOMPUTE_MIN_INTERVAL_S = float(
+    os.environ.get("AMFS_CLUSTER_RECOMPUTE_MIN_INTERVAL_S", "300"),
+)
+_cluster_recompute_lock = threading.Lock()
+_cluster_recompute_last: dict[str, float] = {}
+
+
 @app.post("/api/v1/agent-groups/recompute")
-async def recompute_clusters(
+def recompute_clusters(
+    force: bool = False,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    """Trigger recomputation of agent clusters."""
+    """Trigger recomputation of agent clusters.
+
+    Runs on the threadpool (plain ``def``): the compile is CPU-bound Python and
+    used to freeze the event loop for its whole duration. ``force=true`` skips
+    the reuse window but still waits its turn behind a compile in flight.
+    """
     try:
         from amfs_cortex.compiler import DigestCompiler
         from amfs_postgres.adapter import PostgresAdapter
-
-        mem = _get_memory()
-        adapter = mem._adapter
-        if not isinstance(adapter, PostgresAdapter):
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Cluster recomputation requires Postgres adapter"},
-            )
-        compiler = DigestCompiler(
-            adapter=adapter,
-            namespace=mem.namespace,
-        )
-        compiler.compile(f"cluster:account:{mem.namespace}")
     except ImportError:
         return JSONResponse(
             status_code=400,
             content={"error": "amfs-cortex package is required for recomputation"},
         )
+    mem = _get_memory()
+    adapter = mem._adapter
+    if not isinstance(adapter, PostgresAdapter):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Cluster recomputation requires Postgres adapter"},
+        )
+    ns = mem.namespace
+    with _cluster_recompute_lock:
+        last = _cluster_recompute_last.get(ns)
+        if (
+            not force
+            and last is not None
+            and time.monotonic() - last < _CLUSTER_RECOMPUTE_MIN_INTERVAL_S
+        ):
+            return {"ok": True, "skipped": "recent"}
+        DigestCompiler(adapter=adapter, namespace=ns).compile(f"cluster:account:{ns}")
+        _cluster_recompute_last[ns] = time.monotonic()
     return {"ok": True}
 
 
@@ -6350,7 +6375,7 @@ SNAPSHOT_ENTITY = "_system/agent-snapshots"
 
 
 @app.post("/api/v1/agents/{agent_id:path}/snapshots")
-async def create_snapshot(
+def create_snapshot(
     request: Request,
     agent_id: str,
     req: CreateSnapshotRequest,
@@ -6408,7 +6433,7 @@ async def create_snapshot(
 
 
 @app.get("/api/v1/agents/{agent_id:path}/snapshots")
-async def list_snapshots(
+def list_snapshots(
     request: Request,
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
@@ -6436,7 +6461,7 @@ async def list_snapshots(
 
 
 @app.get("/api/v1/agents/{agent_id:path}/snapshots/{snapshot_id}")
-async def get_snapshot(
+def get_snapshot(
     request: Request,
     agent_id: str,
     snapshot_id: str,
@@ -6454,7 +6479,7 @@ async def get_snapshot(
 
 
 @app.delete("/api/v1/agents/{agent_id:path}/snapshots/{snapshot_id}")
-async def delete_snapshot(
+def delete_snapshot(
     request: Request,
     agent_id: str,
     snapshot_id: str,
@@ -6472,7 +6497,7 @@ async def delete_snapshot(
 
 
 @app.post("/api/v1/agents/{agent_id:path}/snapshots/{snapshot_id}/recover")
-async def recover_snapshot(
+def recover_snapshot(
     request: Request,
     agent_id: str,
     snapshot_id: str,
@@ -6527,7 +6552,7 @@ async def recover_snapshot(
 
 
 @app.post("/api/v1/rollback")
-async def rollback(
+def rollback(
     request: Request,
     body: dict[str, Any],
     _auth: str | None = Depends(verify_api_key),
@@ -6604,7 +6629,7 @@ async def rollback(
 
 
 @app.get("/api/v1/agents/{agent_id:path}/branches")
-async def agent_branches(
+def agent_branches(
     request: Request,
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
@@ -6629,7 +6654,7 @@ async def agent_branches(
 
 
 @app.get("/api/v1/agents/{agent_id:path}/pull-requests")
-async def agent_pull_requests(
+def agent_pull_requests(
     request: Request,
     agent_id: str,
     _auth: str | None = Depends(verify_api_key),
@@ -6947,7 +6972,7 @@ def list_audit_log(
 
 
 @app.get("/api/v1/patterns")
-async def list_patterns(
+def list_patterns(
     request: Request,
     entity_path: str | None = Query(None),
     limit: int = Query(100),
@@ -7724,7 +7749,7 @@ def _filter_graph_edges(request: Request, edges: list) -> list:
 
 
 @app.get("/api/v1/pro/graph/neighbors")
-async def graph_neighbors(
+def graph_neighbors(
     request: Request,
     entity: str = Query(...),
     relation: str | None = Query(None),
@@ -7841,7 +7866,7 @@ async def expertise_graph(
 
 
 @app.post("/api/v1/pro/graph/backfill")
-async def graph_backfill(
+def graph_backfill(
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Backfill knowledge graph edges from existing entries and outcomes.
@@ -8050,7 +8075,7 @@ async def stream(
 
 
 @app.get("/api/v1/admin/config")
-async def get_system_config(
+def get_system_config(
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Return system configuration and active Pro module status."""
@@ -8086,7 +8111,7 @@ async def get_system_config(
 
 
 @app.get("/api/v1/connectors")
-async def list_connectors(
+def list_connectors(
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """List available and installed connectors."""
@@ -8387,7 +8412,7 @@ async def get_briefing(
 
 
 @app.get("/api/v1/cortex/status")
-async def cortex_status(
+def cortex_status(
     request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -8427,7 +8452,7 @@ async def cortex_status(
 
 
 @app.get("/api/v1/cortex/digests")
-async def list_cortex_digests(
+def list_cortex_digests(
     request: Request,
     digest_type: str | None = Query(None),
     scope: str | None = Query(None),
@@ -8464,7 +8489,7 @@ async def list_cortex_digests(
 
 
 @app.get("/api/v1/cortex/activity")
-async def cortex_activity(
+def cortex_activity(
     request: Request,
     limit: int = Query(default=50, le=200),
     _auth: str | None = Depends(verify_api_key),
@@ -8486,7 +8511,7 @@ async def cortex_activity(
 
 
 @app.post("/api/v1/cortex/recompile")
-async def cortex_recompile(
+def cortex_recompile(
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Trigger a full digest recompilation."""
@@ -8502,7 +8527,7 @@ async def cortex_recompile(
 
 
 @app.post("/api/v1/cortex/consolidate")
-async def run_consolidation(
+def run_consolidation(
     request: Request,
     body: dict[str, Any] | None = None,
     _auth: str | None = Depends(verify_api_key),
@@ -8539,7 +8564,7 @@ async def run_consolidation(
 
 
 @app.get("/api/v1/cortex/consolidation/candidates")
-async def list_consolidation_candidates(
+def list_consolidation_candidates(
     request: Request,
     entity_path: str = Query(...),
     branch: str = Query("main"),
@@ -8566,7 +8591,7 @@ async def list_consolidation_candidates(
 
 
 @app.get("/api/v1/cortex/consolidation/proposals")
-async def list_consolidation_proposals(
+def list_consolidation_proposals(
     request: Request,
     entity_path: str | None = Query(None),
     status: str | None = Query(None),
@@ -8656,7 +8681,7 @@ async def list_consolidation_proposals(
 
 
 @app.get("/api/v1/cortex/consolidation/status")
-async def consolidation_status(
+def consolidation_status(
     request: Request,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -8788,7 +8813,7 @@ async def ingest_webhook(
 
 
 @app.post("/api/v1/events")
-async def ingest_event(
+def ingest_event(
     body: EventRequest,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
