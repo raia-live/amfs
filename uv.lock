@@ -395,7 +395,7 @@ provides-extras = ["crewai"]
 
 [[package]]
 name = "amfs-http-server"
-version = "0.3.41"
+version = "0.3.42"
 source = { editable = "packages/http-server" }
 dependencies = [
     { name = "amfs" },
@@ -465,7 +465,7 @@ provides-extras = ["langgraph"]
 
 [[package]]
 name = "amfs-mcp-server"
-version = "0.7.34"
+version = "0.7.35"
 source = { editable = "packages/mcp-server" }
 dependencies = [
     { name = "amfs" },
