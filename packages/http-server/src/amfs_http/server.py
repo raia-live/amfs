@@ -3640,56 +3640,52 @@ def create_commit(
     # from the moment this deploys. The body wins when both are present.
     agent_id = body.get("agent_id") or request.headers.get("x-amfs-agent-id")
     session_id = body.get("session_id")
-    original_agent = mem._tagger.agent_id if agent_id else None
-    original_session = mem._tagger.session_id if session_id else None
 
-    try:
-        if agent_id:
-            mem._tagger.agent_id = agent_id
-            try:
-                # The gateway ensures its agent when the session opens, so this
-                # is normally a no-op. It is here for a client committing as an
-                # agent this server has not seen, where the entry insert would
-                # otherwise fail on a name nothing has registered.
-                mem._adapter.ensure_agent(agent_id, mem.namespace)
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "ensure_agent failed for %s — committing anyway", agent_id,
-                    exc_info=True,
-                )
-            _link_agent_owner_once(request, agent_id, mem.namespace)
+    # A per-request handle carries the caller's identity (``AgentMemory.as_agent``).
+    # Swapping the shared tagger and restoring it in a ``finally`` was atomic
+    # only while this body ran on the event loop; on the threadpool two commits
+    # would stamp each other's writes.
+    handle = mem
+    if agent_id or session_id:
+        handle = mem.as_agent(agent_id or mem.agent_id)
         if session_id:
-            mem._tagger.session_id = session_id
+            handle._tagger.session_id = session_id
 
-        with mem.transaction(message) as tx:
-            for w in writes:
-                options = {k: w[k] for k in _COMMIT_WRITE_OPTIONS if k in w}
-                # Arrives over the wire as a string, and the write path wants
-                # the enum. An unknown one is refused rather than dropped:
-                # writing the entry with a default type would put the wrong
-                # metadata on the right memory, and nothing later can tell that
-                # happened.
-                if "memory_type" in options:
-                    raw = str(options["memory_type"])
-                    try:
-                        options["memory_type"] = MemoryType(raw)
-                    except ValueError as exc:
-                        raise HTTPException(
-                            status_code=422,
-                            detail=(
-                                f"Invalid memory_type {raw!r}. Valid: "
-                                + ", ".join(m.value for m in MemoryType)
-                            ),
-                        ) from exc
-                tx.write(w["entity_path"], w["key"], w.get("value"), **options)
-    finally:
-        # Restored even when the transaction raised. This memory is a process
-        # singleton, so a tagger left holding one caller's name would sign the
-        # next caller's writes with it.
-        if original_agent is not None:
-            mem._tagger.agent_id = original_agent
-        if original_session is not None:
-            mem._tagger.session_id = original_session
+    if agent_id:
+        try:
+            # The gateway ensures its agent when the session opens, so this
+            # is normally a no-op. It is here for a client committing as an
+            # agent this server has not seen, where the entry insert would
+            # otherwise fail on a name nothing has registered.
+            mem._adapter.ensure_agent(agent_id, mem.namespace)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "ensure_agent failed for %s — committing anyway", agent_id,
+                exc_info=True,
+            )
+        _link_agent_owner_once(request, agent_id, mem.namespace)
+
+    with handle.transaction(message) as tx:
+        for w in writes:
+            options = {k: w[k] for k in _COMMIT_WRITE_OPTIONS if k in w}
+            # Arrives over the wire as a string, and the write path wants
+            # the enum. An unknown one is refused rather than dropped:
+            # writing the entry with a default type would put the wrong
+            # metadata on the right memory, and nothing later can tell that
+            # happened.
+            if "memory_type" in options:
+                raw = str(options["memory_type"])
+                try:
+                    options["memory_type"] = MemoryType(raw)
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"Invalid memory_type {raw!r}. Valid: "
+                            + ", ".join(m.value for m in MemoryType)
+                        ),
+                    ) from exc
+            tx.write(w["entity_path"], w["key"], w.get("value"), **options)
 
     commit = tx.commit
     return {
@@ -5706,13 +5702,10 @@ def agent_recall(
     if vis is not None and vis.should_filter() and not vis.is_agent_visible(agent_id):
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    mem = _get_memory()
-    original_agent = mem._tagger.agent_id
-    mem._tagger.agent_id = agent_id
-    try:
-        entry = mem.recall(entity_path, key)
-    finally:
-        mem._tagger.agent_id = original_agent
+    # Acting as the agent through a per-request handle, not by swapping the
+    # shared tagger: these routes run on the threadpool now, and a swap there
+    # is a race (``AgentMemory.as_agent``).
+    entry = _get_memory().as_agent(agent_id).recall(entity_path, key)
     if entry is None:
         return {"status": "not_found", "agentId": agent_id,
                 "entityPath": entity_path, "key": key}
@@ -5764,15 +5757,8 @@ def agent_read_from(
     # from another — and that edge is what the authority ranking is built on,
     # so a cross-agent read over HTTP never counted for anything.
     #
-    # Swapping the tagger is how the rest of this file attributes work to the
-    # caller (see agent_recall above): the memory is a process singleton, so a
-    # tagger left holding one caller's name would sign the next caller's reads.
-    original_agent = mem._tagger.agent_id
-    mem._tagger.agent_id = agent_id
-    try:
-        entry = mem.read_from(source_agent_id, entity_path, key)
-    finally:
-        mem._tagger.agent_id = original_agent
+    # A per-request handle attributes the read to the caller (see agent_recall).
+    entry = mem.as_agent(agent_id).read_from(source_agent_id, entity_path, key)
 
     if entry is None:
         return {"status": "not_found", "sourceAgentId": source_agent_id,
@@ -6326,8 +6312,22 @@ _cluster_recompute_lock = threading.Lock()
 _cluster_recompute_last: dict[str, float] = {}
 
 
+def _recompute_window_key(request: Request, namespace: str) -> str:
+    """Who the reuse window belongs to.
+
+    A multi-tenant deployment runs every account under one namespace and keeps
+    them apart with row-level security, so the namespace alone would let the
+    first account's compile mark every other account on the instance as fresh.
+    The tenant middleware names the account on ``request.state.account_id``;
+    a single-tenant server has none and the namespace is the whole story.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    return f"{account_id or ''}:{namespace}"
+
+
 @app.post("/api/v1/agent-groups/recompute")
 def recompute_clusters(
+    request: Request,
     force: bool = False,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
@@ -6335,7 +6335,9 @@ def recompute_clusters(
 
     Runs on the threadpool (plain ``def``): the compile is CPU-bound Python and
     used to freeze the event loop for its whole duration. ``force=true`` skips
-    the reuse window but still waits its turn behind a compile in flight.
+    the reuse window but still waits its turn behind a compile in flight. The
+    window is per tenant account; the lock is per process, because the compile
+    is what pins the core.
     """
     try:
         from amfs_cortex.compiler import DigestCompiler
@@ -6353,8 +6355,9 @@ def recompute_clusters(
             content={"error": "Cluster recomputation requires Postgres adapter"},
         )
     ns = mem.namespace
+    window_key = _recompute_window_key(request, ns)
     with _cluster_recompute_lock:
-        last = _cluster_recompute_last.get(ns)
+        last = _cluster_recompute_last.get(window_key)
         if (
             not force
             and last is not None
@@ -6362,7 +6365,7 @@ def recompute_clusters(
         ):
             return {"ok": True, "skipped": "recent"}
         DigestCompiler(adapter=adapter, namespace=ns).compile(f"cluster:account:{ns}")
-        _cluster_recompute_last[ns] = time.monotonic()
+        _cluster_recompute_last[window_key] = time.monotonic()
     return {"ok": True}
 
 
@@ -6395,17 +6398,12 @@ def create_snapshot(
         "data": req.snapshot_data,
     }
 
-    original_agent = mem._tagger.agent_id
-    mem._tagger.agent_id = agent_id
-    try:
-        mem.write(
-            SNAPSHOT_ENTITY,
-            f"{agent_id}/{snapshot_id}",
-            snapshot_value,
-            confidence=1.0,
-        )
-    finally:
-        mem._tagger.agent_id = original_agent
+    mem.as_agent(agent_id).write(
+        SNAPSHOT_ENTITY,
+        f"{agent_id}/{snapshot_id}",
+        snapshot_value,
+        confidence=1.0,
+    )
 
     try:
         mem._adapter.log_event(Event(
@@ -8787,23 +8785,19 @@ async def ingest_webhook(
         event_id=event_id,
     )
 
-    original_agent = mem._tagger.agent_id
-    mem._tagger.agent_id = f"webhook/{connector_name}"
     persisted = 0
-    try:
-        for r in results:
-            if r.success and r.action == "write":
-                entry = mem.write(
-                    r.entity_path,
-                    r.key,
-                    r.details,
-                    confidence=1.0,
-                    memory_type=MemoryType.EXPERIENCE,
-                )
-                _sse_manager.broadcast(entry)
-                persisted += 1
-    finally:
-        mem._tagger.agent_id = original_agent
+    as_webhook = mem.as_agent(f"webhook/{connector_name}")
+    for r in results:
+        if r.success and r.action == "write":
+            entry = as_webhook.write(
+                r.entity_path,
+                r.key,
+                r.details,
+                confidence=1.0,
+                memory_type=MemoryType.EXPERIENCE,
+            )
+            _sse_manager.broadcast(entry)
+            persisted += 1
 
     return {
         "results": [r.model_dump(mode="json") for r in results],
@@ -8824,19 +8818,14 @@ def ingest_event(
     """
     mem = _get_memory()
 
-    original_agent = mem._tagger.agent_id
-    mem._tagger.agent_id = f"external/{body.source}"
-    try:
-        entry = mem.write(
-            body.entity_path,
-            body.key,
-            body.value,
-            confidence=1.0,
-            memory_type=MemoryType.EXPERIENCE,
-        )
-        _sse_manager.broadcast(entry)
-    finally:
-        mem._tagger.agent_id = original_agent
+    entry = mem.as_agent(f"external/{body.source}").write(
+        body.entity_path,
+        body.key,
+        body.value,
+        confidence=1.0,
+        memory_type=MemoryType.EXPERIENCE,
+    )
+    _sse_manager.broadcast(entry)
 
     return {
         "status": "ok",

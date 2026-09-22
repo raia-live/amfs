@@ -55,9 +55,13 @@ def client(
 ) -> TestClient:
     mem = MagicMock()
     mem.namespace = "test-ns"
+    mem.agent_id = SERVER_AGENT
     mem._tagger = tagger
 
     class _Tx:
+        def __init__(self, handle_tagger):
+            self._handle_tagger = handle_tagger
+
         def __enter__(self):
             return self
 
@@ -65,18 +69,28 @@ def client(
             return False
 
         def write(self, entity_path, key, value, **options):
-            # Read at write time, not afterwards: the point of the fix is that
-            # the tagger holds the caller's name for the duration, and a check
-            # made after the block would pass even if it were restored early.
-            observed["agent_id"] = tagger.agent_id
-            observed["session_id"] = tagger.session_id
+            # Read at write time from the tagger of whichever handle ran the
+            # transaction: the caller's name has to be on it for the duration.
+            observed["agent_id"] = self._handle_tagger.agent_id
+            observed["session_id"] = self._handle_tagger.session_id
 
         commit = SimpleNamespace(
             id="c-1", model_dump=lambda mode="json": {"id": "c-1"}
         )
         entries = ["one"]
 
-    mem.transaction.return_value = _Tx()
+    # The route acts for the caller through ``AgentMemory.as_agent`` — a
+    # per-request handle with its own tagger — never by swapping the shared
+    # one. The shared handle's ``transaction`` is the server committing as
+    # itself, which only a caller naming nobody should reach.
+    def as_agent(agent_id):
+        handle = MagicMock()
+        handle._tagger = SimpleNamespace(agent_id=agent_id, session_id=tagger.session_id)
+        handle.transaction.side_effect = lambda message="": _Tx(handle._tagger)
+        return handle
+
+    mem.as_agent.side_effect = as_agent
+    mem.transaction.side_effect = lambda message="": _Tx(tagger)
     monkeypatch.setattr(server, "_memory", mem)
     monkeypatch.setattr(server, "_get_memory", lambda: mem)
     monkeypatch.setattr(server, "_link_agent_owner_once", lambda *a, **k: None)
@@ -125,7 +139,9 @@ class TestTheHeaderIsTheFallback:
 
 class TestTheServerTaggerIsLeftAsItWasFound:
     """This memory is a process singleton, so a tagger left holding one
-    caller's name signs the next caller's writes with it."""
+    caller's name signs the next caller's writes with it. The route now runs
+    on the threadpool, where even a swap restored in a ``finally`` races the
+    next request; the shared tagger must not be touched at all."""
 
     def test_the_agent_is_restored(self, client, tagger) -> None:
         _post(client, agent_id="builder-agent", session_id="sess-caller")
@@ -134,6 +150,12 @@ class TestTheServerTaggerIsLeftAsItWasFound:
     def test_the_session_is_restored(self, client, tagger) -> None:
         _post(client, agent_id="builder-agent", session_id="sess-caller")
         assert tagger.session_id == SERVER_SESSION
+
+    def test_the_shared_handle_never_commits_for_a_named_caller(self, client) -> None:
+        mem = server._get_memory()
+        _post(client, agent_id="builder-agent", session_id="sess-caller")
+        mem.transaction.assert_not_called()
+        mem.as_agent.assert_called_once_with("builder-agent")
 
     def test_it_is_restored_even_when_the_batch_is_rejected(
         self, client, tagger
