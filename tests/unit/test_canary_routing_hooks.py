@@ -151,12 +151,11 @@ class TestReadsFollowTheRoute:
         assert call.kwargs["branch"] == CANARY_BRANCH
 
     def test_aggregate(self, mem) -> None:
-        asyncio.run(
-            server.aggregate_entries_endpoint(
-                _request(memory_branch=CANARY_BRANCH),
-                AggregateRequest(entity_path="acme/billing"),
-                None,
-            )
+        # A plain def route (runs on the threadpool in the app): call it directly.
+        server.aggregate_entries_endpoint(
+            _request(memory_branch=CANARY_BRANCH),
+            AggregateRequest(entity_path="acme/billing"),
+            None,
         )
         assert mem.list.call_args.kwargs["branch"] == CANARY_BRANCH
 
