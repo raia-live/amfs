@@ -25,9 +25,10 @@ from amfs_core.actions import (
     plan_actions,
     pooled_classes,
     priors_local,
+    rank_by_lessons,
     render_priors,
 )
-from amfs_core.lessons import lesson_of
+from amfs_core.lessons import applicable_claims, lesson_of
 from amfs_core.render import (
     ContextEntry,
     render_context,
@@ -79,6 +80,12 @@ class Guidance:
     #: for guidance over the actions it has not tried must not be handed the
     #: one that just failed because the situation's record has it as a winner.
     candidate_actions: list[str] | None = None
+    #: The task as the run described it, and the situation it declared, when
+    #: it did. What :attr:`applicable_lessons` is read against: a lesson is
+    #: about this task when its situation is the declared one, else when its
+    #: words are in the task text.
+    task_text: str | None = None
+    situation: str | None = None
 
     @property
     def mode(self) -> str | None:
@@ -113,7 +120,20 @@ class Guidance:
         if self.candidate_actions:
             allowed = set(self.candidate_actions)
             plan = [a for a in plan if a in allowed]
-        return plan
+        return rank_by_lessons(
+            plan, self.applicable_lessons, priors=self.priors, recommendation=self.recommendation,
+        )
+
+    @property
+    def applicable_lessons(self) -> list[dict[str, Any]]:
+        """The claims among :attr:`lessons` that are about this task —
+        ``{"action", "worked", "evidence_status"}`` rows — read against
+        :attr:`situation` (exactly) or :attr:`task_text` (the situation's
+        words found in it). Empty when neither was given. They re-order
+        :attr:`plan`: the situation-exact record over the pooled priors."""
+        if not self.task_text and not self.situation:
+            return []
+        return applicable_claims(self.lessons, self.task_text, declared=self.situation)
 
     @property
     def next_action(self) -> str | None:
@@ -237,6 +257,8 @@ class Guidance:
         branch: str = "main",
         entity_path: str | None = None,
         candidate_actions: Sequence[str] | None = None,
+        task_text: str | None = None,
+        situation: str | None = None,
     ) -> Guidance:
         """Assemble guidance from what the SDK already returns.
 
@@ -293,7 +315,18 @@ class Guidance:
                 why = "; ".join(str(d) for d in (p.get("applicability_detail") or []))
                 lines.append(f"- {p.get('entity_path')}/{p.get('key')}" + (f" ({why})" if why else ""))
             blocks.append("Not for this run:\n" + "\n".join(lines))
-        priors_block = render_priors(priors, recommendation, candidate_actions=candidate_actions)
+        claims = None
+        if task_text or situation:
+            shown = [e for e in ordered if not e.is_training_excluded]
+            rows = []
+            for e in shown:
+                lesson = lesson_of(e.value)
+                if lesson is not None:
+                    rows.append(dict(lesson, evidence_status=e.evidence_status))
+            claims = applicable_claims(rows, task_text, declared=situation) or None
+        priors_block = render_priors(
+            priors, recommendation, candidate_actions=candidate_actions, lessons=claims,
+        )
         if priors_block:
             blocks.append(priors_block)
         if regime_shift:
@@ -317,6 +350,8 @@ class Guidance:
             recommendation=recommendation if isinstance(recommendation, dict) else None,
             regime_shift=regime_shift,
             candidate_actions=[str(a) for a in candidate_actions] if candidate_actions else None,
+            task_text=task_text,
+            situation=situation,
         )
 
 

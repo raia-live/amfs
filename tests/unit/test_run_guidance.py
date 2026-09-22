@@ -397,6 +397,59 @@ class TestLessonsAndPlan:
         assert abstained.plan == [] and abstained.next_action is None
         assert "Try in this order" not in abstained.text
 
+    def test_a_lesson_for_the_exact_situation_reorders_the_plan_and_the_text(self) -> None:
+        """Ops-queue CI #45: the server's plan put bump_dependency second (it
+        wins on the unpinned audit class the neighbourhood also holds) while
+        the shown lesson for the pinned class said it had failed. Given the
+        task text the guidance reads the lesson as about this task and moves
+        the action to the back — in the plan, in next_action after the first
+        fails, and in the rendered order. A lesson for another class does not
+        touch the plan; without the task text or a situation nothing moves."""
+        from amfs_core.lessons import make_lesson
+
+        class Hit:
+            def __init__(self, entry):
+                self.entry, self.breakdown = entry, {}
+
+        def entry(key, value, status="validated"):
+            return type("E", (), {
+                "entity_path": "acme/ci", "key": key, "value": value, "memory_type": "fact",
+                "evidence_status": status, "confidence": 0.9, "success_count": 3,
+                "failure_count": 0, "version": 1})()
+
+        sit = "pip-audit: requests has ; fix version · backend-only PR · changed requirements.txt"
+        task = ("PR #3864 · audit pinned. CI is red (audit pinned related change).\n"
+                "pip-audit: requests==2.31.0 has CVE-2024-XXXX; fix version 2.32.0\n"
+                "backend-only PR, no UI files changed. Files changed: requirements.txt")
+        hits = [
+            Hit(entry("learned-audit", make_lesson(sit, "fix:bump_dependency", False, "the pin is deliberate"))),
+            Hit(entry("learned-jest", make_lesson("jest: snapshots failed in web/components/Checkout.test.tsx",
+                                                  "fix:update_snapshots", True))),
+        ]
+        priors = {"tried": [{"action_key": "fix:add_audit_exception", "won": 9, "lost": 1, "n": 10, "p": 0.8,
+                             "last_3": ["lost", "won", "won"], "agents": 2},
+                            {"action_key": "fix:bump_dependency", "won": 1, "lost": 1, "n": 2, "p": 0.5,
+                             "last_3": ["won", "lost"], "agents": 1}],
+                  "untried": ["fix:fix_code", "fix:update_snapshots"], "source": "similar_outcomes"}
+        rec = {"mode": "act", "suggested_action": "fix:add_audit_exception", "why": "",
+               "plan": ["fix:add_audit_exception", "fix:bump_dependency", "fix:fix_code", "fix:update_snapshots"]}
+        g = Guidance.build(hits=hits, meta={"priors": priors, "recommendation": rec}, task_text=task)
+        assert [c["action"] for c in g.applicable_lessons] == ["fix:bump_dependency"]
+        assert g.plan == ["fix:add_audit_exception", "fix:fix_code", "fix:update_snapshots", "fix:bump_dependency"]
+        assert "Try in this order: fix:add_audit_exception -> fix:fix_code -> fix:update_snapshots -> fix:bump_dependency." in g.text
+        # The jest lesson's action was not moved up: it is about another class.
+        assert g.plan[1] != "fix:update_snapshots"
+        # A declared situation is compared exactly and needs no task text.
+        declared = Guidance.build(hits=hits, meta={"priors": priors, "recommendation": rec}, situation=sit.upper())
+        assert declared.plan == g.plan
+        # Nothing to read the lessons against: the server's order stands.
+        blind = Guidance.build(hits=hits, meta={"priors": priors, "recommendation": rec})
+        assert blind.applicable_lessons == [] and blind.plan == rec["plan"]
+        # The retry, over the untried actions, leads with what the lesson did not bar.
+        retry = Guidance.build(hits=hits, meta={"priors": priors, "recommendation": dict(rec, mode="explore")},
+                               task_text=task, candidate_actions=["fix:bump_dependency", "fix:fix_code"])
+        assert retry.plan == ["fix:fix_code", "fix:bump_dependency"] and retry.next_action == "fix:fix_code"
+
     def test_a_computed_plan_is_drawn_from_the_candidates_only(self) -> None:
         """A retry asks for guidance over the actions it has not tried. The
         situation's record still has the action that just failed as a winner;

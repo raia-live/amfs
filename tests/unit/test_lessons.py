@@ -107,3 +107,35 @@ def test_render_puts_the_claim_first_in_a_fixed_shape() -> None:
                          evidence_status="validated", success_count=3)
     assert entry.render().split(" worked.")[0] == other.render().split(" worked.")[0]
     assert not ContextEntry("acme/ci", "k", "prose").is_lesson
+
+
+def test_a_lesson_applies_by_declared_situation_or_by_its_words_in_the_task() -> None:
+    """The ops-queue audit classes: 'requests' is pinned by a house rule,
+    'urllib3' is not. The two tasks read alike to an embedding; the lesson's
+    words tell them apart, and a declared situation is compared exactly."""
+    from amfs_core.lessons import applicable_claims, lesson_applies
+
+    pinned = ("CI is red on PR #3864 (audit pinned related change).\nFailing job log:\n"
+              "  pip-audit: requests==2.31.0 has CVE-2024-XXXX; fix version 2.32.0\n"
+              "Files changed by the PR:\n  requirements.txt")
+    free = pinned.replace("requests==2.31.0", "urllib3==1.26.5").replace("2.32.0", "1.26.18")
+    sit = "pip-audit: requests has ; fix version · backend-only PR · changed requirements.txt"
+    assert lesson_applies(sit, pinned + " backend-only PR")
+    assert not lesson_applies(sit, free + " backend-only PR")
+    assert not lesson_applies("jest: snapshots failed in web/components/Checkout.test.tsx", pinned)
+    # Declared: exact, whitespace and case folded; the task text is not consulted.
+    assert lesson_applies("  Pip-Audit:  requests HAS ; fix version ", "unrelated", declared=sit.split(" ·")[0] + " ")
+    assert not lesson_applies(sit, pinned, declared="something else")
+    assert not lesson_applies("", pinned) and not lesson_applies(sit, None)
+    lessons = [
+        make_lesson(sit, "fix:bump_dependency", False, evidence_status="validated"),
+        make_lesson(sit, "fix:add_audit_exception", True),
+        make_lesson("jest: snapshots failed in web/components/Checkout.test.tsx", "fix:update_snapshots", True),
+        {"kind": "lesson", "situation": sit, "action": "fix:x", "worked": "yes"},  # not a boolean: ignored
+        "prose",
+    ]
+    claims = applicable_claims(lessons, pinned + " backend-only PR")
+    assert [(c["action"], c["worked"], c["evidence_status"]) for c in claims] == [
+        ("fix:bump_dependency", False, "validated"), ("fix:add_audit_exception", True, None),
+    ]
+    assert applicable_claims(lessons, None) == []

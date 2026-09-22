@@ -169,6 +169,7 @@ class Run:
         guidance = Guidance.build(
             digests=digests, hits=hits, meta=self.memory.last_priors,
             branch=branch, entity_path=entity_path, candidate_actions=self._candidate_actions,
+            task_text=self.task_input, situation=situation,
         )
         self._stamp(guidance)
         return guidance
@@ -252,6 +253,7 @@ class Run:
             hits=hits, meta=self.memory.last_priors,
             branch=self.memory.branch, entity_path=self.entity_path,
             candidate_actions=candidates,
+            task_text=self.task_input, situation=self._situation,
         )
         if guidance.is_empty:
             return None
