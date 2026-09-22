@@ -490,6 +490,8 @@ run.complete(True, verified_by="ci", evidence={"run_id": "98765"},
 | `recommendation` | `act` / `explore` / `escalate` / `abstain` with `suggested_action` and `why`; `priors` holds the per-action record. |
 | `guidance_id` | Names what was served (branch, entries and versions, render version). Stamped on the session as `guidance_id` / `guidance_count`, so the sealed trace says which guidance the agent saw. |
 
+`model`, `agent_version` and `runtime` on `begin()` are the run's environment. They scope procedures to this run, and they are stamped on the sealed trace (`model` as its own field as well as an attribute) — which is what the repair loop's feedback contract reads: an automatic policy ships and rolls back fixes only when enough of your runs record which model and which version of your agent ran them, or a model swap on your side would be blamed on the fix. Pass them on every `begin`.
+
 `verified_by` on `complete()` (or `commit_outcome()`) says who decided the outcome when the agent did not — `"ci"`, `"human"`, `"verifier"`, `"customer"`. It travels as the `verified_by` session attribute with `evidence_<key>` pointers; the repair loop weighs a verified outcome differently from an agent's own declaration, and holds automatic promotion until enough outcomes carry it.
 
 `Run(mem, assign_branch=fn)` takes an optional hook `(agent_id, unit) -> branch | None` for a canary assignment; when it names a branch, the run reads memory from it and writes stay on `main`.
