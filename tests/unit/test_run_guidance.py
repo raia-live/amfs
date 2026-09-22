@@ -13,7 +13,12 @@ from __future__ import annotations
 
 import pytest
 from amfs import AgentMemory, Guidance, Run
-from amfs.memory import GUIDANCE_COUNT_ATTRIBUTE, GUIDANCE_ID_ATTRIBUTE, provenance_attributes
+from amfs.memory import (
+    GUIDANCE_COUNT_ATTRIBUTE,
+    GUIDANCE_ID_ATTRIBUTE,
+    SITUATION_ATTRIBUTE,
+    provenance_attributes,
+)
 from amfs_core.models import MemoryType, OutcomeType
 from amfs_core.render import ContextEntry, guidance_id
 from amfs_filesystem.adapter import FilesystemAdapter
@@ -152,6 +157,8 @@ class TestRun:
         assert g.guidance_id
         assert mem.session_attributes[GUIDANCE_ID_ATTRIBUTE] == g.guidance_id
         assert mem.session_attributes[GUIDANCE_COUNT_ATTRIBUTE] == 1
+        # No situation was declared: none is stamped.
+        assert SITUATION_ATTRIBUTE not in mem.session_attributes
         # Nothing has been validated on this entity: strength is none, and the
         # caller's default policy is not to inject.
         assert g.strength == "none"
@@ -360,6 +367,13 @@ class TestLessonsAndPlan:
         assert g.lessons_claiming("fix:rerun_job") == []
         if "fix:rerun_job" in keys:
             assert g.lessons_claiming("fix:rerun_job", worked=False) == [keys["fix:rerun_job"]]
+
+    def test_a_declared_situation_is_stamped_on_the_trace(self, mem) -> None:
+        """The repair loop tells same-work runs apart by it: the task text's
+        first line is one customer's wording, the situation is the class."""
+        Run(mem).begin("“my card keeps getting declined”", entity_path="acme/support",
+                       situation="  card declined at checkout ")
+        assert mem.session_attributes[SITUATION_ATTRIBUTE] == "card declined at checkout"
 
     def test_learn_needs_an_entity(self, mem) -> None:
         with pytest.raises(ValueError):
