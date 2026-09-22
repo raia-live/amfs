@@ -509,6 +509,42 @@ def test_pooled_classes_reads_an_alternating_contradiction_and_not_a_single_flip
         _contrast_row("fix:b", "fix:a", sim=0.96, days_ago=1),
     ]))
     assert act.pooled_classes(far["contrasts"]) is None
+    # Only rows that pit A against B are on the timeline. One flip (b then a)
+    # plus a later win of A over some third action C is still one reversal.
+    flip_plus_c = act.aggregate_priors(act.neighbourhood_weights([
+        _contrast_row("fix:a", "fix:b", sim=0.96, days_ago=4, ref="old"),
+        _contrast_row("fix:b", "fix:a", sim=0.96, days_ago=2, ref="new"),
+        _contrast_row("fix:c", "fix:a", sim=0.96, days_ago=1, ref="a-over-c"),
+    ]))
+    assert act.pooled_classes(flip_plus_c["contrasts"]) is None
+    # And with the wins over C on the other side of the flip, still one reversal.
+    flip_c_first = act.aggregate_priors(act.neighbourhood_weights([
+        _contrast_row("fix:c", "fix:b", sim=0.96, days_ago=5, ref="b-over-c"),
+        _contrast_row("fix:a", "fix:b", sim=0.96, days_ago=4, ref="old"),
+        _contrast_row("fix:c", "fix:a", sim=0.96, days_ago=3, ref="a-over-c"),
+        _contrast_row("fix:b", "fix:a", sim=0.96, days_ago=2, ref="new"),
+    ]))
+    assert act.pooled_classes(flip_c_first["contrasts"]) is None
+
+
+def test_pooling_is_read_only_over_local_priors() -> None:
+    """The ``action_stats`` fallback records every outcome on the entity at
+    similarity 1.0, so mixed kinds of task there always look near-identical
+    and always contradict. It can name a winner; it cannot say the record is
+    pooled, thin the guidance, or warn the agent off the action record."""
+    pr = act.aggregate_priors(_pooled_rows())
+    entity_wide = {**pr, "source": "action_stats"}
+    assert act.priors_local(pr) and not act.priors_local(entity_wide)
+    # Strength: the winner stands over an entity-wide record …
+    assert act.guidance_strength(entity_wide, ["untested"]) == "strong"
+    assert act.guidance_strength(pr, ["untested"], priors_are_local=False) == "strong"
+    # … and a validated hit is strong whatever the priors look like: its
+    # record is about the hit, not about the neighbourhood.
+    assert act.guidance_strength(pr, ["validated"]) == "strong"
+    # Render: no contrast lines and no warning off an entity-wide record.
+    text = act.render_priors(entity_wide, act.recommend(entity_wide, agent_id="x", priors_are_local=False))
+    assert "near-identical" not in text and "alternating over time" not in text
+    assert "Recommendation: act -> fix:fix_code" in text
 
 
 def test_recommend_abstains_over_a_pooled_record_instead_of_naming_either_class_fix() -> None:

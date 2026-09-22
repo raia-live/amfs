@@ -702,13 +702,20 @@ def guidance_strength(
     hit_statuses: Sequence[str] | None,
     *,
     regime_shift: bool = False,
+    priors_are_local: bool | None = None,
 ) -> str:
     """How much the served context is worth acting on: ``strong`` when a hit is
     validated or an action has a winning record here; ``none`` when there is
     nothing or only untested / contested / discredited evidence; ``thin``
-    otherwise (some evidence, none of it confirmed, a regime shift in scope,
-    or a record that :func:`pooled_classes` says is about two kinds of task).
-    Pure; the briefing and the SDK's ``Guidance`` carry the label."""
+    otherwise (some evidence, none of it confirmed, or a regime shift in
+    scope). Pure; the briefing and the SDK's ``Guidance`` carry the label.
+
+    A winning record that :func:`pooled_classes` says is about two kinds of
+    task does not make the guidance strong — it won on the other class half
+    the time — but a validated hit still does: the hit's record is about the
+    hit. Read only over local priors (*priors_are_local*, else
+    :func:`priors_local` on the block); the entity-wide fallback always looks
+    pooled and is never read for it."""
     tried = list((priors or {}).get("tried") or [])
     statuses = [s for s in (hit_statuses or []) if s]
     # The same reading of "winner" as recommend(): a record that lost its
@@ -719,9 +726,9 @@ def guidance_strength(
     ]
     if regime_shift:
         return "thin" if (tried or statuses) else "none"
-    if pooled_classes(list((priors or {}).get("contrasts") or [])) is not None:
-        # A winner over a pooled record won on the other class half the time.
-        return "thin"
+    local = priors_local(priors) if priors_are_local is None else priors_are_local
+    if winners and local and pooled_classes(list((priors or {}).get("contrasts") or [])) is not None:
+        winners = []
     if winners or "validated" in statuses:
         return "strong"
     if not tried and (not statuses or all(s in _WEAK_STATUSES for s in statuses)):
@@ -760,6 +767,17 @@ def pooled_classes(
     on every third task — three first-try losses in twelve, each with the
     correct note for the exact symptom sitting in the same guidance.
 
+    Only the rows that pit the two actions against each other are on the
+    timeline — A resolving what B failed, B resolving what A failed. A's
+    wins over some third action C say nothing about the A/B question, and
+    counting them turned one flip plus one unrelated resolve into two
+    reversals.
+
+    Local priors only: the ``action_stats`` fallback records every outcome on
+    the entity at similarity 1.0, so mixed kinds of task there always look
+    near-identical and always contradict. Callers pass such a record through
+    :func:`priors_local` before asking.
+
     Returns ``{"actions": [A, B], "sequence": [...resolved_with in time
     order...], "reversals": n, "outcome_refs": [...]}`` or ``None``.
     """
@@ -774,15 +792,18 @@ def pooled_classes(
     for c in near:
         resolved_by.setdefault(str(c["resolved_with"]), []).append(c)
     floor = datetime.min.replace(tzinfo=timezone.utc)
+
+    def _over(rows: Sequence[Mapping[str, Any]], loser: str) -> list[Mapping[str, Any]]:
+        return [c for c in rows if loser in [str(x) for x in (c.get("failed") or [])]]
+
     for a, a_rows in resolved_by.items():
         for b, b_rows in resolved_by.items():
             if b <= a:
                 continue
-            a_over_b = any(b in [str(x) for x in (c.get("failed") or [])] for c in a_rows)
-            b_over_a = any(a in [str(x) for x in (c.get("failed") or [])] for c in b_rows)
+            a_over_b, b_over_a = _over(a_rows, b), _over(b_rows, a)
             if not (a_over_b and b_over_a):
                 continue
-            ordered = sorted(a_rows + b_rows, key=lambda c: _as_dt(c.get("committed_at")) or floor)
+            ordered = sorted(a_over_b + b_over_a, key=lambda c: _as_dt(c.get("committed_at")) or floor)
             sequence = [str(c["resolved_with"]) for c in ordered]
             reversals = sum(1 for i in range(1, len(sequence)) if sequence[i] != sequence[i - 1])
             if reversals >= 2:
@@ -793,6 +814,20 @@ def pooled_classes(
                     "outcome_refs": [c.get("outcome_ref") for c in ordered],
                 }
     return None
+
+
+def priors_local(priors: Mapping[str, Any] | None) -> bool:
+    """Whether a priors block is about *this kind of task*.
+
+    The server labels the block with its ``source``: ``similar_outcomes``
+    (nearest outcomes by task embedding, re-weighted by
+    :func:`neighbourhood_weights`) or ``action_stats`` (the entity's whole
+    record, every row at similarity 1.0). Only the former can be read for
+    contrasts or pooling; the latter can name a winner but not say what task
+    it won on. A block with no label (a caller aggregating its own rows) is
+    taken as local.
+    """
+    return (priors or {}).get("source") != "action_stats"
 
 
 def _pooled_why(pooled: Mapping[str, Any]) -> str:
@@ -870,10 +905,20 @@ def _act_from_contrast(
     return None
 
 
-def render_priors(priors: Mapping[str, Any] | None, recommendation: Mapping[str, Any] | None) -> str:
-    """One compact block for an agent's context. Empty string when nothing to show."""
+def render_priors(
+    priors: Mapping[str, Any] | None,
+    recommendation: Mapping[str, Any] | None,
+    *,
+    priors_are_local: bool | None = None,
+) -> str:
+    """One compact block for an agent's context. Empty string when nothing to show.
+
+    Contrasts — and the pooled-classes warning read from them — are shown only
+    over local priors (*priors_are_local*, else :func:`priors_local` on the
+    block): the entity-wide fallback is not known to be about this task."""
     if not priors and not recommendation:
         return ""
+    local = priors_local(priors) if priors_are_local is None else priors_are_local
     lines: list[str] = []
     tried = (priors or {}).get("tried") or []
     if tried:
@@ -886,7 +931,7 @@ def render_priors(priors: Mapping[str, Any] | None, recommendation: Mapping[str,
         lines.append("Tried on similar tasks here: " + "; ".join(parts))
     contrasts = [
         c for c in ((priors or {}).get("contrasts") or [])
-        if float(c.get("weight") or 0.0) >= CONTRAST_MIN_W
+        if local and float(c.get("weight") or 0.0) >= CONTRAST_MIN_W
     ]
     pooled = pooled_classes(contrasts)
     if pooled is not None and not (recommendation or {}).get("pooled"):
@@ -927,6 +972,7 @@ __all__ = [
     "entity_paths_of",
     "guidance_strength",
     "pooled_classes",
+    "priors_local",
     "recommend",
     "render_priors",
     "stable_bucket",
