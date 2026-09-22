@@ -189,6 +189,30 @@ class TestThePageNeverScansTheNamespace:
         assert GUARD not in body["crossAgentReads"]
         assert body["nodes"][0]["readCounts"] or body["nodes"][1]["readCounts"]
 
+    def test_truncation_is_judged_before_the_visibility_filter(self, client, mem, monkeypatch) -> None:
+        """Two users' agents sharing a name share an ``agent_id``. The SQL page
+        is cut at the ceiling before the per-user filter runs, so the filter can
+        empty a full page; the response must still say it was cut."""
+        _guard_saves_four_private_episodes(mem)
+        monkeypatch.setattr(server, "max_scan_rows", lambda: 3)
+
+        class _Vis:
+            def should_filter(self):
+                return True
+
+            def is_agent_visible(self, agent_id):
+                return True
+
+            def filter_entries(self, rows):
+                return [r for r in rows if r.key == "episodes-0"]
+
+        monkeypatch.setattr(server, "_get_visibility_filter", lambda request: _Vis())
+
+        body = client.get(f"/api/v1/agents/{GUARD}/memory-graph").json()
+
+        assert body["totalWritten"] <= 1, "only what the caller may see is listed"
+        assert body["truncated"] is True, "four rows against a ceiling of three was cut, whatever the filter kept"
+
     def test_reading_across_too_many_paths_is_bounded_and_flagged(self, client, mem, monkeypatch) -> None:
         _guard_saves_four_private_episodes(mem)
         monkeypatch.setattr(server, "_MEMORY_GRAPH_MAX_READ_PATHS", 3)

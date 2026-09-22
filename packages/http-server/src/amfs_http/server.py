@@ -5553,10 +5553,15 @@ def agent_memory_graph(
     # This agent's own entries, filtered by author in SQL. This used to be
     # ``handle.list()`` — every current entry in the namespace, 400k rows on a
     # large account, 208 s in production — filtered down to the agent's 69 in
-    # Python afterwards. Fetched one past the ceiling so the flag is exact.
-    own_entries, own_truncated = _bounded_scan(
-        _scoped(handle.search(agent_id=agent_id, limit=ceiling + 1)), ceiling,
+    # Python afterwards. Fetched one past the ceiling so the flag is exact,
+    # and the flag is read off the RAW rows: the per-user filter below runs
+    # after the limit, so where two users' agents share a name, a page at the
+    # ceiling may hold rows this caller cannot see in place of ones they can.
+    # The response cannot recover those, but it must not call itself complete.
+    own_raw, own_truncated = _bounded_scan(
+        handle.search(agent_id=agent_id, limit=ceiling + 1), ceiling,
     )
+    own_entries = _scoped(own_raw)
     # Read counts and the trace count are aggregated by the adapter; this
     # used to pull up to 10,000 full traces to tally causal_entries here.
     trace_count = mem._adapter.count_traces(agent_id=agent_id)
