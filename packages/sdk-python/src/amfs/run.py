@@ -32,7 +32,16 @@ Example::
         prompt += hint.text
     ...
     run.complete(True, verified_by="ci", evidence={"run_id": "98765"},
-                 response_text=final_answer)
+                 response_text=final_answer,
+                 causal_entry_keys=cited or [guidance.top_key])
+
+Name what the agent acted on. A ``begin`` serves several entries and the
+agent follows one; ``causal_entry_keys`` on ``attempt_failed`` and
+``complete`` is how the outcome reaches that one and not the others. Ask the
+model for the keys it used (they are in the rendered text) and fall back to
+``guidance.top_key``. Left unnamed, every entry read is charged for every
+failure, and a correct lesson that merely shared the context with a wrong
+one is discredited alongside it.
 """
 
 from __future__ import annotations
@@ -242,11 +251,46 @@ class Run:
         summary: str | None = None,
         *,
         outcome_type: OutcomeType | str = OutcomeType.MINOR_FAILURE,
+        causal_entry_keys: list[str | None] | None = None,
     ) -> None:
-        """Close the approach just tried as failed before trying another. The
-        memory read since the previous boundary receives that failure at
-        ``complete``; what is read afterwards is credited with the outcome."""
-        self.memory.record_attempt(outcome_type=outcome_type, summary=summary)
+        """Close the approach just tried as failed before trying another.
+
+        *causal_entry_keys* names the entries the attempt acted on — what the
+        agent cited, or :attr:`Guidance.top_key` when it cited nothing. Pass
+        them: a ``begin`` serves several entries and the agent follows one,
+        and without the names the whole read window is charged for the
+        failure, so correct lessons that merely shared the context lose
+        confidence with the one that was wrong. Bare keys (no ``/``) are
+        qualified with the run's ``entity_path``. Without them the memory read
+        since the previous boundary receives the failure at ``complete``;
+        what is read afterwards is credited with the outcome.
+        """
+        self.memory.record_attempt(
+            outcome_type=outcome_type,
+            summary=summary,
+            causal_entry_keys=self._qualify(causal_entry_keys),
+        )
+
+    def _qualify(self, keys: list[str | None] | None) -> list[str] | None:
+        """``entity_path/key`` for every key, qualifying bare ones with the
+        run's entity. ``None`` stays ``None`` (the caller declined to name
+        anything, and ``AgentMemory`` falls back to the read window)."""
+        if keys is None:
+            return None
+        out: list[str] = []
+        for key in keys:
+            # ``cited or [guidance.top_key]`` yields ``[None]`` on empty
+            # guidance; a None is "nothing to name", not an entry called None.
+            if key is None:
+                continue
+            key = str(key).strip()
+            if not key:
+                continue
+            if "/" not in key and self.entity_path:
+                key = f"{self.entity_path}/{key}"
+            if key not in out:
+                out.append(key)
+        return out
 
     # ------------------------------------------------------------------
     # complete
@@ -263,6 +307,7 @@ class Run:
         response_text: str | None = None,
         attributes: Mapping[str, Any] | None = None,
         decision_summary: str | None = None,
+        causal_entry_keys: list[str | None] | None = None,
     ) -> list[MemoryEntry]:
         """Commit the run's outcome and seal its trace.
 
@@ -270,6 +315,11 @@ class Run:
         names who decided it when the agent did not (``"ci"``, ``"human"``,
         ``"verifier"``); without it the outcome is the agent's own declaration.
         *task_input* defaults to what ``begin`` was given.
+
+        *causal_entry_keys* names the entries the final decision acted on and
+        is credited with the outcome (see :meth:`attempt_failed`); ``None``
+        credits everything read since the last attempt boundary, ``[]``
+        credits nothing. Bare keys are qualified with the run's entity.
         """
         if isinstance(outcome, bool):
             otype = OutcomeType.SUCCESS if outcome else OutcomeType.FAILURE
@@ -289,6 +339,7 @@ class Run:
             situation=self._situation,
             verified_by=verified_by,
             evidence=evidence,
+            causal_entry_keys=self._qualify(causal_entry_keys),
         )
         self._completed = True
         return entries

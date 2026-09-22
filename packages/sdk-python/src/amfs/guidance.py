@@ -75,6 +75,32 @@ class Guidance:
     def is_empty(self) -> bool:
         return not self.text.strip()
 
+    @property
+    def shown(self) -> list[ContextEntry]:
+        """The entries the rendered text actually shows, in its order: the
+        renderer omits training-excluded keys (``lesson-contrast-*``,
+        ``risk-*``, ``correction-*``), so those are not something the agent
+        could have acted on and must not be blamed for what it did."""
+        return [e for e in self.entries if not e.is_training_excluded]
+
+    @property
+    def entry_keys(self) -> list[str]:
+        """Every shown entry as ``entity_path/key``, in the order rendered
+        (highest confidence first). The form :meth:`amfs.run.Run.complete`
+        and :meth:`amfs.run.Run.attempt_failed` take as *causal_entry_keys*."""
+        return [f"{e.entity_path}/{e.key}" for e in self.shown]
+
+    @property
+    def top_key(self) -> str | None:
+        """The entry the agent most plausibly acted on when it cited nothing:
+        the highest-ranked shown non-procedure entry, or the first shown
+        procedure when that is all there was. ``None`` for empty guidance."""
+        shown = self.shown
+        for e in shown:
+            if not e.is_procedure:
+                return f"{e.entity_path}/{e.key}"
+        return f"{shown[0].entity_path}/{shown[0].key}" if shown else None
+
     def should_inject(self) -> bool:
         """The default policy for a customer's agent: inject when there is text
         and the strength is not ``none``. A caller who wants to show hints too

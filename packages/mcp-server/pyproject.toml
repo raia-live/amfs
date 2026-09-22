@@ -1,6 +1,6 @@
 [project]
 name = "amfs-mcp-server"
-version = "0.7.34"
+version = "0.7.35"
 description = "AMFS MCP Server — expose Agent Memory as MCP tools for Cursor and Claude Code"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -19,7 +19,7 @@ dependencies = [
     # Read through getattr, so an older pairing degrades to that extra list()
     # rather than breaking the write — which makes this floor the same shape as
     # the adapter one below: nothing raises, the scope block is just never there.
-    "amfs>=0.5.27",
+    "amfs>=0.5.28",
     # Direct floor at the import site. amfs_export and amfs_aggregate do
     # `from amfs_core.aggregates import coerce_value, iter_rows, aggregate_entries`.
     # Those were added in amfs-core 0.3.15 — but 0.3.14 was already published
