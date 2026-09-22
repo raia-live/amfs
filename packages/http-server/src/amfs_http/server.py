@@ -8826,6 +8826,23 @@ async def ingest_event(
 # CLI Entry Point
 # ──────────────────────────────────────────────────────────────────────
 
+# With more than one worker, uvicorn runs a supervisor that pings every worker
+# twice a second and SIGKILLs any that has not answered within
+# ``timeout_worker_healthcheck`` — 5 seconds by default — then spawns a fresh
+# one and logs the same "Child process [pid] died" it would for a real crash.
+# The pong comes from a thread the worker starts on entry, so it needs the GIL,
+# and a fresh worker does not have one to give: spawn re-imports this module
+# and its C extensions and the lifespan loads the embedding models, all of it
+# CPU-bound, all of it competing with the worker next door that is serving
+# traffic. On a 2-vCPU Cloud Run instance that reliably took longer than 5
+# seconds, so one slot per instance was killed every 8 seconds forever and
+# never once logged "Started server process" (2026-09-21, 36 kills a minute
+# across the fleet, every request that landed on the dying slot truncated).
+# Two minutes is generous room to start and rides out any GIL hold a request
+# could plausibly cause, while a worker that is genuinely wedged still gets
+# replaced. A single worker has no supervisor and is unaffected either way.
+DEFAULT_WORKER_HEALTHCHECK_S = 120
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -8861,6 +8878,16 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=int(os.environ.get("AMFS_HTTP_WORKERS", "1")),
         help="Number of uvicorn worker processes (default: 1, env: AMFS_HTTP_WORKERS)",
+    )
+    parser.add_argument(
+        "--worker-healthcheck-timeout",
+        type=int,
+        default=int(os.environ.get("AMFS_HTTP_WORKER_HEALTHCHECK_S", str(DEFAULT_WORKER_HEALTHCHECK_S))),
+        help=(
+            "Seconds a worker may go without answering the supervisor's ping before "
+            "it is killed and replaced; only meaningful with --workers > 1 "
+            f"(default: {DEFAULT_WORKER_HEALTHCHECK_S}, env: AMFS_HTTP_WORKER_HEALTHCHECK_S)"
+        ),
     )
     return parser.parse_args()
 
@@ -8998,7 +9025,8 @@ def main() -> None:
         workers = 1
 
     logger.info(
-        "Starting AMFS HTTP server on %s:%d (workers=%d)", args.host, args.port, workers
+        "Starting AMFS HTTP server on %s:%d (workers=%d, worker healthcheck=%ds)",
+        args.host, args.port, workers, args.worker_healthcheck_timeout,
     )
     uvicorn.run(
         "amfs_http.server:app",
@@ -9006,6 +9034,7 @@ def main() -> None:
         port=args.port,
         reload=args.reload,
         workers=workers,
+        timeout_worker_healthcheck=args.worker_healthcheck_timeout,
     )
 
 
