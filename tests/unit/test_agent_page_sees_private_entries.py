@@ -130,3 +130,105 @@ class TestItStillShowsOnlyThisAgentsWork:
 
         paths = [n["entityPath"] for n in body["nodes"] if n.get("writtenEntries")]
         assert not any(p.startswith("_system/") for p in paths), paths
+
+
+class TestThePageNeverScansTheNamespace:
+    """208 s in production for an agent with 69 entries.
+
+    ``handle.list()`` with no entity path is every current entry the agent may
+    see — 400k rows on a large account — filtered down to the agent's own in
+    Python afterwards. The agent's entries come from ``search(agent_id=…)``,
+    filtered by author in SQL, and the authors of what it read come from
+    listing only the entity paths it actually read.
+    """
+
+    def test_no_unscoped_list_and_the_search_is_by_author(self, client, mem, monkeypatch) -> None:
+        _guard_saves_four_private_episodes(mem)
+        for i in range(50):
+            mem.as_agent(OTHER_AGENT).write(f"noise/{i}", "k", f"row {i}", shared=True)
+
+        list_paths: list = []
+        search_calls: list = []
+        real_list, real_search = AgentMemory.list, AgentMemory.search
+
+        def spy_list(self, entity_path=None, **kw):
+            list_paths.append(entity_path)
+            return real_list(self, entity_path, **kw)
+
+        def spy_search(self, **kw):
+            search_calls.append(kw)
+            return real_search(self, **kw)
+
+        monkeypatch.setattr(AgentMemory, "list", spy_list)
+        monkeypatch.setattr(AgentMemory, "search", spy_search)
+
+        body = client.get(f"/api/v1/agents/{GUARD}/memory-graph").json()
+
+        assert None not in list_paths, "listed the whole namespace"
+        assert search_calls and all(c.get("agent_id") == GUARD for c in search_calls)
+        assert body["totalWritten"] == 4
+        assert body["truncated"] is False
+
+    def test_cross_agent_reads_still_name_the_author(self, client, mem, monkeypatch) -> None:
+        """The namespace list existed to find who wrote what this agent read.
+        Listing just the read paths has to give the same answer."""
+        _guard_saves_four_private_episodes(mem)
+        mem.as_agent(OTHER_AGENT).write("someone/else", "public", "shared", shared=True)
+        monkeypatch.setattr(
+            mem._adapter, "trace_read_counts",
+            lambda agent_id: {"someone/else": {"public": 3}, GUARD_PATH: {"episodes-1": 1}},
+            raising=False,
+        )
+
+        body = client.get(f"/api/v1/agents/{GUARD}/memory-graph").json()
+
+        assert body["crossAgentReads"] == {
+            OTHER_AGENT: [{"entityPath": "someone/else", "key": "public", "readCount": 3}],
+        }, body["crossAgentReads"]
+        # Its own entry read back is not a cross-agent read.
+        assert GUARD not in body["crossAgentReads"]
+        assert body["nodes"][0]["readCounts"] or body["nodes"][1]["readCounts"]
+
+    def test_truncation_is_judged_before_the_visibility_filter(self, client, mem, monkeypatch) -> None:
+        """Two users' agents sharing a name share an ``agent_id``. The SQL page
+        is cut at the ceiling before the per-user filter runs, so the filter can
+        empty a full page; the response must still say it was cut."""
+        _guard_saves_four_private_episodes(mem)
+        monkeypatch.setattr(server, "max_scan_rows", lambda: 3)
+
+        class _Vis:
+            def should_filter(self):
+                return True
+
+            def is_agent_visible(self, agent_id):
+                return True
+
+            def filter_entries(self, rows):
+                return [r for r in rows if r.key == "episodes-0"]
+
+        monkeypatch.setattr(server, "_get_visibility_filter", lambda request: _Vis())
+
+        body = client.get(f"/api/v1/agents/{GUARD}/memory-graph").json()
+
+        assert body["totalWritten"] <= 1, "only what the caller may see is listed"
+        assert body["truncated"] is True, "four rows against a ceiling of three was cut, whatever the filter kept"
+
+    def test_reading_across_too_many_paths_is_bounded_and_flagged(self, client, mem, monkeypatch) -> None:
+        _guard_saves_four_private_episodes(mem)
+        monkeypatch.setattr(server, "_MEMORY_GRAPH_MAX_READ_PATHS", 3)
+        monkeypatch.setattr(
+            mem._adapter, "trace_read_counts",
+            lambda agent_id: {f"elsewhere/{i}": {"k": 1} for i in range(10)},
+            raising=False,
+        )
+        listed: list = []
+        real_list = AgentMemory.list
+        monkeypatch.setattr(
+            AgentMemory, "list",
+            lambda self, entity_path=None, **kw: (listed.append(entity_path), real_list(self, entity_path, **kw))[1],
+        )
+
+        body = client.get(f"/api/v1/agents/{GUARD}/memory-graph").json()
+
+        assert len([p for p in listed if p and p.startswith("elsewhere/")]) == 3
+        assert body["truncated"] is True

@@ -1459,6 +1459,12 @@ async def _list_agent_entries_page(
     )
 
 
+# How many distinct entity paths the memory-graph page will list to name the
+# authors of what an agent read. One indexed query per path; an agent that has
+# read across more paths than this gets the first N and ``truncated: true``.
+_MEMORY_GRAPH_MAX_READ_PATHS = 200
+
+
 def _bounded_scan(items: list[Any], ceiling: int) -> tuple[list[Any], bool]:
     """Trim a scan to *ceiling* rows and say whether anything was cut.
 
@@ -5526,18 +5532,36 @@ def agent_memory_graph(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     mem = _get_memory()
-    # Listed AS this agent, not as the server. ``list`` keeps an entry only if
-    # it is shared or the listing identity's own, so asking the server's handle
-    # produced a page that could not see the agent's PRIVATE entries at all: an
-    # agent whose every entry was private showed 0 memories and 0 topics while
-    # its card, counted by SQL with no such filter, correctly said 4 and 1.
-    entries = mem.as_agent(agent_id).list()
-    if vis is not None and vis.should_filter():
+    # Acting AS this agent, not as the server. ``search`` and ``list`` keep an
+    # entry only if it is shared or the acting identity's own, so asking the
+    # server's handle produced a page that could not see the agent's PRIVATE
+    # entries at all: an agent whose every entry was private showed 0 memories
+    # and 0 topics while its card, counted by SQL with no such filter,
+    # correctly said 4 and 1.
+    handle = mem.as_agent(agent_id)
+    ceiling = max_scan_rows()
+
+    def _scoped(rows: list) -> list:
         # The same per-user filter every other entry-returning route applies,
         # and this one did not: agent ids are matched as bare strings within an
         # account, so where two people share an account and their agents share a
         # default name, each was shown the other's entries.
-        entries = vis.filter_entries(entries)
+        if vis is not None and vis.should_filter():
+            return vis.filter_entries(rows)
+        return rows
+
+    # This agent's own entries, filtered by author in SQL. This used to be
+    # ``handle.list()`` — every current entry in the namespace, 400k rows on a
+    # large account, 208 s in production — filtered down to the agent's 69 in
+    # Python afterwards. Fetched one past the ceiling so the flag is exact,
+    # and the flag is read off the RAW rows: the per-user filter below runs
+    # after the limit, so where two users' agents share a name, a page at the
+    # ceiling may hold rows this caller cannot see in place of ones they can.
+    # The response cannot recover those, but it must not call itself complete.
+    own_raw, own_truncated = _bounded_scan(
+        handle.search(agent_id=agent_id, limit=ceiling + 1), ceiling,
+    )
+    own_entries = _scoped(own_raw)
     # Read counts and the trace count are aggregated by the adapter; this
     # used to pull up to 10,000 full traces to tally causal_entries here.
     trace_count = mem._adapter.count_traces(agent_id=agent_id)
@@ -5546,8 +5570,7 @@ def agent_memory_graph(
     }
 
     written_by_agent = [
-        e for e in entries
-        if e.provenance.agent_id == agent_id and not e.entity_path.startswith("_system/")
+        e for e in own_entries if not e.entity_path.startswith("_system/")
     ]
     entities_written: dict[str, list[dict]] = {}
     for e in written_by_agent:
@@ -5576,7 +5599,6 @@ def agent_memory_graph(
     # type, and the response says when the bound was hit.
     total_read_events = 0
     read_events_truncated = False
-    ceiling = max_scan_rows()
     try:
         read_events, cut_a = _bounded_scan(
             mem._adapter.list_events(
@@ -5602,9 +5624,21 @@ def agent_memory_graph(
     except Exception:
         pass
 
+    # Who wrote what this agent read. Only the entity paths it actually read
+    # are listed — a few dozen at most, each an indexed lookup — rather than
+    # the whole namespace. Bounded so an agent that has read everywhere does
+    # not turn this back into the scan it replaces; the flag says when it hit.
     entry_authors: dict[str, str] = {}
-    for e in entries:
+    for e in own_entries:
         entry_authors[f"{e.entity_path}/{e.key}"] = e.provenance.agent_id
+    read_paths = sorted(read_entities)
+    authors_truncated = len(read_paths) > _MEMORY_GRAPH_MAX_READ_PATHS
+    for ep in read_paths[:_MEMORY_GRAPH_MAX_READ_PATHS]:
+        try:
+            for e in _scoped(handle.list(ep)):
+                entry_authors.setdefault(f"{ep}/{e.key}", e.provenance.agent_id)
+        except Exception:
+            logger.debug("memory-graph: could not list %s for authors", ep, exc_info=True)
 
     cross_agent_reads: dict[str, list[dict]] = {}
     for ep, keys in read_entities.items():
@@ -5636,7 +5670,7 @@ def agent_memory_graph(
         "totalRecalls": total_recalls,
         "recalledTokensSaved": recalled_tokens_saved,
         "crossAgentReads": cross_agent_reads,
-        "truncated": read_events_truncated,
+        "truncated": read_events_truncated or own_truncated or authors_truncated,
     }
 
 
