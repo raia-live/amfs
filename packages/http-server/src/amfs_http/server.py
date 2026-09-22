@@ -6318,10 +6318,22 @@ def _recompute_window_key(request: Request, namespace: str) -> str:
     A multi-tenant deployment runs every account under one namespace and keeps
     them apart with row-level security, so the namespace alone would let the
     first account's compile mark every other account on the instance as fresh.
-    The tenant middleware names the account on ``request.state.account_id``;
-    a single-tenant server has none and the namespace is the whole story.
+    The account the compile will actually run under is the one on the RLS
+    context — the same ContextVar the Postgres connection reads — so that is
+    the key, whichever middleware branch authenticated the request.
+    ``request.state.account_id`` is the fallback for a deployment whose
+    middleware sets the request state but not the RLS context; a single-tenant
+    server has neither and the namespace is the whole story.
     """
-    account_id = getattr(request.state, "account_id", None)
+    account_id: Any = None
+    try:
+        from amfs_postgres.tenant_context import get_request_tenant_account_id
+
+        account_id = get_request_tenant_account_id()
+    except ImportError:
+        pass
+    if not account_id:
+        account_id = getattr(request.state, "account_id", None)
     return f"{account_id or ''}:{namespace}"
 
 

@@ -396,6 +396,30 @@ def test_recompute_window_is_per_tenant_account(monkeypatch) -> None:
     assert len(calls) == 3
 
 
+def test_recompute_window_follows_the_rls_tenant_context(monkeypatch) -> None:
+    """Pro traffic names the account on the RLS ContextVar, not only on
+    ``request.state``; the compile runs under that context, so the window is
+    keyed by it first, and the request state is only the fallback."""
+    from amfs_postgres import tenant_context as tc
+
+    calls: list = []
+    _wire_recompute(monkeypatch, calls)
+    tc.set_tls_tenant_account_id("acct-rls-A")
+    try:
+        assert server.recompute_clusters(_req()) == {"ok": True}
+        assert server.recompute_clusters(_req()) == {"ok": True, "skipped": "recent"}
+        # A stale state.account_id does not override the context the compile used.
+        assert server.recompute_clusters(_req("acct-other")) == {"ok": True, "skipped": "recent"}
+        tc.set_tls_tenant_account_id("acct-rls-B")
+        assert server.recompute_clusters(_req()) == {"ok": True}
+    finally:
+        tc.clear_tls_tenant_account_id()
+    assert server.recompute_clusters(_req("acct-rls-A")) == {"ok": True, "skipped": "recent"}, (
+        "without an RLS context the request state names the same account"
+    )
+    assert len(calls) == 2
+
+
 def test_concurrent_recomputes_do_not_stack(monkeypatch) -> None:
     """Two Agents-page mounts at once: one compile runs, the other reuses it."""
     calls: list = []
