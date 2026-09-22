@@ -86,6 +86,38 @@ class TestGuidance:
         assert "Recommendation: act" in g.text
         assert g.mode == "act"
 
+    def test_a_pooled_neighbourhood_is_thin_whatever_the_briefing_rated_the_entity(self) -> None:
+        """The briefing rates strength over the entity's whole record, and an
+        entity-wide winner is the very action that won on the other class
+        half the time. When the retrieve's own neighbourhood is pooled — its
+        recommendation abstains — its ``thin`` stands over the briefing's
+        ``strong``; a plain ``act`` neighbourhood still takes the stronger."""
+        class D:
+            digest_type, scope = "entity", "acme/ci"
+            summary = {"guidance_strength": "strong", "tried_here": [{"action": "fix:a"}]}
+
+        pooled_meta = {
+            "guidance_strength": "thin", "priors": {"source": "similar_outcomes", "contrasts": []},
+            "recommendation": {"mode": "abstain", "suggested_action": None,
+                               "pooled": {"actions": ["fix:a", "fix:b"], "reversals": 3},
+                               "why": "near-identical tasks here alternate"},
+        }
+        g = Guidance.build(digests=[D()], meta=pooled_meta, entity_path="acme/ci")
+        assert g.strength == "thin" and g.mode == "abstain"
+        act_meta = {"guidance_strength": "thin", "priors": {"source": "similar_outcomes"},
+                    "recommendation": {"mode": "act", "suggested_action": "fix:a", "why": "won"}}
+        assert Guidance.build(digests=[D()], meta=act_meta, entity_path="acme/ci").strength == "strong"
+        # Silent pooling (the caller did not ask to be told) is read off the
+        # local contrasts themselves; an entity-wide block is never read.
+        from amfs_core.actions import aggregate_priors, pooled_classes
+        from tests.unit.test_action_priors import _pooled_rows
+        pr = aggregate_priors(_pooled_rows())
+        assert pooled_classes(pr["contrasts"]) is not None
+        quiet = {"guidance_strength": "thin", "priors": pr, "recommendation": None}
+        assert Guidance.build(digests=[D()], meta=quiet, entity_path="acme/ci").strength == "thin"
+        wide = {**quiet, "priors": {**pr, "source": "action_stats"}}
+        assert Guidance.build(digests=[D()], meta=wide, entity_path="acme/ci").strength == "strong"
+
     def test_not_applicable_from_meta_drops_the_entry_and_says_why(self) -> None:
         class Hit:
             def __init__(self, entry):

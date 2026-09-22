@@ -294,8 +294,12 @@ class BriefingService:
             return
         # The evidence sections rated the scope on entries alone; a winning
         # action record is evidence too, so re-rate with the priors in hand.
+        # ``action_stats`` is the entity's whole record, every row at
+        # similarity 1.0: it can name a winner, but its contrasts are not
+        # about this kind of task and must not be read for pooling.
         lead.summary["guidance_strength"] = guidance_strength(
             priors, hit_statuses, regime_shift=bool(lead.summary.get("regime_shift")),
+            priors_are_local=False,
         )
         lead.summary["tried_here"] = [
             {
