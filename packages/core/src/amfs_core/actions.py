@@ -1204,12 +1204,21 @@ def render_priors(
                 f"On a near-identical task here {failed} failed and "
                 f"{c['resolved_with']} resolved it."
             )
+    allowed = set(candidate_actions) if candidate_actions else None
     untried = (priors or {}).get("untried") or []
+    if allowed is not None:
+        untried = [u for u in untried if u in allowed]
     if untried:
         lines.append("Not yet tried here: " + ", ".join(untried[:8]))
     if recommendation:
         mode = recommendation.get("mode")
         sug = recommendation.get("suggested_action")
+        if sug and allowed is not None and sug not in allowed:
+            # The suggestion is an action the run said it will not take — the
+            # winner a retry has just tried, an action outside its tool. The
+            # mode and the reason still stand; naming the action would hand
+            # it back through the one line the plan filter below cannot reach.
+            sug = None
         lines.append(f"Recommendation: {mode}" + (f" -> {sug}" if sug else "") + f". {recommendation.get('why', '')}".rstrip())
     # The imperative part. An agent with several attempts reads the record
     # above as history; what it needs is the order to try things in and what
@@ -1231,8 +1240,7 @@ def render_priors(
             priors, recommendation, priors_are_local=local, candidate_actions=candidate_actions,
         ) if priors else []
     )
-    if candidate_actions:
-        allowed = set(candidate_actions)
+    if allowed is not None:
         plan = [a for a in plan if a in allowed]
     stopped = [t for t in tried if _stopped_working(t) and int(t.get("won", 0)) > 0]
     failed = [

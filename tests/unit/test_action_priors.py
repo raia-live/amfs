@@ -726,6 +726,14 @@ def test_render_priors_gives_the_order_and_what_not_to_retry() -> None:
     sent = dict(rec, plan=["fix:rerun_job", "fix:edit_generated_file", "fix:regen_migrations"])
     text = act.render_priors(pr, sent, candidate_actions=["fix:edit_generated_file", "fix:regen_migrations"])
     assert "Try in this order: fix:edit_generated_file -> fix:regen_migrations." in text
+    # The recommendation line does not name a barred action either, and the
+    # untried list is drawn from the candidates: a retry's text names nothing
+    # it has ruled out.
+    assert rec["suggested_action"] == "fix:rerun_job"
+    assert "Recommendation: act." in text and "-> fix:rerun_job" not in text
+    with_untried = dict(pr, untried=["fix:rerun_job", "fix:regen_migrations"])
+    text = act.render_priors(with_untried, rec, candidate_actions=["fix:edit_generated_file", "fix:regen_migrations"])
+    assert "Not yet tried here: fix:regen_migrations\n" in text
     # No recommendation, or an abstain: the record is shown, no order is given.
     assert "Try in this order" not in act.render_priors(pr, None)
     assert "Do not spend" not in act.render_priors(pr, None)

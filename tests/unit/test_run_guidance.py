@@ -427,6 +427,9 @@ class TestLessonsAndPlan:
             "plan": ["fix:bump_dependency"]}}, candidate_actions=["fix:regen_migrations"])
         assert stale.plan == [] and stale.next_action is None
         assert "Try in this order" not in stale.text
+        # Nor does the recommendation line name it: the mode and reason stay,
+        # the barred action does not.
+        assert "Recommendation: act." in stale.text and "-> fix:bump_dependency" not in stale.text
         unfiltered = Guidance.build(meta={"priors": priors, "recommendation": {
             "mode": "act", "suggested_action": "fix:bump_dependency", "why": ""}})
         assert unfiltered.next_action == "fix:bump_dependency"
