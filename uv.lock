@@ -184,7 +184,7 @@ wheels = [
 
 [[package]]
 name = "amfs"
-version = "0.5.27"
+version = "0.5.28"
 source = { editable = "packages/sdk-python" }
 dependencies = [
     { name = "amfs-adapter-filesystem" },

@@ -178,6 +178,43 @@ class TestRun:
         assert len(meta.get("attempts") or []) == 1
         assert meta["attempts"][0]["summary"] == "pinning did not help"
 
+    def test_named_causal_keys_replace_the_read_window(self, mem) -> None:
+        """Two entries served, one followed: the outcome reaches the one that
+        was named and not the other. Bare keys are qualified with the run's
+        entity; ``[]`` credits nothing."""
+        mem.write("acme/ci", "fix-cache", "purge the pip cache when the wheel is corrupt", confidence=0.8)
+        mem._read_tracker.clear()
+        run = Run(mem)
+        g = run.begin("pip install fails", entity_path="acme/ci")
+        served = set(g.entry_keys)
+        assert {"acme/ci/fix-pin", "acme/ci/fix-cache"} <= served
+        assert g.top_key in served and not g.top_key.endswith("procedure-install")
+
+        run.on_tool_result("shell", {"cmd": "pip install urllib3<2"}, "boom", success=False,
+                           guide_on_failure=False)
+        run.attempt_failed("pinning did not help", causal_entry_keys=["fix-pin"])
+        run.on_tool_result("shell", {"cmd": "pip cache purge"}, "ok", success=True)
+        affected = run.complete(True, causal_entry_keys=["acme/ci/fix-cache"])
+
+        meta = mem._last_trace.session_metadata.model_dump()
+        assert meta["attempts"][0]["causal_entry_keys"] == ["acme/ci/fix-pin"]
+        # Both named entries were touched — the attempt's with the failure,
+        # the final one with the success — and nothing else.
+        assert {e.key for e in affected} == {"fix-cache", "fix-pin"}
+        pin = mem.read("acme/ci", "fix-pin")
+        cache = mem.read("acme/ci", "fix-cache")
+        assert pin.failure_count == 1 and pin.success_count == 0
+        assert cache.success_count == 1 and cache.failure_count == 0
+        # The procedure shared the window and was named by neither.
+        proc = mem.read("acme/ci", "procedure-install")
+        assert proc.success_count == 0 and proc.failure_count == 0
+
+    def test_empty_causal_keys_credit_nothing(self, mem) -> None:
+        run = Run(mem)
+        run.begin("pip install fails", entity_path="acme/ci")
+        assert run.complete(True, causal_entry_keys=[]) == []
+        assert mem.read("acme/ci", "fix-pin").success_count == 0
+
     def test_assign_branch_hook_checks_out_and_falls_back(self, mem) -> None:
         seen = []
 

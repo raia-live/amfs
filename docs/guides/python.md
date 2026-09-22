@@ -466,13 +466,19 @@ hint = run.on_tool_result(
 if hint is not None and hint.should_inject():
     messages.append({"role": "system", "content": hint.text})
 
-# When the approach you were following did not work and you switch:
-run.attempt_failed("pinning urllib3 did not resolve the conflict")
+# When the approach you were following did not work and you switch — name
+# the entry you followed (the keys are in guidance.text) or fall back to the
+# top hit:
+run.attempt_failed("pinning urllib3 did not resolve the conflict",
+                   causal_entry_keys=cited or [guidance.top_key])
 
-# 3. When the run ends: the outcome, and who decided it.
+# 3. When the run ends: the outcome, who decided it, and what it acted on.
 run.complete(True, verified_by="ci", evidence={"run_id": "98765"},
-             response_text=final_answer)
+             response_text=final_answer,
+             causal_entry_keys=cited or [guidance.top_key])
 ```
+
+**Name what the agent acted on.** `begin` serves several entries and the agent follows one. `causal_entry_keys` on `attempt_failed` and `complete` sends the outcome to that one; left unnamed, *every* entry read since the last boundary is charged, and a correct lesson that merely shared the context with a wrong one loses confidence alongside it — enough of that and the briefing flags a regime shift that never happened. Ask your model to return the keys it used (add a `used_memory_keys` field to its structured output; the keys appear as `entity/key` in the rendered text), intersect them with `guidance.entry_keys`, and fall back to `guidance.top_key`. Bare keys are qualified with the run's `entity_path`; `[]` credits nothing.
 
 `Guidance` carries:
 

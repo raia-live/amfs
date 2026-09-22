@@ -75,6 +75,23 @@ class Guidance:
     def is_empty(self) -> bool:
         return not self.text.strip()
 
+    @property
+    def entry_keys(self) -> list[str]:
+        """Every served entry as ``entity_path/key``, in the order rendered
+        (highest confidence first). The form :meth:`amfs.run.Run.complete`
+        and :meth:`amfs.run.Run.attempt_failed` take as *causal_entry_keys*."""
+        return [f"{e.entity_path}/{e.key}" for e in self.entries]
+
+    @property
+    def top_key(self) -> str | None:
+        """The entry the agent most plausibly acted on when it cited nothing:
+        the highest-ranked non-procedure entry, or the first procedure when
+        that is all there was. ``None`` for empty guidance."""
+        for e in self.entries:
+            if not e.is_procedure:
+                return f"{e.entity_path}/{e.key}"
+        return self.entry_keys[0] if self.entries else None
+
     def should_inject(self) -> bool:
         """The default policy for a customer's agent: inject when there is text
         and the strength is not ``none``. A caller who wants to show hints too
