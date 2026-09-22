@@ -157,6 +157,27 @@ class TestRun:
         assert g.strength == "none"
         assert not g.should_inject()
 
+    def test_the_environment_declared_on_begin_reaches_the_trace_metadata_itself(self, mem) -> None:
+        """``model`` is a reserved trace attribute: the seal path stamps it from
+        ``session_metadata.model`` and drops a caller's copy from the bag. A run
+        that declared its model only through ``Run.begin(model=...)`` sealed
+        with none — and the repair loop's feedback contract read 0% of runs
+        carrying a model. The fields travel on the metadata itself now, the
+        attribute winning over identity metadata (the reading ``environment()``
+        already gave)."""
+        from amfs_core.models import SessionMetadata
+        mem.session_metadata = SessionMetadata(model="identity-said-gpt-4", client_name="cursor")
+        run = Run(mem)
+        run.begin("pip install fails", entity_path="acme/ci",
+                  model="gpt-5.4-mini", agent_version="ci-bot@1.4", runtime="python3.12")
+        run.complete(True, verified_by="ci")
+        meta = mem._last_trace.session_metadata
+        assert meta.model == "gpt-5.4-mini"
+        assert meta.agent_version == "ci-bot@1.4" and meta.runtime == "python3.12"
+        assert meta.client_name == "cursor"
+        # The bag still carries them too, for the paths that read it there.
+        assert meta.attributes["model"] == "gpt-5.4-mini"
+
     def test_begin_on_another_runtime_sets_the_procedure_apart(self, mem) -> None:
         run = Run(mem)
         g = run.begin("pip install fails", entity_path="acme/ci", runtime="python3.9")

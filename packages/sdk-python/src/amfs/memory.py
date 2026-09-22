@@ -2062,6 +2062,18 @@ class AgentMemory:
             data[SESSION_ATTRIBUTES_KEY] = attributes
         else:
             data.pop(SESSION_ATTRIBUTES_KEY, None)
+        # The environment travels on the metadata's own fields as well as in
+        # the bag. ``model`` is a reserved trace attribute: the seal path
+        # stamps it from ``session_metadata.model`` and drops a caller's copy
+        # from the bag, so a run that declared its model only through
+        # ``Run.begin(model=...)`` / ``set_session_attributes`` sealed with no
+        # model at all — and the repair loop's feedback contract counted it
+        # as missing. The same reading as ``environment()``: the attribute
+        # wins over identity metadata, because it names this run.
+        for key in ENVIRONMENT_KEYS:
+            value = attributes.get(key)
+            if isinstance(value, str) and value.strip():
+                data[key] = value.strip()
         if llm_calls:
             data[SESSION_LLM_CALLS_KEY] = llm_calls
         else:
