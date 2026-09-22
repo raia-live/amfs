@@ -395,7 +395,7 @@ provides-extras = ["crewai"]
 
 [[package]]
 name = "amfs-http-server"
-version = "0.3.43"
+version = "0.3.44"
 source = { editable = "packages/http-server" }
 dependencies = [
     { name = "amfs" },
