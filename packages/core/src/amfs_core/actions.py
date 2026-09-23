@@ -376,6 +376,12 @@ def aggregate_priors(
         "tried": [p.as_dict() for p in tried],
         "untried": untried,
         "n_outcomes": len(rows),
+        # Tasks nothing solved. On the situation's own record this is how
+        # often an agent's judgement has already failed on this very
+        # situation, and what turns an explore into a sweep (:func:`recommend`).
+        "n_unsolved": sum(
+            1 for r in rows if not is_success(str(r.get("outcome_type") or "success"))
+        ),
         "contrasts": contrasts,
     }
 
@@ -823,10 +829,20 @@ def _recommend_mode(
         # name over the untried, so peers on one problem spread out — not
         # knowledge about the task. Grid v3 measured what happens when it is
         # read as knowledge: an explore that was followed won 14% of the
-        # time, one that was ignored 67%. Said as what it is.
-        why += (f"{len(untried)} untried on this kind of task and nothing in the record orders them — "
-                f"use your own judgement; {pick} is this agent's exploration assignment if you have no better guess")
+        # time, one that was ignored 67%. Said as what it is — except on the
+        # situation's own record once a task there ended unsolved: the
+        # agent's judgement has been tried on this very situation and failed,
+        # and the sweep over the untried is then the plan (:func:`_sweep`).
+        unsolved = _sweep(priors)
+        if unsolved:
+            why += (f"your own pick has already failed on this situation ({unsolved} unsolved) — "
+                    f"work through the {len(untried)} untried in the order given, starting with {pick}")
+        else:
+            why += (f"{len(untried)} untried on this kind of task and nothing in the record orders them — "
+                    f"use your own judgement; {pick} is this agent's exploration assignment if you have no better guess")
         out: dict[str, Any] = {"mode": "explore", "suggested_action": pick, "untried": untried, "why": why}
+        if unsolved:
+            out["sweep"] = True
         if stopped:
             out["stopped_working"] = [str(s["action_key"]) for s in stopped]
         return out
@@ -974,6 +990,22 @@ def _leading_losses(prior: Mapping[str, Any]) -> int:
             break
         n += 1
     return n
+
+
+def _sweep(priors: Mapping[str, Any] | None) -> int:
+    """How many tasks on the situation's own record ended unsolved; ``0`` on
+    a pooled record. Non-zero turns an explore into a *sweep*: the untried
+    are worked through in the plan's order instead of by the agent's
+    judgement, because that judgement has already been tried on this exact
+    situation and failed. Measured on the ops-queue support demo (2026-09-22):
+    a class whose fix is a house rule (``card declined`` -> ``resend_email``)
+    went unsolved on four tickets while the model, told to choose among the
+    untried itself, chose the same three intuitive actions each time; a
+    sweep over nine candidates finds the fix within three tickets."""
+    record = (priors or {}).get("situation_record")
+    if not isinstance(record, Mapping):
+        return 0
+    return int((priors or {}).get("n_unsolved") or 0)
 
 
 def _exact_first_win(prior: Mapping[str, Any]) -> bool:
@@ -1468,6 +1500,10 @@ def render_priors(
         lines.append("Do not spend an attempt on: " + "; ".join(avoid) + f" — these failed {here}.")
     backed = _evidence_backed(plan, tried, contrasts if local else [], lessons, recommendation)
     hedged_keys = {str(t.get("action_key")) for t in hedged}
+    if (recommendation or {}).get("sweep"):
+        # The agent's judgement has failed on this exact situation; the
+        # order over the untried is the plan, not a hint.
+        backed = backed | {a for a in plan if a in set(untried)}
     head = [a for a in plan if a in backed and a not in hedged_keys]
     hedge = [a for a in plan if a in hedged_keys]
     in_plan = set(plan)

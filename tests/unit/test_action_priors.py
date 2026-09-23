@@ -1488,9 +1488,14 @@ def test_one_unsolved_loss_on_the_situations_own_record_turns_the_action() -> No
     assert "newest take lost on a task nothing solved" in rec["why"]
     text = act.render_priors(pr, rec, candidate_actions=cands)
     assert "Recommendation: explore." in text and "-> fix:" not in text.split("Recommendation")[1].split("\n")[0]
-    assert "Make your own pick first; if it fails, try fix:add_audit_exception next" in text
+    # The unsolved task is where the agent's judgement already failed on this
+    # situation: the untried are swept in the plan's order, the turned action
+    # is the hedge after the first of them.
+    assert rec["sweep"] is True
+    assert f"Try {rec['plan'][0]} first, then {rec['plan'][2]}." in text
+    assert "If that fails, try fix:add_audit_exception next" in text
     assert "Do not spend an attempt on: fix:bump_dependency (0/2)" in text
-    assert "Untried on this situation: fix:fix_code, fix:rerun_job — the record cannot order these" in text
+    assert "Untried on this situation" not in text
     assert "stopped working" not in text
     # A loss that another action then resolved is a contrast, not a turn.
     solved = act.aggregate_priors([
@@ -1606,3 +1611,75 @@ def test_the_server_serves_the_situations_own_record_and_its_neighbours_apart(cl
     _stub_similar(server_mem._adapter, [dict(r, situation=None) for r in rows])
     meta = client.post("/api/v1/retrieve", json=dict(body, situation="jest snapshot · UI PR")).json()[-1]
     assert "situation_record" not in meta["priors"]
+
+
+def test_the_situations_own_record_is_an_equality_not_a_neighbourhood(client, server_mem) -> None:
+    """Ops-queue support (2026-09-22): the classes of a queue embed far apart,
+    so the first Android ticket found no neighbour above the floor, the
+    priors fell back to the entity's whole record, and the ticket was told
+    ``act: explain_and_close`` — the webhook class's winner — with strength
+    ``strong``. With a situation declared, the exact record is read from the
+    entity's outcomes by situation whatever the neighbourhood found: empty
+    means abstain, and a record found there is acted on as the situation's
+    own (source ``situation_record``, local), with no ``nearby`` from a pool
+    that is not a neighbourhood."""
+    from amfs_http import server
+
+    cands = ["resolve:explain_and_close", "resolve:advise_settings_change", "resolve:resend_email"]
+    entity_record = [
+        _sit_row("webhook delivery delayed", [("resolve:explain_and_close", True)]),
+        _sit_row("webhook delivery delayed", [("resolve:explain_and_close", True)], days_ago=1),
+        _sit_row("Android notifications missing", [("resolve:advise_settings_change", True)], days_ago=2),
+    ]
+    # No neighbour above the floor; the entity-wide fallback has three classes.
+    server_mem._adapter.similar_outcomes = lambda entity_path, embedding, **kw: []  # type: ignore[attr-defined]
+    server_mem._adapter.action_stats = lambda entity_path, **kw: list(entity_record)  # type: ignore[attr-defined]
+    server._get_server_embedder = lambda: _StubEmbedder()
+    body = {"query": "push notifications stopped", "entity_path": "acme/support", "include_priors": True,
+            "agent_id": "a9", "candidate_actions": cands, "abstain": True}
+    # A class never seen: abstain, not the entity's winner.
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="duplicate refund requested")).json()[-1]
+    assert meta["priors"]["situation_record"]["outcomes"] == 0 and meta["priors"]["tried"] == []
+    assert meta["priors"]["source"] == "situation_record"
+    assert meta["recommendation"]["mode"] == "abstain"
+    assert meta["guidance_strength"] != "strong"
+    # A class seen once: its own record, acted on, and local.
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="android notifications missing")).json()[-1]
+    pr = meta["priors"]
+    assert pr["situation_record"]["outcomes"] == 1 and pr["source"] == "situation_record"
+    assert [t["action_key"] for t in pr["tried"]] == ["resolve:advise_settings_change"]
+    assert pr["nearby"] == {"outcomes": 0, "by_situation": []}
+    assert meta["recommendation"]["mode"] == "act"
+    assert meta["recommendation"]["suggested_action"] == "resolve:advise_settings_change"
+    # No situation declared: the pooled fallback as before.
+    meta = client.post("/api/v1/retrieve", json=body).json()[-1]
+    assert meta["priors"]["source"] == "action_stats" and "situation_record" not in meta["priors"]
+
+
+def test_an_explore_on_the_situations_own_record_is_a_sweep_once_a_task_there_went_unsolved() -> None:
+    """Support #3/#11/#28/#30/#32 (2026-09-22): a house-rule class went
+    unsolved four times while the model, handed the untried to order by its
+    own judgement, chose the same intuitive actions each time. Once the
+    situation's own record holds an unsolved task, the explore is a sweep:
+    the order over the untried is the plan and the prose puts it in the
+    head. On a pooled record, or an exact one with nothing unsolved, the
+    explore stays an assignment."""
+    cands = ["resolve:a", "resolve:b", "resolve:c", "resolve:d"]
+    rows = [_sit_row("card declined", [("resolve:a", False), ("resolve:b", False)], outcome="failure")]
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    assert pr["n_unsolved"] == 1
+    pr["situation_record"] = {"situation": "card declined", "outcomes": 1}
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "explore" and rec["sweep"] is True
+    assert "your own pick has already failed on this situation (1 unsolved)" in rec["why"]
+    assert set(rec["plan"][:2]) == {"resolve:c", "resolve:d"}
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    first, second = rec["plan"][:2]
+    assert f"Try {first} first, then {second}. Do not repeat an action that failed on this task." in text
+    assert "Untried on this situation" not in text
+    assert "Do not spend an attempt on: resolve:a (0/1); resolve:b (0/1)" in text
+    # Pooled: the same rows are an assignment, and the untried stay a tail.
+    pooled = act.aggregate_priors(rows, candidate_actions=cands)
+    rec = act.recommend(pooled, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "explore" and "sweep" not in rec
+    assert "Untried on tasks like this" in act.render_priors(pooled, rec, candidate_actions=cands)

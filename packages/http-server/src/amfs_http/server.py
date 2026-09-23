@@ -1073,6 +1073,11 @@ def _resolved_actions_from_lessons(
     return out
 
 
+#: How many of the entity's newest outcomes are scanned for the declared
+#: situation's own record when the embedding neighbourhood holds none of it.
+SITUATION_RECORD_SCAN = 1000
+
+
 def _priors_for_retrieve(
     *,
     entity_path: str,
@@ -1147,14 +1152,39 @@ def _priors_for_retrieve(
         except Exception:  # noqa: BLE001
             logger.debug("action_stats failed", exc_info=True)
             rows = []
-    if not rows:
-        return None
     mine: list[dict[str, Any]] | None = None
     others: list[dict[str, Any]] = []
     declared = _fold_situation(situation)
-    if declared and source == "similar_outcomes" and any(r.get("situation") for r in rows):
-        mine = [r for r in rows if _fold_situation(r.get("situation")) == declared]
-        others = [r for r in rows if _fold_situation(r.get("situation")) != declared]
+    if declared and callable(stats):
+        # The situation's own record is an equality, not a neighbourhood.
+        # The embedding neighbourhood may hold none of it — a queue whose
+        # classes embed far apart returns no neighbour above the floor for a
+        # class seen once — and the fallback to the entity's whole record
+        # would then serve another class's winner as ``act``. Measured on
+        # the ops-queue support demo (2026-09-22): the first Android ticket
+        # was told ``act: explain_and_close`` from the webhook class's record
+        # and spent its three attempts on the entity's winners. So the exact
+        # rows come from the entity's record by situation, whatever the
+        # neighbourhood found; the neighbourhood supplies ``nearby``.
+        exact_rows = [r for r in rows if _fold_situation(r.get("situation")) == declared]
+        if source != "similar_outcomes" or not exact_rows:
+            try:
+                seen = {r.get("outcome_ref") for r in exact_rows}
+                for r in stats(entity_path, limit=SITUATION_RECORD_SCAN):
+                    if _fold_situation(r.get("situation")) == declared and r.get("outcome_ref") not in seen:
+                        exact_rows.append(r)
+                        seen.add(r.get("outcome_ref"))
+            except Exception:  # noqa: BLE001
+                logger.debug("action_stats by situation failed", exc_info=True)
+        labelled = any(r.get("situation") for r in rows) or bool(exact_rows)
+        if labelled:
+            mine = exact_rows
+            others = (
+                [r for r in rows if _fold_situation(r.get("situation")) != declared]
+                if source == "similar_outcomes" else []
+            )
+    if not rows and mine is None:
+        return None
     if mine is not None:
         block = aggregate_priors(
             mine, candidate_actions=candidate_actions, environment=environment or None,
@@ -1162,6 +1192,10 @@ def _priors_for_retrieve(
         )
         block["situation_record"] = {"situation": str(situation)[:200], "outcomes": len(mine)}
         block["nearby"] = _nearby_record(others, environment=environment or None)
+        # The exact record is about this kind of task by construction; the
+        # label ``action_stats`` would have it read as the entity-wide pool.
+        if source != "similar_outcomes":
+            source = "situation_record"
     else:
         block = aggregate_priors(
             rows, candidate_actions=candidate_actions, environment=environment or None
