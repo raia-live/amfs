@@ -3347,8 +3347,15 @@ async def retrieve_entries(
         from amfs_core.lessons import applicable_claims as _applicable_claims
         from amfs_core.lessons import lesson_of as _lesson_of
 
+        # Not the avoided ones: an avoided lesson is one retrieve hid because
+        # it failed on this kind of task, and its status need not say
+        # ``discredited`` yet — a locally falsified "worked" claim must not
+        # promote the action it was falsified on.
+        avoided_keys = {e.entry_key for e in avoided}
         lesson_rows = []
         for e in local_pool:
+            if e.entry_key in avoided_keys:
+                continue
             lesson = _lesson_of(e.value)
             if lesson is not None:
                 lesson_rows.append(dict(lesson, evidence_status=e.evidence_status))

@@ -1399,3 +1399,11 @@ def test_the_server_reorders_the_plan_by_the_lessons_about_this_task(client, ser
     assert meta["recommendation"]["plan"][-1] == "resolve:b"
     _, meta = _priors_meta(client, query="declined", situation="webhook late", candidate_actions=cands)
     assert meta["recommendation"]["plan"][:2] == ["resolve:a", "resolve:b"]
+    # A lesson retrieve avoids — it failed on tasks like this one, twice — says
+    # nothing: its "worked" claim must not promote the action it was falsified on.
+    server_mem.write("acme/support", "learned-card-declined-c",
+                     make_lesson("card declined at checkout", "resolve:c", True, "try the other card"))
+    _outcomes(server_mem, "learned-card-declined-c", OutcomeType.FAILURE, OutcomeType.FAILURE)
+    body, meta = _priors_meta(client, query="card declined at checkout", candidate_actions=cands)
+    assert all(e.get("key") != "learned-card-declined-c" for e in body if not e.get("_meta"))
+    assert meta["recommendation"]["plan"][0] == "resolve:a" and meta["recommendation"]["plan"][-1] == "resolve:b"
