@@ -1749,3 +1749,68 @@ def test_a_sweep_is_ordered_by_the_entitys_record_elsewhere() -> None:
     rec = act.recommend(pr, agent_id="x", candidate_actions=cands)
     assert rec["plan"][0] == rec["suggested_action"] == act.sweep_order(pr, pr["untried"], "x")[0]
     assert set(rec["plan"][:3]) == {"resolve:c", "resolve:d", "resolve:e"}
+
+
+def test_a_validated_hit_whose_action_is_off_the_table_is_spent() -> None:
+    """Ops-queue CI #25/#45 (2026-09-22): on the retry after the lesson's own
+    action failed, the validated hit still yielded ``act`` with no action,
+    and the plan's first untried was logged as the recommendation. A lesson
+    that says "X worked" when X is not among the caller's candidates is
+    spent on this task; with another worked action still available it is
+    not."""
+    lessons = [{"situation": "s", "action": "fix:a", "worked": True, "evidence_status": "validated"}]
+    pooled = {"tried": [], "untried": ["fix:c", "fix:d"]}
+    assert act.recommend(pooled, agent_id="x", candidate_actions=["fix:c", "fix:d"], lessons=lessons,
+                         top_hit_status="validated") is None
+    assert act.recommend(pooled, agent_id="x", candidate_actions=["fix:a", "fix:c"], lessons=lessons,
+                         top_hit_status="validated")["mode"] == "act"
+    two = lessons + [{"situation": "s", "action": "fix:c", "worked": True, "evidence_status": "validated"}]
+    assert act.recommend(pooled, agent_id="x", candidate_actions=["fix:c", "fix:d"], lessons=two,
+                         top_hit_status="validated")["mode"] == "act"
+
+
+def test_a_stopped_winner_is_the_plans_last_resort_so_its_record_can_recover() -> None:
+    """A turned or streaking action was never appended to the plan, so an
+    agent that follows the plan could never retry it and a 10/11 fix lost to
+    one flake stayed turned for good. It goes last — after the untried and
+    the plain failures — and stays out of the text's order."""
+    cands = ["fix:a", "fix:b", "fix:c"]
+    rows = [_sit_row("s", [("fix:a", True)], days_ago=d) for d in (5, 4, 3)]
+    rows.append(_sit_row("s", [("fix:a", False), ("fix:b", False)], outcome="failure", days_ago=2))
+    rows.append(_sit_row("s", [("fix:a", False), ("fix:b", False)], outcome="failure", days_ago=1))
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "s", "outcomes": 5}
+    a = next(t for t in pr["tried"] if t["action_key"] == "fix:a")
+    assert act.turned(a) and act._stopped_working(a)
+    rec = act.recommend(pr, agent_id="x", candidate_actions=cands)
+    assert rec["mode"] == "explore"
+    assert rec["plan"] == ["fix:c", "fix:b", "fix:a"]
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    assert "fix:a (3/5, stopped working)" in text
+    assert "fix:a" not in text.split("Try ")[-1].split(".")[0]
+
+
+def test_per_task_situation_labels_leave_the_block_pooled(client, server_mem) -> None:
+    """A caller that puts an ID in its situation gives every outcome a
+    distinct label. Read as classes, every record would be empty and the
+    priors would abstain for good where the pooled block served a winner;
+    when almost every labelled outcome is distinct, the block stays pooled
+    as for an undeclared situation. Recurring labels are classes."""
+    from amfs_http import server
+
+    cands = ["resolve:a", "resolve:b"]
+    noisy = [_sit_row(f"ticket SUP-{i}", [("resolve:a", True)], days_ago=i) for i in range(8)]
+    server_mem._adapter.similar_outcomes = lambda entity_path, embedding, **kw: []  # type: ignore[attr-defined]
+    server_mem._adapter.action_stats = lambda entity_path, **kw: list(noisy)  # type: ignore[attr-defined]
+    server._get_server_embedder = lambda: _StubEmbedder()
+    body = {"query": "ticket", "entity_path": "acme/support", "include_priors": True,
+            "agent_id": "a9", "candidate_actions": cands, "abstain": True}
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="ticket SUP-99")).json()[-1]
+    assert "situation_record" not in meta["priors"] and meta["priors"]["source"] == "action_stats"
+    assert meta["recommendation"]["mode"] == "act" and meta["recommendation"]["suggested_action"] == "resolve:a"
+    # Recurring labels: classes, and an unseen one abstains.
+    classes = [_sit_row(["card", "login"][i % 2], [("resolve:a", True)], days_ago=i) for i in range(8)]
+    server_mem._adapter.action_stats = lambda entity_path, **kw: list(classes)  # type: ignore[attr-defined]
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="export")).json()[-1]
+    assert meta["priors"]["situation_record"]["outcomes"] == 0
+    assert meta["recommendation"]["mode"] == "abstain"

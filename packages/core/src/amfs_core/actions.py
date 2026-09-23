@@ -700,6 +700,7 @@ def recommend(
 
     return _with_plan(_recommend_mode(
         priors, tried=tried, untried=untried, winners=winners, stopped=stopped, losers=losers,
+        lessons=lessons, candidate_actions=candidate_actions,
         failed_now=failed_now, all_tried_failed=all_tried_failed,
         all_tried_failed_firm=all_tried_failed_firm, have_candidates=have_candidates,
         agent_id=agent_id, top_hit_status=top_hit_status,
@@ -730,6 +731,8 @@ def _recommend_mode(
     abstain: bool,
     hit_statuses: Sequence[str] | None,
     priors_are_local: bool,
+    lessons: Sequence[Mapping[str, Any]] | None = None,
+    candidate_actions: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     """The mode and suggested action of :func:`recommend`; the plan is added
     by the caller."""
@@ -797,6 +800,7 @@ def _recommend_mode(
         and not top_hit_recent_failure
         and not top_hit_shifted
         and not all_tried_failed
+        and not _lessons_spent(lessons, candidate_actions)
     ):
         # Only for a caller choosing among a fixed set of actions. Without
         # candidates there is no action to act *with*, and ``act`` on a bare
@@ -1070,6 +1074,25 @@ def _sweep(priors: Mapping[str, Any] | None) -> int:
     return int((priors or {}).get("n_unsolved") or 0)
 
 
+def _lessons_spent(
+    lessons: Sequence[Mapping[str, Any]] | None, candidate_actions: Sequence[str] | None
+) -> bool:
+    """Whether every lesson for this situation that says an action worked
+    names one the caller will not take — a retry asking over the actions it
+    has not tried, after the lesson's own action just failed. The validated
+    hit is then spent on this task: ``act`` on it would say "follow the top
+    hit" about an action already off the table, and the agent read the plan's
+    first untried as the recommendation (ops-queue CI #25/#45, 2026-09-22)."""
+    if not lessons or not candidate_actions:
+        return False
+    allowed = set(candidate_actions)
+    worked = [
+        c for c in lessons
+        if c.get("worked") and str(c.get("evidence_status") or "") != "discredited"
+    ]
+    return bool(worked) and all(str(c.get("action")) not in allowed for c in worked)
+
+
 def _exact_first_win(prior: Mapping[str, Any]) -> bool:
     """A single win on the situation's own record, its one take a win.
 
@@ -1198,6 +1221,15 @@ def plan_actions(
             _add(a)
     for t in by_p:
         if t in failed_now and not _stopped_working(t):
+            _add(t.get("action_key"))
+    # Last resort: what stopped working here but has won. Never in the text's
+    # order — it sits under "do not spend an attempt on" — but in the plan,
+    # so an agent that follows the plan to the end can retry it once every
+    # alternative has failed, and its record can recover from a loss that
+    # was a flake after all. Without this a turned 10/11 winner is never
+    # taken again and stays turned for good.
+    for t in by_p:
+        if _stopped_working(t) and int(t.get("won", 0)) > 0:
             _add(t.get("action_key"))
     for t in by_p:
         _add(t.get("action_key"))

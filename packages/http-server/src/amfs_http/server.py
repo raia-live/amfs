@@ -30,7 +30,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, timezone
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import uvicorn
@@ -1185,6 +1185,13 @@ def _priors_for_retrieve(
         labelled = any(r.get("situation") for r in rows) or bool(exact_rows) or any(
             r.get("situation") for r in elsewhere_rows
         )
+        # Labels that are not classes — a situation per task, an ID in it —
+        # would leave every record empty and the priors abstaining for
+        # good, where the pooled block served a winner before. When almost
+        # every scanned outcome carries a distinct label, the block stays
+        # pooled as for an undeclared situation.
+        if labelled and not _labels_are_classes([*exact_rows, *elsewhere_rows]):
+            labelled = False
         if labelled:
             mine = exact_rows
             others = (
@@ -1225,6 +1232,24 @@ def _priors_for_retrieve(
             "outcomes": len(rows),
         }
     return block
+
+
+#: Below this many labelled outcomes the labels are taken as classes: too
+#: few to tell a class from a one-off.
+LABELS_MIN_ROWS = 6
+#: Above this share of distinct labels among the labelled outcomes, the
+#: situation is a per-task string, not a class.
+LABELS_MAX_DISTINCT_RATIO = 0.8
+
+
+def _labels_are_classes(rows: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the situations on *rows* recur — a class label — rather than
+    naming each task once. Fewer than ``LABELS_MIN_ROWS`` labelled rows are
+    read as classes."""
+    labels = [_fold_situation(r.get("situation")) for r in rows if r.get("situation")]
+    if len(labels) < LABELS_MIN_ROWS:
+        return True
+    return len(set(labels)) / len(labels) <= LABELS_MAX_DISTINCT_RATIO
 
 
 def _fold_situation(value: Any) -> str:
