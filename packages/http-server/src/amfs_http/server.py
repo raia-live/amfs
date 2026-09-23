@@ -1235,11 +1235,15 @@ def _priors_for_retrieve(
 
 
 #: Below this many labelled outcomes the labels are taken as classes: too
-#: few to tell a class from a one-off.
-LABELS_MIN_ROWS = 6
+#: few to tell a class from a one-off — an entity's first outcomes are one
+#: per class, every label distinct, and a floor of 6 read a queue of eight
+#: classes as per-task strings at its seventh ticket (ops-queue support run
+#: 4, 2026-09-22: the pooled fallback served another class's winner, 4
+#: wasted). Classes recur well within twenty outcomes.
+LABELS_MIN_ROWS = 20
 #: Above this share of distinct labels among the labelled outcomes, the
 #: situation is a per-task string, not a class.
-LABELS_MAX_DISTINCT_RATIO = 0.8
+LABELS_MAX_DISTINCT_RATIO = 0.9
 
 
 def _labels_are_classes(rows: Sequence[Mapping[str, Any]]) -> bool:

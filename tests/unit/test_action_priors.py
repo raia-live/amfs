@@ -1799,7 +1799,7 @@ def test_per_task_situation_labels_leave_the_block_pooled(client, server_mem) ->
     from amfs_http import server
 
     cands = ["resolve:a", "resolve:b"]
-    noisy = [_sit_row(f"ticket SUP-{i}", [("resolve:a", True)], days_ago=i) for i in range(8)]
+    noisy = [_sit_row(f"ticket SUP-{i}", [("resolve:a", True)], days_ago=i) for i in range(24)]
     server_mem._adapter.similar_outcomes = lambda entity_path, embedding, **kw: []  # type: ignore[attr-defined]
     server_mem._adapter.action_stats = lambda entity_path, **kw: list(noisy)  # type: ignore[attr-defined]
     server._get_server_embedder = lambda: _StubEmbedder()
@@ -1809,8 +1809,15 @@ def test_per_task_situation_labels_leave_the_block_pooled(client, server_mem) ->
     assert "situation_record" not in meta["priors"] and meta["priors"]["source"] == "action_stats"
     assert meta["recommendation"]["mode"] == "act" and meta["recommendation"]["suggested_action"] == "resolve:a"
     # Recurring labels: classes, and an unseen one abstains.
-    classes = [_sit_row(["card", "login"][i % 2], [("resolve:a", True)], days_ago=i) for i in range(8)]
+    classes = [_sit_row(["card", "login"][i % 2], [("resolve:a", True)], days_ago=i) for i in range(24)]
     server_mem._adapter.action_stats = lambda entity_path, **kw: list(classes)  # type: ignore[attr-defined]
     meta = client.post("/api/v1/retrieve", json=dict(body, situation="export")).json()[-1]
+    assert meta["priors"]["situation_record"]["outcomes"] == 0
+    assert meta["recommendation"]["mode"] == "abstain"
+    # An entity's first outcomes are one per class, every label distinct:
+    # still classes — too few rows to call them per-task.
+    first = [_sit_row(f"class-{i}", [("resolve:a", True)], days_ago=i) for i in range(8)]
+    server_mem._adapter.action_stats = lambda entity_path, **kw: list(first)  # type: ignore[attr-defined]
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="class-9")).json()[-1]
     assert meta["priors"]["situation_record"]["outcomes"] == 0
     assert meta["recommendation"]["mode"] == "abstain"
