@@ -230,6 +230,16 @@ class ActionPrior:
     last_3: list[str] = field(default_factory=list)   # newest first: "won" / "lost"
     last_at: datetime | None = None
     agents: set[str] = field(default_factory=set)
+    #: Whether the newest take was a loss on a task that *nothing* then
+    #: solved. A loss inside a task another action went on to win is a
+    #: contrast (``A failed, B resolved``); a loss on a task that ended
+    #: unsolved is the record saying the fix for this situation is not what
+    #: it was. ``None`` until a take is seen.
+    last_unsolved: bool | None = None
+    #: Set when the record is the situation's own (see
+    #: :func:`aggregate_priors` ``situation_exact``), which is what lets
+    #: :func:`turned_unsolved` read one loss as a turn.
+    situation_exact: bool = False
 
     @property
     def n(self) -> int:
@@ -241,7 +251,7 @@ class ActionPrior:
         return (self.won_w + 1.0) / (self.won_w + self.lost_w + 2.0)
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "action_key": self.action_key,
             "won": self.won,
             "lost": self.lost,
@@ -254,7 +264,11 @@ class ActionPrior:
             # reader tell a loss on this task from a loss on a neighbour.
             "won_w": round(self.won_w, 3),
             "lost_w": round(self.lost_w, 3),
+            "last_unsolved": bool(self.last_unsolved),
         }
+        if self.situation_exact:
+            out["situation_exact"] = True
+        return out
 
 
 def aggregate_priors(
@@ -265,6 +279,7 @@ def aggregate_priors(
     daily_decay: float = PRIORS_DAILY_DECAY,
     environment: Mapping[str, Any] | None = None,
     env_mismatch_weight: float = ENV_MISMATCH_WEIGHT,
+    situation_exact: bool = False,
 ) -> dict[str, Any]:
     """Fold similar past outcomes into per-action priors.
 
@@ -273,6 +288,11 @@ def aggregate_priors(
     optional and multiplies the weight. Returns ``{"tried": [...], "untried":
     [...], "n_outcomes": int, "contrasts": [...]}`` with ``tried`` sorted by
     posterior descending and, within ties, by evidence.
+
+    ``situation_exact=True`` says every row is an outcome of *this* situation
+    — the caller partitioned them by the label the runs declared — and marks
+    each ``tried`` row so; :func:`turned_unsolved` reads one loss on such a
+    record as a turn, which it never does on a pooled one.
 
     When *environment* is given (``{"model": ..., "runtime": ...}``, see
     ``amfs_core.models.environment_of``), a row whose ``session_metadata`` (or
@@ -304,6 +324,7 @@ def aggregate_priors(
         if env:
             w *= _env_match(row, env, env_mismatch_weight)
         agent = str(row.get("agent_id") or "")
+        solved = is_success(str(row.get("outcome_type") or "success"))
         failed_here: list[str] = []
         resolved_here: str | None = None
         for act in row.get("actions_taken") or []:
@@ -311,6 +332,7 @@ def aggregate_priors(
             if not key:
                 continue
             pr = priors.setdefault(key, ActionPrior(action_key=key))
+            pr.situation_exact = situation_exact
             ok = bool(act.get("success"))
             if ok:
                 pr.won += 1
@@ -318,6 +340,8 @@ def aggregate_priors(
             else:
                 pr.lost += 1
                 pr.lost_w += w
+            if pr.last_unsolved is None:
+                pr.last_unsolved = (not ok) and not solved
             if len(pr.last_3) < 3:
                 pr.last_3.append("won" if ok else "lost")
             if at and (pr.last_at is None or at > pr.last_at):
@@ -606,6 +630,28 @@ def recommend(
     untried: list[str] = list((priors or {}).get("untried") or [])
     have_candidates = bool(candidate_actions)
 
+    # The situation's own record, when the caller declared one and the store
+    # partitions outcomes by it. Empty means no run has ended on this
+    # situation yet: whatever the neighbourhood holds is another kind of
+    # task, and a plan drawn from it is the other class's fix. Measured on
+    # the ops-queue demo (2026-09-22): a UI snapshot PR was told ``act:
+    # fix_code`` from the backend snapshot class's one win — the opposite of
+    # its own fix — and cost three CI runs where the same model with no
+    # memory cost none, in both runs compared.
+    record = (priors or {}).get("situation_record")
+    if isinstance(record, Mapping) and int(record.get("outcomes") or 0) == 0:
+        if not abstain:
+            return None
+        return {
+            "mode": "abstain",
+            "suggested_action": None,
+            "situation_record": "none",
+            "why": (
+                "no outcome recorded for this situation yet; what the record shows is from "
+                "nearby kinds of task — hints, not a plan. Use your own judgement"
+            ),
+        }
+
     def _with_plan(rec: dict[str, Any] | None) -> dict[str, Any] | None:
         if rec is None:
             return None
@@ -761,11 +807,21 @@ def _recommend_mode(
         why = "regime shift suspected for tasks like this; " if shift_explores else ""
         if stopped:
             s = stopped[0]
-            why += (f"{s['action_key']} won {s['won']}/{s['n']} on tasks like this but lost its last "
-                    f"{_leading_losses(s)} — what worked here has stopped working; ")
+            if turned_unsolved(s) and not turned(s) and not _recently_failing(s):
+                why += (f"{s['action_key']} won {s['won']}/{s['n']} on this situation but its newest take "
+                        f"lost on a task nothing solved — the fix here may have changed; ")
+            else:
+                why += (f"{s['action_key']} won {s['won']}/{s['n']} on tasks like this but lost its last "
+                        f"{_leading_losses(s)} — what worked here has stopped working; ")
         elif failed:
             why += f"tried and failed on similar tasks here: {failed}; "
-        why += f"{len(untried)} untried — try {pick}"
+        # The pick is an exploration *assignment* — a hash of the agent's
+        # name over the untried, so peers on one problem spread out — not
+        # knowledge about the task. Grid v3 measured what happens when it is
+        # read as knowledge: an explore that was followed won 14% of the
+        # time, one that was ignored 67%. Said as what it is.
+        why += (f"{len(untried)} untried on this kind of task and nothing in the record orders them — "
+                f"use your own judgement; {pick} is this agent's exploration assignment if you have no better guess")
         out: dict[str, Any] = {"mode": "explore", "suggested_action": pick, "untried": untried, "why": why}
         if stopped:
             out["stopped_working"] = [str(s["action_key"]) for s in stopped]
@@ -831,6 +887,12 @@ def guidance_strength(
     ]
     if regime_shift:
         return "thin" if (tried or statuses) else "none"
+    record = (priors or {}).get("situation_record")
+    if isinstance(record, Mapping) and int(record.get("outcomes") or 0) == 0:
+        # Nothing has ended on this situation. A validated hit among the
+        # results is validated on some other kind of task, and the
+        # neighbourhood's record is another class's: hints at most.
+        return "thin" if (statuses or (priors or {}).get("nearby")) else "none"
     local = priors_local(priors) if priors_are_local is None else priors_are_local
     if winners and local and pooled_classes(list((priors or {}).get("contrasts") or [])) is not None:
         winners = []
@@ -862,10 +924,32 @@ def turned(prior: Mapping[str, Any]) -> bool:
     )
 
 
+def turned_unsolved(prior: Mapping[str, Any]) -> bool:
+    """An action with wins on *this situation's own record* whose newest take
+    lost on a task that nothing then solved.
+
+    The one-loss forgiveness in :func:`turned` is for a pooled record, where
+    the loss may be a neighbour's. On the situation's own record
+    (``situation_exact``, see :func:`aggregate_priors`) a loss that ended the
+    task unsolved is the record saying the fix has changed, and waiting for a
+    second costs a whole task: measured on the ops-queue demo (2026-09-22),
+    the task after a changed class's first three-attempt miss was told
+    ``act`` on the same action again and missed again — three runs a class
+    per change, twice per run. The action is not dropped: :func:`plan_actions`
+    keeps it second, so a flaky loss of a good fix costs one attempt, not the
+    fix.
+    """
+    if not prior.get("situation_exact") or not prior.get("last_unsolved"):
+        return False
+    last = list(prior.get("last_3") or [])
+    return int(prior.get("won", 0)) >= 1 and bool(last) and last[0] == "lost"
+
+
 def _stopped_working(prior: Mapping[str, Any]) -> bool:
     """Not a winner whatever the lifetime ratio: a losing streak
-    (:func:`_recently_failing`) or a validated action that turned."""
-    return _recently_failing(prior) or turned(prior)
+    (:func:`_recently_failing`), a validated action that turned, or one that
+    just lost on this situation's own record with nothing solving the task."""
+    return _recently_failing(prior) or turned(prior) or turned_unsolved(prior)
 
 
 def _turned_since(prior: Mapping[str, Any], contrast_weight: float) -> bool:
@@ -969,6 +1053,13 @@ def plan_actions(
     for t in by_p:
         last = list(t.get("last_3") or [])
         if int(t.get("won", 0)) > 0 and t not in failed_now and last and last[0] == "won":
+            _add(t.get("action_key"))
+    # An action that just turned on this situation's own record (one loss on
+    # an unsolved task) is not first — the loss says the fix may have changed
+    # — but second: if the loss was a flake, the fix is one attempt away
+    # rather than gone.
+    for t in by_p:
+        if turned_unsolved(t) and not turned(t) and not _recently_failing(t):
             _add(t.get("action_key"))
     if local:
         for c in (priors or {}).get("contrasts") or []:
@@ -1234,20 +1325,58 @@ def render_priors(
     the one that just failed because the situation's record has it as a
     winner, whether the plan was computed here or sent by the server.
     *lessons*, the situation-exact claims about this task, re-order the plan
-    (:func:`rank_by_lessons`) — a plan the server sent included."""
+    (:func:`rank_by_lessons`) — a plan the server sent included.
+
+    The imperative part names only what the record can stand behind. "Try in
+    this order" lists the actions with evidence for them on this kind of
+    task — the recommended one, the winners, what a contrast resolved with,
+    what a lesson says worked, an action that just turned kept as the hedge.
+    The untried candidates follow as a list the agent is told to order by its
+    own judgement: the record holds nothing about them, and the hash order
+    that spreads a fleet's exploration is not knowledge. Grid v3 measured an
+    explore that was followed at 14% success against 67% when ignored; the
+    ops-queue demo (2026-09-22) showed the same on the plan's tail — a tail
+    pooled from other classes put ``refund`` second on a ticket where it is
+    the one action that cannot be undone. When the record is the situation's
+    own (``situation_record``), the block says so, and the neighbourhood is
+    shown under its situations as what it is: another kind of task.
+    """
     if not priors and not recommendation:
         return ""
     local = priors_local(priors) if priors_are_local is None else priors_are_local
     lines: list[str] = []
     tried = (priors or {}).get("tried") or []
+    record = (priors or {}).get("situation_record")
+    exact = isinstance(record, Mapping)
+    here = "on this situation" if exact else "on tasks like this"
     if tried:
         parts = [
             f"{t['action_key']} {t['won']}/{t['n']}"
             + ("" if int(t.get('agents', 0)) <= 1 else f" ({t['agents']} agents)")
-            + (f", lost last {_leading_losses(t)}" if _stopped_working(t) and int(t.get("won", 0)) else "")
+            + (
+                ", newest take lost on a task nothing solved"
+                if turned_unsolved(t) and not turned(t) and not _recently_failing(t)
+                else (f", lost last {_leading_losses(t)}" if _stopped_working(t) and int(t.get("won", 0)) else "")
+            )
             for t in tried[:6]
         ]
-        lines.append("Tried on similar tasks here: " + "; ".join(parts))
+        lines.append(("Tried on this situation: " if exact else "Tried on similar tasks here: ") + "; ".join(parts))
+    elif exact:
+        lines.append("No outcome recorded for this situation yet.")
+    nearby = (priors or {}).get("nearby") if exact else None
+    if isinstance(nearby, Mapping) and nearby.get("by_situation"):
+        groups = []
+        for g in list(nearby.get("by_situation") or [])[:3]:
+            acts = "; ".join(
+                f"{t['action_key']} {t['won']}/{t['n']}" for t in list(g.get("tried") or [])[:4]
+            )
+            if acts:
+                groups.append(f"\u201c{str(g.get('situation') or '')[:80]}\u201d: {acts}")
+        if groups:
+            lines.append(
+                "On nearby kinds of task (not this situation) — " + " | ".join(groups)
+                + ". Another class of task may take the opposite fix; weigh what differs."
+            )
     contrasts = [
         c for c in ((priors or {}).get("contrasts") or [])
         if local and float(c.get("weight") or 0.0) >= CONTRAST_MIN_W
@@ -1269,10 +1398,10 @@ def render_priors(
     untried = (priors or {}).get("untried") or []
     if allowed is not None:
         untried = [u for u in untried if u in allowed]
-    if untried:
-        lines.append("Not yet tried here: " + ", ".join(untried[:8]))
+    mode = (recommendation or {}).get("mode")
+    if untried and mode not in ("act", "explore"):
+        lines.append(f"Not yet tried {here}: " + ", ".join(untried[:8]))
     if recommendation:
-        mode = recommendation.get("mode")
         sug = recommendation.get("suggested_action")
         if sug and allowed is not None and sug not in allowed:
             # The suggestion is an action the run said it will not take — the
@@ -1280,20 +1409,15 @@ def render_priors(
             # mode and the reason still stand; naming the action would hand
             # it back through the one line the plan filter below cannot reach.
             sug = None
+        if mode == "explore":
+            # The explore's action is an exploration assignment, not advice;
+            # the reason says so and the "Untried" line below carries it.
+            sug = None
         lines.append(f"Recommendation: {mode}" + (f" -> {sug}" if sug else "") + f". {recommendation.get('why', '')}".rstrip())
-    # The imperative part. An agent with several attempts reads the record
-    # above as history; what it needs is the order to try things in and what
-    # not to spend an attempt on. Failed-here actions are named so the agent
-    # does not re-try its instinct: on the ops-queue demo the second and third
-    # attempts after a recommended action failed were actions already 0/n on
-    # the exact situation.
-    # Only behind an act or explore: an abstain (or no recommendation at all)
-    # says the record here is not about this task — pooled classes, a
-    # neighbourhood match — and an order drawn from it would be advice with
-    # nothing behind it. Measured on the ops-queue demo (2026-09-22): a plan
-    # rendered under no recommendation led with the untried candidates in a
-    # stable order, and the agent read it as memory telling it what to do.
-    mode = (recommendation or {}).get("mode")
+    # The imperative part, only behind an act or explore: an abstain (or no
+    # recommendation at all) says the record here is not about this task —
+    # pooled classes, a neighbourhood match, a situation with no record — and
+    # an order drawn from it would be advice with nothing behind it.
     if mode not in ("act", "explore"):
         return "\n".join(lines)
     plan = list((recommendation or {}).get("plan") or []) or (
@@ -1305,21 +1429,77 @@ def render_priors(
         plan = [a for a in plan if a in allowed]
     plan = rank_by_lessons(plan, lessons, priors=priors, recommendation=recommendation)
     stopped = [t for t in tried if _stopped_working(t) and int(t.get("won", 0)) > 0]
+    hedged = [t for t in stopped if turned_unsolved(t) and not turned(t) and not _recently_failing(t)]
     failed = [
         t for t in tried
         if t not in stopped and int(t.get("won", 0)) == 0
     ]
     avoid = [
-        f"{t['action_key']} ({t['won']}/{t['n']}, stopped working)" for t in stopped[:3]
+        f"{t['action_key']} ({t['won']}/{t['n']}, stopped working)" for t in stopped[:3] if t not in hedged
     ] + [f"{t['action_key']} (0/{t['n']})" for t in failed[:5]]
     if avoid:
-        lines.append("Do not spend an attempt on: " + "; ".join(avoid) + " — these failed on tasks like this.")
-    if len(plan) > 1 or (plan and mode != "act"):
+        lines.append("Do not spend an attempt on: " + "; ".join(avoid) + f" — these failed {here}.")
+    backed = _evidence_backed(plan, tried, contrasts if local else [], lessons, recommendation)
+    hedged_keys = {str(t.get("action_key")) for t in hedged}
+    head = [a for a in plan if a in backed and a not in hedged_keys]
+    hedge = [a for a in plan if a in hedged_keys]
+    in_plan = set(plan)
+    # The candidates' own order, not the plan's: the plan rotates them by the
+    # agent's name so a fleet spreads out, and a list said to be unordered
+    # should not carry an order.
+    tail = [u for u in untried if u in in_plan and u not in backed and u not in hedged_keys]
+    if head:
+        line = f"Try {head[0]} first"
+        if head[1:]:
+            line += ", then " + " -> ".join(head[1:])
+        lines.append(line + ". Do not repeat an action that failed on this task.")
+    for a in hedge[:1]:
+        h = next(t for t in hedged if str(t.get("action_key")) == a)
+        lead = "If that fails" if head else "Make your own pick first; if it fails"
         lines.append(
-            "Try in this order: " + " -> ".join(plan)
-            + ". Take the first; if it fails, the next. Do not repeat an action that failed on this task."
+            f"{lead}, try {a} next: it won {h['won']}/{h['n']} on this situation and just lost on a "
+            "task nothing solved — the fix may have changed, and one attempt on it is cheap if it did not."
+        )
+    if tail:
+        lines.append(
+            f"Untried {here}: " + ", ".join(tail[:8])
+            + " — the record cannot order these; choose among them by your own judgement of the task."
         )
     return "\n".join(lines)
+
+
+def _evidence_backed(
+    plan: Sequence[str],
+    tried: Sequence[Mapping[str, Any]],
+    contrasts: Sequence[Mapping[str, Any]],
+    lessons: Sequence[Mapping[str, Any]] | None,
+    recommendation: Mapping[str, Any] | None,
+) -> set[str]:
+    """The actions in *plan* the record can stand behind: tried here with at
+    least one win (a winner, a newest-won, a turned action kept as the
+    hedge), what a contrast resolved with, what a lesson for this situation
+    says worked, and an ``act``'s own action. Never an untried candidate: an
+    explore's pick is an assignment, and the tail's order a hash."""
+    out: set[str] = set()
+    for t in tried:
+        if int(t.get("won", 0)) > 0 and not _recently_failing(t) and not turned(t):
+            out.add(str(t.get("action_key")))
+    for c in contrasts:
+        if c.get("resolved_with"):
+            out.add(str(c["resolved_with"]))
+    barred: set[str] = set()
+    for claim in lessons or ():
+        if str(claim.get("evidence_status") or "") == "discredited":
+            continue
+        if claim.get("worked"):
+            out.add(str(claim.get("action")))
+        else:
+            barred.add(str(claim.get("action")))
+    if recommendation and recommendation.get("mode") == "act" and recommendation.get("suggested_action"):
+        out.add(str(recommendation["suggested_action"]))
+    # A lesson for this situation that says the action did not work outranks
+    # the pooled record that has it winning: not named in the order.
+    return {a for a in out if a in set(plan) and a not in barred}
 
 
 __all__ = [
@@ -1349,5 +1529,6 @@ __all__ = [
     "render_priors",
     "stable_bucket",
     "turned",
+    "turned_unsolved",
     "recorded_environment",
 ]

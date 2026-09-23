@@ -1081,6 +1081,7 @@ def _priors_for_retrieve(
     candidate_actions: list[str] | None,
     environment: Mapping[str, Any] | None = None,
     query_vector: list[float] | None = None,
+    situation: str | None = None,
 ) -> dict[str, Any] | None:
     """Action priors for ``entity_path`` on tasks like ``text``.
 
@@ -1092,6 +1093,16 @@ def _priors_for_retrieve(
     or nothing has been committed on the entity yet — so the caller sends
     nothing rather than a block whose only content is the candidate list the
     agent itself supplied.
+
+    With a declared *situation*, and outcomes in the neighbourhood that carry
+    one, the block is the **situation's own record**: the priors are
+    aggregated over the outcomes whose situation is this one
+    (``situation_record``: how many), and the rest of the neighbourhood is
+    reported separately under ``nearby`` — per situation, what was tried and
+    how it went — for the agent to weigh, never to be planned from. Two
+    situations that differ by one token embed within 0.02 of each other, so
+    text alone pools them; the label is what tells them apart. Outcomes
+    without a situation (older clients) leave the block pooled as before.
 
     Synchronous, and blocking on the sync adapter: callers on the event loop
     run it through ``_offload``. ``query_vector`` is the caller's embedding of
@@ -1138,9 +1149,23 @@ def _priors_for_retrieve(
             rows = []
     if not rows:
         return None
-    block = aggregate_priors(
-        rows, candidate_actions=candidate_actions, environment=environment or None
-    )
+    mine: list[dict[str, Any]] | None = None
+    others: list[dict[str, Any]] = []
+    declared = _fold_situation(situation)
+    if declared and source == "similar_outcomes" and any(r.get("situation") for r in rows):
+        mine = [r for r in rows if _fold_situation(r.get("situation")) == declared]
+        others = [r for r in rows if _fold_situation(r.get("situation")) != declared]
+    if mine is not None:
+        block = aggregate_priors(
+            mine, candidate_actions=candidate_actions, environment=environment or None,
+            situation_exact=True,
+        )
+        block["situation_record"] = {"situation": str(situation)[:200], "outcomes": len(mine)}
+        block["nearby"] = _nearby_record(others, environment=environment or None)
+    else:
+        block = aggregate_priors(
+            rows, candidate_actions=candidate_actions, environment=environment or None
+        )
     block["source"] = source
     block["entity_path"] = entity_path
     if source == "similar_outcomes" and rows:
@@ -1149,6 +1174,42 @@ def _priors_for_retrieve(
             "outcomes": len(rows),
         }
     return block
+
+
+def _fold_situation(value: Any) -> str:
+    """A situation label as compared: case- and whitespace-folded."""
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _nearby_record(
+    rows: list[dict[str, Any]], *, environment: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """The neighbourhood outside the declared situation, per situation:
+    ``{"outcomes": n, "by_situation": [{"situation", "outcomes", "tried":
+    [...]}]}``, nearest situation first, three at most. What the agent sees
+    as "on nearby kinds of task"; nothing here is planned from."""
+    from amfs_core.actions import aggregate_priors
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        groups.setdefault(_fold_situation(r.get("situation")) or "(unlabelled)", []).append(r)
+
+    def _nearness(items: list[dict[str, Any]]) -> float:
+        return max(float(r.get("task_similarity") or r.get("similarity") or 0.0) for r in items)
+
+    by_situation = []
+    for key, items in sorted(groups.items(), key=lambda kv: -_nearness(kv[1]))[:3]:
+        label = next((str(r.get("situation")) for r in items if r.get("situation")), key)
+        agg = aggregate_priors(items, environment=environment)
+        by_situation.append({
+            "situation": label[:200],
+            "outcomes": len(items),
+            "tried": [
+                {k: t[k] for k in ("action_key", "won", "lost", "n", "last_3") if k in t}
+                for t in agg["tried"][:6]
+            ],
+        })
+    return {"outcomes": len(rows), "by_situation": by_situation}
 
 
 def _get_visibility_filter(request: Request):
@@ -3247,6 +3308,7 @@ async def retrieve_entries(
             candidate_actions=req.candidate_actions,
             environment=environment,
             query_vector=priors_vec,
+            situation=req.situation,
         )
         top = head[0][0] if head else None
         top_bd = head[0][2] if head else {}

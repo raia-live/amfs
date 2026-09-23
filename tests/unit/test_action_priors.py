@@ -708,8 +708,11 @@ def test_render_priors_gives_the_order_and_what_not_to_retry() -> None:
     rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
     text = act.render_priors(pr, rec)
     assert "Do not spend an attempt on: fix:fix_code (0/2)" in text
-    assert "Try in this order: fix:rerun_job -> fix:" in text
-    assert text.index("Recommendation:") < text.index("Try in this order")
+    # The winner is the order; the untried tail is a list for the agent's
+    # judgement, in the candidates' order, not the plan's rotation.
+    assert "Try fix:rerun_job first. Do not repeat an action that failed on this task." in text
+    assert "Untried on tasks like this: fix:edit_generated_file, fix:regen_migrations — the record cannot order these" in text
+    assert text.index("Recommendation:") < text.index("Try fix:rerun_job first")
     # A turned winner is named as such in the avoid line.
     two = dict(pr, tried=[_prior("fix:rerun_job", 3, 5, ["lost", "lost", "won"])] + pr["tried"][1:])
     text = act.render_priors(two, act.recommend(two, agent_id="a", candidate_actions=cands))
@@ -722,10 +725,10 @@ def test_render_priors_gives_the_order_and_what_not_to_retry() -> None:
     # The order names candidates only, whether computed here or sent by the server.
     rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
     text = act.render_priors(pr, rec, candidate_actions=["fix:edit_generated_file", "fix:regen_migrations"])
-    assert "fix:rerun_job" not in text.split("Try in this order:")[1]
+    assert "Try " not in text and "fix:rerun_job" not in text.split("Untried on tasks like this:")[1]
     sent = dict(rec, plan=["fix:rerun_job", "fix:edit_generated_file", "fix:regen_migrations"])
     text = act.render_priors(pr, sent, candidate_actions=["fix:edit_generated_file", "fix:regen_migrations"])
-    assert "Try in this order: fix:edit_generated_file -> fix:regen_migrations." in text
+    assert "Untried on tasks like this: fix:edit_generated_file, fix:regen_migrations —" in text
     # The recommendation line does not name a barred action either, and the
     # untried list is drawn from the candidates: a retry's text names nothing
     # it has ruled out.
@@ -733,11 +736,11 @@ def test_render_priors_gives_the_order_and_what_not_to_retry() -> None:
     assert "Recommendation: act." in text and "-> fix:rerun_job" not in text
     with_untried = dict(pr, untried=["fix:rerun_job", "fix:regen_migrations"])
     text = act.render_priors(with_untried, rec, candidate_actions=["fix:edit_generated_file", "fix:regen_migrations"])
-    assert "Not yet tried here: fix:regen_migrations\n" in text
+    assert "Untried on tasks like this: fix:regen_migrations —" in text
     # No recommendation, or an abstain: the record is shown, no order is given.
-    assert "Try in this order" not in act.render_priors(pr, None)
+    assert "Try " not in act.render_priors(pr, None) and "Untried" not in act.render_priors(pr, None)
     assert "Do not spend" not in act.render_priors(pr, None)
-    assert "Try in this order" not in act.render_priors(pr, {"mode": "abstain", "why": "pooled"})
+    assert "Try " not in act.render_priors(pr, {"mode": "abstain", "why": "pooled"})
     assert "Tried on similar tasks here" in act.render_priors(pr, None)
 
 
@@ -1345,7 +1348,9 @@ def test_lessons_for_the_exact_situation_reorder_the_plan() -> None:
     rec2 = act.recommend(pr, agent_id="a", candidate_actions=cands, lessons=failed)
     assert rec2["plan"] == ranked
     text = act.render_priors(pr, dict(rec, plan=None), candidate_actions=cands, lessons=failed)
-    assert text.split("Try in this order: ")[1].split(".")[0].split(" -> ")[-1] == "fix:bump_dependency"
+    # The barred action is not named in the order at all: the lesson for this
+    # situation outranks the pooled record that has it winning.
+    assert "Try fix:add_audit_exception first." in text and "then fix:bump_dependency" not in text
     # A 'worked' claim goes to the front — after the act's own action.
     worked = [{"action": "fix:fix_code", "worked": True, "evidence_status": "untested"}]
     assert act.rank_by_lessons(rec["plan"], worked, priors=pr, recommendation=rec)[:2] == [
@@ -1407,3 +1412,156 @@ def test_the_server_reorders_the_plan_by_the_lessons_about_this_task(client, ser
     body, meta = _priors_meta(client, query="card declined at checkout", candidate_actions=cands)
     assert all(e.get("key") != "learned-card-declined-c" for e in body if not e.get("_meta"))
     assert meta["recommendation"]["plan"][0] == "resolve:a" and meta["recommendation"]["plan"][-1] == "resolve:b"
+
+
+# ── the situation's own record ─────────────────────────────────────────────
+
+
+def _sit_row(situation, actions, *, outcome="success", agent="a1", days_ago=0, sim=1.0):
+    row = _row(actions, agent=agent, days_ago=days_ago, sim=sim)
+    row["situation"] = situation
+    row["outcome_type"] = outcome
+    return row
+
+
+def test_a_situation_with_no_record_abstains_instead_of_planning_from_its_neighbours() -> None:
+    """Ops-queue CI #5 in two runs: the UI snapshot class's first PR was told
+    ``act: fix_code`` from the backend snapshot class's single win — the
+    opposite of its own fix — and cost three CI runs where the same model
+    with no memory cost none. With the situation's own record empty, the
+    recommendation abstains, the strength is at most ``thin`` whatever a
+    neighbour's lesson is rated, and the text shows the neighbourhood as
+    another kind of task."""
+    cands = ["fix:fix_code", "fix:update_snapshots", "fix:rerun_job"]
+    pr = {"tried": [], "untried": cands, "source": "similar_outcomes",
+          "situation_record": {"situation": "jest snapshot · UI PR", "outcomes": 0},
+          "nearby": {"outcomes": 1, "by_situation": [
+              {"situation": "jest snapshot · backend-only PR", "outcomes": 1,
+               "tried": [{"action_key": "fix:fix_code", "won": 1, "lost": 0, "n": 1},
+                         {"action_key": "fix:update_snapshots", "won": 0, "lost": 1, "n": 1}]}]}}
+    assert act.recommend(pr, agent_id="a", candidate_actions=cands) is None
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands, abstain=True)
+    assert rec["mode"] == "abstain" and rec["suggested_action"] is None
+    assert rec["situation_record"] == "none" and "plan" not in rec
+    assert act.guidance_strength(pr, ["validated"]) == "thin"
+    assert act.guidance_strength(dict(pr, nearby=None), []) == "none"
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    assert "No outcome recorded for this situation yet." in text
+    assert "On nearby kinds of task (not this situation) — “jest snapshot · backend-only PR”: fix:fix_code 1/1; fix:update_snapshots 0/1" in text
+    assert "Not yet tried on this situation: fix:fix_code, fix:update_snapshots, fix:rerun_job" in text
+    assert "Try " not in text and "Do not spend" not in text
+    # The same neighbourhood, pooled (no situation declared, or none recorded):
+    # the old reading stands, so callers without situations lose nothing.
+    pooled = {"tried": [_prior("fix:fix_code", 1, 1, ["won"]), _prior("fix:update_snapshots", 0, 1, ["lost"])],
+              "untried": ["fix:rerun_job"], "source": "similar_outcomes"}
+    assert act.recommend(pooled, agent_id="a", candidate_actions=cands)["mode"] == "act"
+
+
+def test_one_unsolved_loss_on_the_situations_own_record_turns_the_action() -> None:
+    """Ops-queue CI #45/#48 and support #49/#53: after a change, the class's
+    validated fix failed on a task nothing then solved, and the next task of
+    the class was still told ``act`` on it — three runs wasted twice. On the
+    situation's own record one such loss turns the action: the mode is
+    ``explore``, the turned action is kept second in the plan as the hedge,
+    and the text says to make an own pick first. A loss inside a task another
+    action solved is a contrast, not a turn; and the same loss on a pooled
+    record is forgiven as before."""
+    cands = ["fix:add_audit_exception", "fix:bump_dependency", "fix:fix_code", "fix:rerun_job"]
+    rows = [
+        _sit_row("pip-audit · pinned", [("fix:add_audit_exception", False), ("fix:bump_dependency", False)],
+                 outcome="failure"),
+        _sit_row("pip-audit · pinned", [("fix:add_audit_exception", True)], days_ago=1),
+        _sit_row("pip-audit · pinned", [("fix:add_audit_exception", True)], days_ago=2),
+        _sit_row("pip-audit · pinned", [("fix:bump_dependency", False), ("fix:add_audit_exception", True)], days_ago=3),
+    ]
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "pip-audit · pinned", "outcomes": 4}
+    by = {t["action_key"]: t for t in pr["tried"]}
+    assert by["fix:add_audit_exception"]["situation_exact"] is True
+    assert by["fix:add_audit_exception"]["last_unsolved"] is True
+    assert by["fix:add_audit_exception"]["won"] == 3 and by["fix:add_audit_exception"]["last_3"][0] == "lost"
+    assert act.turned_unsolved(by["fix:add_audit_exception"]) and not act.turned(by["fix:add_audit_exception"])
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "explore"
+    assert rec["suggested_action"] in ("fix:fix_code", "fix:rerun_job")
+    assert rec["plan"][1] == "fix:add_audit_exception"
+    assert "newest take lost on a task nothing solved" in rec["why"]
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    assert "Recommendation: explore." in text and "-> fix:" not in text.split("Recommendation")[1].split("\n")[0]
+    assert "Make your own pick first; if it fails, try fix:add_audit_exception next" in text
+    assert "Do not spend an attempt on: fix:bump_dependency (0/2)" in text
+    assert "Untried on this situation: fix:fix_code, fix:rerun_job — the record cannot order these" in text
+    assert "stopped working" not in text
+    # A loss that another action then resolved is a contrast, not a turn.
+    solved = act.aggregate_priors([
+        _sit_row("s", [("fix:a", False), ("fix:b", True)]),
+        _sit_row("s", [("fix:a", True)], days_ago=1),
+    ], situation_exact=True)
+    a = next(t for t in solved["tried"] if t["action_key"] == "fix:a")
+    assert a["last_unsolved"] is False and not act.turned_unsolved(a)
+    # Pooled: the same rows without the mark keep the one-loss forgiveness.
+    pooled = act.aggregate_priors(rows, candidate_actions=cands)
+    assert not act.turned_unsolved(next(t for t in pooled["tried"] if t["action_key"] == "fix:add_audit_exception"))
+    assert act.recommend(pooled, agent_id="a", candidate_actions=cands)["mode"] == "act"
+
+
+def test_an_explore_names_its_pick_as_an_assignment_not_an_instruction() -> None:
+    """Grid v3: an explore that was followed won 14% of the time, one that
+    was ignored 67%; the ops-queue demo lost three tickets to a hash-picked
+    action on a class the model got right on its own. The pick stays in the
+    payload for a fleet to spread out over; the prose says what it is and
+    hands the untried to the agent's judgement."""
+    cands = ["resolve:a", "resolve:b", "resolve:c"]
+    pr = {"tried": [_prior("resolve:a", 0, 2, ["lost", "lost"])], "untried": ["resolve:b", "resolve:c"]}
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "explore" and rec["suggested_action"] in ("resolve:b", "resolve:c")
+    assert "exploration assignment if you have no better guess" in rec["why"]
+    assert "use your own judgement" in rec["why"]
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    assert "Recommendation: explore." in text
+    assert "Try " not in text
+    assert "Untried on tasks like this: resolve:b, resolve:c — the record cannot order these" in text
+
+
+def test_the_server_serves_the_situations_own_record_and_its_neighbours_apart(client, server_mem) -> None:
+    """Rows carry the situation their run declared. With one declared on the
+    request, the priors are that situation's outcomes; the rest of the
+    neighbourhood is reported per situation, and a situation with no
+    outcomes abstains. Without a declared situation — or when no row carries
+    one — the block is pooled as before."""
+    rows = [
+        _sit_row("jest snapshot · backend-only PR", [("fix:update_snapshots", False), ("fix:fix_code", True)]),
+        _sit_row("jest snapshot · UI PR", [("fix:fix_code", False), ("fix:rerun_job", False)], outcome="failure",
+                 agent="a2", sim=0.98),
+    ]
+    _stub_similar(server_mem._adapter, rows)
+    cands = ["fix:fix_code", "fix:update_snapshots", "fix:rerun_job"]
+    body = {"query": "card declined", "entity_path": "acme/support", "include_priors": True,
+            "agent_id": "a9", "candidate_actions": cands, "abstain": True}
+    # The UI class: its own record is two losses; the backend class is nearby.
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="Jest Snapshot · UI PR")).json()[-1]
+    pr = meta["priors"]
+    assert pr["situation_record"] == {"situation": "Jest Snapshot · UI PR", "outcomes": 1}
+    assert {t["action_key"] for t in pr["tried"]} == {"fix:fix_code", "fix:rerun_job"}
+    assert all(t["situation_exact"] for t in pr["tried"])
+    assert pr["untried"] == ["fix:update_snapshots"]
+    assert pr["nearby"]["outcomes"] == 1
+    assert pr["nearby"]["by_situation"][0]["situation"] == "jest snapshot · backend-only PR"
+    assert {t["action_key"]: t["won"] for t in pr["nearby"]["by_situation"][0]["tried"]} == {
+        "fix:fix_code": 1, "fix:update_snapshots": 0}
+    assert meta["recommendation"]["mode"] == "explore"
+    assert meta["recommendation"]["suggested_action"] == "fix:update_snapshots"
+    # A situation nothing has ended on: abstain, and not ``strong``.
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="pip-audit · pinned")).json()[-1]
+    assert meta["priors"]["situation_record"]["outcomes"] == 0 and meta["priors"]["tried"] == []
+    assert meta["recommendation"]["mode"] == "abstain" and meta["recommendation"]["situation_record"] == "none"
+    assert meta["guidance_strength"] == "thin"
+    assert len(meta["priors"]["nearby"]["by_situation"]) == 2
+    # No situation on the request: pooled, as before.
+    meta = client.post("/api/v1/retrieve", json=body).json()[-1]
+    assert "situation_record" not in meta["priors"]
+    assert {t["action_key"] for t in meta["priors"]["tried"]} == {"fix:fix_code", "fix:update_snapshots", "fix:rerun_job"}
+    # Rows without situations (older clients): pooled too, even with one declared.
+    _stub_similar(server_mem._adapter, [dict(r, situation=None) for r in rows])
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="jest snapshot · UI PR")).json()[-1]
+    assert "situation_record" not in meta["priors"]
