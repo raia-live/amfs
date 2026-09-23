@@ -1872,3 +1872,90 @@ def test_a_winner_the_caller_cannot_take_is_not_acted_on() -> None:
     assert retry["suggested_action"] in ("resolve:settings", "resolve:resend")
     assert retry["suggested_action"] == retry["plan"][0]
     assert "resolve:workaround" not in retry["plan"]
+
+
+def test_a_clean_first_win_is_acted_on_whatever_its_posterior() -> None:
+    """Review of #446: a single win's Beta mean is at most 0.667, and the
+    neighbourhood weight or a day of decay on it drops under ``ACT_MIN_P`` —
+    the ``recommendation: null`` the exact first win was meant to end. The
+    clean first win (one take, no loss) is acted on without the gate; with a
+    loss on the record the gate applies."""
+    cands = ["resolve:a", "resolve:b", "resolve:c"]
+    pr = act.aggregate_priors(
+        [_sit_row("export", [("resolve:a", True)], days_ago=1, sim=0.4)],
+        candidate_actions=cands, situation_exact=True,
+    )
+    pr["situation_record"] = {"situation": "export", "outcomes": 1}
+    a = pr["tried"][0]
+    assert a["p"] < act.ACT_MIN_P and act._is_winner(a)
+    rec = act.recommend(pr, agent_id="x", candidate_actions=cands)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "resolve:a"
+    # One win, one earlier loss, newest a win: the posterior gate stands.
+    pr2 = act.aggregate_priors(
+        [_sit_row("export", [("resolve:a", False)], outcome="failure", days_ago=2, sim=0.4),
+         _sit_row("export", [("resolve:a", True)], days_ago=1, sim=0.4)],
+        candidate_actions=cands, situation_exact=True,
+    )
+    assert not act._is_winner(pr2["tried"][0])
+
+
+def test_a_sweep_never_names_an_action_a_lesson_barred() -> None:
+    """Review of #446: the sweep unions the untried into the evidence-backed
+    head. An action a lesson for this situation says did not work may be
+    untried by the record (another agent's memory, a scan cap) and must not
+    be named in the ``Try … first`` line."""
+    cands = ["resolve:a", "resolve:b", "resolve:c", "resolve:d"]
+    rows = [_sit_row("export", [("resolve:a", False)], outcome="failure", days_ago=1)]
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "export", "outcomes": 1}
+    lessons = [{"action": "resolve:b", "worked": False, "evidence_status": "validated"}]
+    rec = act.recommend(pr, agent_id="x", candidate_actions=cands, lessons=lessons)
+    assert rec["mode"] == "explore" and rec.get("sweep") is True
+    text = act.render_priors(pr, rec, candidate_actions=cands, lessons=lessons)
+    head = next(line for line in text.splitlines() if line.startswith("Try "))
+    assert "resolve:b" not in head and "resolve:c" in head
+
+
+def test_a_retry_whose_candidates_exclude_every_tried_action_still_explores() -> None:
+    """Review of #446: the record holds one action — the winner, just tried
+    and lost on this task — and the retry asks over the rest. With the
+    tried actions read over the candidates alone nothing is tried, and the
+    explore that needs a record would not fire; the record is what it
+    explores from."""
+    cands_all = ["resolve:a", "resolve:b", "resolve:c"]
+    rows = [_sit_row("export", [("resolve:a", True)], days_ago=d) for d in (3, 2, 1)]
+    pr = act.aggregate_priors(rows, candidate_actions=cands_all, situation_exact=True)
+    pr["situation_record"] = {"situation": "export", "outcomes": 3}
+    rec = act.recommend(pr, agent_id="x", candidate_actions=["resolve:b", "resolve:c"], top_hit_status="validated")
+    assert rec is not None and rec["mode"] == "explore"
+    assert rec["suggested_action"] in ("resolve:b", "resolve:c") and rec["plan"][0] == rec["suggested_action"]
+
+
+def test_a_situation_with_matches_is_partitioned_whatever_the_labels_elsewhere(client, server_mem) -> None:
+    """Review of #446: the per-task-label heuristic read every label on the
+    entity, so a client putting IDs in its situations pooled every other
+    caller's record — the wrong-class ``act`` the partition exists to stop.
+    A label that has matched is a class for this caller. And labels found
+    only elsewhere on the entity do not make an unlabelled neighbourhood
+    abstain: that is the older rows' pooled reading."""
+    from amfs_http import server
+
+    cands = ["resolve:a", "resolve:b"]
+    ids = [_sit_row(f"ticket SUP-{i}", [("resolve:a", True)], days_ago=i + 2) for i in range(30)]
+    mine = [_sit_row("export", [("resolve:a", False), ("resolve:b", True)], days_ago=1)]
+    server_mem._adapter.similar_outcomes = lambda entity_path, embedding, **kw: []  # type: ignore[attr-defined]
+    server_mem._adapter.action_stats = lambda entity_path, **kw: [*mine, *ids]  # type: ignore[attr-defined]
+    server._get_server_embedder = lambda: _StubEmbedder()
+    body = {"query": "export", "entity_path": "acme/support", "include_priors": True,
+            "agent_id": "a9", "candidate_actions": cands, "abstain": True}
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="export")).json()[-1]
+    assert meta["priors"]["situation_record"]["outcomes"] == 1
+    assert meta["recommendation"]["mode"] == "act" and meta["recommendation"]["suggested_action"] == "resolve:b"
+    # An unlabelled neighbourhood with labels only elsewhere on the entity: pooled, not an empty record.
+    legacy = [_row([("resolve:a", True)], days_ago=1, sim=0.9) for _ in range(3)]
+    classes = [_sit_row("card", [("resolve:b", True)], days_ago=i + 2) for i in range(5)]
+    server_mem._adapter.similar_outcomes = lambda entity_path, embedding, **kw: list(legacy)  # type: ignore[attr-defined]
+    server_mem._adapter.action_stats = lambda entity_path, **kw: [*legacy, *classes]  # type: ignore[attr-defined]
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="export")).json()[-1]
+    assert "situation_record" not in meta["priors"]
+    assert meta["recommendation"]["mode"] == "act" and meta["recommendation"]["suggested_action"] == "resolve:a"

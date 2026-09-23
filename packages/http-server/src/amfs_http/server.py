@@ -1182,15 +1182,20 @@ def _priors_for_retrieve(
                     elsewhere_rows.append(r)
         except Exception:  # noqa: BLE001
             logger.debug("action_stats by situation failed", exc_info=True)
-        labelled = any(r.get("situation") for r in rows) or bool(exact_rows) or any(
-            r.get("situation") for r in elsewhere_rows
-        )
+        # Partitioned when the situation has a record, or the neighbourhood
+        # itself carries labels (so an empty record means "not seen yet",
+        # not "older clients"). Labels found only elsewhere on the entity do
+        # not decide it: an unlabelled neighbourhood is the older rows'
+        # pooled reading, as promised.
+        labelled = bool(exact_rows) or any(r.get("situation") for r in rows)
         # Labels that are not classes — a situation per task, an ID in it —
         # would leave every record empty and the priors abstaining for
         # good, where the pooled block served a winner before. When almost
         # every scanned outcome carries a distinct label, the block stays
-        # pooled as for an undeclared situation.
-        if labelled and not _labels_are_classes([*exact_rows, *elsewhere_rows]):
+        # pooled as for an undeclared situation. Only ever a question for a
+        # situation with no match: a label that has matched is a class for
+        # this caller, whatever other clients put in theirs.
+        if labelled and not exact_rows and not _labels_are_classes(elsewhere_rows):
             labelled = False
         if labelled:
             mine = exact_rows

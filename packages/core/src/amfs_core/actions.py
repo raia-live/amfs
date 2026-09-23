@@ -707,12 +707,17 @@ def recommend(
         if (float(t.get("p", 1)) < EXPLORE_MAX_P and int(t.get("n", 0)) >= EXPLORE_MIN_N) or _stopped_working(t)
     ]
     failed_now = [t for t in tried if t in losers or int(t.get("won", 0)) == 0]
-    all_tried_failed = bool(tried) and len(failed_now) == len(tried)
+    # "Everything tried has failed" is read over the record, not only over
+    # what is on the table: a retry whose candidates exclude every action the
+    # record holds — the one winner, just tried and lost on this task — has a
+    # record to explore from, and nothing left in it to act on.
+    all_tried_failed = bool(record_tried) and len(failed_now) == len(tried)
     all_tried_failed_firm = bool(tried) and len(losers) == len(tried)
 
     return _with_plan(_recommend_mode(
         priors, tried=tried, untried=untried, winners=winners, stopped=stopped, losers=losers,
         lessons=lessons, candidate_actions=candidate_actions, allowed=allowed,
+        has_record=bool(record_tried),
         failed_now=failed_now, all_tried_failed=all_tried_failed,
         all_tried_failed_firm=all_tried_failed_firm, have_candidates=have_candidates,
         agent_id=agent_id, top_hit_status=top_hit_status,
@@ -746,9 +751,13 @@ def _recommend_mode(
     lessons: Sequence[Mapping[str, Any]] | None = None,
     candidate_actions: Sequence[str] | None = None,
     allowed: set[str] | None = None,
+    has_record: bool | None = None,
 ) -> dict[str, Any] | None:
     """The mode and suggested action of :func:`recommend`; the plan is added
-    by the caller."""
+    by the caller. *has_record* says the record holds tried actions, whether
+    or not any is among the candidates (defaults to ``bool(tried)``)."""
+    if has_record is None:
+        has_record = bool(tried)
     if priors_are_local:
         contrasts = list((priors or {}).get("contrasts") or [])
         # Near-identical outcomes that contradict each other over time are two
@@ -829,7 +838,7 @@ def _recommend_mode(
             why += "; a shift is suspected elsewhere on this entity, not in this hit's record"
         return {"mode": "act", "suggested_action": None, "why": why}
     shift_explores = regime_shift and priors_are_local
-    if (all_tried_failed or shift_explores) and untried and tried:
+    if (all_tried_failed or shift_explores) and untried and has_record:
         pick = (
             sweep_order(priors, untried, agent_id)[0] if _sweep(priors)
             else untried[stable_bucket(agent_id, len(untried))]
@@ -1128,9 +1137,17 @@ def _exact_first_win(prior: Mapping[str, Any]) -> bool:
 
 def _is_winner(prior: Mapping[str, Any]) -> bool:
     """A winner: a good posterior over ``ACT_MIN_N`` takes — or one win on the
-    situation's own record (:func:`_exact_first_win`) — and not stopped."""
+    situation's own record (:func:`_exact_first_win`) — and not stopped.
+
+    The clean first win — one take, won, no loss — is not read through the
+    posterior gate: a single win's Beta mean is at most 0.667, and the
+    neighbourhood weight or a day of decay on it drops under ``ACT_MIN_P``
+    for a record that says only "solved once here". With a loss on the
+    record the gate applies as everywhere else."""
     if _stopped_working(prior):
         return False
+    if _exact_first_win(prior) and int(prior.get("lost", 0)) == 0:
+        return True
     if float(prior.get("p", 0)) < ACT_MIN_P:
         return False
     return int(prior.get("n", 0)) >= ACT_MIN_N or _exact_first_win(prior)
@@ -1638,8 +1655,12 @@ def render_priors(
     hedged_keys = {str(t.get("action_key")) for t in hedged}
     if (recommendation or {}).get("sweep"):
         # The agent's judgement has failed on this exact situation; the
-        # order over the untried is the plan, not a hint.
-        backed = backed | {a for a in plan if a in set(untried)}
+        # order over the untried is the plan, not a hint. Still never an
+        # action a lesson for this situation says did not work: the record
+        # may not hold that attempt (another agent's memory, a scan cap),
+        # but the lesson does.
+        barred = _lesson_barred(lessons)
+        backed = backed | {a for a in plan if a in set(untried) and a not in barred}
     head = [a for a in plan if a in backed and a not in hedged_keys]
     hedge = [a for a in plan if a in hedged_keys]
     in_plan = set(plan)
@@ -1688,19 +1709,27 @@ def _evidence_backed(
     for c in contrasts:
         if c.get("resolved_with"):
             out.add(str(c["resolved_with"]))
-    barred: set[str] = set()
     for claim in lessons or ():
-        if str(claim.get("evidence_status") or "") == "discredited":
-            continue
-        if claim.get("worked"):
+        if claim.get("worked") and str(claim.get("evidence_status") or "") != "discredited":
             out.add(str(claim.get("action")))
-        else:
-            barred.add(str(claim.get("action")))
     if recommendation and recommendation.get("mode") == "act" and recommendation.get("suggested_action"):
         out.add(str(recommendation["suggested_action"]))
     # A lesson for this situation that says the action did not work outranks
     # the pooled record that has it winning: not named in the order.
+    barred = _lesson_barred(lessons)
     return {a for a in out if a in set(plan) and a not in barred}
+
+
+def _lesson_barred(lessons: Sequence[Mapping[str, Any]] | None) -> set[str]:
+    """The actions the non-discredited lessons for this situation say did not
+    work, less any a lesson says did."""
+    worked: set[str] = set()
+    failed: set[str] = set()
+    for claim in lessons or ():
+        if str(claim.get("evidence_status") or "") == "discredited":
+            continue
+        (worked if claim.get("worked") else failed).add(str(claim.get("action")))
+    return failed - worked
 
 
 __all__ = [
