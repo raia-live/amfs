@@ -1649,6 +1649,10 @@ def test_the_situations_own_record_is_an_equality_not_a_neighbourhood(client, se
     assert pr["situation_record"]["outcomes"] == 1 and pr["source"] == "situation_record"
     assert [t["action_key"] for t in pr["tried"]] == ["resolve:advise_settings_change"]
     assert pr["nearby"] == {"outcomes": 0, "by_situation": []}
+    # The rest of the entity's record travels as ``elsewhere``: the sweep's order.
+    assert pr["elsewhere"]["outcomes"] == 2
+    assert pr["elsewhere"]["tried"][0]["action_key"] == "resolve:explain_and_close"
+    assert pr["elsewhere"]["tried"][0]["won"] == 2
     assert meta["recommendation"]["mode"] == "act"
     assert meta["recommendation"]["suggested_action"] == "resolve:advise_settings_change"
     # No situation declared: the pooled fallback as before.
@@ -1683,3 +1687,65 @@ def test_an_explore_on_the_situations_own_record_is_a_sweep_once_a_task_there_we
     rec = act.recommend(pooled, agent_id="a", candidate_actions=cands)
     assert rec["mode"] == "explore" and "sweep" not in rec
     assert "Untried on tasks like this" in act.render_priors(pooled, rec, candidate_actions=cands)
+
+
+def test_a_turned_action_another_has_won_since_is_superseded_not_hedged() -> None:
+    """CI run 2 (2026-09-22): after the change, ``rerun_job`` (6/7) lost on a
+    task nothing solved and ``edit_generated_file`` then won on the class.
+    With ``rerun_job`` still hedged second beside the new 1/1 winner, the
+    model took its own instinct on six of eight PRs; the hedge is for a
+    loss that may have been a flake, and a later win by another action says
+    it was not. Superseded: not in the plan's head or hedge, listed under
+    what not to spend an attempt on, and named as such in the tried line."""
+    cands = ["fix:fix_code", "fix:rerun_job", "fix:edit_generated_file", "fix:run_formatter"]
+    rows = [_sit_row("flaky", [("fix:rerun_job", True)], days_ago=d) for d in (6, 5, 4)]
+    rows.append(_sit_row("flaky", [("fix:rerun_job", False), ("fix:run_formatter", False)], outcome="failure", days_ago=2))
+    rows.append(_sit_row("flaky", [("fix:edit_generated_file", True)], days_ago=1))
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "flaky", "outcomes": 5}
+    rerun = next(t for t in pr["tried"] if t["action_key"] == "fix:rerun_job")
+    assert act.turned_unsolved(rerun) and act._superseded(rerun, pr["tried"])
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "fix:edit_generated_file"
+    assert rec["plan"][0] == "fix:edit_generated_file" and rec["plan"].index("fix:rerun_job") > 1
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    assert "fix:rerun_job 3/4, newest take lost on a task nothing solved and another action has won here since" in text
+    assert "fix:rerun_job (3/4, superseded here)" in text
+    assert "try fix:rerun_job next" not in text
+    assert "Try fix:edit_generated_file first." in text
+    # Without the later win, the same loss is still hedged.
+    pr2 = act.aggregate_priors(rows[:-1], candidate_actions=cands, situation_exact=True)
+    pr2["situation_record"] = {"situation": "flaky", "outcomes": 4}
+    rec2 = act.recommend(pr2, agent_id="a", candidate_actions=cands)
+    assert rec2["plan"][1] == "fix:rerun_job"
+    assert "try fix:rerun_job next" in act.render_priors(pr2, rec2, candidate_actions=cands)
+
+
+def test_a_sweep_is_ordered_by_the_entitys_record_elsewhere() -> None:
+    """Support run 2 (2026-09-22): after the change the three affected
+    classes' new fixes were found in 2, 8 and 9 attempts under a hash order,
+    and two of the three were the queue's top winners on other situations.
+    An action that is the fix somewhere on this queue is likelier to be a
+    house convention than one that never worked anywhere, so the sweep goes
+    most-won-elsewhere first; ties keep the agent's rotation."""
+    cands = ["resolve:a", "resolve:b", "resolve:c", "resolve:d", "resolve:e"]
+    pr = act.aggregate_priors(
+        [_sit_row("card declined", [("resolve:a", False), ("resolve:b", False)], outcome="failure")],
+        candidate_actions=cands, situation_exact=True,
+    )
+    pr["situation_record"] = {"situation": "card declined", "outcomes": 1}
+    pr["elsewhere"] = {"outcomes": 20, "tried": [
+        {"action_key": "resolve:e", "won": 9, "lost": 1, "n": 10, "p": 0.83},
+        {"action_key": "resolve:c", "won": 2, "lost": 0, "n": 2, "p": 0.75},
+        {"action_key": "resolve:a", "won": 5, "lost": 0, "n": 5, "p": 0.86},
+    ]}
+    assert act.sweep_order(pr, pr["untried"], "x")[:2] == ["resolve:e", "resolve:c"]
+    rec = act.recommend(pr, agent_id="x", candidate_actions=cands)
+    assert rec["sweep"] is True and rec["suggested_action"] == "resolve:e"
+    assert rec["plan"][:3] == ["resolve:e", "resolve:c", "resolve:d"]
+    assert "Try resolve:e first, then resolve:c -> resolve:d." in act.render_priors(pr, rec, candidate_actions=cands)
+    # No record elsewhere: the rotation, and the same first pick from both.
+    del pr["elsewhere"]
+    rec = act.recommend(pr, agent_id="x", candidate_actions=cands)
+    assert rec["plan"][0] == rec["suggested_action"] == act.sweep_order(pr, pr["untried"], "x")[0]
+    assert set(rec["plan"][:3]) == {"resolve:c", "resolve:d", "resolve:e"}

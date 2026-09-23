@@ -1154,6 +1154,7 @@ def _priors_for_retrieve(
             rows = []
     mine: list[dict[str, Any]] | None = None
     others: list[dict[str, Any]] = []
+    elsewhere_rows: list[dict[str, Any]] = []
     declared = _fold_situation(situation)
     if declared and callable(stats):
         # The situation's own record is an equality, not a neighbourhood.
@@ -1167,16 +1168,23 @@ def _priors_for_retrieve(
         # rows come from the entity's record by situation, whatever the
         # neighbourhood found; the neighbourhood supplies ``nearby``.
         exact_rows = [r for r in rows if _fold_situation(r.get("situation")) == declared]
-        if source != "similar_outcomes" or not exact_rows:
-            try:
-                seen = {r.get("outcome_ref") for r in exact_rows}
-                for r in stats(entity_path, limit=SITUATION_RECORD_SCAN):
-                    if _fold_situation(r.get("situation")) == declared and r.get("outcome_ref") not in seen:
+        # The same scan gives the record *elsewhere* — the entity's other
+        # situations — which is what orders a sweep over the untried
+        # (``amfs_core.actions.sweep_order``).
+        try:
+            seen = {r.get("outcome_ref") for r in exact_rows}
+            for r in stats(entity_path, limit=SITUATION_RECORD_SCAN):
+                if _fold_situation(r.get("situation")) == declared:
+                    if r.get("outcome_ref") not in seen:
                         exact_rows.append(r)
                         seen.add(r.get("outcome_ref"))
-            except Exception:  # noqa: BLE001
-                logger.debug("action_stats by situation failed", exc_info=True)
-        labelled = any(r.get("situation") for r in rows) or bool(exact_rows)
+                else:
+                    elsewhere_rows.append(r)
+        except Exception:  # noqa: BLE001
+            logger.debug("action_stats by situation failed", exc_info=True)
+        labelled = any(r.get("situation") for r in rows) or bool(exact_rows) or any(
+            r.get("situation") for r in elsewhere_rows
+        )
         if labelled:
             mine = exact_rows
             others = (
@@ -1192,6 +1200,15 @@ def _priors_for_retrieve(
         )
         block["situation_record"] = {"situation": str(situation)[:200], "outcomes": len(mine)}
         block["nearby"] = _nearby_record(others, environment=environment or None)
+        if elsewhere_rows:
+            elsewhere = aggregate_priors(elsewhere_rows, environment=environment or None)
+            block["elsewhere"] = {
+                "outcomes": len(elsewhere_rows),
+                "tried": [
+                    {k: t[k] for k in ("action_key", "won", "lost", "n", "p")}
+                    for t in elsewhere["tried"][:12]
+                ],
+            }
         # The exact record is about this kind of task by construction; the
         # label ``action_stats`` would have it read as the entity-wide pool.
         if source != "similar_outcomes":

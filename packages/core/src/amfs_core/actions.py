@@ -812,19 +812,23 @@ def _recommend_mode(
         return {"mode": "act", "suggested_action": None, "why": why}
     shift_explores = regime_shift and priors_are_local
     if (all_tried_failed or shift_explores) and untried and tried:
-        pick = untried[stable_bucket(agent_id, len(untried))]
+        pick = (
+            sweep_order(priors, untried, agent_id)[0] if _sweep(priors)
+            else untried[stable_bucket(agent_id, len(untried))]
+        )
         failed = ", ".join(f"{t['action_key']} {t['won']}/{t['n']}" for t in failed_now[:4])
         why = "regime shift suspected for tasks like this; " if shift_explores else ""
         if stopped:
             s = stopped[0]
-            if turned_unsolved(s) and not turned(s) and not _recently_failing(s):
+            if turned_unsolved(s) and not turned(s) and not _recently_failing(s) and not _superseded(s, tried):
                 why += (f"{s['action_key']} won {s['won']}/{s['n']} on this situation but its newest take "
                         f"lost on a task nothing solved — the fix here may have changed; ")
             else:
                 why += (f"{s['action_key']} won {s['won']}/{s['n']} on tasks like this but lost its last "
                         f"{_leading_losses(s)} — what worked here has stopped working; ")
         elif failed:
-            why += f"tried and failed on similar tasks here: {failed}; "
+            where = "on this situation" if isinstance((priors or {}).get("situation_record"), Mapping) else "on similar tasks here"
+            why += f"tried and failed {where}: {failed}; "
         # The pick is an exploration *assignment* — a hash of the agent's
         # name over the untried, so peers on one problem spread out — not
         # knowledge about the task. Grid v3 measured what happens when it is
@@ -992,6 +996,64 @@ def _leading_losses(prior: Mapping[str, Any]) -> int:
     return n
 
 
+def sweep_order(
+    priors: Mapping[str, Any] | None, untried: Sequence[str], agent_id: str = ""
+) -> list[str]:
+    """The order a sweep works through the *untried* in.
+
+    The record for this situation holds nothing about them; what there is
+    is the entity's record *elsewhere* (``priors["elsewhere"]``: the same
+    queue's other situations). An action that is the fix somewhere on this
+    queue is likelier to be a house convention than one that has never
+    worked anywhere, so the untried go most-won-elsewhere first, and ties —
+    the common case when nothing has won — keep the rotation by the agent's
+    name that spreads a fleet out. Measured on the ops-queue support demo
+    (2026-09-22): after the change, three classes' new fixes were found in
+    2, 8 and 9 attempts under a hash order; two of the three fixes were the
+    queue's top winners elsewhere and would have been first.
+    """
+    rec = (priors or {}).get("elsewhere")
+    by_key: dict[str, Mapping[str, Any]] = {}
+    if isinstance(rec, Mapping):
+        for t in rec.get("tried") or []:
+            by_key[str(t.get("action_key"))] = t
+    n = len(untried)
+    start = stable_bucket(agent_id, n) if n else 0
+    rotated = [untried[(start + i) % n] for i in range(n)]
+
+    def rank(i_a: tuple[int, str]) -> tuple[float, float, int]:
+        i, a = i_a
+        t = by_key.get(a)
+        won = float(t.get("won", 0)) if t else 0.0
+        p = float(t.get("p", 0)) if t else 0.0
+        return (-won, -p, i)
+
+    return [a for _, a in sorted(enumerate(rotated), key=rank)]
+
+
+def _superseded(prior: Mapping[str, Any], tried: Sequence[Mapping[str, Any]]) -> bool:
+    """A turned action (:func:`turned_unsolved`) is superseded when another
+    action has won on this situation *since* its loss: the hedge — "one
+    attempt on it is cheap if the fix did not change" — no longer applies,
+    because the record already shows what replaced it. Measured on the
+    ops-queue CI demo (2026-09-22): with the old winner still hedged second
+    beside a new 1/1 winner, the model took its own instinct instead on six
+    of eight PRs; once the hedge dropped out it followed every time."""
+    if not turned_unsolved(prior):
+        return False
+    lost_at = _as_dt(prior.get("last_at"))
+    for other in tried:
+        if other is prior or str(other.get("action_key")) == str(prior.get("action_key")):
+            continue
+        last = list(other.get("last_3") or [])
+        if int(other.get("won", 0)) < 1 or not last or last[0] != "won":
+            continue
+        won_at = _as_dt(other.get("last_at"))
+        if lost_at is None or (won_at is not None and won_at >= lost_at):
+            return True
+    return False
+
+
 def _sweep(priors: Mapping[str, Any] | None) -> int:
     """How many tasks on the situation's own record ended unsolved; ``0`` on
     a pooled record. Non-zero turns an explore into a *sweep*: the untried
@@ -1118,7 +1180,7 @@ def plan_actions(
     # — but second: if the loss was a flake, the fix is one attempt away
     # rather than gone.
     for t in by_p:
-        if turned_unsolved(t) and not turned(t) and not _recently_failing(t):
+        if turned_unsolved(t) and not turned(t) and not _recently_failing(t) and not _superseded(t, by_p):
             _add(t.get("action_key"))
     if local:
         for c in (priors or {}).get("contrasts") or []:
@@ -1128,9 +1190,12 @@ def plan_actions(
             if resolved and all(str(t.get("action_key")) != resolved or t not in failed_now for t in by_p):
                 _add(resolved)
     if untried:
-        start = stable_bucket(agent_id, len(untried))
-        for i in range(len(untried)):
-            _add(untried[(start + i) % len(untried)])
+        # A sweep orders them by the entity's record elsewhere; otherwise the
+        # rotation by the agent's name that spreads a fleet out.
+        for a in (sweep_order(priors, untried, agent_id) if _sweep(priors) else (
+            [untried[(stable_bucket(agent_id, len(untried)) + i) % len(untried)] for i in range(len(untried))]
+        )):
+            _add(a)
     for t in by_p:
         if t in failed_now and not _stopped_working(t):
             _add(t.get("action_key"))
@@ -1414,6 +1479,7 @@ def render_priors(
             + ("" if int(t.get('agents', 0)) <= 1 else f" ({t['agents']} agents)")
             + (
                 ", newest take lost on a task nothing solved"
+                + (" and another action has won here since" if _superseded(t, tried) else "")
                 if turned_unsolved(t) and not turned(t) and not _recently_failing(t)
                 else (f", lost last {_leading_losses(t)}" if _stopped_working(t) and int(t.get("won", 0)) else "")
             )
@@ -1488,13 +1554,18 @@ def render_priors(
         plan = [a for a in plan if a in allowed]
     plan = rank_by_lessons(plan, lessons, priors=priors, recommendation=recommendation)
     stopped = [t for t in tried if _stopped_working(t) and int(t.get("won", 0)) > 0]
-    hedged = [t for t in stopped if turned_unsolved(t) and not turned(t) and not _recently_failing(t)]
+    hedged = [
+        t for t in stopped
+        if turned_unsolved(t) and not turned(t) and not _recently_failing(t) and not _superseded(t, tried)
+    ]
     failed = [
         t for t in tried
         if t not in stopped and int(t.get("won", 0)) == 0
     ]
     avoid = [
-        f"{t['action_key']} ({t['won']}/{t['n']}, stopped working)" for t in stopped[:3] if t not in hedged
+        f"{t['action_key']} ({t['won']}/{t['n']}, "
+        + ("superseded here" if _superseded(t, tried) else "stopped working") + ")"
+        for t in stopped[:3] if t not in hedged
     ] + [f"{t['action_key']} (0/{t['n']})" for t in failed[:5]]
     if avoid:
         lines.append("Do not spend an attempt on: " + "; ".join(avoid) + f" — these failed {here}.")
@@ -1545,7 +1616,9 @@ def _evidence_backed(
     explore's pick is an assignment, and the tail's order a hash."""
     out: set[str] = set()
     for t in tried:
-        if int(t.get("won", 0)) > 0 and not _recently_failing(t) and not turned(t):
+        # A turned action is the hedge (its own line) or superseded — never
+        # the head.
+        if int(t.get("won", 0)) > 0 and not _stopped_working(t):
             out.add(str(t.get("action_key")))
     for c in contrasts:
         if c.get("resolved_with"):
@@ -1593,5 +1666,6 @@ __all__ = [
     "stable_bucket",
     "turned",
     "turned_unsolved",
+    "sweep_order",
     "recorded_environment",
 ]
