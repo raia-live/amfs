@@ -55,7 +55,12 @@ from amfs_core.lessons import lesson_key, make_lesson
 from amfs_core.models import ENVIRONMENT_KEYS, MemoryEntry, OutcomeType
 
 from amfs.guidance import Guidance
-from amfs.memory import GUIDANCE_COUNT_ATTRIBUTE, GUIDANCE_ID_ATTRIBUTE, AgentMemory
+from amfs.memory import (
+    GUIDANCE_COUNT_ATTRIBUTE,
+    GUIDANCE_ID_ATTRIBUTE,
+    SITUATION_ATTRIBUTE,
+    AgentMemory,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +143,14 @@ class Run:
             # Attributes, not identity metadata: they reach the sealed trace on
             # every path and ``AgentMemory.environment()`` reads them back.
             self.memory.set_session_attributes(env)
+        if situation and situation.strip():
+            # On the trace as well as on the retrieve: the repair loop needs
+            # to know which runs were on the same kind of task, and the task
+            # text's first line is one customer's wording of it.
+            try:
+                self.memory.set_session_attributes({SITUATION_ATTRIBUTE: situation.strip()[:200]})
+            except (TypeError, ValueError):
+                pass
 
         branch = self._checkout(unit)
         try:
@@ -169,6 +182,7 @@ class Run:
         guidance = Guidance.build(
             digests=digests, hits=hits, meta=self.memory.last_priors,
             branch=branch, entity_path=entity_path, candidate_actions=self._candidate_actions,
+            task_text=self.task_input, situation=situation,
         )
         self._stamp(guidance)
         return guidance
@@ -252,6 +266,7 @@ class Run:
             hits=hits, meta=self.memory.last_priors,
             branch=self.memory.branch, entity_path=self.entity_path,
             candidate_actions=candidates,
+            task_text=self.task_input, situation=self._situation,
         )
         if guidance.is_empty:
             return None

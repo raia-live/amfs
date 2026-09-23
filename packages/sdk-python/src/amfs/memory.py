@@ -218,6 +218,10 @@ EVIDENCE_ATTRIBUTE_PREFIX = "evidence_"
 #: and the count of guidances a session was handed.
 GUIDANCE_ID_ATTRIBUTE = "guidance_id"
 GUIDANCE_COUNT_ATTRIBUTE = "guidance_count"
+#: Attribute the situation a run declared on ``Run.begin`` travels under — the
+#: kind of task, in the producer's words. The repair loop reads it to tell
+#: which passing runs did the same work as the failing ones.
+SITUATION_ATTRIBUTE = "situation"
 
 
 def provenance_attributes(

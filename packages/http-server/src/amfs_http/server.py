@@ -3339,10 +3339,32 @@ async def retrieve_entries(
             top is not None and not top_rescued and _regime_shifted(top, now=now)
         )
         hit_statuses = [str(e.evidence_status) for e, _, _ in head if e.evidence_status]
+        # The situation-exact record: the lessons among the hits that are
+        # about this task (their situation compared to the declared one, else
+        # found in the task text). They re-order the plan — priors are pooled
+        # over a neighbourhood that can hold two classes with opposite
+        # answers; a lesson names one class.
+        from amfs_core.lessons import applicable_claims as _applicable_claims
+        from amfs_core.lessons import lesson_of as _lesson_of
+
+        # Not the avoided ones: an avoided lesson is one retrieve hid because
+        # it failed on this kind of task, and its status need not say
+        # ``discredited`` yet — a locally falsified "worked" claim must not
+        # promote the action it was falsified on.
+        avoided_keys = {e.entry_key for e in avoided}
+        lesson_rows = []
+        for e in local_pool:
+            if e.entry_key in avoided_keys:
+                continue
+            lesson = _lesson_of(e.value)
+            if lesson is not None:
+                lesson_rows.append(dict(lesson, evidence_status=e.evidence_status))
+        claims = _applicable_claims(lesson_rows, req.query, declared=req.situation)
         recommendation = _recommend(
             priors,
             agent_id=req.agent_id or "",
             candidate_actions=req.candidate_actions,
+            lessons=claims or None,
             top_hit_status=(
                 str(top_bd.get("evidence_status") or top.evidence_status)
                 if top is not None else None

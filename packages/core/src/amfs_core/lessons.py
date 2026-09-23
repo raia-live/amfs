@@ -120,6 +120,81 @@ def lesson_claim(value: Any) -> tuple[str, str, bool] | None:
     return situation, str(lesson["action"]).strip(), bool(lesson["worked"])
 
 
+#: Share of a situation's words that must appear in the task for the lesson
+#: to be read as about it, when no declared situation is compared exactly.
+LESSON_APPLIES_MIN_COVERAGE = 0.85
+_WORD = re.compile(r"[a-z0-9][a-z0-9_.:/-]*")
+_STOP = frozenset({
+    "the", "a", "an", "and", "or", "of", "on", "in", "to", "for", "with", "is",
+    "are", "was", "no", "not", "has", "have", "by", "at", "as", "it", "this",
+    "that", "from", "pr", "task", "changed", "files",
+})
+
+
+def _words(text: str) -> set[str]:
+    return {w.strip(".,;:()[]\"'") for w in _WORD.findall(str(text).lower())} - _STOP - {""}
+
+
+def lesson_applies(situation: str, task: str | None, *, declared: str | None = None) -> bool:
+    """Whether a lesson about *situation* is about this task.
+
+    With a *declared* situation (the one the run named on ``begin``), the two
+    are compared exactly, whitespace folded and case ignored: a run that
+    says what its situation is gets the lessons filed under it and no other.
+    Without one, the situation's words are looked for in the task text: the
+    lesson applies when :data:`LESSON_APPLIES_MIN_COVERAGE` of them are
+    there. A situation has few words and they are the task's own (the agent
+    wrote them from the task), so "pip-audit: requests has ; fix version ·
+    changed requirements.txt" is found in a requests audit failure and not
+    in a urllib3 one, while a jest lesson's words are not in either.
+
+    Why this exists (ops-queue demo, 2026-09-22): the plan after a turned
+    winner was drawn from priors pooled over a similarity neighbourhood, and
+    the neighbourhood held two classes with opposite answers; the lesson for
+    the exact class said the plan's second action had failed there. Lessons
+    are the situation-exact record; priors are not.
+    """
+    sit = " ".join(str(situation or "").split()).lower()
+    if not sit:
+        return False
+    if declared is not None and str(declared).strip():
+        return sit == " ".join(str(declared).split()).lower()
+    if not task:
+        return False
+    need = _words(sit)
+    if not need:
+        return False
+    have = _words(task)
+    covered = sum(1 for w in need if w in have)
+    return covered / len(need) >= LESSON_APPLIES_MIN_COVERAGE
+
+
+def applicable_claims(
+    lessons: Any, task: str | None, *, declared: str | None = None,
+) -> list[dict[str, Any]]:
+    """The claims among *lessons* that are about this task, each as
+    ``{"action", "worked", "evidence_status"}``. *lessons* are mappings with
+    at least ``situation``, ``action`` and ``worked`` — a lesson value, or
+    the SDK's lesson rows; ``evidence_status`` is carried when present so a
+    discredited lesson can be left out of an order."""
+    out: list[dict[str, Any]] = []
+    for lesson in lessons or []:
+        if not isinstance(lesson, dict):
+            continue
+        situation = lesson.get("situation")
+        action = lesson.get("action")
+        worked = lesson.get("worked")
+        if not (isinstance(situation, str) and isinstance(action, str) and isinstance(worked, bool)):
+            continue
+        if not lesson_applies(situation, task, declared=declared):
+            continue
+        out.append({
+            "action": action.strip(), "worked": worked,
+            "evidence_status": lesson.get("evidence_status"),
+        })
+    return out
+
+
 def render_lesson(value: Any) -> str:
     """One line: the claim, then the agent's words. ``""`` for a non-lesson."""
     lesson = lesson_of(value)
@@ -139,6 +214,9 @@ __all__ = [
     "LESSON_KIND",
     "LESSON_SITUATION_MAX_CHARS",
     "LESSON_TEXT_MAX_CHARS",
+    "LESSON_APPLIES_MIN_COVERAGE",
+    "applicable_claims",
+    "lesson_applies",
     "lesson_claim",
     "lesson_key",
     "lesson_of",

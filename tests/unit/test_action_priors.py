@@ -1317,3 +1317,93 @@ def test_compact_retrieve_carries_the_first_two_hits_whole_and_the_rest_as_previ
         assert len(r["value"]) <= server._COMPACT_TAIL_CHARS + len(" …[truncated]")
     full = client.post("/api/v1/retrieve", json={"query": "card declined", "entity_path": "acme/support", "limit": 7}).json()
     assert len(str(rows)) <= 0.55 * len(str(full))
+
+
+def test_lessons_for_the_exact_situation_reorder_the_plan() -> None:
+    """Ops-queue CI, 2026-09-22, PR #45: the audit winner had turned and the
+    plan's second action was bump_dependency — it wins on the unpinned audit
+    class the neighbourhood also held — while the lesson for the pinned class
+    said it had failed there. The situation-exact record outranks the pooled
+    one: a 'did not work' claim goes to the back, a 'worked' claim to the
+    front (after an act's own action), discredited lessons say nothing, and
+    a 'worked' claim about an action whose record here has stopped working
+    is not moved up."""
+    pr = {"tried": [_prior("fix:add_audit_exception", 9, 10, ["lost", "won", "won"]),
+                    _prior("fix:bump_dependency", 1, 2, ["won", "lost"]),
+                    _prior("fix:edit_generated_file", 0, 1, ["lost"])],
+          "untried": ["fix:fix_code", "fix:run_formatter", "fix:regen_migrations"]}
+    cands = ["fix:add_audit_exception", "fix:bump_dependency", "fix:edit_generated_file",
+             "fix:fix_code", "fix:run_formatter", "fix:regen_migrations"]
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "fix:add_audit_exception"
+    assert rec["plan"][1] == "fix:bump_dependency"
+    failed = [{"action": "fix:bump_dependency", "worked": False, "evidence_status": "validated"}]
+    ranked = act.rank_by_lessons(rec["plan"], failed, priors=pr, recommendation=rec)
+    assert ranked[0] == "fix:add_audit_exception" and ranked[-1] == "fix:bump_dependency"
+    assert set(ranked) == set(rec["plan"])
+    # Through recommend and render_priors alike, the same order.
+    rec2 = act.recommend(pr, agent_id="a", candidate_actions=cands, lessons=failed)
+    assert rec2["plan"] == ranked
+    text = act.render_priors(pr, dict(rec, plan=None), candidate_actions=cands, lessons=failed)
+    assert text.split("Try in this order: ")[1].split(".")[0].split(" -> ")[-1] == "fix:bump_dependency"
+    # A 'worked' claim goes to the front — after the act's own action.
+    worked = [{"action": "fix:fix_code", "worked": True, "evidence_status": "untested"}]
+    assert act.rank_by_lessons(rec["plan"], worked, priors=pr, recommendation=rec)[:2] == [
+        "fix:add_audit_exception", "fix:fix_code"]
+    # In an explore there is no action of its own to keep first: the claim leads.
+    explore = dict(rec, mode="explore", suggested_action="fix:run_formatter")
+    assert act.rank_by_lessons(rec["plan"], worked, priors=pr, recommendation=explore)[0] == "fix:fix_code"
+    # Discredited lessons and lessons about a turned record say nothing.
+    assert act.rank_by_lessons(rec["plan"], [dict(failed[0], evidence_status="discredited")],
+                               priors=pr, recommendation=rec) == rec["plan"]
+    turned = dict(pr, tried=[_prior("fix:add_audit_exception", 9, 11, ["lost", "lost", "won"])] + pr["tried"][1:])
+    claim = [{"action": "fix:add_audit_exception", "worked": True, "evidence_status": "contested"}]
+    plan = ["fix:fix_code", "fix:add_audit_exception"]
+    assert act.rank_by_lessons(plan, claim, priors=turned, recommendation={"mode": "explore"}) == plan
+    # Both claims about one action: the positive wins (the lesson flipped and back).
+    both = failed + [{"action": "fix:bump_dependency", "worked": True}]
+    assert act.rank_by_lessons(rec["plan"], both, priors=pr, recommendation=rec)[1] == "fix:bump_dependency"
+    # Nothing to say: the plan is returned as given, never grown or shrunk.
+    assert act.rank_by_lessons(rec["plan"], [], priors=pr, recommendation=rec) == rec["plan"]
+    assert act.rank_by_lessons([], failed) == []
+
+
+def test_the_server_reorders_the_plan_by_the_lessons_about_this_task(client, server_mem) -> None:
+    """The record over the neighbourhood has resolve:a winning and resolve:b
+    with one win, so the plan is a then b then the untried c. A lesson filed
+    for this exact situation says b did not work: the plan the server sends
+    puts b last. A lesson for another situation changes nothing."""
+    from amfs_core.lessons import make_lesson
+
+    _stub_stats(server_mem._adapter, [
+        _row([("resolve:a", True)], agent="a1"), _row([("resolve:a", True)], agent="a2"),
+        _row([("resolve:b", True)], agent="a3"),
+    ])
+    server_mem.write("acme/support", "learned-card-declined",
+                     make_lesson("card declined at checkout", "resolve:b", False, "the card is fine"))
+    server_mem.write("acme/support", "learned-export",
+                     make_lesson("export timed out for a large workspace", "resolve:c", True))
+    server_mem._read_tracker.clear()
+
+    cands = ["resolve:a", "resolve:b", "resolve:c"]
+    body, meta = _priors_meta(client, query="card declined at checkout", candidate_actions=cands)
+    assert "learned-card-declined" in {e.get("key") for e in body if not e.get("_meta")}
+    plan = meta["recommendation"]["plan"]
+    assert plan[0] == "resolve:a" and plan[-1] == "resolve:b" and "resolve:c" in plan
+    # The lesson is a hit but its situation is not in this query: the record's order stands.
+    _, meta = _priors_meta(client, query="declined", candidate_actions=cands)
+    assert meta["recommendation"]["plan"][:2] == ["resolve:a", "resolve:b"]
+    # Declared situation: compared exactly (case and spacing folded), the text is not consulted.
+    _, meta = _priors_meta(client, query="declined", situation="  Card declined AT checkout ",
+                           candidate_actions=cands)
+    assert meta["recommendation"]["plan"][-1] == "resolve:b"
+    _, meta = _priors_meta(client, query="declined", situation="webhook late", candidate_actions=cands)
+    assert meta["recommendation"]["plan"][:2] == ["resolve:a", "resolve:b"]
+    # A lesson retrieve avoids — it failed on tasks like this one, twice — says
+    # nothing: its "worked" claim must not promote the action it was falsified on.
+    server_mem.write("acme/support", "learned-card-declined-c",
+                     make_lesson("card declined at checkout", "resolve:c", True, "try the other card"))
+    _outcomes(server_mem, "learned-card-declined-c", OutcomeType.FAILURE, OutcomeType.FAILURE)
+    body, meta = _priors_meta(client, query="card declined at checkout", candidate_actions=cands)
+    assert all(e.get("key") != "learned-card-declined-c" for e in body if not e.get("_meta"))
+    assert meta["recommendation"]["plan"][0] == "resolve:a" and meta["recommendation"]["plan"][-1] == "resolve:b"

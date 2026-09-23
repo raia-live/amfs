@@ -511,6 +511,7 @@ def recommend(
     abstain: bool = False,
     hit_statuses: Sequence[str] | None = None,
     priors_are_local: bool = True,
+    lessons: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Decide ``act`` / ``explore`` / ``escalate`` from priors and the top hit.
 
@@ -612,7 +613,7 @@ def recommend(
             "plan",
             plan_actions(
                 priors, rec, agent_id=agent_id, candidate_actions=candidate_actions,
-                priors_are_local=priors_are_local,
+                priors_are_local=priors_are_local, lessons=lessons,
             ),
         )
         return rec
@@ -915,6 +916,7 @@ def plan_actions(
     candidate_actions: Sequence[str] | None = None,
     priors_are_local: bool | None = None,
     limit: int = PLAN_MAX,
+    lessons: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[str]:
     """The order to try actions in, for an agent with more than one attempt.
 
@@ -928,7 +930,9 @@ def plan_actions(
     then the untried candidates, rotated by the agent's name so two agents on
     the same problem explore different ones first; and only then, to fill
     the budget, what has failed here. Never the same action twice. Capped at
-    *limit*; empty when there is nothing to order.
+    *limit*; empty when there is nothing to order. *lessons*, the
+    situation-exact claims about this task, re-order the result last (see
+    :func:`rank_by_lessons`).
 
     Measured on the ops-queue CI demo (2026-09-22): after a change, the three
     tasks of the affected class each cost three CI runs — the recommended
@@ -982,7 +986,61 @@ def plan_actions(
             _add(t.get("action_key"))
     for t in by_p:
         _add(t.get("action_key"))
-    return plan
+    return rank_by_lessons(plan, lessons, priors=priors, recommendation=recommendation)
+
+
+def rank_by_lessons(
+    plan: Sequence[str],
+    lessons: Sequence[Mapping[str, Any]] | None,
+    *,
+    priors: Mapping[str, Any] | None = None,
+    recommendation: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """Re-order *plan* by what the situation-exact lessons claim.
+
+    *lessons* are claims about **this** task (see
+    :func:`amfs_core.lessons.applicable_claims`): ``{"action", "worked",
+    "evidence_status"}``. An action a lesson says did not work here — and no
+    lesson says did — goes to the back of the order; an action a lesson says
+    worked goes to the front, after the recommendation's own action when the
+    mode is ``act``. Discredited lessons say nothing; a "worked" claim about
+    an action whose record here has stopped working is not moved up either —
+    the record is newer than the lesson's words. Actions are never added or
+    removed: the plan's membership is the priors' and the candidates'.
+
+    Why: priors are folded over a similarity neighbourhood, and a
+    neighbourhood can hold two classes of task with opposite answers. On the
+    ops-queue demo (2026-09-22) the plan after the audit winner turned put
+    ``bump_dependency`` second — it wins on the *unpinned* audit class the
+    neighbourhood also held — while the lesson for the pinned class said it
+    had failed. The agent spent an attempt on it, twice.
+    """
+    order = [str(a) for a in plan]
+    if not order or not lessons:
+        return order
+    tried = {str(t.get("action_key")): t for t in (priors or {}).get("tried") or []}
+    worked: set[str] = set()
+    failed: set[str] = set()
+    for claim in lessons:
+        if str(claim.get("evidence_status") or "") == "discredited":
+            continue
+        action = str(claim.get("action") or "").strip()
+        if not action:
+            continue
+        (worked if claim.get("worked") else failed).add(action)
+    failed -= worked
+    worked = {a for a in worked if not (a in tried and _stopped_working(tried[a]))}
+    if not worked and not failed:
+        return order
+    head: list[str] = []
+    mode = (recommendation or {}).get("mode")
+    suggested = str((recommendation or {}).get("suggested_action") or "")
+    if mode == "act" and suggested in order and suggested not in failed:
+        head.append(suggested)
+    front = [a for a in order if a in worked and a not in head]
+    back = [a for a in order if a in failed]
+    middle = [a for a in order if a not in head and a not in worked and a not in failed]
+    return head + front + middle + back
 
 
 def pooled_classes(
@@ -1163,6 +1221,7 @@ def render_priors(
     *,
     priors_are_local: bool | None = None,
     candidate_actions: Sequence[str] | None = None,
+    lessons: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
     """One compact block for an agent's context. Empty string when nothing to show.
 
@@ -1173,7 +1232,9 @@ def render_priors(
     *candidate_actions*, when given, are the only actions the order may name:
     a retry asking over the actions it has not tried must not be told to try
     the one that just failed because the situation's record has it as a
-    winner, whether the plan was computed here or sent by the server."""
+    winner, whether the plan was computed here or sent by the server.
+    *lessons*, the situation-exact claims about this task, re-order the plan
+    (:func:`rank_by_lessons`) — a plan the server sent included."""
     if not priors and not recommendation:
         return ""
     local = priors_local(priors) if priors_are_local is None else priors_are_local
@@ -1242,6 +1303,7 @@ def render_priors(
     )
     if allowed is not None:
         plan = [a for a in plan if a in allowed]
+    plan = rank_by_lessons(plan, lessons, priors=priors, recommendation=recommendation)
     stopped = [t for t in tried if _stopped_working(t) and int(t.get("won", 0)) > 0]
     failed = [
         t for t in tried
@@ -1276,6 +1338,7 @@ __all__ = [
     "entity_paths_of",
     "guidance_strength",
     "plan_actions",
+    "rank_by_lessons",
     "PLAN_MAX",
     "POOLED_WEIGHT_RATIO",
     "pooled_classes",
