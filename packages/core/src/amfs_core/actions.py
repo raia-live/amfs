@@ -632,9 +632,21 @@ def recommend(
     A single ``suggested_action`` is one attempt's worth of advice; an agent
     with three attempts wasted the other two re-trying its instinct.
     """
-    tried: list[Mapping[str, Any]] = list((priors or {}).get("tried") or [])
+    record_tried: list[Mapping[str, Any]] = list((priors or {}).get("tried") or [])
     untried: list[str] = list((priors or {}).get("untried") or [])
     have_candidates = bool(candidate_actions)
+    # The mode is decided over the actions the caller can take. A winner
+    # outside ``candidate_actions`` — a retry asking over what it has not
+    # tried, after the winner just failed on this very task — cannot be acted
+    # on, and ``act`` naming it put the plan's first untried under an act
+    # label (ops-queue support #49, 2026-09-22). The whole record still
+    # informs the plan and the text; it is the verdict that is read over
+    # what is on the table.
+    allowed = set(candidate_actions) if candidate_actions else None
+    tried = [
+        t for t in record_tried
+        if allowed is None or str(t.get("action_key")) in allowed
+    ]
 
     # The situation's own record, when the caller declared one and the store
     # partitions outcomes by it. Empty means no run has ended on this
@@ -680,7 +692,7 @@ def recommend(
     # Named in the explore when the record behind them is real: ACT_MIN_N
     # wins pooled, or any win on the situation's own record.
     stopped = [
-        t for t in tried
+        t for t in record_tried
         if _stopped_working(t)
         and (int(t.get("won", 0)) >= ACT_MIN_N or (t.get("situation_exact") and int(t.get("won", 0)) >= 1))
     ]
@@ -700,7 +712,7 @@ def recommend(
 
     return _with_plan(_recommend_mode(
         priors, tried=tried, untried=untried, winners=winners, stopped=stopped, losers=losers,
-        lessons=lessons, candidate_actions=candidate_actions,
+        lessons=lessons, candidate_actions=candidate_actions, allowed=allowed,
         failed_now=failed_now, all_tried_failed=all_tried_failed,
         all_tried_failed_firm=all_tried_failed_firm, have_candidates=have_candidates,
         agent_id=agent_id, top_hit_status=top_hit_status,
@@ -733,6 +745,7 @@ def _recommend_mode(
     priors_are_local: bool,
     lessons: Sequence[Mapping[str, Any]] | None = None,
     candidate_actions: Sequence[str] | None = None,
+    allowed: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """The mode and suggested action of :func:`recommend`; the plan is added
     by the caller."""
@@ -760,6 +773,7 @@ def _recommend_mode(
             winners,
             regime_shift=regime_shift,
             regime_shift_at=regime_shift_at,
+            allowed=allowed,
         )
         if from_contrast is not None:
             return from_contrast
@@ -1404,6 +1418,7 @@ def _act_from_contrast(
     *,
     regime_shift: bool,
     regime_shift_at: datetime | None,
+    allowed: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """``act -> B`` from the nearest contrast pair, or ``None``.
 
@@ -1419,6 +1434,20 @@ def _act_from_contrast(
     actions the pair says failed: an established C that the contrast is not
     about keeps its recommendation; an established A that just failed on
     this kind of task does not.
+
+    B that has *stopped working* by its own record (:func:`_stopped_working`
+    — a streak, a turn, or one loss on the situation's own record that left
+    the task unsolved) is not acted on either, whatever the weights say.
+    The weighted reading is for a pooled neighbourhood, where the loss may be
+    a distant neighbour's; on the situation's own record the loss is this
+    situation's, and its weight is only how far its task text sat from the
+    query. Measured on the ops-queue support demo (2026-09-22): the export
+    class's fix changed, its 6/6 winner lost on the next ticket, and the
+    contrast from the class's first ticket still said ``act`` on it — the
+    loss weighed 0.3 against a contrast weighing 1.0 — while the lesson for
+    the class pushed that action to the back of the plan, so the agent read
+    "act" over an untried action and ignored it three times. Nor is a B the
+    caller cannot take (*allowed*) acted on.
     """
     if not contrasts:
         return None
@@ -1430,6 +1459,11 @@ def _act_from_contrast(
         failed = [str(a) for a in (c.get("failed") or [])]
         if not resolved or not failed:
             continue
+        if allowed is not None and resolved not in allowed:
+            continue
+        b = by_key.get(resolved)
+        if b is not None and _stopped_working(b):
+            continue
         if regime_shift:
             at = _as_dt(c.get("committed_at"))
             if regime_shift_at is None or at is None or at <= (
@@ -1437,7 +1471,6 @@ def _act_from_contrast(
                 else regime_shift_at.replace(tzinfo=timezone.utc)
             ):
                 continue
-        b = by_key.get(resolved)
         if b is not None and _turned_since(b, float(c.get("weight") or 0.0)):
             continue
         if winners and winners[0].get("action_key") not in failed:

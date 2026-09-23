@@ -1821,3 +1821,54 @@ def test_per_task_situation_labels_leave_the_block_pooled(client, server_mem) ->
     meta = client.post("/api/v1/retrieve", json=dict(body, situation="class-9")).json()[-1]
     assert meta["priors"]["situation_record"]["outcomes"] == 0
     assert meta["recommendation"]["mode"] == "abstain"
+
+
+def test_a_contrast_does_not_act_on_a_b_that_turned_on_the_situations_own_record() -> None:
+    """Support run 5 #53 (2026-09-22): the export class's 6/6 winner lost on
+    #49, a ticket nothing solved. The contrast from the class's first ticket
+    (escalate failed, advise_workaround resolved) still said ``act`` on it:
+    the loss row sat 0.3 from the query while the contrast weighed 1.0, so the
+    weighted turn test forgave it. The lesson then put the action at the back
+    of the plan, and the agent read ``act`` over an untried action and
+    ignored it three times. On the situation's own record one unsolved loss
+    is the turn, whatever the weights; the recommendation is the sweep."""
+    cands = ["resolve:escalate", "resolve:workaround", "resolve:settings", "resolve:resend", "resolve:refund"]
+    first = _sit_row("export", [("resolve:escalate", False), ("resolve:workaround", True)], days_ago=6, sim=1.0)
+    first["actions_taken"][0]["attempt"] = 1   # a recorded attempt, then the terminal action: a contrast
+    rows = [first]
+    rows += [_sit_row("export", [("resolve:workaround", True)], days_ago=d, sim=0.9) for d in (5, 4, 3)]
+    rows.append(_sit_row(
+        "export", [("resolve:workaround", False), ("resolve:escalate", False)],
+        outcome="failure", days_ago=1, sim=0.3,
+    ))
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "export", "outcomes": len(rows)}
+    assert pr["contrasts"] and pr["contrasts"][0]["resolved_with"] == "resolve:workaround"
+    b = next(t for t in pr["tried"] if t["action_key"] == "resolve:workaround")
+    assert act.turned_unsolved(b) and not act._turned_since(b, 1.0)
+    lessons = [{"action": "resolve:workaround", "worked": False, "evidence_status": "validated"}]
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands, top_hit_status="validated", lessons=lessons)
+    assert rec["mode"] == "explore" and rec.get("sweep") is True
+    assert rec["suggested_action"] == rec["plan"][0] and rec["plan"][0] in ("resolve:settings", "resolve:resend", "resolve:refund")
+    assert "newest take lost on a task nothing solved" in rec["why"]
+
+
+def test_a_winner_the_caller_cannot_take_is_not_acted_on() -> None:
+    """Support run 5 #49 (2026-09-22): the retry asked over the actions not
+    yet tried on the ticket — the 6/6 winner had just failed on it and was off
+    the table — and was told ``act`` on that winner, so the rendered head
+    was the plan's first untried under an act label, and the model ignored
+    it. The mode is read over the candidates: with the winner excluded and
+    the rest of the record failed, the remaining untried are the explore."""
+    cands_all = ["resolve:workaround", "resolve:escalate", "resolve:settings", "resolve:resend"]
+    rows = [_sit_row("export", [("resolve:escalate", False), ("resolve:workaround", True)], days_ago=6)]
+    rows += [_sit_row("export", [("resolve:workaround", True)], days_ago=d) for d in (5, 4, 3)]
+    pr = act.aggregate_priors(rows, candidate_actions=cands_all, situation_exact=True)
+    pr["situation_record"] = {"situation": "export", "outcomes": len(rows)}
+    full = act.recommend(pr, agent_id="a", candidate_actions=cands_all)
+    assert full["mode"] == "act" and full["suggested_action"] == "resolve:workaround"
+    retry = act.recommend(pr, agent_id="a", candidate_actions=["resolve:escalate", "resolve:settings", "resolve:resend"])
+    assert retry["mode"] == "explore"
+    assert retry["suggested_action"] in ("resolve:settings", "resolve:resend")
+    assert retry["suggested_action"] == retry["plan"][0]
+    assert "resolve:workaround" not in retry["plan"]
