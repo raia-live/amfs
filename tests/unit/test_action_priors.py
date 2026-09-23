@@ -1505,6 +1505,47 @@ def test_one_unsolved_loss_on_the_situations_own_record_turns_the_action() -> No
     assert act.recommend(pooled, agent_id="a", candidate_actions=cands)["mode"] == "act"
 
 
+def test_one_win_on_the_situations_own_record_is_acted_on() -> None:
+    """Ops-queue smoke (2026-09-22, local server with the partition): the UI
+    snapshot class's first PR was solved with ``update_snapshots``, and its
+    second was served ``recommendation: null`` — the 1/1 is below
+    ``ACT_MIN_N``, a guard against luck on a pooled record. On the situation's
+    own record one win is the same task solved: ``act``, strength ``strong``,
+    the plan opens with it, and the neighbour's opposite fix stays in the
+    nearby line. The same 1/1 without the mark is still a hint, and a 1/1
+    whose one take lost on an unsolved task is not a winner."""
+    cands = ["fix:update_snapshots", "fix:fix_code", "fix:rerun_job"]
+    rows = [_sit_row("jest snapshot · UI PR", [("fix:update_snapshots", True)])]
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "jest snapshot · UI PR", "outcomes": 1}
+    pr["nearby"] = {"outcomes": 1, "by_situation": [
+        {"situation": "jest snapshot · backend-only PR", "outcomes": 1,
+         "tried": [{"action_key": "fix:fix_code", "won": 1, "lost": 0, "n": 1},
+                   {"action_key": "fix:update_snapshots", "won": 0, "lost": 1, "n": 1}]}]}
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "fix:update_snapshots"
+    assert "won 1/1 on this exact situation" in rec["why"]
+    assert rec["plan"][0] == "fix:update_snapshots"
+    assert act.guidance_strength(pr, [], priors_are_local=True) == "strong"
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    assert "Try fix:update_snapshots first." in text
+    assert "On nearby kinds of task (not this situation) — “jest snapshot · backend-only PR”: fix:fix_code 1/1" in text
+    # Pooled: the same single win is not acted on.
+    pooled = act.aggregate_priors(rows, candidate_actions=cands)
+    assert act.recommend(pooled, agent_id="a", candidate_actions=cands) is None
+    # Exact, but the one take lost on a task nothing solved: no winner, and
+    # the explore names it as a possible turn.
+    lost = act.aggregate_priors(
+        [_sit_row("s", [("fix:update_snapshots", True)], days_ago=1),
+         _sit_row("s", [("fix:update_snapshots", False)], outcome="failure")],
+        candidate_actions=cands, situation_exact=True,
+    )
+    lost["situation_record"] = {"situation": "s", "outcomes": 2}
+    rec = act.recommend(lost, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "explore" and rec["stopped_working"] == ["fix:update_snapshots"]
+    assert rec["plan"][1] == "fix:update_snapshots"
+
+
 def test_an_explore_names_its_pick_as_an_assignment_not_an_instruction() -> None:
     """Grid v3: an explore that was followed won 14% of the time, one that
     was ignored 67%; the ops-queue demo lost three tickets to a hash-picked

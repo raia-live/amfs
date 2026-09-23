@@ -670,11 +670,14 @@ def recommend(
     # REGIME_TURN_STREAK (``turned``). Those with a real record behind them
     # are what a shift looks like at the action level ("what worked here has
     # stopped working"), and they are named in the explore that follows.
-    winners = [
+    winners = [t for t in tried if _is_winner(t)]
+    # Named in the explore when the record behind them is real: ACT_MIN_N
+    # wins pooled, or any win on the situation's own record.
+    stopped = [
         t for t in tried
-        if float(t.get("p", 0)) >= ACT_MIN_P and int(t.get("n", 0)) >= ACT_MIN_N and not _stopped_working(t)
+        if _stopped_working(t)
+        and (int(t.get("won", 0)) >= ACT_MIN_N or (t.get("situation_exact") and int(t.get("won", 0)) >= 1))
     ]
-    stopped = [t for t in tried if _stopped_working(t) and int(t.get("won", 0)) >= ACT_MIN_N]
     # Two readings of "failed". ``losers`` is the firm one — a low ratio over
     # at least EXPLORE_MIN_N takes, or a streak — and is what ``escalate``
     # asserts. ``failed_now`` also counts an action never seen to win: a 0/1
@@ -764,10 +767,11 @@ def _recommend_mode(
             }
     if winners and not regime_shift:
         best = winners[0]
+        where = "on this exact situation" if best.get("situation_exact") else "on similar tasks here"
         return {
             "mode": "act",
             "suggested_action": best["action_key"],
-            "why": f"{best['action_key']} won {best['won']}/{best['n']} on similar tasks here"
+            "why": f"{best['action_key']} won {best['won']}/{best['n']} {where}"
                    + (f" ({best['agents']} agents)" if int(best.get("agents", 0)) > 1 else ""),
         }
     lone = _lone_winner(tried, failed_now) if priors_are_local else None
@@ -881,10 +885,7 @@ def guidance_strength(
     statuses = [s for s in (hit_statuses or []) if s]
     # The same reading of "winner" as recommend(): a record that lost its
     # newest RECENT_FAIL_STREAK takes is not one, whatever its lifetime ratio.
-    winners = [
-        t for t in tried
-        if float(t.get("p", 0)) >= ACT_MIN_P and int(t.get("n", 0)) >= ACT_MIN_N and not _stopped_working(t)
-    ]
+    winners = [t for t in tried if _is_winner(t)]
     if regime_shift:
         return "thin" if (tried or statuses) else "none"
     record = (priors or {}).get("situation_record")
@@ -975,6 +976,35 @@ def _leading_losses(prior: Mapping[str, Any]) -> int:
     return n
 
 
+def _exact_first_win(prior: Mapping[str, Any]) -> bool:
+    """A single win on the situation's own record, its one take a win.
+
+    ``ACT_MIN_N`` guards against luck on a *pooled* record: one win among
+    tasks that only resemble this one may be the other class's fix. A win on
+    the declared situation itself is a different kind of evidence — the same
+    task, solved — and is acted on from one take. If the fix has since
+    changed, the first loss on an unsolved task turns it
+    (:func:`turned_unsolved`) and the explore that follows names it.
+    Measured on the ops-queue demos (2026-09-22): the second task of every
+    class was brute-forced with ``recommendation: null`` although its first
+    had been solved on that exact situation.
+    """
+    if not prior.get("situation_exact"):
+        return False
+    last = list(prior.get("last_3") or [])
+    return int(prior.get("won", 0)) >= 1 and bool(last) and last[0] == "won"
+
+
+def _is_winner(prior: Mapping[str, Any]) -> bool:
+    """A winner: a good posterior over ``ACT_MIN_N`` takes — or one win on the
+    situation's own record (:func:`_exact_first_win`) — and not stopped."""
+    if _stopped_working(prior):
+        return False
+    if float(prior.get("p", 0)) < ACT_MIN_P:
+        return False
+    return int(prior.get("n", 0)) >= ACT_MIN_N or _exact_first_win(prior)
+
+
 def _lone_winner(
     tried: Sequence[Mapping[str, Any]], failed_now: Sequence[Mapping[str, Any]]
 ) -> Mapping[str, Any] | None:
@@ -1045,10 +1075,7 @@ def plan_actions(
     ]
     failed_now = [t for t in by_p if t in losers or int(t.get("won", 0)) == 0]
     for t in by_p:
-        if (
-            float(t.get("p", 0)) >= ACT_MIN_P and int(t.get("n", 0)) >= ACT_MIN_N
-            and not _stopped_working(t)
-        ):
+        if _is_winner(t):
             _add(t.get("action_key"))
     for t in by_p:
         last = list(t.get("last_3") or [])
