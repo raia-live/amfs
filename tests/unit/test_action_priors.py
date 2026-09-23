@@ -708,8 +708,11 @@ def test_render_priors_gives_the_order_and_what_not_to_retry() -> None:
     rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
     text = act.render_priors(pr, rec)
     assert "Do not spend an attempt on: fix:fix_code (0/2)" in text
-    assert "Try in this order: fix:rerun_job -> fix:" in text
-    assert text.index("Recommendation:") < text.index("Try in this order")
+    # The winner is the order; the untried tail is a list for the agent's
+    # judgement, in the candidates' order, not the plan's rotation.
+    assert "Try fix:rerun_job first. Do not repeat an action that failed on this task." in text
+    assert "Untried on tasks like this: fix:edit_generated_file, fix:regen_migrations — the record cannot order these" in text
+    assert text.index("Recommendation:") < text.index("Try fix:rerun_job first")
     # A turned winner is named as such in the avoid line.
     two = dict(pr, tried=[_prior("fix:rerun_job", 3, 5, ["lost", "lost", "won"])] + pr["tried"][1:])
     text = act.render_priors(two, act.recommend(two, agent_id="a", candidate_actions=cands))
@@ -722,10 +725,10 @@ def test_render_priors_gives_the_order_and_what_not_to_retry() -> None:
     # The order names candidates only, whether computed here or sent by the server.
     rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
     text = act.render_priors(pr, rec, candidate_actions=["fix:edit_generated_file", "fix:regen_migrations"])
-    assert "fix:rerun_job" not in text.split("Try in this order:")[1]
+    assert "Try " not in text and "fix:rerun_job" not in text.split("Untried on tasks like this:")[1]
     sent = dict(rec, plan=["fix:rerun_job", "fix:edit_generated_file", "fix:regen_migrations"])
     text = act.render_priors(pr, sent, candidate_actions=["fix:edit_generated_file", "fix:regen_migrations"])
-    assert "Try in this order: fix:edit_generated_file -> fix:regen_migrations." in text
+    assert "Untried on tasks like this: fix:edit_generated_file, fix:regen_migrations —" in text
     # The recommendation line does not name a barred action either, and the
     # untried list is drawn from the candidates: a retry's text names nothing
     # it has ruled out.
@@ -733,11 +736,11 @@ def test_render_priors_gives_the_order_and_what_not_to_retry() -> None:
     assert "Recommendation: act." in text and "-> fix:rerun_job" not in text
     with_untried = dict(pr, untried=["fix:rerun_job", "fix:regen_migrations"])
     text = act.render_priors(with_untried, rec, candidate_actions=["fix:edit_generated_file", "fix:regen_migrations"])
-    assert "Not yet tried here: fix:regen_migrations\n" in text
+    assert "Untried on tasks like this: fix:regen_migrations —" in text
     # No recommendation, or an abstain: the record is shown, no order is given.
-    assert "Try in this order" not in act.render_priors(pr, None)
+    assert "Try " not in act.render_priors(pr, None) and "Untried" not in act.render_priors(pr, None)
     assert "Do not spend" not in act.render_priors(pr, None)
-    assert "Try in this order" not in act.render_priors(pr, {"mode": "abstain", "why": "pooled"})
+    assert "Try " not in act.render_priors(pr, {"mode": "abstain", "why": "pooled"})
     assert "Tried on similar tasks here" in act.render_priors(pr, None)
 
 
@@ -1345,7 +1348,9 @@ def test_lessons_for_the_exact_situation_reorder_the_plan() -> None:
     rec2 = act.recommend(pr, agent_id="a", candidate_actions=cands, lessons=failed)
     assert rec2["plan"] == ranked
     text = act.render_priors(pr, dict(rec, plan=None), candidate_actions=cands, lessons=failed)
-    assert text.split("Try in this order: ")[1].split(".")[0].split(" -> ")[-1] == "fix:bump_dependency"
+    # The barred action is not named in the order at all: the lesson for this
+    # situation outranks the pooled record that has it winning.
+    assert "Try fix:add_audit_exception first." in text and "then fix:bump_dependency" not in text
     # A 'worked' claim goes to the front — after the act's own action.
     worked = [{"action": "fix:fix_code", "worked": True, "evidence_status": "untested"}]
     assert act.rank_by_lessons(rec["plan"], worked, priors=pr, recommendation=rec)[:2] == [
@@ -1407,3 +1412,600 @@ def test_the_server_reorders_the_plan_by_the_lessons_about_this_task(client, ser
     body, meta = _priors_meta(client, query="card declined at checkout", candidate_actions=cands)
     assert all(e.get("key") != "learned-card-declined-c" for e in body if not e.get("_meta"))
     assert meta["recommendation"]["plan"][0] == "resolve:a" and meta["recommendation"]["plan"][-1] == "resolve:b"
+
+
+# ── the situation's own record ─────────────────────────────────────────────
+
+
+def _sit_row(situation, actions, *, outcome="success", agent="a1", days_ago=0, sim=1.0):
+    row = _row(actions, agent=agent, days_ago=days_ago, sim=sim)
+    row["situation"] = situation
+    row["outcome_type"] = outcome
+    return row
+
+
+def test_a_situation_with_no_record_abstains_instead_of_planning_from_its_neighbours() -> None:
+    """Ops-queue CI #5 in two runs: the UI snapshot class's first PR was told
+    ``act: fix_code`` from the backend snapshot class's single win — the
+    opposite of its own fix — and cost three CI runs where the same model
+    with no memory cost none. With the situation's own record empty, the
+    recommendation abstains, the strength is at most ``thin`` whatever a
+    neighbour's lesson is rated, and the text shows the neighbourhood as
+    another kind of task."""
+    cands = ["fix:fix_code", "fix:update_snapshots", "fix:rerun_job"]
+    pr = {"tried": [], "untried": cands, "source": "similar_outcomes",
+          "situation_record": {"situation": "jest snapshot · UI PR", "outcomes": 0},
+          "nearby": {"outcomes": 1, "by_situation": [
+              {"situation": "jest snapshot · backend-only PR", "outcomes": 1,
+               "tried": [{"action_key": "fix:fix_code", "won": 1, "lost": 0, "n": 1},
+                         {"action_key": "fix:update_snapshots", "won": 0, "lost": 1, "n": 1}]}]}}
+    assert act.recommend(pr, agent_id="a", candidate_actions=cands) is None
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands, abstain=True)
+    assert rec["mode"] == "abstain" and rec["suggested_action"] is None
+    assert rec["situation_record"] == "none" and "plan" not in rec
+    assert act.guidance_strength(pr, ["validated"]) == "thin"
+    assert act.guidance_strength(dict(pr, nearby=None), []) == "none"
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    assert "No outcome recorded for this situation yet." in text
+    assert "On nearby kinds of task (not this situation) — “jest snapshot · backend-only PR”: fix:fix_code 1/1; fix:update_snapshots 0/1" in text
+    assert "Not yet tried on this situation: fix:fix_code, fix:update_snapshots, fix:rerun_job" in text
+    assert "Try " not in text and "Do not spend" not in text
+    # The same neighbourhood, pooled (no situation declared, or none recorded):
+    # the old reading stands, so callers without situations lose nothing.
+    pooled = {"tried": [_prior("fix:fix_code", 1, 1, ["won"]), _prior("fix:update_snapshots", 0, 1, ["lost"])],
+              "untried": ["fix:rerun_job"], "source": "similar_outcomes"}
+    assert act.recommend(pooled, agent_id="a", candidate_actions=cands)["mode"] == "act"
+
+
+def test_one_unsolved_loss_on_the_situations_own_record_turns_the_action() -> None:
+    """Ops-queue CI #45/#48 and support #49/#53: after a change, the class's
+    validated fix failed on a task nothing then solved, and the next task of
+    the class was still told ``act`` on it — three runs wasted twice. On the
+    situation's own record one such loss turns the action: the mode is
+    ``explore``, the turned action is kept second in the plan as the hedge,
+    and the text says to make an own pick first. A loss inside a task another
+    action solved is a contrast, not a turn; and the same loss on a pooled
+    record is forgiven as before."""
+    cands = ["fix:add_audit_exception", "fix:bump_dependency", "fix:fix_code", "fix:rerun_job"]
+    rows = [
+        _sit_row("pip-audit · pinned", [("fix:add_audit_exception", False), ("fix:bump_dependency", False)],
+                 outcome="failure"),
+        _sit_row("pip-audit · pinned", [("fix:add_audit_exception", True)], days_ago=1),
+        _sit_row("pip-audit · pinned", [("fix:add_audit_exception", True)], days_ago=2),
+        _sit_row("pip-audit · pinned", [("fix:bump_dependency", False), ("fix:add_audit_exception", True)], days_ago=3),
+    ]
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "pip-audit · pinned", "outcomes": 4}
+    by = {t["action_key"]: t for t in pr["tried"]}
+    assert by["fix:add_audit_exception"]["situation_exact"] is True
+    assert by["fix:add_audit_exception"]["last_unsolved"] is True
+    assert by["fix:add_audit_exception"]["won"] == 3 and by["fix:add_audit_exception"]["last_3"][0] == "lost"
+    assert act.turned_unsolved(by["fix:add_audit_exception"]) and not act.turned(by["fix:add_audit_exception"])
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "explore"
+    assert rec["suggested_action"] in ("fix:fix_code", "fix:rerun_job")
+    assert rec["plan"][1] == "fix:add_audit_exception"
+    assert "newest take lost on a task nothing solved" in rec["why"]
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    assert "Recommendation: explore." in text and "-> fix:" not in text.split("Recommendation")[1].split("\n")[0]
+    # The unsolved task is where the agent's judgement already failed on this
+    # situation: the untried are swept in the plan's order, the turned action
+    # is the hedge after the first of them.
+    assert rec["sweep"] is True
+    assert f"Try {rec['plan'][0]} first, then {rec['plan'][2]}." in text
+    assert "If that fails, try fix:add_audit_exception next" in text
+    assert "Do not spend an attempt on: fix:bump_dependency (0/2)" in text
+    assert "Untried on this situation" not in text
+    assert "stopped working" not in text
+    # A loss that another action then resolved is a contrast, not a turn.
+    solved = act.aggregate_priors([
+        _sit_row("s", [("fix:a", False), ("fix:b", True)]),
+        _sit_row("s", [("fix:a", True)], days_ago=1),
+    ], situation_exact=True)
+    a = next(t for t in solved["tried"] if t["action_key"] == "fix:a")
+    assert a["last_unsolved"] is False and not act.turned_unsolved(a)
+    # Pooled: the same rows without the mark keep the one-loss forgiveness.
+    pooled = act.aggregate_priors(rows, candidate_actions=cands)
+    assert not act.turned_unsolved(next(t for t in pooled["tried"] if t["action_key"] == "fix:add_audit_exception"))
+    assert act.recommend(pooled, agent_id="a", candidate_actions=cands)["mode"] == "act"
+
+
+def test_one_win_on_the_situations_own_record_is_acted_on() -> None:
+    """Ops-queue smoke (2026-09-22, local server with the partition): the UI
+    snapshot class's first PR was solved with ``update_snapshots``, and its
+    second was served ``recommendation: null`` — the 1/1 is below
+    ``ACT_MIN_N``, a guard against luck on a pooled record. On the situation's
+    own record one win is the same task solved: ``act``, strength ``strong``,
+    the plan opens with it, and the neighbour's opposite fix stays in the
+    nearby line. The same 1/1 without the mark is still a hint, and a 1/1
+    whose one take lost on an unsolved task is not a winner."""
+    cands = ["fix:update_snapshots", "fix:fix_code", "fix:rerun_job"]
+    rows = [_sit_row("jest snapshot · UI PR", [("fix:update_snapshots", True)])]
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "jest snapshot · UI PR", "outcomes": 1}
+    pr["nearby"] = {"outcomes": 1, "by_situation": [
+        {"situation": "jest snapshot · backend-only PR", "outcomes": 1,
+         "tried": [{"action_key": "fix:fix_code", "won": 1, "lost": 0, "n": 1},
+                   {"action_key": "fix:update_snapshots", "won": 0, "lost": 1, "n": 1}]}]}
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "fix:update_snapshots"
+    assert "won 1/1 on this exact situation" in rec["why"]
+    assert rec["plan"][0] == "fix:update_snapshots"
+    assert act.guidance_strength(pr, [], priors_are_local=True) == "strong"
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    assert "Try fix:update_snapshots first." in text
+    assert "On nearby kinds of task (not this situation) — “jest snapshot · backend-only PR”: fix:fix_code 1/1" in text
+    # Pooled: the same single win is not acted on.
+    pooled = act.aggregate_priors(rows, candidate_actions=cands)
+    assert act.recommend(pooled, agent_id="a", candidate_actions=cands) is None
+    # Exact, but the one take lost on a task nothing solved: no winner, and
+    # the explore names it as a possible turn.
+    lost = act.aggregate_priors(
+        [_sit_row("s", [("fix:update_snapshots", True)], days_ago=1),
+         _sit_row("s", [("fix:update_snapshots", False)], outcome="failure")],
+        candidate_actions=cands, situation_exact=True,
+    )
+    lost["situation_record"] = {"situation": "s", "outcomes": 2}
+    rec = act.recommend(lost, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "explore" and rec["stopped_working"] == ["fix:update_snapshots"]
+    assert rec["plan"][1] == "fix:update_snapshots"
+
+
+def test_an_explore_names_its_pick_as_an_assignment_not_an_instruction() -> None:
+    """Grid v3: an explore that was followed won 14% of the time, one that
+    was ignored 67%; the ops-queue demo lost three tickets to a hash-picked
+    action on a class the model got right on its own. The pick stays in the
+    payload for a fleet to spread out over; the prose says what it is and
+    hands the untried to the agent's judgement."""
+    cands = ["resolve:a", "resolve:b", "resolve:c"]
+    pr = {"tried": [_prior("resolve:a", 0, 2, ["lost", "lost"])], "untried": ["resolve:b", "resolve:c"]}
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "explore" and rec["suggested_action"] in ("resolve:b", "resolve:c")
+    assert "exploration assignment if you have no better guess" in rec["why"]
+    assert "use your own judgement" in rec["why"]
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    assert "Recommendation: explore." in text
+    assert "Try " not in text
+    assert "Untried on tasks like this: resolve:b, resolve:c — the record cannot order these" in text
+
+
+def test_the_server_serves_the_situations_own_record_and_its_neighbours_apart(client, server_mem) -> None:
+    """Rows carry the situation their run declared. With one declared on the
+    request, the priors are that situation's outcomes; the rest of the
+    neighbourhood is reported per situation, and a situation with no
+    outcomes abstains. Without a declared situation — or when no row carries
+    one — the block is pooled as before."""
+    rows = [
+        _sit_row("jest snapshot · backend-only PR", [("fix:update_snapshots", False), ("fix:fix_code", True)]),
+        _sit_row("jest snapshot · UI PR", [("fix:fix_code", False), ("fix:rerun_job", False)], outcome="failure",
+                 agent="a2", sim=0.98),
+    ]
+    _stub_similar(server_mem._adapter, rows)
+    cands = ["fix:fix_code", "fix:update_snapshots", "fix:rerun_job"]
+    body = {"query": "card declined", "entity_path": "acme/support", "include_priors": True,
+            "agent_id": "a9", "candidate_actions": cands, "abstain": True}
+    # The UI class: its own record is two losses; the backend class is nearby.
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="Jest Snapshot · UI PR")).json()[-1]
+    pr = meta["priors"]
+    assert pr["situation_record"] == {"situation": "Jest Snapshot · UI PR", "outcomes": 1}
+    assert {t["action_key"] for t in pr["tried"]} == {"fix:fix_code", "fix:rerun_job"}
+    assert all(t["situation_exact"] for t in pr["tried"])
+    assert pr["untried"] == ["fix:update_snapshots"]
+    assert pr["nearby"]["outcomes"] == 1
+    assert pr["nearby"]["by_situation"][0]["situation"] == "jest snapshot · backend-only PR"
+    assert {t["action_key"]: t["won"] for t in pr["nearby"]["by_situation"][0]["tried"]} == {
+        "fix:fix_code": 1, "fix:update_snapshots": 0}
+    assert meta["recommendation"]["mode"] == "explore"
+    assert meta["recommendation"]["suggested_action"] == "fix:update_snapshots"
+    # A situation nothing has ended on: abstain, and not ``strong``.
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="pip-audit · pinned")).json()[-1]
+    assert meta["priors"]["situation_record"]["outcomes"] == 0 and meta["priors"]["tried"] == []
+    assert meta["recommendation"]["mode"] == "abstain" and meta["recommendation"]["situation_record"] == "none"
+    assert meta["guidance_strength"] == "thin"
+    assert len(meta["priors"]["nearby"]["by_situation"]) == 2
+    # No situation on the request: pooled, as before.
+    meta = client.post("/api/v1/retrieve", json=body).json()[-1]
+    assert "situation_record" not in meta["priors"]
+    assert {t["action_key"] for t in meta["priors"]["tried"]} == {"fix:fix_code", "fix:update_snapshots", "fix:rerun_job"}
+    # Rows without situations (older clients): pooled too, even with one declared.
+    _stub_similar(server_mem._adapter, [dict(r, situation=None) for r in rows])
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="jest snapshot · UI PR")).json()[-1]
+    assert "situation_record" not in meta["priors"]
+
+
+def test_the_situations_own_record_is_an_equality_not_a_neighbourhood(client, server_mem) -> None:
+    """Ops-queue support (2026-09-22): the classes of a queue embed far apart,
+    so the first Android ticket found no neighbour above the floor, the
+    priors fell back to the entity's whole record, and the ticket was told
+    ``act: explain_and_close`` — the webhook class's winner — with strength
+    ``strong``. With a situation declared, the exact record is read from the
+    entity's outcomes by situation whatever the neighbourhood found: empty
+    means abstain, and a record found there is acted on as the situation's
+    own (source ``situation_record``, local), with no ``nearby`` from a pool
+    that is not a neighbourhood."""
+    from amfs_http import server
+
+    cands = ["resolve:explain_and_close", "resolve:advise_settings_change", "resolve:resend_email"]
+    entity_record = [
+        _sit_row("webhook delivery delayed", [("resolve:explain_and_close", True)]),
+        _sit_row("webhook delivery delayed", [("resolve:explain_and_close", True)], days_ago=1),
+        _sit_row("Android notifications missing", [("resolve:advise_settings_change", True)], days_ago=2),
+    ]
+    # No neighbour above the floor; the entity-wide fallback has three classes.
+    server_mem._adapter.similar_outcomes = lambda entity_path, embedding, **kw: []  # type: ignore[attr-defined]
+    server_mem._adapter.action_stats = lambda entity_path, **kw: list(entity_record)  # type: ignore[attr-defined]
+    server._get_server_embedder = lambda: _StubEmbedder()
+    body = {"query": "push notifications stopped", "entity_path": "acme/support", "include_priors": True,
+            "agent_id": "a9", "candidate_actions": cands, "abstain": True}
+    # A class never seen: abstain, not the entity's winner.
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="duplicate refund requested")).json()[-1]
+    assert meta["priors"]["situation_record"]["outcomes"] == 0 and meta["priors"]["tried"] == []
+    assert meta["priors"]["source"] == "situation_record"
+    assert meta["recommendation"]["mode"] == "abstain"
+    assert meta["guidance_strength"] != "strong"
+    # A class seen once: its own record, acted on, and local.
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="android notifications missing")).json()[-1]
+    pr = meta["priors"]
+    assert pr["situation_record"]["outcomes"] == 1 and pr["source"] == "situation_record"
+    assert [t["action_key"] for t in pr["tried"]] == ["resolve:advise_settings_change"]
+    assert pr["nearby"] == {"outcomes": 0, "by_situation": []}
+    # The rest of the entity's record travels as ``elsewhere``: the sweep's order.
+    assert pr["elsewhere"]["outcomes"] == 2
+    assert pr["elsewhere"]["tried"][0]["action_key"] == "resolve:explain_and_close"
+    assert pr["elsewhere"]["tried"][0]["won"] == 2
+    assert meta["recommendation"]["mode"] == "act"
+    assert meta["recommendation"]["suggested_action"] == "resolve:advise_settings_change"
+    # No situation declared: the pooled fallback as before.
+    meta = client.post("/api/v1/retrieve", json=body).json()[-1]
+    assert meta["priors"]["source"] == "action_stats" and "situation_record" not in meta["priors"]
+
+
+def test_an_explore_on_the_situations_own_record_is_a_sweep_once_a_task_there_went_unsolved() -> None:
+    """Support #3/#11/#28/#30/#32 (2026-09-22): a house-rule class went
+    unsolved four times while the model, handed the untried to order by its
+    own judgement, chose the same intuitive actions each time. Once the
+    situation's own record holds an unsolved task, the explore is a sweep:
+    the order over the untried is the plan and the prose puts it in the
+    head. On a pooled record, or an exact one with nothing unsolved, the
+    explore stays an assignment."""
+    cands = ["resolve:a", "resolve:b", "resolve:c", "resolve:d"]
+    rows = [_sit_row("card declined", [("resolve:a", False), ("resolve:b", False)], outcome="failure")]
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    assert pr["n_unsolved"] == 1
+    pr["situation_record"] = {"situation": "card declined", "outcomes": 1}
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "explore" and rec["sweep"] is True
+    assert "your own pick has already failed on this situation (1 unsolved)" in rec["why"]
+    assert set(rec["plan"][:2]) == {"resolve:c", "resolve:d"}
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    first, second = rec["plan"][:2]
+    assert f"Try {first} first, then {second}. Do not repeat an action that failed on this task." in text
+    assert "Untried on this situation" not in text
+    assert "Do not spend an attempt on: resolve:a (0/1); resolve:b (0/1)" in text
+    # Pooled: the same rows are an assignment, and the untried stay a tail.
+    pooled = act.aggregate_priors(rows, candidate_actions=cands)
+    rec = act.recommend(pooled, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "explore" and "sweep" not in rec
+    assert "Untried on tasks like this" in act.render_priors(pooled, rec, candidate_actions=cands)
+
+
+def test_a_turned_action_another_has_won_since_is_superseded_not_hedged() -> None:
+    """CI run 2 (2026-09-22): after the change, ``rerun_job`` (6/7) lost on a
+    task nothing solved and ``edit_generated_file`` then won on the class.
+    With ``rerun_job`` still hedged second beside the new 1/1 winner, the
+    model took its own instinct on six of eight PRs; the hedge is for a
+    loss that may have been a flake, and a later win by another action says
+    it was not. Superseded: not in the plan's head or hedge, listed under
+    what not to spend an attempt on, and named as such in the tried line."""
+    cands = ["fix:fix_code", "fix:rerun_job", "fix:edit_generated_file", "fix:run_formatter"]
+    rows = [_sit_row("flaky", [("fix:rerun_job", True)], days_ago=d) for d in (6, 5, 4)]
+    rows.append(_sit_row("flaky", [("fix:rerun_job", False), ("fix:run_formatter", False)], outcome="failure", days_ago=2))
+    rows.append(_sit_row("flaky", [("fix:edit_generated_file", True)], days_ago=1))
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "flaky", "outcomes": 5}
+    rerun = next(t for t in pr["tried"] if t["action_key"] == "fix:rerun_job")
+    assert act.turned_unsolved(rerun) and act._superseded(rerun, pr["tried"])
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "fix:edit_generated_file"
+    assert rec["plan"][0] == "fix:edit_generated_file" and rec["plan"].index("fix:rerun_job") > 1
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    assert "fix:rerun_job 3/4, newest take lost on a task nothing solved and another action has won here since" in text
+    assert "fix:rerun_job (3/4, superseded here)" in text
+    assert "try fix:rerun_job next" not in text
+    assert "Try fix:edit_generated_file first." in text
+    # Without the later win, the same loss is still hedged.
+    pr2 = act.aggregate_priors(rows[:-1], candidate_actions=cands, situation_exact=True)
+    pr2["situation_record"] = {"situation": "flaky", "outcomes": 4}
+    rec2 = act.recommend(pr2, agent_id="a", candidate_actions=cands)
+    assert rec2["plan"][1] == "fix:rerun_job"
+    assert "try fix:rerun_job next" in act.render_priors(pr2, rec2, candidate_actions=cands)
+
+
+def test_a_sweep_is_ordered_by_the_entitys_record_elsewhere() -> None:
+    """Support run 2 (2026-09-22): after the change the three affected
+    classes' new fixes were found in 2, 8 and 9 attempts under a hash order,
+    and two of the three were the queue's top winners on other situations.
+    An action that is the fix somewhere on this queue is likelier to be a
+    house convention than one that never worked anywhere, so the sweep goes
+    most-won-elsewhere first; ties keep the agent's rotation."""
+    cands = ["resolve:a", "resolve:b", "resolve:c", "resolve:d", "resolve:e"]
+    pr = act.aggregate_priors(
+        [_sit_row("card declined", [("resolve:a", False), ("resolve:b", False)], outcome="failure")],
+        candidate_actions=cands, situation_exact=True,
+    )
+    pr["situation_record"] = {"situation": "card declined", "outcomes": 1}
+    pr["elsewhere"] = {"outcomes": 20, "tried": [
+        {"action_key": "resolve:e", "won": 9, "lost": 1, "n": 10, "p": 0.83},
+        {"action_key": "resolve:c", "won": 2, "lost": 0, "n": 2, "p": 0.75},
+        {"action_key": "resolve:a", "won": 5, "lost": 0, "n": 5, "p": 0.86},
+    ]}
+    assert act.sweep_order(pr, pr["untried"], "x")[:2] == ["resolve:e", "resolve:c"]
+    rec = act.recommend(pr, agent_id="x", candidate_actions=cands)
+    assert rec["sweep"] is True and rec["suggested_action"] == "resolve:e"
+    assert rec["plan"][:3] == ["resolve:e", "resolve:c", "resolve:d"]
+    assert "Try resolve:e first, then resolve:c -> resolve:d." in act.render_priors(pr, rec, candidate_actions=cands)
+    # No record elsewhere: the rotation, and the same first pick from both.
+    del pr["elsewhere"]
+    rec = act.recommend(pr, agent_id="x", candidate_actions=cands)
+    assert rec["plan"][0] == rec["suggested_action"] == act.sweep_order(pr, pr["untried"], "x")[0]
+    assert set(rec["plan"][:3]) == {"resolve:c", "resolve:d", "resolve:e"}
+
+
+def test_a_validated_hit_whose_action_is_off_the_table_is_spent() -> None:
+    """Ops-queue CI #25/#45 (2026-09-22): on the retry after the lesson's own
+    action failed, the validated hit still yielded ``act`` with no action,
+    and the plan's first untried was logged as the recommendation. A lesson
+    that says "X worked" when X is not among the caller's candidates is
+    spent on this task; with another worked action still available it is
+    not."""
+    lessons = [{"situation": "s", "action": "fix:a", "worked": True, "evidence_status": "validated"}]
+    pooled = {"tried": [], "untried": ["fix:c", "fix:d"]}
+    assert act.recommend(pooled, agent_id="x", candidate_actions=["fix:c", "fix:d"], lessons=lessons,
+                         top_hit_status="validated") is None
+    assert act.recommend(pooled, agent_id="x", candidate_actions=["fix:a", "fix:c"], lessons=lessons,
+                         top_hit_status="validated")["mode"] == "act"
+    two = lessons + [{"situation": "s", "action": "fix:c", "worked": True, "evidence_status": "validated"}]
+    assert act.recommend(pooled, agent_id="x", candidate_actions=["fix:c", "fix:d"], lessons=two,
+                         top_hit_status="validated")["mode"] == "act"
+
+
+def test_a_stopped_winner_is_the_plans_last_resort_so_its_record_can_recover() -> None:
+    """A turned or streaking action was never appended to the plan, so an
+    agent that follows the plan could never retry it and a 10/11 fix lost to
+    one flake stayed turned for good. It goes last — after the untried and
+    the plain failures — and stays out of the text's order."""
+    cands = ["fix:a", "fix:b", "fix:c"]
+    rows = [_sit_row("s", [("fix:a", True)], days_ago=d) for d in (5, 4, 3)]
+    rows.append(_sit_row("s", [("fix:a", False), ("fix:b", False)], outcome="failure", days_ago=2))
+    rows.append(_sit_row("s", [("fix:a", False), ("fix:b", False)], outcome="failure", days_ago=1))
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "s", "outcomes": 5}
+    a = next(t for t in pr["tried"] if t["action_key"] == "fix:a")
+    assert act.turned(a) and act._stopped_working(a)
+    rec = act.recommend(pr, agent_id="x", candidate_actions=cands)
+    assert rec["mode"] == "explore"
+    assert rec["plan"] == ["fix:c", "fix:b", "fix:a"]
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    assert "fix:a (3/5, stopped working)" in text
+    assert "fix:a" not in text.split("Try ")[-1].split(".")[0]
+
+
+def test_per_task_situation_labels_leave_the_block_pooled(client, server_mem) -> None:
+    """A caller that puts an ID in its situation gives every outcome a
+    distinct label. Read as classes, every record would be empty and the
+    priors would abstain for good where the pooled block served a winner;
+    when almost every labelled outcome is distinct, the block stays pooled
+    as for an undeclared situation. Recurring labels are classes."""
+    from amfs_http import server
+
+    cands = ["resolve:a", "resolve:b"]
+    noisy = [_sit_row(f"ticket SUP-{i}", [("resolve:a", True)], days_ago=i) for i in range(24)]
+    server_mem._adapter.similar_outcomes = lambda entity_path, embedding, **kw: []  # type: ignore[attr-defined]
+    server_mem._adapter.action_stats = lambda entity_path, **kw: list(noisy)  # type: ignore[attr-defined]
+    server._get_server_embedder = lambda: _StubEmbedder()
+    body = {"query": "ticket", "entity_path": "acme/support", "include_priors": True,
+            "agent_id": "a9", "candidate_actions": cands, "abstain": True}
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="ticket SUP-99")).json()[-1]
+    assert "situation_record" not in meta["priors"] and meta["priors"]["source"] == "action_stats"
+    assert meta["recommendation"]["mode"] == "act" and meta["recommendation"]["suggested_action"] == "resolve:a"
+    # Recurring labels: classes, and an unseen one abstains.
+    classes = [_sit_row(["card", "login"][i % 2], [("resolve:a", True)], days_ago=i) for i in range(24)]
+    server_mem._adapter.action_stats = lambda entity_path, **kw: list(classes)  # type: ignore[attr-defined]
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="export")).json()[-1]
+    assert meta["priors"]["situation_record"]["outcomes"] == 0
+    assert meta["recommendation"]["mode"] == "abstain"
+    # An entity's first outcomes are one per class, every label distinct:
+    # still classes — too few rows to call them per-task.
+    first = [_sit_row(f"class-{i}", [("resolve:a", True)], days_ago=i) for i in range(8)]
+    server_mem._adapter.action_stats = lambda entity_path, **kw: list(first)  # type: ignore[attr-defined]
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="class-9")).json()[-1]
+    assert meta["priors"]["situation_record"]["outcomes"] == 0
+    assert meta["recommendation"]["mode"] == "abstain"
+
+
+def test_a_contrast_does_not_act_on_a_b_that_turned_on_the_situations_own_record() -> None:
+    """Support run 5 #53 (2026-09-22): the export class's 6/6 winner lost on
+    #49, a ticket nothing solved. The contrast from the class's first ticket
+    (escalate failed, advise_workaround resolved) still said ``act`` on it:
+    the loss row sat 0.3 from the query while the contrast weighed 1.0, so the
+    weighted turn test forgave it. The lesson then put the action at the back
+    of the plan, and the agent read ``act`` over an untried action and
+    ignored it three times. On the situation's own record one unsolved loss
+    is the turn, whatever the weights; the recommendation is the sweep."""
+    cands = ["resolve:escalate", "resolve:workaround", "resolve:settings", "resolve:resend", "resolve:refund"]
+    first = _sit_row("export", [("resolve:escalate", False), ("resolve:workaround", True)], days_ago=6, sim=1.0)
+    first["actions_taken"][0]["attempt"] = 1   # a recorded attempt, then the terminal action: a contrast
+    rows = [first]
+    rows += [_sit_row("export", [("resolve:workaround", True)], days_ago=d, sim=0.9) for d in (5, 4, 3)]
+    rows.append(_sit_row(
+        "export", [("resolve:workaround", False), ("resolve:escalate", False)],
+        outcome="failure", days_ago=1, sim=0.3,
+    ))
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "export", "outcomes": len(rows)}
+    assert pr["contrasts"] and pr["contrasts"][0]["resolved_with"] == "resolve:workaround"
+    b = next(t for t in pr["tried"] if t["action_key"] == "resolve:workaround")
+    assert act.turned_unsolved(b) and not act._turned_since(b, 1.0)
+    lessons = [{"action": "resolve:workaround", "worked": False, "evidence_status": "validated"}]
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands, top_hit_status="validated", lessons=lessons)
+    assert rec["mode"] == "explore" and rec.get("sweep") is True
+    assert rec["suggested_action"] == rec["plan"][0] and rec["plan"][0] in ("resolve:settings", "resolve:resend", "resolve:refund")
+    assert "newest take lost on a task nothing solved" in rec["why"]
+
+
+def test_a_winner_the_caller_cannot_take_is_not_acted_on() -> None:
+    """Support run 5 #49 (2026-09-22): the retry asked over the actions not
+    yet tried on the ticket — the 6/6 winner had just failed on it and was off
+    the table — and was told ``act`` on that winner, so the rendered head
+    was the plan's first untried under an act label, and the model ignored
+    it. The mode is read over the candidates: with the winner excluded and
+    the rest of the record failed, the remaining untried are the explore."""
+    cands_all = ["resolve:workaround", "resolve:escalate", "resolve:settings", "resolve:resend"]
+    rows = [_sit_row("export", [("resolve:escalate", False), ("resolve:workaround", True)], days_ago=6)]
+    rows += [_sit_row("export", [("resolve:workaround", True)], days_ago=d) for d in (5, 4, 3)]
+    pr = act.aggregate_priors(rows, candidate_actions=cands_all, situation_exact=True)
+    pr["situation_record"] = {"situation": "export", "outcomes": len(rows)}
+    full = act.recommend(pr, agent_id="a", candidate_actions=cands_all)
+    assert full["mode"] == "act" and full["suggested_action"] == "resolve:workaround"
+    retry = act.recommend(pr, agent_id="a", candidate_actions=["resolve:escalate", "resolve:settings", "resolve:resend"])
+    assert retry["mode"] == "explore"
+    assert retry["suggested_action"] in ("resolve:settings", "resolve:resend")
+    assert retry["suggested_action"] == retry["plan"][0]
+    assert "resolve:workaround" not in retry["plan"]
+
+
+def test_a_clean_first_win_is_acted_on_whatever_its_posterior() -> None:
+    """Review of #446: a single win's Beta mean is at most 0.667, and the
+    neighbourhood weight or a day of decay on it drops under ``ACT_MIN_P`` —
+    the ``recommendation: null`` the exact first win was meant to end. The
+    clean first win (one take, no loss) is acted on without the gate; with a
+    loss on the record the gate applies."""
+    cands = ["resolve:a", "resolve:b", "resolve:c"]
+    pr = act.aggregate_priors(
+        [_sit_row("export", [("resolve:a", True)], days_ago=1, sim=0.4)],
+        candidate_actions=cands, situation_exact=True,
+    )
+    pr["situation_record"] = {"situation": "export", "outcomes": 1}
+    a = pr["tried"][0]
+    assert a["p"] < act.ACT_MIN_P and act._is_winner(a)
+    rec = act.recommend(pr, agent_id="x", candidate_actions=cands)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "resolve:a"
+    # One win, one earlier loss, newest a win: the posterior gate stands.
+    pr2 = act.aggregate_priors(
+        [_sit_row("export", [("resolve:a", False)], outcome="failure", days_ago=2, sim=0.4),
+         _sit_row("export", [("resolve:a", True)], days_ago=1, sim=0.4)],
+        candidate_actions=cands, situation_exact=True,
+    )
+    assert not act._is_winner(pr2["tried"][0])
+
+
+def test_a_sweep_never_names_an_action_a_lesson_barred() -> None:
+    """Review of #446: the sweep unions the untried into the evidence-backed
+    head. An action a lesson for this situation says did not work may be
+    untried by the record (another agent's memory, a scan cap) and must not
+    be named in the ``Try … first`` line."""
+    cands = ["resolve:a", "resolve:b", "resolve:c", "resolve:d"]
+    rows = [_sit_row("export", [("resolve:a", False)], outcome="failure", days_ago=1)]
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "export", "outcomes": 1}
+    lessons = [{"action": "resolve:b", "worked": False, "evidence_status": "validated"}]
+    rec = act.recommend(pr, agent_id="x", candidate_actions=cands, lessons=lessons)
+    assert rec["mode"] == "explore" and rec.get("sweep") is True
+    text = act.render_priors(pr, rec, candidate_actions=cands, lessons=lessons)
+    head = next(line for line in text.splitlines() if line.startswith("Try "))
+    assert "resolve:b" not in head and "resolve:c" in head
+
+
+def test_a_retry_whose_candidates_exclude_every_tried_action_still_explores() -> None:
+    """Review of #446: the record holds one action — the winner, just tried
+    and lost on this task — and the retry asks over the rest. With the
+    tried actions read over the candidates alone nothing is tried, and the
+    explore that needs a record would not fire; the record is what it
+    explores from."""
+    cands_all = ["resolve:a", "resolve:b", "resolve:c"]
+    rows = [_sit_row("export", [("resolve:a", True)], days_ago=d) for d in (3, 2, 1)]
+    pr = act.aggregate_priors(rows, candidate_actions=cands_all, situation_exact=True)
+    pr["situation_record"] = {"situation": "export", "outcomes": 3}
+    rec = act.recommend(pr, agent_id="x", candidate_actions=["resolve:b", "resolve:c"], top_hit_status="validated")
+    assert rec is not None and rec["mode"] == "explore"
+    assert rec["suggested_action"] in ("resolve:b", "resolve:c") and rec["plan"][0] == rec["suggested_action"]
+
+
+def test_a_situation_with_matches_is_partitioned_whatever_the_labels_elsewhere(client, server_mem) -> None:
+    """Review of #446: the per-task-label heuristic read every label on the
+    entity, so a client putting IDs in its situations pooled every other
+    caller's record — the wrong-class ``act`` the partition exists to stop.
+    A label that has matched is a class for this caller. And labels found
+    only elsewhere on the entity do not make an unlabelled neighbourhood
+    abstain: that is the older rows' pooled reading."""
+    from amfs_http import server
+
+    cands = ["resolve:a", "resolve:b"]
+    ids = [_sit_row(f"ticket SUP-{i}", [("resolve:a", True)], days_ago=i + 2) for i in range(30)]
+    mine = [_sit_row("export", [("resolve:a", False), ("resolve:b", True)], days_ago=1)]
+    server_mem._adapter.similar_outcomes = lambda entity_path, embedding, **kw: []  # type: ignore[attr-defined]
+    server_mem._adapter.action_stats = lambda entity_path, **kw: [*mine, *ids]  # type: ignore[attr-defined]
+    server._get_server_embedder = lambda: _StubEmbedder()
+    body = {"query": "export", "entity_path": "acme/support", "include_priors": True,
+            "agent_id": "a9", "candidate_actions": cands, "abstain": True}
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="export")).json()[-1]
+    assert meta["priors"]["situation_record"]["outcomes"] == 1
+    assert meta["recommendation"]["mode"] == "act" and meta["recommendation"]["suggested_action"] == "resolve:b"
+    # An unlabelled neighbourhood with labels only elsewhere on the entity: pooled, not an empty record.
+    legacy = [_row([("resolve:a", True)], days_ago=1, sim=0.9) for _ in range(3)]
+    classes = [_sit_row("card", [("resolve:b", True)], days_ago=i + 2) for i in range(5)]
+    server_mem._adapter.similar_outcomes = lambda entity_path, embedding, **kw: list(legacy)  # type: ignore[attr-defined]
+    server_mem._adapter.action_stats = lambda entity_path, **kw: [*legacy, *classes]  # type: ignore[attr-defined]
+    meta = client.post("/api/v1/retrieve", json=dict(body, situation="export")).json()[-1]
+    assert "situation_record" not in meta["priors"]
+    assert meta["recommendation"]["mode"] == "act" and meta["recommendation"]["suggested_action"] == "resolve:a"
+
+
+def test_a_stopped_action_is_never_in_the_try_line_whatever_an_old_contrast_or_lesson_says() -> None:
+    """Review of #446: after a class's fix changes, the contrast from before
+    the change still resolves with the old fix, and a lesson may still say it
+    worked. The record says it has stopped working — twice lost, or
+    superseded — and lists it under "do not spend an attempt on"; the same
+    block must not also name it in the ``Try … first`` line."""
+    cands = ["fix:old", "fix:new", "fix:other", "fix:more"]
+    first = _sit_row("flaky", [("fix:other", False), ("fix:old", True)], days_ago=8)
+    first["actions_taken"][0]["attempt"] = 1
+    rows = [first] + [_sit_row("flaky", [("fix:old", True)], days_ago=d) for d in (7, 6)]
+    rows += [_sit_row("flaky", [("fix:old", False), ("fix:more", False)], outcome="failure", days_ago=d) for d in (3, 2)]
+    rows.append(_sit_row("flaky", [("fix:new", True)], days_ago=1))
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "flaky", "outcomes": len(rows)}
+    old = next(t for t in pr["tried"] if t["action_key"] == "fix:old")
+    assert act._stopped_working(old) and pr["contrasts"][0]["resolved_with"] == "fix:old"
+    lessons = [{"action": "fix:old", "worked": True, "evidence_status": "validated"}]
+    rec = act.recommend(pr, agent_id="x", candidate_actions=cands, lessons=lessons)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "fix:new"
+    text = act.render_priors(pr, rec, candidate_actions=cands, lessons=lessons)
+    head = next(line for line in text.splitlines() if line.startswith("Try "))
+    assert "fix:old" not in head and head.startswith("Try fix:new first")
+    assert "Do not spend an attempt on: fix:old" in text
+
+
+def test_a_lesson_barred_action_is_not_offered_as_an_untried_choice() -> None:
+    """Review of #446: on a sweep the lesson-barred untried actions were kept
+    out of the head only to become the whole of the ``Untried … choose by
+    your own judgement`` tail. A lesson that an action did not work here is
+    not a live choice anywhere in the text."""
+    cands = ["resolve:a", "resolve:b", "resolve:c", "resolve:d"]
+    rows = [_sit_row("export", [("resolve:a", False)], outcome="failure", days_ago=1)]
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "export", "outcomes": 1}
+    lessons = [{"action": "resolve:b", "worked": False, "evidence_status": "validated"}]
+    rec = act.recommend(pr, agent_id="x", candidate_actions=cands, lessons=lessons)
+    text = act.render_priors(pr, rec, candidate_actions=cands, lessons=lessons)
+    assert "resolve:b" not in text.split("Do not spend", 1)[-1] or "Untried" not in text
+    assert not any(line.startswith("Untried") and "resolve:b" in line for line in text.splitlines())
+    # Without the sweep the same lesson keeps the action out of the tail too.
+    pr2 = act.aggregate_priors(
+        [_sit_row("export", [("resolve:a", True)], days_ago=1), _sit_row("export", [("resolve:a", True)], days_ago=2)],
+        candidate_actions=cands, situation_exact=True,
+    )
+    pr2["situation_record"] = {"situation": "export", "outcomes": 2}
+    rec2 = act.recommend(pr2, agent_id="x", candidate_actions=cands, lessons=lessons)
+    text2 = act.render_priors(pr2, rec2, candidate_actions=cands, lessons=lessons)
+    assert not any(line.startswith("Untried") and "resolve:b" in line for line in text2.splitlines())

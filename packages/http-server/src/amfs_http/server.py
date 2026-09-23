@@ -30,7 +30,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, timezone
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import uvicorn
@@ -1073,6 +1073,11 @@ def _resolved_actions_from_lessons(
     return out
 
 
+#: How many of the entity's newest outcomes are scanned for the declared
+#: situation's own record when the embedding neighbourhood holds none of it.
+SITUATION_RECORD_SCAN = 1000
+
+
 def _priors_for_retrieve(
     *,
     entity_path: str,
@@ -1081,6 +1086,7 @@ def _priors_for_retrieve(
     candidate_actions: list[str] | None,
     environment: Mapping[str, Any] | None = None,
     query_vector: list[float] | None = None,
+    situation: str | None = None,
 ) -> dict[str, Any] | None:
     """Action priors for ``entity_path`` on tasks like ``text``.
 
@@ -1092,6 +1098,16 @@ def _priors_for_retrieve(
     or nothing has been committed on the entity yet — so the caller sends
     nothing rather than a block whose only content is the candidate list the
     agent itself supplied.
+
+    With a declared *situation*, and outcomes in the neighbourhood that carry
+    one, the block is the **situation's own record**: the priors are
+    aggregated over the outcomes whose situation is this one
+    (``situation_record``: how many), and the rest of the neighbourhood is
+    reported separately under ``nearby`` — per situation, what was tried and
+    how it went — for the agent to weigh, never to be planned from. Two
+    situations that differ by one token embed within 0.02 of each other, so
+    text alone pools them; the label is what tells them apart. Outcomes
+    without a situation (older clients) leave the block pooled as before.
 
     Synchronous, and blocking on the sync adapter: callers on the event loop
     run it through ``_offload``. ``query_vector`` is the caller's embedding of
@@ -1136,11 +1152,83 @@ def _priors_for_retrieve(
         except Exception:  # noqa: BLE001
             logger.debug("action_stats failed", exc_info=True)
             rows = []
-    if not rows:
+    mine: list[dict[str, Any]] | None = None
+    others: list[dict[str, Any]] = []
+    elsewhere_rows: list[dict[str, Any]] = []
+    declared = _fold_situation(situation)
+    if declared and callable(stats):
+        # The situation's own record is an equality, not a neighbourhood.
+        # The embedding neighbourhood may hold none of it — a queue whose
+        # classes embed far apart returns no neighbour above the floor for a
+        # class seen once — and the fallback to the entity's whole record
+        # would then serve another class's winner as ``act``. Measured on
+        # the ops-queue support demo (2026-09-22): the first Android ticket
+        # was told ``act: explain_and_close`` from the webhook class's record
+        # and spent its three attempts on the entity's winners. So the exact
+        # rows come from the entity's record by situation, whatever the
+        # neighbourhood found; the neighbourhood supplies ``nearby``.
+        exact_rows = [r for r in rows if _fold_situation(r.get("situation")) == declared]
+        # The same scan gives the record *elsewhere* — the entity's other
+        # situations — which is what orders a sweep over the untried
+        # (``amfs_core.actions.sweep_order``).
+        try:
+            seen = {r.get("outcome_ref") for r in exact_rows}
+            for r in stats(entity_path, limit=SITUATION_RECORD_SCAN):
+                if _fold_situation(r.get("situation")) == declared:
+                    if r.get("outcome_ref") not in seen:
+                        exact_rows.append(r)
+                        seen.add(r.get("outcome_ref"))
+                else:
+                    elsewhere_rows.append(r)
+        except Exception:  # noqa: BLE001
+            logger.debug("action_stats by situation failed", exc_info=True)
+        # Partitioned when the situation has a record, or the neighbourhood
+        # itself carries labels (so an empty record means "not seen yet",
+        # not "older clients"). Labels found only elsewhere on the entity do
+        # not decide it: an unlabelled neighbourhood is the older rows'
+        # pooled reading, as promised.
+        labelled = bool(exact_rows) or any(r.get("situation") for r in rows)
+        # Labels that are not classes — a situation per task, an ID in it —
+        # would leave every record empty and the priors abstaining for
+        # good, where the pooled block served a winner before. When almost
+        # every scanned outcome carries a distinct label, the block stays
+        # pooled as for an undeclared situation. Only ever a question for a
+        # situation with no match: a label that has matched is a class for
+        # this caller, whatever other clients put in theirs.
+        if labelled and not exact_rows and not _labels_are_classes(elsewhere_rows):
+            labelled = False
+        if labelled:
+            mine = exact_rows
+            others = (
+                [r for r in rows if _fold_situation(r.get("situation")) != declared]
+                if source == "similar_outcomes" else []
+            )
+    if not rows and mine is None:
         return None
-    block = aggregate_priors(
-        rows, candidate_actions=candidate_actions, environment=environment or None
-    )
+    if mine is not None:
+        block = aggregate_priors(
+            mine, candidate_actions=candidate_actions, environment=environment or None,
+            situation_exact=True,
+        )
+        block["situation_record"] = {"situation": str(situation)[:200], "outcomes": len(mine)}
+        block["nearby"] = _nearby_record(others, environment=environment or None)
+        if elsewhere_rows:
+            elsewhere = aggregate_priors(elsewhere_rows, environment=environment or None)
+            block["elsewhere"] = {
+                "outcomes": len(elsewhere_rows),
+                "tried": [
+                    {k: t[k] for k in ("action_key", "won", "lost", "n", "p")}
+                    for t in elsewhere["tried"][:12]
+                ],
+            }
+        # The exact record is about this kind of task by construction; the
+        # label ``action_stats`` would have it read as the entity-wide pool.
+        if source != "similar_outcomes":
+            source = "situation_record"
+    else:
+        block = aggregate_priors(
+            rows, candidate_actions=candidate_actions, environment=environment or None
+        )
     block["source"] = source
     block["entity_path"] = entity_path
     if source == "similar_outcomes" and rows:
@@ -1149,6 +1237,64 @@ def _priors_for_retrieve(
             "outcomes": len(rows),
         }
     return block
+
+
+#: Below this many labelled outcomes the labels are taken as classes: too
+#: few to tell a class from a one-off — an entity's first outcomes are one
+#: per class, every label distinct, and a floor of 6 read a queue of eight
+#: classes as per-task strings at its seventh ticket (ops-queue support run
+#: 4, 2026-09-22: the pooled fallback served another class's winner, 4
+#: wasted). Classes recur well within twenty outcomes.
+LABELS_MIN_ROWS = 20
+#: Above this share of distinct labels among the labelled outcomes, the
+#: situation is a per-task string, not a class.
+LABELS_MAX_DISTINCT_RATIO = 0.9
+
+
+def _labels_are_classes(rows: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the situations on *rows* recur — a class label — rather than
+    naming each task once. Fewer than ``LABELS_MIN_ROWS`` labelled rows are
+    read as classes."""
+    labels = [_fold_situation(r.get("situation")) for r in rows if r.get("situation")]
+    if len(labels) < LABELS_MIN_ROWS:
+        return True
+    return len(set(labels)) / len(labels) <= LABELS_MAX_DISTINCT_RATIO
+
+
+def _fold_situation(value: Any) -> str:
+    """A situation label as compared: case- and whitespace-folded."""
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _nearby_record(
+    rows: list[dict[str, Any]], *, environment: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """The neighbourhood outside the declared situation, per situation:
+    ``{"outcomes": n, "by_situation": [{"situation", "outcomes", "tried":
+    [...]}]}``, nearest situation first, three at most. What the agent sees
+    as "on nearby kinds of task"; nothing here is planned from."""
+    from amfs_core.actions import aggregate_priors
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        groups.setdefault(_fold_situation(r.get("situation")) or "(unlabelled)", []).append(r)
+
+    def _nearness(items: list[dict[str, Any]]) -> float:
+        return max(float(r.get("task_similarity") or r.get("similarity") or 0.0) for r in items)
+
+    by_situation = []
+    for key, items in sorted(groups.items(), key=lambda kv: -_nearness(kv[1]))[:3]:
+        label = next((str(r.get("situation")) for r in items if r.get("situation")), key)
+        agg = aggregate_priors(items, environment=environment)
+        by_situation.append({
+            "situation": label[:200],
+            "outcomes": len(items),
+            "tried": [
+                {k: t[k] for k in ("action_key", "won", "lost", "n", "last_3") if k in t}
+                for t in agg["tried"][:6]
+            ],
+        })
+    return {"outcomes": len(rows), "by_situation": by_situation}
 
 
 def _get_visibility_filter(request: Request):
@@ -3247,6 +3393,7 @@ async def retrieve_entries(
             candidate_actions=req.candidate_actions,
             environment=environment,
             query_vector=priors_vec,
+            situation=req.situation,
         )
         top = head[0][0] if head else None
         top_bd = head[0][2] if head else {}

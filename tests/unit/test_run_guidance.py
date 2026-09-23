@@ -393,7 +393,9 @@ class TestLessonsAndPlan:
             "mode": "act", "suggested_action": "fix:rerun_job", "why": ""}})
         assert computed.plan[0] == "fix:rerun_job"
         assert set(computed.plan[1:]) == set(priors["untried"])
-        assert "Try in this order: fix:rerun_job -> fix:" in computed.text
+        assert "Try fix:rerun_job first." in computed.text
+        # The untried tail is a list for the agent's judgement, not an order.
+        assert "Untried on tasks like this: fix:edit_generated_file, fix:regen_migrations — the record cannot order these" in computed.text
         assert Guidance.build().plan == [] and Guidance.build().next_action is None
 
     def test_no_plan_without_an_act_or_explore(self) -> None:
@@ -406,10 +408,10 @@ class TestLessonsAndPlan:
                   "untried": ["fix:regen_migrations", "fix:add_audit_exception"], "source": "similar_outcomes"}
         silent = Guidance.build(meta={"priors": priors})
         assert silent.plan == [] and silent.next_action is None
-        assert "Try in this order" not in silent.text and "Do not spend" not in silent.text
+        assert "Try " not in silent.text and "Do not spend" not in silent.text
         abstained = Guidance.build(meta={"priors": priors, "recommendation": {"mode": "abstain", "why": "pooled"}})
         assert abstained.plan == [] and abstained.next_action is None
-        assert "Try in this order" not in abstained.text
+        assert "Try " not in abstained.text and "Untried" not in abstained.text
 
     def test_a_lesson_for_the_exact_situation_reorders_the_plan_and_the_text(self) -> None:
         """Ops-queue CI #45: the server's plan put bump_dependency second (it
@@ -450,7 +452,11 @@ class TestLessonsAndPlan:
         g = Guidance.build(hits=hits, meta={"priors": priors, "recommendation": rec}, task_text=task)
         assert [c["action"] for c in g.applicable_lessons] == ["fix:bump_dependency"]
         assert g.plan == ["fix:add_audit_exception", "fix:fix_code", "fix:update_snapshots", "fix:bump_dependency"]
-        assert "Try in this order: fix:add_audit_exception -> fix:fix_code -> fix:update_snapshots -> fix:bump_dependency." in g.text
+        # The text orders only what the record stands behind: the winner, and the
+        # action the neighbourhood's lesson says worked; the barred action is not
+        # "untried" and the untried tail is left to the agent's judgement.
+        assert "Try fix:add_audit_exception first." in g.text and "then fix:bump_dependency" not in g.text
+        assert "Untried on tasks like this: fix:fix_code, fix:update_snapshots —" in g.text
         # The jest lesson's action was not moved up: it is about another class.
         assert g.plan[1] != "fix:update_snapshots"
         # A declared situation is compared exactly and needs no task text.
@@ -478,14 +484,14 @@ class TestLessonsAndPlan:
         assert g.plan and "fix:bump_dependency" not in g.plan
         assert g.candidate_actions == ["fix:regen_migrations", "fix:add_audit_exception"]
         # The rendered order — what the agent actually reads — is filtered too.
-        assert "Try in this order:" in g.text
-        assert "fix:bump_dependency" not in g.text.split("Try in this order:")[1]
+        assert "Untried on tasks like this:" in g.text
+        assert "fix:bump_dependency" not in g.text.split("Untried on tasks like this:")[1]
         # A plan the server sent is filtered the same way, in the plan and in the text.
         sent = Guidance.build(meta={"priors": priors, "recommendation": dict(
             rec, plan=["fix:regen_migrations", "fix:bump_dependency", "fix:add_audit_exception"])},
             candidate_actions=["fix:regen_migrations", "fix:add_audit_exception"])
         assert sent.plan == ["fix:regen_migrations", "fix:add_audit_exception"]
-        assert "fix:bump_dependency" not in sent.text.split("Try in this order:")[1]
+        assert "fix:bump_dependency" not in sent.text.split("Untried on tasks like this:")[1]
         # A suggestion outside the candidates is no next action either: a server
         # asked without candidates may suggest the winner the retry has just
         # tried; the run must not be handed it back.
@@ -493,7 +499,7 @@ class TestLessonsAndPlan:
             "mode": "act", "suggested_action": "fix:bump_dependency", "why": "",
             "plan": ["fix:bump_dependency"]}}, candidate_actions=["fix:regen_migrations"])
         assert stale.plan == [] and stale.next_action is None
-        assert "Try in this order" not in stale.text
+        assert "Try " not in stale.text and "Untried" not in stale.text
         # Nor does the recommendation line name it: the mode and reason stay,
         # the barred action does not.
         assert "Recommendation: act." in stale.text and "-> fix:bump_dependency" not in stale.text
