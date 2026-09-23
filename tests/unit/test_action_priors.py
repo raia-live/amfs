@@ -1959,3 +1959,53 @@ def test_a_situation_with_matches_is_partitioned_whatever_the_labels_elsewhere(c
     meta = client.post("/api/v1/retrieve", json=dict(body, situation="export")).json()[-1]
     assert "situation_record" not in meta["priors"]
     assert meta["recommendation"]["mode"] == "act" and meta["recommendation"]["suggested_action"] == "resolve:a"
+
+
+def test_a_stopped_action_is_never_in_the_try_line_whatever_an_old_contrast_or_lesson_says() -> None:
+    """Review of #446: after a class's fix changes, the contrast from before
+    the change still resolves with the old fix, and a lesson may still say it
+    worked. The record says it has stopped working — twice lost, or
+    superseded — and lists it under "do not spend an attempt on"; the same
+    block must not also name it in the ``Try … first`` line."""
+    cands = ["fix:old", "fix:new", "fix:other", "fix:more"]
+    first = _sit_row("flaky", [("fix:other", False), ("fix:old", True)], days_ago=8)
+    first["actions_taken"][0]["attempt"] = 1
+    rows = [first] + [_sit_row("flaky", [("fix:old", True)], days_ago=d) for d in (7, 6)]
+    rows += [_sit_row("flaky", [("fix:old", False), ("fix:more", False)], outcome="failure", days_ago=d) for d in (3, 2)]
+    rows.append(_sit_row("flaky", [("fix:new", True)], days_ago=1))
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "flaky", "outcomes": len(rows)}
+    old = next(t for t in pr["tried"] if t["action_key"] == "fix:old")
+    assert act._stopped_working(old) and pr["contrasts"][0]["resolved_with"] == "fix:old"
+    lessons = [{"action": "fix:old", "worked": True, "evidence_status": "validated"}]
+    rec = act.recommend(pr, agent_id="x", candidate_actions=cands, lessons=lessons)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "fix:new"
+    text = act.render_priors(pr, rec, candidate_actions=cands, lessons=lessons)
+    head = next(line for line in text.splitlines() if line.startswith("Try "))
+    assert "fix:old" not in head and head.startswith("Try fix:new first")
+    assert "Do not spend an attempt on: fix:old" in text
+
+
+def test_a_lesson_barred_action_is_not_offered_as_an_untried_choice() -> None:
+    """Review of #446: on a sweep the lesson-barred untried actions were kept
+    out of the head only to become the whole of the ``Untried … choose by
+    your own judgement`` tail. A lesson that an action did not work here is
+    not a live choice anywhere in the text."""
+    cands = ["resolve:a", "resolve:b", "resolve:c", "resolve:d"]
+    rows = [_sit_row("export", [("resolve:a", False)], outcome="failure", days_ago=1)]
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "export", "outcomes": 1}
+    lessons = [{"action": "resolve:b", "worked": False, "evidence_status": "validated"}]
+    rec = act.recommend(pr, agent_id="x", candidate_actions=cands, lessons=lessons)
+    text = act.render_priors(pr, rec, candidate_actions=cands, lessons=lessons)
+    assert "resolve:b" not in text.split("Do not spend", 1)[-1] or "Untried" not in text
+    assert not any(line.startswith("Untried") and "resolve:b" in line for line in text.splitlines())
+    # Without the sweep the same lesson keeps the action out of the tail too.
+    pr2 = act.aggregate_priors(
+        [_sit_row("export", [("resolve:a", True)], days_ago=1), _sit_row("export", [("resolve:a", True)], days_ago=2)],
+        candidate_actions=cands, situation_exact=True,
+    )
+    pr2["situation_record"] = {"situation": "export", "outcomes": 2}
+    rec2 = act.recommend(pr2, agent_id="x", candidate_actions=cands, lessons=lessons)
+    text2 = act.render_priors(pr2, rec2, candidate_actions=cands, lessons=lessons)
+    assert not any(line.startswith("Untried") and "resolve:b" in line for line in text2.splitlines())

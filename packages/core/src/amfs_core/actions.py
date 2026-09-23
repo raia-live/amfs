@@ -1653,13 +1653,13 @@ def render_priors(
         lines.append("Do not spend an attempt on: " + "; ".join(avoid) + f" — these failed {here}.")
     backed = _evidence_backed(plan, tried, contrasts if local else [], lessons, recommendation)
     hedged_keys = {str(t.get("action_key")) for t in hedged}
+    # An action a lesson for this situation says did not work is not a live
+    # choice anywhere in the text: the record may not hold that attempt
+    # (another agent's memory, a scan cap), but the lesson does.
+    barred = _lesson_barred(lessons)
     if (recommendation or {}).get("sweep"):
         # The agent's judgement has failed on this exact situation; the
-        # order over the untried is the plan, not a hint. Still never an
-        # action a lesson for this situation says did not work: the record
-        # may not hold that attempt (another agent's memory, a scan cap),
-        # but the lesson does.
-        barred = _lesson_barred(lessons)
+        # order over the untried is the plan, not a hint.
         backed = backed | {a for a in plan if a in set(untried) and a not in barred}
     head = [a for a in plan if a in backed and a not in hedged_keys]
     hedge = [a for a in plan if a in hedged_keys]
@@ -1667,7 +1667,10 @@ def render_priors(
     # The candidates' own order, not the plan's: the plan rotates them by the
     # agent's name so a fleet spreads out, and a list said to be unordered
     # should not carry an order.
-    tail = [u for u in untried if u in in_plan and u not in backed and u not in hedged_keys]
+    tail = [
+        u for u in untried
+        if u in in_plan and u not in backed and u not in hedged_keys and u not in barred
+    ]
     if head:
         line = f"Try {head[0]} first"
         if head[1:]:
@@ -1715,8 +1718,14 @@ def _evidence_backed(
     if recommendation and recommendation.get("mode") == "act" and recommendation.get("suggested_action"):
         out.add(str(recommendation["suggested_action"]))
     # A lesson for this situation that says the action did not work outranks
-    # the pooled record that has it winning: not named in the order.
-    barred = _lesson_barred(lessons)
+    # the pooled record that has it winning: not named in the order. Nor is
+    # an action the record says has stopped working, whatever an older
+    # contrast or lesson still claims for it: after a class's fix changes,
+    # the contrast from before the change still resolves with the old fix,
+    # and the same block lists it under "do not spend an attempt on".
+    barred = _lesson_barred(lessons) | {
+        str(t.get("action_key")) for t in tried if _stopped_working(t)
+    }
     return {a for a in out if a in set(plan) and a not in barred}
 
 
