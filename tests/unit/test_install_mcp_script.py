@@ -63,8 +63,11 @@ def _run(args: str, snippet: str, tmp_path: Path) -> str:
     parsing, and neither is used here.
     """
     script = _sourceable(tmp_path)
+    # XDG_CONFIG_HOME is part of the path on Linux, and a runner may have one
+    # set that points outside the fake HOME every test writes under.
     program = f"""
 set -euo pipefail
+unset XDG_CONFIG_HOME
 # shellcheck disable=SC1090
 source {script!s} {args}
 {snippet}
@@ -428,16 +431,23 @@ class TestVSCodeIsWrittenWhereAndHowVSCodeReads:
     alone was enough to make the success line a lie.
     """
 
-    def _path(self, home: Path, tmp_path: Path, uname: str = "Darwin") -> Path:
+    def _path(
+        self, home: Path, tmp_path: Path, uname: str, xdg: str | None = None
+    ) -> Path:
         """Ask the script for the path under a fake HOME and a chosen platform.
 
-        `OS` is set once at parse time from `uname -s`, so the platform is
-        chosen by stubbing `uname` before the script is sourced rather than by
-        assigning the variable after.
+        For the tests about the *shape* of the path only. `OS` is set once at
+        parse time from `uname -s`, so the platform is chosen by stubbing
+        `uname` before the script is sourced rather than by assigning the
+        variable after. Everything that runs the script for real uses
+        `_native`, because the script writes where the machine it runs on
+        says, and CI is Linux while a laptop is usually not.
         """
         script = _sourceable(tmp_path)
+        xdg_line = f"export XDG_CONFIG_HOME={xdg}\n" if xdg else "unset XDG_CONFIG_HOME\n"
         program = (
             "set -euo pipefail\n"
+            f"{xdg_line}"
             f"uname() {{ echo {uname}; }}\n"
             f"HOME={home!s}\n"
             f"source {script!s}\n"
@@ -448,6 +458,12 @@ class TestVSCodeIsWrittenWhereAndHowVSCodeReads:
         )
         assert proc.returncode == 0, proc.stderr
         return Path(proc.stdout.strip())
+
+    def _native(self, home: Path, tmp_path: Path, product: str = "Code") -> Path:
+        """The path the script will actually use on the platform running the test."""
+        return Path(
+            _run("", f'HOME={home!s} vscode_config_path "{product}"', tmp_path).strip()
+        )
 
     def _configure(self, args: str, tmp_path: Path, home: Path) -> str:
         return _run(
@@ -464,6 +480,13 @@ class TestVSCodeIsWrittenWhereAndHowVSCodeReads:
         home = tmp_path / "home"
         assert self._path(home, tmp_path, "Linux") == (
             home / ".config" / "Code" / "User" / "mcp.json"
+        )
+
+    def test_on_linux_an_xdg_config_home_is_honoured(self, tmp_path: Path) -> None:
+        """VS Code follows it, so a person who moved their config keeps it."""
+        home = tmp_path / "home"
+        assert self._path(home, tmp_path, "Linux", xdg="/srv/cfg") == Path(
+            "/srv/cfg/Code/User/mcp.json"
         )
 
     def test_it_is_never_the_extensions_cache(self, tmp_path: Path) -> None:
@@ -503,7 +526,7 @@ class TestVSCodeIsWrittenWhereAndHowVSCodeReads:
         self, tmp_path: Path
     ) -> None:
         home = tmp_path / "home"
-        path = self._path(home, tmp_path, "Darwin")
+        path = self._native(home, tmp_path)
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({
             "inputs": [{"id": "tok", "type": "promptString"}],
@@ -521,7 +544,7 @@ class TestVSCodeIsWrittenWhereAndHowVSCodeReads:
         self, tmp_path: Path
     ) -> None:
         home = tmp_path / "home"
-        path = self._path(home, tmp_path, "Darwin")
+        path = self._native(home, tmp_path)
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({
             "servers": {
@@ -540,7 +563,7 @@ class TestVSCodeIsWrittenWhereAndHowVSCodeReads:
     def test_uninstall_keeps_the_key_it_takes_away(self, tmp_path: Path) -> None:
         """The backup reads the same key the write does, or it finds nothing."""
         home = tmp_path / "home"
-        path = self._path(home, tmp_path, "Darwin")
+        path = self._native(home, tmp_path)
         path.parent.mkdir(parents=True)
         key = "amfs_xZnxjg8Jhl1Sd0liWX2uga_g9qdqgo18xSKDBbMtJaU"
         path.write_text(json.dumps({
@@ -585,9 +608,9 @@ class TestVSCodeIsWrittenWhereAndHowVSCodeReads:
         """Each build keeps its own User folder; a file for VS Code proper does
         nothing for someone running Insiders."""
         home = tmp_path / "home"
-        stable = self._path(home, tmp_path, "Darwin")
-        insiders = stable.parent.parent.parent / "Code - Insiders" / "User" / "mcp.json"
-        codium = stable.parent.parent.parent / "VSCodium" / "User" / "mcp.json"
+        stable = self._native(home, tmp_path)
+        insiders = self._native(home, tmp_path, "Code - Insiders")
+        codium = self._native(home, tmp_path, "VSCodium")
         insiders.parent.mkdir(parents=True)
         codium.parent.mkdir(parents=True)
 
@@ -610,7 +633,7 @@ class TestVSCodeIsWrittenWhereAndHowVSCodeReads:
         out = self._configure("", tmp_path, home)
 
         assert out.count("Configured") == 1
-        assert self._path(home, tmp_path, "Darwin").exists()
+        assert self._native(home, tmp_path).exists()
 
     # ── The file the old installer wrote ──────────────────────────────────
 
