@@ -416,6 +416,453 @@ class TestClientsThatCannotHoldAUrl:
         assert "https://mcp.sense-lab.ai/mcp" in written[0].read_text()
 
 
+class TestVSCodeIsWrittenWhereAndHowVSCodeReads:
+    """VS Code, which was "Configured" for as long as the script has known it
+    without VS Code ever loading the server.
+
+    Two things were wrong at once. The file went to `~/.vscode/mcp.json`, and
+    `~/.vscode` is the extensions cache — the `.vscode/mcp.json` VS Code does
+    read is the *workspace* form, relative to a project. And the entry went
+    under `"mcpServers"`, the key every other JSON client uses, where VS Code's
+    schema names it `"servers"` and ignores anything else without a word. Each
+    alone was enough to make the success line a lie.
+    """
+
+    def _path(self, home: Path, tmp_path: Path, uname: str = "Darwin") -> Path:
+        """Ask the script for the path under a fake HOME and a chosen platform.
+
+        `OS` is set once at parse time from `uname -s`, so the platform is
+        chosen by stubbing `uname` before the script is sourced rather than by
+        assigning the variable after.
+        """
+        script = _sourceable(tmp_path)
+        program = (
+            "set -euo pipefail\n"
+            f"uname() {{ echo {uname}; }}\n"
+            f"HOME={home!s}\n"
+            f"source {script!s}\n"
+            "vscode_config_path\n"
+        )
+        proc = subprocess.run(
+            ["bash", "-c", program], capture_output=True, text=True, timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+        return Path(proc.stdout.strip())
+
+    def _configure(self, args: str, tmp_path: Path, home: Path) -> str:
+        return _run(
+            args, f"HOME={home!s} configure_client vscode 2>&1 || true", tmp_path
+        )
+
+    def test_on_macos_it_is_the_user_profile_folder(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        assert self._path(home, tmp_path, "Darwin") == (
+            home / "Library" / "Application Support" / "Code" / "User" / "mcp.json"
+        )
+
+    def test_on_linux_it_is_under_xdg_config(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        assert self._path(home, tmp_path, "Linux") == (
+            home / ".config" / "Code" / "User" / "mcp.json"
+        )
+
+    def test_it_is_never_the_extensions_cache(self, tmp_path: Path) -> None:
+        """The path that was written for as long as VS Code was supported."""
+        home = tmp_path / "home"
+        for uname in ("Darwin", "Linux"):
+            assert self._path(home, tmp_path, uname) != home / ".vscode" / "mcp.json"
+
+    def test_the_stdio_entry_goes_under_servers(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        home.mkdir()
+
+        out = self._configure("--api-key amfs_k", tmp_path, home)
+
+        assert "Configured VS Code" in out
+        written = json.loads(self._written(home).read_text())
+        assert "mcpServers" not in written
+        entry = written["servers"]["senselab"]
+        assert entry["args"] == ["--refresh", "amfs-mcp-server-pro"]
+        assert entry["env"]["AMFS_API_KEY"] == "amfs_k"
+
+    def test_the_remote_entry_goes_under_servers_too(self, tmp_path: Path) -> None:
+        """VS Code takes the URL form, so it is written rather than told."""
+        home = tmp_path / "home"
+        home.mkdir()
+
+        out = self._configure("--remote", tmp_path, home)
+
+        assert "Configured VS Code" in out
+        assert "cannot be configured from here" not in out
+        written = json.loads(self._written(home).read_text())
+        assert written["servers"]["senselab"] == {
+            "type": "http", "url": "https://mcp.sense-lab.ai/mcp",
+        }
+
+    def test_it_merges_into_an_existing_file_without_touching_other_servers(
+        self, tmp_path: Path
+    ) -> None:
+        home = tmp_path / "home"
+        path = self._path(home, tmp_path, "Darwin")
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({
+            "inputs": [{"id": "tok", "type": "promptString"}],
+            "servers": {"github": {"type": "http", "url": "https://x/mcp"}},
+        }))
+
+        self._configure("", tmp_path, home)
+
+        written = json.loads(path.read_text())
+        assert written["inputs"] == [{"id": "tok", "type": "promptString"}]
+        assert written["servers"]["github"] == {"type": "http", "url": "https://x/mcp"}
+        assert written["servers"]["senselab"]["args"] == ["--refresh", "amfs-mcp-server"]
+
+    def test_uninstall_removes_the_entry_from_under_servers(
+        self, tmp_path: Path
+    ) -> None:
+        home = tmp_path / "home"
+        path = self._path(home, tmp_path, "Darwin")
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({
+            "servers": {
+                "senselab": {"command": "uvx", "args": ["amfs-mcp-server"]},
+                "github": {"type": "http", "url": "https://x/mcp"},
+            }
+        }))
+
+        out = self._configure("--uninstall", tmp_path, home)
+
+        assert "Removed AMFS from VS Code" in out
+        written = json.loads(path.read_text())
+        assert "senselab" not in written["servers"]
+        assert written["servers"]["github"]
+
+    def test_uninstall_keeps_the_key_it_takes_away(self, tmp_path: Path) -> None:
+        """The backup reads the same key the write does, or it finds nothing."""
+        home = tmp_path / "home"
+        path = self._path(home, tmp_path, "Darwin")
+        path.parent.mkdir(parents=True)
+        key = "amfs_xZnxjg8Jhl1Sd0liWX2uga_g9qdqgo18xSKDBbMtJaU"
+        path.write_text(json.dumps({
+            "servers": {"senselab": {"command": "uvx", "env": {"AMFS_API_KEY": key}}}
+        }))
+
+        out = self._configure("--uninstall", tmp_path, home)
+
+        backups = sorted(path.parent.glob(f"{path.name}.senselab-backup-*"))
+        assert len(backups) == 1
+        assert key in backups[0].read_text()
+        assert "Kept a copy" in out
+
+    def test_it_is_detected_by_the_user_folder_not_the_extensions_cache(
+        self, tmp_path: Path
+    ) -> None:
+        """`~/.vscode` exists on machines that have never run VS Code."""
+        home = tmp_path / "home"
+        (home / ".vscode").mkdir(parents=True)
+
+        detect = (
+            f"HOME={home!s} detect_clients\n"
+            'printf "%s\\n" "${DETECTED_CLIENTS[@]+"${DETECTED_CLIENTS[@]}"}"'
+        )
+        assert "vscode" not in _run("", detect, tmp_path).split()
+
+        # The path for whatever platform the test is running on.
+        native = Path(_run("", f"HOME={home!s} vscode_config_path", tmp_path).strip())
+        native.parent.mkdir(parents=True)
+        assert "vscode" in _run("", detect, tmp_path).split()
+
+    def _written(self, home: Path) -> Path:
+        found = [p for p in home.rglob("mcp.json") if ".vscode" not in p.parts]
+        assert len(found) == 1, found
+        return found[0]
+
+    # ── Other builds ──────────────────────────────────────────────────────
+
+    def test_insiders_and_vscodium_are_written_where_they_read(
+        self, tmp_path: Path
+    ) -> None:
+        """Each build keeps its own User folder; a file for VS Code proper does
+        nothing for someone running Insiders."""
+        home = tmp_path / "home"
+        stable = self._path(home, tmp_path, "Darwin")
+        insiders = stable.parent.parent.parent / "Code - Insiders" / "User" / "mcp.json"
+        codium = stable.parent.parent.parent / "VSCodium" / "User" / "mcp.json"
+        insiders.parent.mkdir(parents=True)
+        codium.parent.mkdir(parents=True)
+
+        out = self._configure("--remote", tmp_path, home)
+
+        assert "Configured VS Code Insiders" in out
+        assert "Configured VSCodium" in out
+        assert not stable.exists(), "not installed here, so nothing to write"
+        for path in (insiders, codium):
+            assert json.loads(path.read_text())["servers"]["senselab"]["type"] == "http"
+
+    def test_a_machine_with_none_launched_gets_vscode_proper(
+        self, tmp_path: Path
+    ) -> None:
+        """An explicit `--client vscode` before the first launch: the file is
+        created where VS Code will look on that first launch."""
+        home = tmp_path / "home"
+        home.mkdir()
+
+        out = self._configure("", tmp_path, home)
+
+        assert out.count("Configured") == 1
+        assert self._path(home, tmp_path, "Darwin").exists()
+
+    # ── The file the old installer wrote ──────────────────────────────────
+
+    def _legacy_file(self, home: Path, extra: dict | None = None, key: str | None = None) -> Path:
+        legacy = home / ".vscode" / "mcp.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        servers = {"senselab": {"command": "uvx", "args": ["--refresh", "amfs-mcp-server-pro"]}}
+        if key:
+            servers["senselab"]["env"] = {"AMFS_API_KEY": key}
+        servers.update(extra or {})
+        legacy.write_text(json.dumps({"mcpServers": servers}))
+        return legacy
+
+    def test_it_deletes_the_stale_file_the_old_installer_wrote(
+        self, tmp_path: Path
+    ) -> None:
+        """`~/.vscode/mcp.json` was never read; when all it holds is our entry
+        it was ours, and leaving it invites someone to edit the wrong file."""
+        home = tmp_path / "home"
+        legacy = self._legacy_file(home)
+
+        out = self._configure("", tmp_path, home)
+
+        assert not legacy.exists()
+        assert "never read" in out
+
+    def test_it_only_removes_our_entry_when_the_stale_file_has_others(
+        self, tmp_path: Path
+    ) -> None:
+        home = tmp_path / "home"
+        legacy = self._legacy_file(home, extra={"theirs": {"command": "node"}})
+
+        self._configure("", tmp_path, home)
+
+        left = json.loads(legacy.read_text())
+        assert "senselab" not in left["mcpServers"]
+        assert left["mcpServers"]["theirs"]
+
+    def test_the_key_in_the_stale_file_is_kept(self, tmp_path: Path) -> None:
+        """It may be the only copy: the old file was where `--api-key` went."""
+        home = tmp_path / "home"
+        key = "amfs_xZnxjg8Jhl1Sd0liWX2uga_g9qdqgo18xSKDBbMtJaU"
+        legacy = self._legacy_file(home, key=key)
+
+        out = self._configure("", tmp_path, home)
+
+        backups = sorted(legacy.parent.glob("mcp.json.senselab-backup-*"))
+        assert len(backups) == 1
+        assert key in backups[0].read_text()
+        assert "Kept a copy" in out
+
+    def test_uninstall_also_retires_the_stale_file(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        legacy = self._legacy_file(home)
+
+        self._configure("--uninstall", tmp_path, home)
+
+        assert not legacy.exists()
+
+    def test_a_stale_file_without_our_entry_is_not_touched(
+        self, tmp_path: Path
+    ) -> None:
+        """Someone may genuinely use ~ as a workspace; that file is theirs."""
+        home = tmp_path / "home"
+        legacy = home / ".vscode" / "mcp.json"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text('{"servers": {"theirs": {"command": "node"}}}')
+        before = legacy.read_text()
+
+        out = self._configure("", tmp_path, home)
+
+        assert legacy.read_text() == before
+        assert "never read" not in out
+
+
+class TestACommentedConfigFileIsNotDestroyed:
+    """A config file that is JSONC rather than JSON, which VS Code's are.
+
+    VS Code's own documentation writes `//` comments and trailing commas into
+    its `mcp.json` examples, and the habit carries to Cursor's. `json.load`
+    refuses those, and the merge used to answer the refusal with an empty
+    object — so the file was rewritten around our one entry and every other
+    server the person had was gone, under a line that said "Configured".
+    """
+
+    COMMENTED = """{
+    // servers I use
+    "mcpServers": {
+        "github": {
+            "type": "http",
+            "url": "https://api.githubcopilot.com/mcp", // hosted
+        },
+        /* keep */ "files": { "command": "npx", "args": ["-y", "mcp-fs"] },
+    },
+}
+"""
+
+    def _cursor_file(self, home: Path, text: str, tmp_path: Path) -> Path:
+        home.mkdir(exist_ok=True)
+        path = Path(_run("", f"HOME={home!s} cursor_config_path", tmp_path).strip())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    def _configure(self, client: str, args: str, tmp_path: Path, home: Path) -> str:
+        return _run(
+            args, f"HOME={home!s} configure_client {client} 2>&1 || true", tmp_path
+        )
+
+    def test_the_other_servers_survive_the_merge(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        path = self._cursor_file(home, self.COMMENTED, tmp_path)
+
+        out = self._configure("cursor", "--remote", tmp_path, home)
+
+        assert "Configured Cursor" in out
+        written = json.loads(path.read_text())
+        assert written["mcpServers"]["github"]["url"] == "https://api.githubcopilot.com/mcp"
+        assert written["mcpServers"]["files"]["args"] == ["-y", "mcp-fs"]
+        assert written["mcpServers"]["senselab"]["type"] == "http"
+
+    def test_the_comments_are_kept_in_a_copy_and_the_person_is_told(
+        self, tmp_path: Path
+    ) -> None:
+        """Comments cannot survive a JSON rewrite. Losing them silently is
+        the smaller version of losing the servers silently."""
+        home = tmp_path / "home"
+        path = self._cursor_file(home, self.COMMENTED, tmp_path)
+
+        out = self._configure("cursor", "", tmp_path, home)
+
+        backups = sorted(path.parent.glob("mcp.json.senselab-backup-*"))
+        assert len(backups) == 1
+        assert backups[0].read_text() == self.COMMENTED
+        assert "had comments" in out
+
+    def test_a_plain_json_file_gets_no_such_copy(self, tmp_path: Path) -> None:
+        """Nothing is lost, so a copy would be litter."""
+        home = tmp_path / "home"
+        path = self._cursor_file(
+            home, json.dumps({"mcpServers": {"x": {"command": "y"}}}), tmp_path
+        )
+
+        out = self._configure("cursor", "", tmp_path, home)
+
+        assert list(path.parent.glob("mcp.json.senselab-backup-*")) == []
+        assert "had comments" not in out
+
+    def test_comment_markers_inside_strings_are_not_comments(
+        self, tmp_path: Path
+    ) -> None:
+        home = tmp_path / "home"
+        path = self._cursor_file(home, """{
+    "mcpServers": {
+        "web": { "type": "http", "url": "https://x.example/mcp" }, // real comment
+    }
+}""", tmp_path)
+
+        self._configure("cursor", "", tmp_path, home)
+
+        assert json.loads(path.read_text())["mcpServers"]["web"]["url"] == "https://x.example/mcp"
+
+    def test_a_file_that_is_not_json_at_all_is_left_alone(
+        self, tmp_path: Path
+    ) -> None:
+        """The case the old fallback destroyed. Nothing is written; the block
+        is printed for the person to paste; it is not called "Configured"."""
+        home = tmp_path / "home"
+        broken = '{"mcpServers": {"x": {"command": "y"}'  # missing brace
+        path = self._cursor_file(home, broken, tmp_path)
+
+        out = self._configure("cursor", "--api-key amfs_k", tmp_path, home)
+
+        assert path.read_text() == broken
+        assert "Configured" not in out
+        assert "left untouched" in out
+        assert '"senselab":' in out and "amfs-mcp-server-pro" in out
+
+    def test_a_top_level_array_is_left_alone_too(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        path = self._cursor_file(home, "[]", tmp_path)
+
+        out = self._configure("cursor", "", tmp_path, home)
+
+        assert path.read_text() == "[]"
+        assert "left untouched" in out
+
+    def test_an_empty_file_is_treated_as_an_empty_config(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        path = self._cursor_file(home, "", tmp_path)
+
+        out = self._configure("cursor", "", tmp_path, home)
+
+        assert "Configured Cursor" in out
+        assert json.loads(path.read_text())["mcpServers"]["senselab"]
+
+    def test_the_unwritable_file_counts_as_a_manual_step_in_the_summary(
+        self, tmp_path: Path
+    ) -> None:
+        """End to end: the closing lines must not tell them to restart."""
+        home = tmp_path / "home"
+        self._cursor_file(home, "{not json", tmp_path)
+        proc = subprocess.run(
+            ["bash", str(SCRIPT), "--remote", "--client", "cursor", "--yes"],
+            capture_output=True, text=True, timeout=120,
+            env={"HOME": str(home), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+        )
+        out = proc.stdout + proc.stderr
+        assert "Nothing was configured automatically" in out
+        assert "Restart your IDE" not in out
+
+    def test_uninstall_from_a_commented_file_removes_only_our_entry(
+        self, tmp_path: Path
+    ) -> None:
+        home = tmp_path / "home"
+        path = self._cursor_file(home, """{
+    // mine
+    "mcpServers": {
+        "senselab": { "command": "uvx", "args": ["amfs-mcp-server"] },
+        "github": { "type": "http", "url": "https://x/mcp" },
+    }
+}""", tmp_path)
+
+        out = self._configure("cursor", "--uninstall", tmp_path, home)
+
+        written = json.loads(path.read_text())
+        assert "senselab" not in written["mcpServers"]
+        assert written["mcpServers"]["github"]
+        assert "had comments" in out
+
+    def test_the_remote_migration_reads_a_commented_file(
+        self, tmp_path: Path
+    ) -> None:
+        """Claude Desktop's told-by-hand path: the old stdio entry has to be
+        found, and removed, through the comments."""
+        home = tmp_path / "home"
+        home.mkdir()
+        path = Path(_run("", f"HOME={home!s} claude_desktop_config_path", tmp_path).strip())
+        path.parent.mkdir(parents=True)
+        path.write_text("""{
+    "mcpServers": {
+        // old install
+        "senselab": { "command": "uvx", "args": ["amfs-mcp-server"] },
+    },
+}""")
+
+        out = self._configure("claude-desktop", "--remote", tmp_path, home)
+
+        assert "Removed the old local" in out
+        assert "senselab" not in json.loads(path.read_text())["mcpServers"]
+
+
 class TestTheKeyOnDiskSurvivesBeingReplaced:
     """The `senselab` block is the only copy of the user's API key.
 

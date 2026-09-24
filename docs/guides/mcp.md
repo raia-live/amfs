@@ -244,6 +244,32 @@ Add to `~/.claude/claude_desktop_config.json`:
 
 The MCP server automatically sends agent instructions to Claude Code when it connects. For additional customization, you can optionally copy `CLAUDE.md` to your project root.
 
+### VS Code
+
+VS Code differs from the other clients in two ways: the top-level key is `servers` (not `mcpServers`), and the user-level file lives in the User profile folder — not `~/.vscode`, which is the extensions cache. Open it with **MCP: Open User Configuration**, or edit it directly:
+
+- macOS: `~/Library/Application Support/Code/User/mcp.json`
+- Linux: `~/.config/Code/User/mcp.json`
+- Windows: `%APPDATA%\Code\User\mcp.json`
+
+```json
+{
+  "servers": {
+    "amfs": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory", "/absolute/path/to/amfs",
+        "amfs-mcp-server"
+      ],
+      "env": {}
+    }
+  }
+}
+```
+
+For a per-project setup, put the same block in `.vscode/mcp.json` at the project root. The installer writes the user-level file for every build it finds installed (VS Code, VS Code Insiders, VSCodium). If the file has `//` comments or trailing commas, the installer merges into it anyway and keeps a copy of the original beside it, since comments cannot survive a JSON rewrite.
+
 ---
 
 ## Step 3: Verify
