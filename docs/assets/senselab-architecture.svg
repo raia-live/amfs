@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 660" width="1200" height="660" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#a8a3c9"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="660" fill="#ffffff"/>
+
+  <!-- Row labels -->
+  <text x="26" y="88" font-size="11.5" font-weight="600" fill="#8d89a3" letter-spacing="1">YOUR AGENTS</text>
+  <text x="26" y="222" font-size="11.5" font-weight="600" fill="#8d89a3" letter-spacing="1">SENSELAB</text>
+  <text x="26" y="574" font-size="11.5" font-weight="600" fill="#8d89a3" letter-spacing="1">STORAGE</text>
+
+  <!-- Agents row -->
+  <rect x="150" y="40" width="300" height="80" rx="12" fill="#ffffff" stroke="#cdc8f5" stroke-width="1.5"/>
+  <text x="300" y="68" font-size="14" font-weight="700" fill="#2f2b3d" text-anchor="middle">Coding agents over MCP</text>
+  <text x="300" y="90" font-size="12" fill="#5c5870" text-anchor="middle">Cursor · Claude Code · VS Code · Codex</text>
+  <text x="300" y="108" font-size="12" fill="#5c5870" text-anchor="middle">Windsurf · Gemini CLI · Claude Desktop</text>
+
+  <rect x="470" y="40" width="300" height="80" rx="12" fill="#ffffff" stroke="#cdc8f5" stroke-width="1.5"/>
+  <text x="620" y="68" font-size="14" font-weight="700" fill="#2f2b3d" text-anchor="middle">Agent frameworks</text>
+  <text x="620" y="90" font-size="12" fill="#5c5870" text-anchor="middle">Strands · CrewAI · LangGraph</text>
+  <text x="620" y="108" font-size="12" fill="#5c5870" text-anchor="middle">LangChain · AutoGen</text>
+
+  <rect x="790" y="40" width="300" height="80" rx="12" fill="#ffffff" stroke="#cdc8f5" stroke-width="1.5"/>
+  <text x="940" y="68" font-size="14" font-weight="700" fill="#2f2b3d" text-anchor="middle">Your own code</text>
+  <text x="940" y="90" font-size="12" fill="#5c5870" text-anchor="middle">Python SDK · TypeScript SDK</text>
+  <text x="940" y="108" font-size="12" fill="#5c5870" text-anchor="middle">REST API · CLI</text>
+
+  <!-- Arrows down into the engine -->
+  <path d="M 300 122 L 300 152" fill="none" stroke="#a8a3c9" stroke-width="2" marker-end="url(#tip)"/>
+  <path d="M 620 122 L 620 152" fill="none" stroke="#a8a3c9" stroke-width="2" marker-end="url(#tip)"/>
+  <path d="M 940 122 L 940 152" fill="none" stroke="#a8a3c9" stroke-width="2" marker-end="url(#tip)"/>
+
+  <!-- Engine -->
+  <rect x="150" y="160" width="940" height="360" rx="16" fill="#f6f5ff" stroke="#7367f0" stroke-width="1.5" stroke-opacity="0.55"/>
+  <text x="620" y="192" font-size="16" font-weight="700" fill="#2f2b3d" text-anchor="middle">Recursive self-improvement engine</text>
+  <text x="620" y="212" font-size="12" fill="#5c5870" text-anchor="middle">Apache 2.0 · the learning is the product; recall and storage serve it · pip install amfs</text>
+
+  <!-- Column 1: Remember -->
+  <rect x="176" y="236" width="282" height="262" rx="12" fill="#ffffff" stroke="#cdc8f5" stroke-width="1.5"/>
+  <text x="196" y="266" font-size="14.5" font-weight="700" fill="#7367f0">Record</text>
+  <text x="196" y="296" font-size="12.5" fill="#2f2b3d">Versioned writes, full history</text>
+  <text x="196" y="320" font-size="12.5" fill="#2f2b3d">Four entry types, each with</text>
+  <text x="196" y="338" font-size="12.5" fill="#2f2b3d">its own decay: fact, belief,</text>
+  <text x="196" y="356" font-size="12.5" fill="#2f2b3d">experience, procedure</text>
+  <text x="196" y="380" font-size="12.5" fill="#2f2b3d">Provenance on every entry</text>
+  <text x="196" y="404" font-size="12.5" fill="#2f2b3d">Knowledge graph, materialised</text>
+  <text x="196" y="422" font-size="12.5" fill="#2f2b3d">from normal use</text>
+  <text x="196" y="446" font-size="12.5" fill="#2f2b3d">Event timeline per agent</text>
+  <text x="196" y="470" font-size="12.5" fill="#2f2b3d">Shared and private entries</text>
+
+  <!-- Column 2: Recall -->
+  <rect x="479" y="236" width="282" height="262" rx="12" fill="#ffffff" stroke="#cdc8f5" stroke-width="1.5"/>
+  <text x="499" y="266" font-size="14.5" font-weight="700" fill="#7367f0">Recall</text>
+  <text x="499" y="296" font-size="12.5" fill="#2f2b3d">Briefings compiled by the Cortex:</text>
+  <text x="499" y="314" font-size="12.5" fill="#2f2b3d">validated, discredited, regime</text>
+  <text x="499" y="332" font-size="12.5" fill="#2f2b3d">shift, what was tried here</text>
+  <text x="499" y="356" font-size="12.5" fill="#2f2b3d">Hybrid search: full text plus</text>
+  <text x="499" y="374" font-size="12.5" fill="#2f2b3d">vectors plus confidence</text>
+  <text x="499" y="398" font-size="12.5" fill="#2f2b3d">Action priors: what won and</text>
+  <text x="499" y="416" font-size="12.5" fill="#2f2b3d">lost on similar tasks, with a</text>
+  <text x="499" y="434" font-size="12.5" fill="#2f2b3d">recommendation to act,</text>
+  <text x="499" y="452" font-size="12.5" fill="#2f2b3d">explore or escalate</text>
+  <text x="499" y="476" font-size="12.5" fill="#2f2b3d">Discredited hits held back</text>
+
+  <!-- Column 3: Learn -->
+  <rect x="782" y="236" width="282" height="262" rx="12" fill="#ffffff" stroke="#cdc8f5" stroke-width="1.5"/>
+  <text x="802" y="266" font-size="14.5" font-weight="700" fill="#7367f0">Learn</text>
+  <text x="802" y="296" font-size="12.5" fill="#2f2b3d">Decision traces: what was asked,</text>
+  <text x="802" y="314" font-size="12.5" fill="#2f2b3d">read, decided, done, answered</text>
+  <text x="802" y="338" font-size="12.5" fill="#2f2b3d">Outcomes move confidence on</text>
+  <text x="802" y="356" font-size="12.5" fill="#2f2b3d">everything the run relied on</text>
+  <text x="802" y="380" font-size="12.5" fill="#2f2b3d">Failed attempts are marked, so</text>
+  <text x="802" y="398" font-size="12.5" fill="#2f2b3d">the recovery does not reward</text>
+  <text x="802" y="416" font-size="12.5" fill="#2f2b3d">the entry that misled</text>
+  <text x="802" y="440" font-size="12.5" fill="#2f2b3d">Contrast lessons: what failed</text>
+  <text x="802" y="458" font-size="12.5" fill="#2f2b3d">and what worked, named</text>
+  <text x="802" y="482" font-size="12.5" fill="#2f2b3d">Regime shift detection</text>
+
+  <!-- Arrow to storage -->
+  <path d="M 620 522 L 620 548" fill="none" stroke="#a8a3c9" stroke-width="2" marker-end="url(#tip)"/>
+
+  <!-- Storage row -->
+  <rect x="150" y="556" width="300" height="60" rx="12" fill="#ffffff" stroke="#cdc8f5" stroke-width="1.5"/>
+  <text x="300" y="581" font-size="14" font-weight="700" fill="#2f2b3d" text-anchor="middle">Filesystem</text>
+  <text x="300" y="601" font-size="12" fill="#5c5870" text-anchor="middle">Zero setup. JSON under .amfs/</text>
+
+  <rect x="470" y="556" width="300" height="60" rx="12" fill="#ffffff" stroke="#cdc8f5" stroke-width="1.5"/>
+  <text x="620" y="581" font-size="14" font-weight="700" fill="#2f2b3d" text-anchor="middle">Postgres + pgvector</text>
+  <text x="620" y="601" font-size="12" fill="#5c5870" text-anchor="middle">Shared across agents and machines</text>
+
+  <rect x="790" y="556" width="300" height="60" rx="12" fill="#ffffff" stroke="#cdc8f5" stroke-width="1.5"/>
+  <text x="940" y="581" font-size="14" font-weight="700" fill="#2f2b3d" text-anchor="middle">S3</text>
+  <text x="940" y="601" font-size="12" fill="#5c5870" text-anchor="middle">Any S3-compatible bucket</text>
+</svg>

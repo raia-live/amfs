@@ -244,9 +244,87 @@ windsurf_config_path() {
     echo "$HOME/.windsurf/mcp.json"
 }
 
+# VS Code's user-level MCP file lives in its User profile folder, not under
+# ~/.vscode — that directory is the extensions cache, and an mcp.json placed
+# there is never read. (The `.vscode/mcp.json` people know is the *workspace*
+# form, relative to a project root, which is where the confusion came from.)
+# The dedicated file exists since VS Code 1.102; before that servers lived in
+# settings.json, which this script does not touch.
+#
+# The optional argument is the product folder — "Code" for VS Code proper,
+# "Code - Insiders" and "VSCodium" for the builds that share its config layout.
 vscode_config_path() {
-    echo "$HOME/.vscode/mcp.json"
+    local product="${1:-Code}"
+    if [[ "$OS" == "macos" ]]; then
+        echo "$HOME/Library/Application Support/$product/User/mcp.json"
+    else
+        echo "${XDG_CONFIG_HOME:-$HOME/.config}/$product/User/mcp.json"
+    fi
 }
+
+# The VS Code builds that are actually installed here, one product folder per
+# line, judged by the User folder existing — VS Code creates it on first launch.
+# Insiders and VSCodium keep their own, so a person on Insiders who was told
+# "Configured VS Code" had a file written for an editor they do not run. When
+# none exists (an explicit `--client vscode` on a machine that has not launched
+# it yet) this falls back to VS Code proper, which then reads the file on its
+# first start.
+VSCODE_PRODUCTS=("Code" "Code - Insiders" "VSCodium")
+
+installed_vscode_products() {
+    local product found=false
+    for product in "${VSCODE_PRODUCTS[@]}"; do
+        if [[ -d "$(dirname "$(vscode_config_path "$product")")" ]]; then
+            echo "$product"
+            found=true
+        fi
+    done
+    $found || echo "Code"
+}
+
+vscode_product_label() {
+    case "$1" in
+        "Code")           echo "VS Code" ;;
+        "Code - Insiders") echo "VS Code Insiders" ;;
+        *)                echo "$1" ;;
+    esac
+}
+
+# The file an earlier version of this installer wrote for VS Code, which VS
+# Code never read. ~/.vscode is the extensions cache; an mcp.json there does
+# nothing — except hold a copy of the API key that was pasted into it, which
+# may be the only copy. So on every VS Code install or uninstall the stale
+# entry is taken out (with the usual key backup), and the file itself is
+# removed when the entry was all it held, because it was ours to begin with.
+retire_legacy_vscode_file() {
+    local legacy="$HOME/.vscode/mcp.json"
+    senselab_entry_exists "$legacy" || return 0
+
+    remove_mcp_config "$legacy" || return 0
+    if senselab_entry_exists "$legacy"; then
+        warn "An earlier install left a \"senselab\" entry in $legacy, which VS Code does not read; it could not be removed."
+        return 0
+    fi
+
+    # Delete the file only when nothing else is in it: "mcpServers" now empty
+    # and no other top-level key. A file with anything else was not only ours.
+    if python3 -c "$JSONC_LOADER"'
+config, _ = load_config(sys.argv[1])
+sys.exit(0 if config == {"mcpServers": {}} else 1)
+' "$legacy" 2>/dev/null; then
+        rm -f "$legacy"
+        success "Removed $legacy, which an earlier install wrote and VS Code never read"
+    else
+        success "Removed the stale \"senselab\" entry from $legacy, which VS Code never read"
+    fi
+}
+
+# The top-level key each JSON client keeps its servers under. Every client this
+# script writes to by file uses "mcpServers", except VS Code, whose mcp.json
+# schema names it "servers" — an entry under "mcpServers" there is ignored
+# without a warning, which is how this script came to report VS Code as
+# "Configured" while VS Code never once loaded the server.
+VSCODE_SERVERS_KEY="servers"
 
 gemini_settings_path() {
     echo "$HOME/.gemini/settings.json"
@@ -406,24 +484,26 @@ keep_a_copy_of_the_key() {
 # a keyless install — which is why the comparison is against a string and not a
 # flag: "no key going in" and "a different key going in" both lose what is
 # there, and both want a copy.
+#
+# `servers_key` is the top-level object the client keeps its servers under;
+# "mcpServers" for everyone but VS Code. It is the third argument, and
+# optional, on every JSON helper below so existing callers keep their shape.
 backup_key_at_risk() {
-    local config_file="$1" incoming="${2:-}" existing=""
+    local config_file="$1" incoming="${2:-}" servers_key="${3:-mcpServers}" existing=""
 
     [[ -f "$config_file" ]] || return 0
 
-    existing="$(python3 -c '
-import json, sys
-
+    existing="$(python3 -c "$JSONC_LOADER"'
 try:
-    with open(sys.argv[1]) as f:
-        config = json.load(f)
-except (json.JSONDecodeError, OSError, ValueError):
+    config, _ = load_config(sys.argv[1])
+except (ValueError, OSError):
     sys.exit(0)
 
-entry = (config.get("mcpServers") or {}).get("senselab")
+entry = (config.get(sys.argv[2]) or {})
+entry = entry.get("senselab") if isinstance(entry, dict) else None
 if isinstance(entry, dict):
     print((entry.get("env") or {}).get("AMFS_API_KEY") or "")
-' "$config_file" 2>/dev/null || true)"
+' "$config_file" "$servers_key" 2>/dev/null || true)"
 
     if [[ -n "$existing" && "$existing" != "$incoming" ]]; then
         keep_a_copy_of_the_key "$config_file"
@@ -467,13 +547,133 @@ backup_cli_store() {
 }
 
 # ── JSON merge (portable, no jq dependency) ──────────────────────────────────
+#
+# Reading a client's config file, for every helper below.
+#
+# These files are not always JSON. VS Code's mcp.json is JSONC — its own docs
+# write `//` comments and trailing commas into the examples — and people carry
+# the habit into Cursor's. `json.load` refuses those, and the merge used to
+# answer a refusal with `config = {}`: the whole file was then rewritten around
+# our one entry, and every other server the person had configured was gone. A
+# comment in a config file is not a reason to delete the config file.
+#
+# So: strict JSON first; failing that, the same text with comments and trailing
+# commas removed. `load_config` returns the parsed object and whether it took
+# the second route, because that route is lossy — the comments do not survive a
+# rewrite — and a caller about to write is expected to keep a copy first.
+# Anything that parses neither way raises, and the caller leaves the file alone.
+#
+# Held in a variable so the inline `python3 -c` blocks can share it verbatim.
+# shellcheck disable=SC2016
+JSONC_LOADER='
+import json, sys
 
+def _strip_jsonc(text):
+    # Comments, then trailing commas — both only outside string literals.
+    out, i, n, in_str = [], 0, len(text), False
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(text[i + 1]); i += 2; continue
+            if c == "\"":
+                in_str = False
+            i += 1
+        elif c == "\"":
+            in_str = True; out.append(c); i += 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i); i = n if j == -1 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2); i = n if j == -1 else j + 2
+        else:
+            out.append(c); i += 1
+    s = "".join(out)
+    res, i, n, in_str = [], 0, len(s), False
+    while i < n:
+        c = s[i]
+        if in_str:
+            res.append(c)
+            if c == "\\" and i + 1 < n:
+                res.append(s[i + 1]); i += 2; continue
+            if c == "\"":
+                in_str = False
+            i += 1
+        elif c == "\"":
+            in_str = True; res.append(c); i += 1
+        elif c == ",":
+            j = i + 1
+            while j < n and s[j] in " \t\r\n":
+                j += 1
+            if j < n and s[j] in "}]":
+                i += 1; continue
+            res.append(c); i += 1
+        else:
+            res.append(c); i += 1
+    return "".join(res)
+
+def load_config(path):
+    """(config, lossy). lossy means comments/trailing commas had to be stripped.
+    Raises ValueError when the text parses neither way, or is not an object."""
+    with open(path) as f:
+        text = f.read()
+    if not text.strip():
+        return {}, False
+    try:
+        config, lossy = json.loads(text), False
+    except ValueError:
+        config, lossy = json.loads(_strip_jsonc(text)), True
+    if not isinstance(config, dict):
+        raise ValueError("top level is not an object")
+    return config, lossy
+'
+
+# Whether a config file can be merged into: "ok", "lossy" (comments would be
+# dropped by a rewrite), or "bad" (leave it alone). A missing file is "ok".
+config_file_state() {
+    local config_file="$1" state=""
+    [[ -f "$config_file" ]] || { echo "ok"; return 0; }
+    state="$(python3 -c "$JSONC_LOADER"'
+try:
+    _, lossy = load_config(sys.argv[1])
+except (ValueError, OSError):
+    print("bad"); sys.exit(0)
+print("lossy" if lossy else "ok")
+' "$config_file" 2>/dev/null || true)"
+    case "$state" in
+        ok|lossy) echo "$state" ;;
+        *) echo "bad" ;;
+    esac
+}
+
+# A copy of a file whose comments are about to be lost to a rewrite. Not the
+# key backup — that one is about a credential — but the same place and shape,
+# so someone looking for one finds the other.
+keep_a_copy_before_stripping_comments() {
+    local file="$1" dest
+    dest="$file.senselab-backup-$(date -u +%Y%m%d%H%M%S)"
+    if cp "$file" "$dest" 2>/dev/null; then
+        chmod 600 "$dest" 2>/dev/null || true
+        info "That file had comments, which JSON cannot carry: kept a copy at $dest"
+    else
+        warn "Could not copy $file before rewriting it; its comments will be lost."
+    fi
+}
+
+# Returns 1, having written nothing, when the file cannot be read as a config.
+# Callers report that as a manual step rather than as "Configured".
 inject_mcp_config() {
-    local config_file="$1"
+    local config_file="$1" servers_key="${2:-mcpServers}"
     local amfs_block
     amfs_block="$(build_mcp_json)"
 
-    backup_key_at_risk "$config_file" "$API_KEY"
+    local state
+    state="$(config_file_state "$config_file")"
+    if [[ "$state" == "bad" ]]; then
+        return 1
+    fi
+
+    backup_key_at_risk "$config_file" "$API_KEY" "$servers_key"
 
     local dir
     dir="$(dirname "$config_file")"
@@ -482,7 +682,7 @@ inject_mcp_config() {
     if [[ ! -f "$config_file" ]]; then
         cat > "$config_file" <<NEWJSON
 {
-    "mcpServers": {
+    "$servers_key": {
         "senselab": $amfs_block
     }
 }
@@ -490,28 +690,41 @@ NEWJSON
         return 0
     fi
 
-    # File exists — use python (available on macOS and most Linux) for safe JSON merge
-    python3 -c "
-import json, sys
+    if [[ "$state" == "lossy" ]]; then
+        keep_a_copy_before_stripping_comments "$config_file"
+    fi
 
+    # File exists — use python (available on macOS and most Linux) for safe JSON merge
+    python3 -c "$JSONC_LOADER"'
 config_path = sys.argv[1]
 amfs_block = json.loads(sys.argv[2])
+servers_key = sys.argv[3]
 
-with open(config_path, 'r') as f:
-    try:
-        config = json.load(f)
-    except json.JSONDecodeError:
-        config = {}
+config, _ = load_config(config_path)
 
-if 'mcpServers' not in config:
-    config['mcpServers'] = {}
+if not isinstance(config.get(servers_key), dict):
+    config[servers_key] = {}
 
-config['mcpServers']['senselab'] = amfs_block
+config[servers_key]["senselab"] = amfs_block
 
-with open(config_path, 'w') as f:
+with open(config_path, "w") as f:
     json.dump(config, f, indent=4)
-    f.write('\n')
-" "$config_file" "$amfs_block"
+    f.write("\n")
+' "$config_file" "$amfs_block" "$servers_key"
+}
+
+# What to say when a config file could not be written to. Counted as a manual
+# step so the closing summary does not claim a restart will connect anything.
+manual_merge_instructions() {
+    local label="$1" config_file="$2" servers_key="${3:-mcpServers}"
+    MANUAL_COUNT=$((MANUAL_COUNT + 1))
+    warn "$label's config could not be read as JSON, so it was left untouched:"
+    echo "    $config_file"
+    echo "    Fix the file, or add this under its \"$servers_key\" object yourself:"
+    echo ""
+    printf '    "senselab": '
+    build_mcp_json | sed 's/^/    /'
+    echo ""
 }
 
 # Whether a config file holds a local stdio `senselab` entry: present, absent, or
@@ -531,24 +744,22 @@ with open(config_path, 'w') as f:
 # nothing happens. Here every failure of the check becomes "unreadable", which is
 # the answer that warns rather than the one that stays quiet.
 senselab_entry_state() {
-    local config_file="$1" state=""
+    local config_file="$1" servers_key="${2:-mcpServers}" state=""
 
     if [[ ! -f "$config_file" ]]; then
         state="absent"
     else
-        state="$(python3 -c "
-import json, sys
-
+        state="$(python3 -c "$JSONC_LOADER"'
 try:
-    with open(sys.argv[1]) as f:
-        config = json.load(f)
-except (json.JSONDecodeError, OSError, ValueError):
+    config, _ = load_config(sys.argv[1])
+except (ValueError, OSError):
     sys.exit(1)
 
-entry = (config.get('mcpServers') or {}).get('senselab')
-# A url entry is this script's own remote config, not a local server to clear.
-print('present' if isinstance(entry, dict) and entry.get('command') else 'absent')
-" "$config_file" 2>/dev/null || true)"
+entry = (config.get(sys.argv[2]) or {})
+entry = entry.get("senselab") if isinstance(entry, dict) else None
+# A url entry is the remote config this script wrote, not a local server to clear.
+print("present" if isinstance(entry, dict) and entry.get("command") else "absent")
+' "$config_file" "$servers_key" 2>/dev/null || true)"
     fi
 
     case "$state" in
@@ -557,32 +768,57 @@ print('present' if isinstance(entry, dict) and entry.get('command') else 'absent
     esac
 }
 
+# Whether the file holds any `senselab` entry at all — stdio or url — under the
+# given key. Exit status: 0 yes, 1 no (including unreadable).
+senselab_entry_exists() {
+    local config_file="$1" servers_key="${2:-mcpServers}"
+    [[ -f "$config_file" ]] || return 1
+    python3 -c "$JSONC_LOADER"'
+try:
+    config, _ = load_config(sys.argv[1])
+except (ValueError, OSError):
+    sys.exit(1)
+servers = config.get(sys.argv[2])
+sys.exit(0 if isinstance(servers, dict) and "senselab" in servers else 1)
+' "$config_file" "$servers_key" 2>/dev/null
+}
+
 remove_mcp_config() {
-    local config_file="$1"
+    local config_file="$1" servers_key="${2:-mcpServers}"
 
     if [[ ! -f "$config_file" ]]; then
         return 0
     fi
 
-    backup_key_at_risk "$config_file" ""
+    # An unreadable file is left alone (the caller checks the state afterwards
+    # and says so). One that only parses with its comments stripped is about to
+    # lose them, but only if there is an entry to remove — so the copy is made
+    # inside the same condition as the write, not before it.
+    local state
+    state="$(config_file_state "$config_file")"
+    [[ "$state" == "bad" ]] && return 0
 
-    python3 -c "
-import json, sys
+    backup_key_at_risk "$config_file" "" "$servers_key"
 
+    if [[ "$state" == "lossy" ]] && senselab_entry_exists "$config_file" "$servers_key"; then
+        keep_a_copy_before_stripping_comments "$config_file"
+    fi
+
+    python3 -c "$JSONC_LOADER"'
 config_path = sys.argv[1]
+servers_key = sys.argv[2]
 
-with open(config_path, 'r') as f:
-    try:
-        config = json.load(f)
-    except json.JSONDecodeError:
-        sys.exit(0)
+try:
+    config, _ = load_config(config_path)
+except (ValueError, OSError):
+    sys.exit(0)
 
-if 'mcpServers' in config and 'senselab' in config['mcpServers']:
-    del config['mcpServers']['senselab']
-    with open(config_path, 'w') as f:
+if isinstance(config.get(servers_key), dict) and "senselab" in config[servers_key]:
+    del config[servers_key]["senselab"]
+    with open(config_path, "w") as f:
         json.dump(config, f, indent=4)
-        f.write('\n')
-" "$config_file"
+        f.write("\n")
+' "$config_file" "$servers_key"
 }
 
 # ── SenseLab memory instructions ─────────────────────────────────────────────
@@ -719,9 +955,17 @@ detect_clients() {
         DETECTED_CLIENTS+=("windsurf")
     fi
 
-    if [[ -d "$HOME/.vscode" ]]; then
-        DETECTED_CLIENTS+=("vscode")
-    fi
+    # The User profile folder is created the first time VS Code is launched, so
+    # its presence means an install that has actually run. `~/.vscode` was the
+    # old test; it is the extensions cache, not where configuration lives, and
+    # detecting on it led straight to writing a file VS Code never reads.
+    local product
+    for product in "${VSCODE_PRODUCTS[@]}"; do
+        if [[ -d "$(dirname "$(vscode_config_path "$product")")" ]]; then
+            DETECTED_CLIENTS+=("vscode")
+            break
+        fi
+    done
 }
 
 # ── Configure a single client ────────────────────────────────────────────────
@@ -839,6 +1083,22 @@ join_next_steps() {
     echo ""
 }
 
+# Write the entry into a file-configured client, or say why it could not be.
+#
+# The one outcome that used to be silent is a config file that is not JSON: the
+# merge answered it by rewriting the file around our entry, dropping every other
+# server in it, and then reporting "Configured". Now the file is left alone, the
+# block is printed for the person to paste, and the summary counts it as a
+# manual step rather than a success.
+write_or_explain() {
+    local label="$1" path="$2" servers_key="${3:-mcpServers}"
+    if inject_mcp_config "$path" "$servers_key"; then
+        configured "Configured $label ($path)"
+    else
+        manual_merge_instructions "$label" "$path" "$servers_key"
+    fi
+}
+
 configure_client() {
     local client="$1"
 
@@ -853,8 +1113,7 @@ configure_client() {
                 connector_instructions "Claude Desktop" \
                     "Settings → Connectors → Add custom connector" "$path"
             else
-                inject_mcp_config "$path"
-                configured "Configured Claude Desktop ($path)"
+                write_or_explain "Claude Desktop" "$path"
             fi
             ;;
         cursor)
@@ -864,8 +1123,7 @@ configure_client() {
                 remove_mcp_config "$path"
                 success "Removed AMFS from Cursor config"
             else
-                inject_mcp_config "$path"
-                configured "Configured Cursor ($path)"
+                write_or_explain "Cursor" "$path"
             fi
             ;;
         claude-code)
@@ -989,8 +1247,7 @@ configure_client() {
                 remove_senselab_block "$HOME/.gemini/GEMINI.md"
                 success "Removed AMFS from Gemini CLI"
             else
-                inject_mcp_config "$path"
-                configured "Configured Gemini CLI ($path)"
+                write_or_explain "Gemini CLI" "$path"
                 upsert_senselab_block "$HOME/.gemini/GEMINI.md"
                 success "Installed SenseLab recall-first memory guide (~/.gemini/GEMINI.md)"
             fi
@@ -1005,20 +1262,28 @@ configure_client() {
                 connector_instructions "Windsurf" \
                     "Settings → Cascade → MCP servers → Add server" "$path"
             else
-                inject_mcp_config "$path"
-                configured "Configured Windsurf ($path)"
+                write_or_explain "Windsurf" "$path"
             fi
             ;;
         vscode)
-            local path
-            path="$(vscode_config_path)"
-            if $UNINSTALL; then
-                remove_mcp_config "$path"
-                success "Removed AMFS from VS Code config"
-            else
-                inject_mcp_config "$path"
-                configured "Configured VS Code ($path)"
-            fi
+            # Same shared JSON helpers as the other file-configured clients, but
+            # under VS Code's own top-level key. Both the stdio block and the
+            # remote `{"type": "http", "url": …}` block are shapes its mcp.json
+            # accepts, so unlike Claude Desktop and Windsurf it is written in
+            # every mode. Once per installed build (VS Code, Insiders, VSCodium),
+            # since each keeps its own User folder.
+            retire_legacy_vscode_file
+            local product path label
+            while IFS= read -r product; do
+                path="$(vscode_config_path "$product")"
+                label="$(vscode_product_label "$product")"
+                if $UNINSTALL; then
+                    remove_mcp_config "$path" "$VSCODE_SERVERS_KEY"
+                    success "Removed AMFS from $label config"
+                else
+                    write_or_explain "$label" "$path" "$VSCODE_SERVERS_KEY"
+                fi
+            done < <(installed_vscode_products)
             ;;
         *)
             error "Unknown client: $client"
