@@ -5,8 +5,8 @@
 <h3 align="center">The recursive self-improvement engine for AI agents</h3>
 
 <p align="center">
-  Your agent does the work. SenseLab remembers what happened, checks how it turned out,<br>
-  and hands the next run a better starting point than the last one had.
+  Every run your agent makes teaches the next one. SenseLab scores what the agent relied on<br>
+  against how the work turned out, and hands the next run a recommendation instead of a guess.
 </p>
 
 <p align="center">
@@ -27,11 +27,15 @@
 
 ## Why this exists
 
-Every agent run starts from zero. The fix an agent found on Tuesday is gone by Wednesday. The approach that failed three times last week gets tried a fourth time. RAG gives an agent documents; it does not give the agent its own track record.
+Agents do not get better at their job. The thousandth run of a deploy agent is exactly as good as the first. The approach that failed three times last week gets tried a fourth time, with the same confidence. Whatever the model learned in training is where it stays.
 
-SenseLab is the missing track record. It stores what an agent knew, what it decided, what it did, and how that went. Then it uses the outcome to move confidence in every memory the run relied on, so the good ones rise and the bad ones sink out of the way. Run it enough times on the same kind of task and the agent stops repeating mistakes and stops rediscovering fixes.
+SenseLab closes that loop. Every run produces a decision trace: what the agent was asked, what it relied on, what it did, how it went. The outcome moves confidence on everything the run depended on, and the next run on the same kind of task gets a briefing and an action recommendation built from that evidence. Do this for long enough and the agent stops repeating mistakes, stops rediscovering fixes, and starts choosing the action that worked here before over the one that reads well in a runbook.
 
-This repo is the open source engine. It runs on a laptop with zero setup, or on your own Postgres for a team of agents. No account needed.
+Storage and retrieval are part of that, and this repo has both. They are the substrate, not the point. Memory layers hand an agent a list of things it saw before; SenseLab hands it a judgement about what to do next, and gets that judgement wrong less often each time.
+
+Where this goes: the improvement lives in the loop today, through briefings and priors at inference time. The same traces are the training data that moves it into the weights. The goal is to be the engine people reach for when they want their agents to improve themselves, the same way they reach for a vector database when they want retrieval.
+
+This repo is that engine, open source. It runs on a laptop with zero setup, or on your own Postgres for a team of agents. No account needed.
 
 > Naming note: the project started life as AMFS (Agent Memory File System), and the package names on PyPI and npm still carry that. `pip install amfs` gets you SenseLab.
 
@@ -44,7 +48,7 @@ This repo is the open source engine. It runs on a laptop with zero setup, or on 
 1. Before work, the agent asks for a briefing. It gets back what is validated, what has been discredited, what changed recently, and which actions worked here before.
 2. During work, reads, decisions, and actions are tracked in a decision trace. If a remembered fix does not pan out, the agent marks the attempt before moving on.
 3. When it is done, the agent commits the outcome: success, or some flavour of failure.
-4. Confidence moves. Memories the run leaned on get reinforced or demoted. A failed attempt demotes only what misled it, and the recovery does not reward the memory that sent the agent down the wrong path. A contrast lesson gets written naming what failed and what worked.
+4. Confidence moves. Everything the run leaned on gets reinforced or demoted. A failed attempt demotes only what misled it, and the recovery does not reward the entry that sent the agent down the wrong path. A contrast lesson gets written naming what failed and what worked.
 
 The next run starts from step 1 with a better briefing. That is the whole trick.
 
@@ -56,7 +60,7 @@ The next run starts from step 1 with a better briefing. That is the whole trick.
 curl -sSL https://raw.githubusercontent.com/raia-live/amfs/main/install-mcp.sh | bash
 ```
 
-That detects which clients you have installed and adds a `senselab` MCP server to each one. No flags means local mode: the server runs on your machine and keeps its data in a `.amfs/` folder. Restart your editor and the agent has 40 memory tools, starting with `amfs_briefing`, `amfs_retrieve`, `amfs_write`, and `amfs_commit_outcome`.
+That detects which clients you have installed and adds a `senselab` MCP server to each one. No flags means local mode: the server runs on your machine and keeps its data in a `.amfs/` folder. Restart your editor and the agent has 40 tools, starting with `amfs_briefing`, `amfs_retrieve`, `amfs_write`, and `amfs_commit_outcome`.
 
 Want to pick a client, or point it at a shared server?
 
@@ -131,36 +135,37 @@ That starts the HTTP server on `:8080` with Postgres and pgvector behind it, plu
 ## What the agent gets
 
 <p align="center">
-  <img src="docs/assets/senselab-architecture.png" alt="Agents over MCP, frameworks and SDKs on top; the engine in the middle with remember, recall and learn; filesystem, Postgres and S3 underneath" width="900">
+  <img src="docs/assets/senselab-architecture.png" alt="Agents over MCP, frameworks and SDKs on top; the engine in the middle with record, recall and learn; filesystem, Postgres and S3 underneath" width="900">
 </p>
 
-Everything below is in this repo and works without an account.
-
-### Memory that knows how sure it is
-
-- Four memory types with their own decay curves: `fact`, `belief`, `experience`, `procedure`. A belief fades unless something confirms it; an experience sticks around.
-- Confidence decays on four signals: time since written, memory type, outcomes it was part of, and how often it gets read. A memory nobody uses fades; one that keeps paying off does not.
-- Every entry carries an evidence status: `untested`, `validated`, `contested`, or `discredited`. An untested 0.9 and a validated 0.9 are different things to act on, and the agent can tell them apart.
-- Full version history on every key. Writes never overwrite; they add a version.
-
-### Recall that comes with a recommendation
-
-- `briefing()` returns compiled digests with `validated`, `discredited`, and `regime_shift` sections, plus `tried_here`: which actions were taken on this entity and how each fared.
-- `retrieve()` is hybrid search: full text plus vectors plus confidence, with discredited hits held back. Pass `candidate_actions` and you also get action priors and a recommendation: `act` (take the suggested action), `explore` (everything tried here failed; try this untried one), or `escalate` (every candidate has been tried and failed, so skip the three doomed attempts).
-- Regime shift detection. When a long-validated memory suddenly starts failing, the briefing flags it instead of letting the agent keep trusting it.
+Everything below is in this repo and works without an account. The order matters: the learning is the product, the recall serves it, the storage serves that.
 
 ### Learning that is honest about failure
 
 - Decision traces capture what the agent was asked, what it read, what it decided, what it did, and what it answered. Committed once, at the end.
-- `record_attempt()` draws a line inside the trace. What was read before the line gets the failure; what was read after gets the success. Without that line, a stale memory that misled the agent would get credit for the recovery.
-- Contrast lessons are written automatically: "X failed here, Y worked". They are the highest-value memories in the store and nobody has to author them.
+- `record_attempt()` draws a line inside the trace. What was read before the line gets the failure; what was read after gets the success. Without that line, a stale entry that misled the agent would get credit for the recovery.
+- Contrast lessons are written automatically: "X failed here, Y worked". They are the highest-value knowledge in the store and nobody has to author them.
 - Outcomes can carry `verified_by` (`ci`, `human`, `customer`), so an agent declaring its own success is weighed differently from CI confirming it.
+- Every trace is a supervised example: request in, actions out, outcome attached. That is what makes the jump from better prompts to better weights possible later.
 
-### The boring parts, handled
+### A recommendation before the agent acts
+
+- `briefing()` returns compiled digests with `validated`, `discredited`, and `regime_shift` sections, plus `tried_here`: which actions were taken on this entity and how each fared.
+- `retrieve()` is hybrid search: full text plus vectors plus confidence, with discredited hits held back. Pass `candidate_actions` and you also get action priors and a recommendation: `act` (take the suggested action), `explore` (everything tried here failed; try this untried one), or `escalate` (every candidate has been tried and failed, so skip the three doomed attempts).
+- Regime shift detection. When a long-validated entry suddenly starts failing, the briefing flags it instead of letting the agent keep trusting it.
+
+### Knowledge that knows how sure it is
+
+- Every entry carries an evidence status: `untested`, `validated`, `contested`, or `discredited`. An untested 0.9 and a validated 0.9 are different things to act on, and the agent can tell them apart.
+- Four entry types with their own decay curves: `fact`, `belief`, `experience`, `procedure`. A belief fades unless something confirms it; an experience sticks around.
+- Confidence decays on four signals: time since written, entry type, outcomes it was part of, and how often it gets read. Knowledge nobody uses fades; knowledge that keeps paying off does not.
+- Full version history on every key. Writes never overwrite; they add a version.
+
+### The substrate, handled
 
 - Storage adapters for the filesystem (JSON, zero setup), Postgres with pgvector, and S3-compatible buckets. Swap by changing one env var.
 - Knowledge graph and per-agent event timeline, built from normal reads and writes.
-- Atomic commits with a DAG, `diff`, `verify`, and `merge_base` for tooling that wants to reason about memory over time.
+- Atomic commits with a DAG, `diff`, `verify`, and `merge_base` for tooling that wants to reason about what an agent knew at a point in time.
 - Agent identity that survives restarts, so work on the dashboard is attributed to the same `dashboard-agent` next week.
 - An MCP server with 40 tools, an HTTP server with a REST API, a CLI, and a Docker image at `ghcr.io/raia-live/amfs`.
 
@@ -182,7 +187,7 @@ Everything below is in this repo and works without an account.
 
 The engine in this repo is the same one behind [SenseLab Cloud](https://sense-lab.ai). Everything on this page runs on your own hardware under Apache 2.0.
 
-Cloud adds the things that only make sense with a hosted service: a dashboard to watch agents learn, shared rooms where several people's agents collaborate on the same memory, multi-tenant access control, branch and merge for memory, and training data export for fine-tuning models on your agents' decision traces. If you want that, the same installer takes an `--api-key`. If you do not, nothing here nags you about it.
+Cloud is where the loop goes from the context window into the weights: decision traces are exported as training data and fine-tuned models are served back to your agents, so the improvement compounds without a longer prompt. It also adds the things that only make sense hosted: a dashboard to watch agents learn, shared rooms where several people's agents work on the same knowledge, multi-tenant access control, and branch and merge for what an agent knows. If you want that, the same installer takes an `--api-key`. If you do not, nothing here nags you about it.
 
 Full breakdown in [docs/editions.md](docs/editions.md).
 

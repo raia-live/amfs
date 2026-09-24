@@ -54,9 +54,9 @@
   <circle cx="936" cy="140" r="11" fill="#7367f0"/>
   <text x="936" y="144.5" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">4</text>
   <text x="956" y="145" font-size="15" font-weight="700" fill="#2f2b3d">Trust moves</text>
-  <text x="930" y="176" font-size="12.5" fill="#5c5870">Memories behind a good run</text>
-  <text x="930" y="196" font-size="12.5" fill="#5c5870">gain confidence. Behind a</text>
-  <text x="930" y="216" font-size="12.5" fill="#5c5870">bad one, they lose it. A</text>
+  <text x="930" y="176" font-size="12.5" fill="#5c5870">What a good run relied on</text>
+  <text x="930" y="196" font-size="12.5" fill="#5c5870">gains confidence. What a bad</text>
+  <text x="930" y="216" font-size="12.5" fill="#5c5870">run relied on loses it. A</text>
   <text x="930" y="236" font-size="12.5" fill="#5c5870">lesson is written.</text>
 
   <!-- Connectors -->

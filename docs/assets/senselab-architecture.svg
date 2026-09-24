@@ -37,13 +37,13 @@
   <!-- Engine -->
   <rect x="150" y="160" width="940" height="360" rx="16" fill="#f6f5ff" stroke="#7367f0" stroke-width="1.5" stroke-opacity="0.55"/>
   <text x="620" y="192" font-size="16" font-weight="700" fill="#2f2b3d" text-anchor="middle">Recursive self-improvement engine</text>
-  <text x="620" y="212" font-size="12" fill="#5c5870" text-anchor="middle">Apache 2.0 · runs on your laptop or your servers · pip install amfs</text>
+  <text x="620" y="212" font-size="12" fill="#5c5870" text-anchor="middle">Apache 2.0 · the learning is the product; recall and storage serve it · pip install amfs</text>
 
   <!-- Column 1: Remember -->
   <rect x="176" y="236" width="282" height="262" rx="12" fill="#ffffff" stroke="#cdc8f5" stroke-width="1.5"/>
-  <text x="196" y="266" font-size="14.5" font-weight="700" fill="#7367f0">Remember</text>
+  <text x="196" y="266" font-size="14.5" font-weight="700" fill="#7367f0">Record</text>
   <text x="196" y="296" font-size="12.5" fill="#2f2b3d">Versioned writes, full history</text>
-  <text x="196" y="320" font-size="12.5" fill="#2f2b3d">Four memory types, each with</text>
+  <text x="196" y="320" font-size="12.5" fill="#2f2b3d">Four entry types, each with</text>
   <text x="196" y="338" font-size="12.5" fill="#2f2b3d">its own decay: fact, belief,</text>
   <text x="196" y="356" font-size="12.5" fill="#2f2b3d">experience, procedure</text>
   <text x="196" y="380" font-size="12.5" fill="#2f2b3d">Provenance on every entry</text>
@@ -75,7 +75,7 @@
   <text x="802" y="356" font-size="12.5" fill="#2f2b3d">everything the run relied on</text>
   <text x="802" y="380" font-size="12.5" fill="#2f2b3d">Failed attempts are marked, so</text>
   <text x="802" y="398" font-size="12.5" fill="#2f2b3d">the recovery does not reward</text>
-  <text x="802" y="416" font-size="12.5" fill="#2f2b3d">the memory that misled</text>
+  <text x="802" y="416" font-size="12.5" fill="#2f2b3d">the entry that misled</text>
   <text x="802" y="440" font-size="12.5" fill="#2f2b3d">Contrast lessons: what failed</text>
   <text x="802" y="458" font-size="12.5" fill="#2f2b3d">and what worked, named</text>
   <text x="802" y="482" font-size="12.5" fill="#2f2b3d">Regime shift detection</text>
