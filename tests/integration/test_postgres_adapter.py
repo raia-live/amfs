@@ -1229,6 +1229,34 @@ def test_the_extended_sql_totals_leave_them_out_too(adapter) -> None:
     assert set(stats["agents"]) == {"agent-a"}
 
 
+def test_extended_stats_survive_a_missing_events_table(adapter) -> None:
+    """The reuse deltas come from ``amfs_events`` and are optional.
+
+    A deployment without that table must still get the rest of the payload,
+    with the deltas at zero. The checkout is one transaction, so the failed
+    statement has to be contained in its own savepoint: aborting the whole
+    transaction and swallowing the error made the method raise on the way out
+    and handed a poisoned connection back to the pool.
+    """
+    import psycopg
+
+    _seed_real_and_system(adapter)
+    with psycopg.connect(PG_DSN, autocommit=True) as conn:
+        conn.execute("DROP TABLE amfs_events CASCADE")
+
+    stats = adapter.stats_extended()
+    assert stats["total_entries"] == 2
+    assert stats["recalls_this_week"] == 0
+    assert stats["recalls_last_week"] == 0
+
+    # And the pooled connection came back usable.
+    assert adapter.stats_extended()["total_entries"] == 2
+    assert {s["entity_path"] for s in adapter.entity_summaries()} == {
+        "repo/module",
+        "repo/other",
+    }
+
+
 def test_the_entity_list_leaves_them_out(adapter) -> None:
     _seed_real_and_system(adapter)
 

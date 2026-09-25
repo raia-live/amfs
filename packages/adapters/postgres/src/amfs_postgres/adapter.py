@@ -3372,8 +3372,11 @@ class PostgresAdapter(AdapterABC):
             GROUP BY entity_path
             ORDER BY MAX(written_at) DESC
         """
-        with self._pool.connection() as conn, conn.transaction():
+        with self._pool.connection() as conn:
             with conn.cursor() as cur:
+                # The checkout is one transaction (see _TenantRLSConnection),
+                # so LOCAL ends with it and the pooled connection goes back
+                # with the default.
                 cur.execute(f"SET LOCAL work_mem = '{_AGGREGATE_WORK_MEM}'")
                 cur.execute(sql, params)
                 rows = cur.fetchall()
@@ -3550,8 +3553,11 @@ class PostgresAdapter(AdapterABC):
         conditions.append(_EXCLUDE_SYSTEM_ROWS)
         where = " AND ".join(conditions)
 
-        with self._pool.connection() as conn, conn.transaction():
+        with self._pool.connection() as conn:
             with conn.cursor() as cur:
+                # The checkout is one transaction (see _TenantRLSConnection),
+                # so LOCAL ends with it and the pooled connection goes back
+                # with the default.
                 cur.execute(f"SET LOCAL work_mem = '{_AGGREGATE_WORK_MEM}'")
                 # No COUNT(DISTINCT ...) here: the two distinct counts are the
                 # row counts of the agent and entity breakdowns below, over the
@@ -3637,22 +3643,28 @@ class PostgresAdapter(AdapterABC):
                 recalls_this_week = 0
                 recalls_last_week = 0
                 try:
-                    cur.execute(
-                        f"""
-                        SELECT
-                            COUNT(*) FILTER (
-                                WHERE created_at >= NOW() - INTERVAL '7 days'
-                            ) AS recalls_this_week,
-                            COUNT(*) FILTER (
-                                WHERE created_at >= NOW() - INTERVAL '14 days'
-                                  AND created_at < NOW() - INTERVAL '7 days'
-                            ) AS recalls_last_week
-                        FROM amfs_events
-                        WHERE {event_where}
-                        """,
-                        event_params,
-                    )
-                    event_row = cur.fetchone()
+                    # Its own savepoint: a failed statement aborts the
+                    # transaction it runs in, and this method is inside the
+                    # checkout's. Rolling back to the savepoint leaves that
+                    # transaction healthy, so the checkout still commits and
+                    # the connection goes back to the pool usable.
+                    with conn.transaction():
+                        cur.execute(
+                            f"""
+                            SELECT
+                                COUNT(*) FILTER (
+                                    WHERE created_at >= NOW() - INTERVAL '7 days'
+                                ) AS recalls_this_week,
+                                COUNT(*) FILTER (
+                                    WHERE created_at >= NOW() - INTERVAL '14 days'
+                                      AND created_at < NOW() - INTERVAL '7 days'
+                                ) AS recalls_last_week
+                            FROM amfs_events
+                            WHERE {event_where}
+                            """,
+                            event_params,
+                        )
+                        event_row = cur.fetchone()
                     if event_row:
                         recalls_this_week = int(event_row["recalls_this_week"] or 0)
                         recalls_last_week = int(event_row["recalls_last_week"] or 0)
