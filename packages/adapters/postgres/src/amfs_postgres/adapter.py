@@ -465,11 +465,25 @@ from amfs_core.aggregates import (  # noqa: E402
     RECALL_TOKENS_FLOOR as _RECALL_TOKENS_FLOOR,
 )
 
+# Guarded by recall_count, because an entry never recalled contributes zero
+# whatever its size, and ``value::text`` is the expensive part: it serialises
+# the whole JSONB document for every row the aggregate sees. Multiplying that
+# by zero afterwards still paid for it — on 400k entries it was half the
+# ``/stats`` statement (4.8 s → 2.3 s with the guard, same result) and half
+# of ``/entities``. CASE evaluates only the branch taken, so the unrecalled
+# majority of rows skip the serialisation.
 _RECALLED_TOKENS_SQL = (
-    "COALESCE(SUM(recall_count * LEAST(GREATEST("
+    "COALESCE(SUM(CASE WHEN recall_count > 0 THEN recall_count * LEAST(GREATEST("
     f"length(value::text) / {_CHARS_PER_TOKEN}, {_RECALL_TOKENS_FLOOR}), "
-    f"{_RECALL_TOKENS_CEIL})), 0)"
+    f"{_RECALL_TOKENS_CEIL}) ELSE 0 END), 0)"
 )
+
+#: ``work_mem`` for the grouped aggregate statements below. Grouping 400k
+#: entries by entity_path spilled to disk at the 4 MB default (``Sort Method:
+#: external merge``) and took 1.9 s; at 64 MB the same statement hash-
+#: aggregates in memory in 0.6 s. Set ``LOCAL`` so it ends with the
+#: transaction and cannot leak to whatever borrows the pooled connection next.
+_AGGREGATE_WORK_MEM = "64MB"
 
 
 class _SingleConnectionPool:
@@ -3360,6 +3374,10 @@ class PostgresAdapter(AdapterABC):
         """
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
+                # The checkout is one transaction (see _TenantRLSConnection),
+                # so LOCAL ends with it and the pooled connection goes back
+                # with the default.
+                cur.execute(f"SET LOCAL work_mem = '{_AGGREGATE_WORK_MEM}'")
                 cur.execute(sql, params)
                 rows = cur.fetchall()
 
@@ -3537,12 +3555,19 @@ class PostgresAdapter(AdapterABC):
 
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
+                # The checkout is one transaction (see _TenantRLSConnection),
+                # so LOCAL ends with it and the pooled connection goes back
+                # with the default.
+                cur.execute(f"SET LOCAL work_mem = '{_AGGREGATE_WORK_MEM}'")
+                # No COUNT(DISTINCT ...) here: the two distinct counts are the
+                # row counts of the agent and entity breakdowns below, over the
+                # same WHERE. As aggregates they forced two sorts of every row
+                # and kept the statement off the parallel plan — 2.3 s against
+                # 0.24 s for the same answer on 400k entries.
                 cur.execute(
                     f"""
                     SELECT
                         COUNT(*) AS total_entries,
-                        COUNT(DISTINCT entity_path) AS total_entities,
-                        COUNT(DISTINCT agent_id) AS total_agents,
                         AVG(confidence) AS confidence_avg,
                         MIN(confidence) AS confidence_min,
                         MAX(confidence) AS confidence_max,
@@ -3618,22 +3643,28 @@ class PostgresAdapter(AdapterABC):
                 recalls_this_week = 0
                 recalls_last_week = 0
                 try:
-                    cur.execute(
-                        f"""
-                        SELECT
-                            COUNT(*) FILTER (
-                                WHERE created_at >= NOW() - INTERVAL '7 days'
-                            ) AS recalls_this_week,
-                            COUNT(*) FILTER (
-                                WHERE created_at >= NOW() - INTERVAL '14 days'
-                                  AND created_at < NOW() - INTERVAL '7 days'
-                            ) AS recalls_last_week
-                        FROM amfs_events
-                        WHERE {event_where}
-                        """,
-                        event_params,
-                    )
-                    event_row = cur.fetchone()
+                    # Its own savepoint: a failed statement aborts the
+                    # transaction it runs in, and this method is inside the
+                    # checkout's. Rolling back to the savepoint leaves that
+                    # transaction healthy, so the checkout still commits and
+                    # the connection goes back to the pool usable.
+                    with conn.transaction():
+                        cur.execute(
+                            f"""
+                            SELECT
+                                COUNT(*) FILTER (
+                                    WHERE created_at >= NOW() - INTERVAL '7 days'
+                                ) AS recalls_this_week,
+                                COUNT(*) FILTER (
+                                    WHERE created_at >= NOW() - INTERVAL '14 days'
+                                      AND created_at < NOW() - INTERVAL '7 days'
+                                ) AS recalls_last_week
+                            FROM amfs_events
+                            WHERE {event_where}
+                            """,
+                            event_params,
+                        )
+                        event_row = cur.fetchone()
                     if event_row:
                         recalls_this_week = int(event_row["recalls_this_week"] or 0)
                         recalls_last_week = int(event_row["recalls_last_week"] or 0)
@@ -3646,8 +3677,8 @@ class PostgresAdapter(AdapterABC):
             "recalls_this_week": recalls_this_week,
             "recalls_last_week": recalls_last_week,
             "total_entries": row["total_entries"] if row else 0,
-            "total_entities": row["total_entities"] if row else 0,
-            "total_agents": row["total_agents"] if row else 0,
+            "total_entities": len(entity_rows),
+            "total_agents": len(agent_rows),
             "agents": {r["agent_id"]: r["cnt"] for r in agent_rows},
             "entities": {r["entity_path"]: r["cnt"] for r in entity_rows},
             "confidence_avg": float(row["confidence_avg"] or 0) if row else 0.0,
