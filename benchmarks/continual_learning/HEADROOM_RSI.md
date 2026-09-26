@@ -328,6 +328,54 @@ Revised ceiling, support at fleet 1 on set A: 100 % − 5 % (first exposures) �
 92.5 % with 2–4 second-exposure losses per run. Ci-fix has one first exposure per changed
 class (2 classes) and sits at 95–96 %.
 
+### Pilots 5d and 5e, complete — the pair, the baselines, and why the loop is still silent
+
+Same cells, on the deployed #449 + #780/#781 with #450's core client-side; the
+`e1-A-baselines` run (GPT-5.5, set A, fleet 1) supplies the other arms on the same seeds.
+
+| support, s11+s23 (success / late / changed-class post-change) | |
+|---|---|
+| `none` (frontier alone) | 66.7 / 51.2 / 5.0 |
+| `pgvector` · `pgvector+rerank` · `pgvector-diy+outcomes` · `raw-traces` | 73.3 / 66.2 / 35.0 · 76.7 / 70.0 / 45.0 · 70.0 / 61.2 / 27.5 · 75.8 / 63.8 / 27.5 |
+| `senselab` 5a · 5d | 92.5 / 91.2 / 82.5 · 90.8 / 87.5 / 75.0 |
+| `senselab-rsi` 5b · 5e | 92.5 / 90.0 / 80.0 · **94.2 / 92.5 / 85.0** |
+
+| ci-fix, s11+s23 | |
+|---|---|
+| `none` · pgvector variants · `raw-traces` | 87.5 / 81.2 / 62.5 · 86.7–89.2 / 81.2–83.8 / 62.5–67.5 · 87.5 / 81.2 / 62.5 |
+| `senselab` 5a · 5d | 95.8 / 95.0 / 90.0 · 94.2 / 91.2 / 82.5 |
+| `senselab-rsi` 5b · 5e | 95.8 / 93.8 / 87.5 · 95.8 / 93.8 / 87.5 |
+
+Three readings:
+
+1. **The outcome loop's margin is the large, stable effect**: +16–18 points over the best
+   baseline on support (+35–40 on the changed classes after the flip), +6–9 on ci-fix
+   (+20–25 on the changed classes). `none` never learns a flipped fix (5 %).
+2. **Identical configurations differ by up to 5 points per cell at n = 60** (5d s11 support
+   90.0 vs 5e s11 95.0; 5d s23 85.0 vs 5e s23 90.0). Nothing between 5a, 5b, 5c, 5d and 5e
+   is resolvable at this size; the dev pilots find defects, the six-seed E1 grid measures.
+3. **The RSI arm has not yet been tested as an RSI arm.** In 5e the loop detected what it
+   should — a regime-shift fix on the export-timeout flip three episodes after it, an
+   escalation ping-pong incident, a canary on s23 with three Tier 2 replays — and shipped
+   nothing: the repair agent gave up on its 50k-token budget after five steps on every fix
+   (template kept), and each replay's reflection step was refused on the repair branch
+   (no grant can exist on a platform-created branch). amfs-internal#782 fixes both.
+
+Where the shipped fixes have to act is now specific. Reading the lessons behind ci-fix
+s11's `flaky-integration` 4/4/4 (5a, 5c, 5d alike): after its first failed sweep the agent
+wrote `ci-flaky-integration-timeout-avoid-unrelated-explore` — "do not follow generic
+explore-order unrelated fixes (dependency bump, migrations…)" — an untested note scoring
+0.95 by similarity, and on every later exposure it obeyed that note over the record,
+taking `fix_code` (0/4 on this situation) first and `rerun_job` (0/3) second, so each
+exposure advanced the sweep by one action at most. The engine's evidence gating did its
+part (the two older "treat it as flakiness and rerun" notes are discredited 0/3 and shown
+as such); what the agent trusts is its own fresh, specific, wrong hypothesis. A corrective
+entry from the loop — validated by a Tier 2 replay before it ships — is the mechanism
+that outranks such a note; nothing in the retrieval ranking should, since the note *is*
+the most similar text. Pilots 5f/5g measure that once #782 is live; the harness now keeps
+the rendered footer with every search in the episode record, so the next reading of
+"followed / ignored" is against the text the agent saw rather than a reconstruction.
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families

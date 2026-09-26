@@ -217,6 +217,26 @@ class Scenario:
             return f"{self.agent_base}-{ep % n + 1}"
         return self.agent_base
 
+    def is_joiner(self, agent_id: str) -> bool:
+        """Whether ``agent_id`` is a team member who arrives at ``join_at`` — a follower in
+        ``pioneer`` mode (members 2..N), the newcomer in ``newcomer`` mode (member N). The
+        team-grows probe (HYPOTHESIS_RSI.md, amendment (i)) keeps the veterans as replicas
+        of one hosted identity and gives each joiner its own, so what a joiner inherits is
+        what the team's memory holds — including what the repair loop shipped to it — and
+        never a fix, canary or judge scoped to the joiner's own (empty) record. Always
+        false under round-robin and without a fleet."""
+        if self.fleet_size <= 1 or self.fleet_mode == "rr":
+            return False
+        prefix = f"{self.agent_base}-"
+        if not agent_id.startswith(prefix) or not agent_id[len(prefix):].isdigit():
+            return False
+        member = int(agent_id[len(prefix):])
+        if self.fleet_mode == "pioneer":
+            return member >= 2
+        if self.fleet_mode == "newcomer":
+            return member == self.fleet_size
+        return False
+
     def regenerate(self, ep: int, salt: int) -> None:
         """Re-draw episode ``ep``'s instance with a different random salt. Scenarios that
         support ``change_focus`` implement it; the default leaves the schedule as built."""

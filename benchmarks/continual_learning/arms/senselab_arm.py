@@ -703,6 +703,9 @@ class SenseLabArm(MemoryArm):
         # The cell's agent base (the runner has already suffixed it per cell attempt, e.g.
         # ``support-agent-388584``); fleet members are ``<base>-<n>``.
         self._agent_base = getattr(scenario, "agent_base", "")
+        # Who joins the team late (pioneer followers, the newcomer): their own hosted identity
+        # even when the veterans are replicas. ``None`` outside the team-grows protocols.
+        self._is_joiner = getattr(scenario, "is_joiner", None)
         # The situation record is asked for where the priors are: a task that ends in a
         # choice among a fixed set of actions. Free-form scenarios get no label parameter.
         from ..agent.loop import candidate_actions
@@ -741,8 +744,16 @@ class SenseLabArm(MemoryArm):
         stripped, relative to the base: the runner's per-cell suffix is numeric too, and
         stripping any trailing ``-<digits>`` collapsed every cell of a family onto one hosted
         agent (shared behaviours, incident baseline, fixes and canary slot). Found in the RSI
-        pilot, 2026-09-26."""
+        pilot, 2026-09-26.
+
+        A member the scenario names as a *joiner* (``pioneer`` followers, the ``newcomer``)
+        keeps its own identity whatever the replica setting: the team-grows probe measures
+        what a new identity inherits from the team's memory, and a joiner folded into the
+        veterans' identity would inherit their fixes and canary by construction."""
         if not self.fleet_replicas:
+            return member_id
+        is_joiner = getattr(self, "_is_joiner", None)
+        if callable(is_joiner) and is_joiner(member_id):
             return member_id
         base = getattr(self, "_agent_base", "") or ""
         if base and member_id.startswith(base + "-") and member_id[len(base) + 1:].isdigit():

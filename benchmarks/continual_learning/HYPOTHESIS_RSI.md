@@ -850,3 +850,106 @@ changed-class post-change ≥ 85 % with second-exposure failures ≤ 2 per run, 
 first proposal ≤ 3 episodes after the change, `repair_agent` share ≥ 80 %, at least one fix
 reaching `canary` per support cell; no `IDLETX` ≥ 60 s or `LOCKWAIT` in the sampler during
 the runs.
+
+**Pilots 5d/5e result (2026-09-26 10:00 UTC; deployed amfs#449 + amfs-internal#780/#781,
+#450's core client-side, `client_core.commit = beace570`).** 5d (`senselab`): support
+90.8 % / late 87.5 % / changed-class post-change 75.0 %; ci-fix 94.2 / 91.2 / 82.5. 5e
+(`senselab-rsi`): support **94.2 / 92.5 / 85.0**; ci-fix 95.8 / 93.8 / 87.5. The 5d
+prediction is **not met** on 5d (late 0.875, changed-post 75 %, `flaky-integration` s11
+4/4/4 again) and met on 5e's support cells (late 0.925, changed-post 85 %, second-exposure
+failures 2 on s23 and 1 on s11); the two runs are the same configuration up to the RSI
+arm, whose loop shipped nothing (below), so the 3.4-point gap between them is the
+run-to-run noise at n = 120, not an effect. Baselines on the same seeds, set and windows
+(`e1-A-baselines`, GPT-5.5, fleet 1): support `none` 66.7 / 51.2 / 5.0, `pgvector`
+73.3 / 66.2 / 35.0, `pgvector+rerank` 76.7 / 70.0 / 45.0, `pgvector-diy+outcomes`
+70.0 / 61.2 / 27.5, `raw-traces` 75.8 / 63.8 / 27.5; ci-fix `none` 87.5 / 81.2 / 62.5,
+the pgvector variants 86.7–89.2 / 81.2–83.8 / 62.5–67.5, `raw-traces` 87.5 / 81.2 / 62.5.
+The 5e RSI predictions **failed on the mechanism**: first proposal came 3 episodes after
+the change (met) and one fix reached `canary` on s23 (met), but the `repair_agent` share
+was 0 % — all four fixes' rationales end in `template kept (repair agent gave up:
+token_budget after 5 step(s), 221.9s)`; the 50k-token run budget bought five steps of a
+conversation that re-sends a 24k-character evidence pack every step. The three Tier 2
+replays the canary triggered on s23 each answered correctly on the fix's branch and each
+failed its reflection step with `403 No access to branch 'repair/…'` (no API key created a
+platform branch, so no grant exists). The regime-shift detector fired correctly on
+`large-date-range-export-failure-workaround` (validated 3×, then failed) and the
+escalation ping-pong incident opened. Both mechanism defects are fixed in
+amfs-internal#782 (`AMFS_EVAL_REPAIR_TOKEN_BUDGET`, default 150k; the agent is told before
+its last affordable step and asked to propose; repair branches readable by the account's
+keys, search included) and, harness-side, a replay's notes are dropped rather than
+written to the fix's branch. The sampler saw no `LOCKWAIT` during the runs but 126
+`IDLETX` samples ≥ 60 s (max 384 s): the Cortex worker's tenant-pinned scan connection,
+not the request path, and not a hazard while no DDL runs — logged as a separate risk. A
+third diagnostic came from reading the lessons behind ci-fix s11's 4/4/4: after one failed
+sweep the agent wrote `ci-flaky-integration-timeout-avoid-unrelated-explore` ("do not
+follow generic explore-order unrelated fixes") and then obeyed that untested note over the
+record on every later exposure, taking `fix_code` (0/4 here) first each time; this is the
+class of failure the loop's corrective entries are for, and the reason the RSI arm's value
+cannot show before #782 is live. Pilots 5f/5g: the same pair on the deployed #450 and
+#782; predictions unchanged from 5d/5e, plus `repair_agent` share ≥ 80 % and replay
+reflection errors = 0.
+
+### 2026-09-26 (i) — the team grows: what a joining agent inherits
+
+**Why.** E1/E2 measure a fixed team living through a change. Teams are not fixed: the
+question a buyer of "RSI for agent fleets" asks is what happens to *quality* when agents
+are added — does a newcomer start from the team's repaired state, or from the team's
+mistakes? The transfer protocols of the continual-learning study (`Scenario.fleet_mode`
+`pioneer` / `newcomer`, `analysis/transfer.py`) already showed that shared memory makes a
+joiner *fast* (grid v3, support, newcomer at ep 40 onto a store with a change at 20:
+first-exposure first-attempt `none` 0.32, `pgvector` 0.50, `senselab` 0.77; on changed
+classes `pgvector` 0.00 with **9/9 poisoned first exposures** — an untested peer note in
+context, nothing validated — against `senselab` 0.56 and 0/9). What they did not ask is
+what the repair loop adds on top of the outcome loop for the joiner. This amendment adds
+that probe, on the RSI arm, with the veterans' loop given time to act before the join.
+
+**Design (probe (i), development seeds first).** `support`, `ci-fix` × seeds 11, 23 ×
+protocols `pioneer` (agent 1 alone for 60 episodes, agents 2..6 join) and `newcomer`
+(agents 1..5 for 60 episodes, agent 6 joins) × arms `pgvector+rerank`, `senselab`,
+`senselab-rsi`, GPT-5.5, 100 episodes, change at 20, join at 60. Veterans are **replicas
+of one hosted identity** (`--fleet-replicas`; always on for `senselab-rsi*`): one fix list,
+one canary, one judge, so the team's repair loop is the loop of a team and not of six
+strangers. Each joiner is a **new identity** (`Scenario.is_joiner`; `SenseLabArm.
+saas_agent_id` keeps a joiner's member id) opened on the platform the moment it arrives:
+nothing reaches it by construction, only through the shared memory — the entries, their
+evidence status, the loop's corrective entries, fix memories. Join at 60 rather than 40
+so that a fix proposed near the change has the ≥ 8-outcome canary floor behind it before
+anyone new reads the store. The confirmatory version (seeds 37/41/59/73, both models)
+runs after `analysis-freeze-rsi` with E1.
+
+**Harness.** `SenseLabRsiArm` now holds every identity a cell opens (`_agents`), readies
+each on first session, polls verdicts on the identity that sealed the trace, unions fixes
+across identities, and reports the veterans' identity at the top level with each joiner
+under `peers`. `analysis/team_grows.py` reads the cells and writes `TEAM_GROWS.md`.
+
+**Endpoints (joiners; first exposure = the joiner's first episode on a class after
+joining).** (A) first-attempt success on changed and on unchanged classes; stale-pick on
+changed classes; escalation. (B) inheritance quality — per first exposure, what the
+searches served: validated hits, untested peer notes, discredited entries in the avoid
+list, platform-authored entries (keys no agent in the cell wrote); *poisoned* first
+exposures (failed first attempt, untested peer note in context, no validated hit) and
+*guided* ones (succeeded with a validated hit); the veterans' own last ten pre-join
+episodes as the reference. (C) episodes and tokens to parity with the veterans (transfer.py's
+units); cold-start curve. (D) disagreement with the veterans' late modal answer per class.
+(E) tokens per joiner episode and per joiner-solved task. (F) RSI only: fixes proposed and
+shipped before the join, levers, the joiners' own verdict and fix counts.
+
+**Predictions, dev seeds.** (P1) Speed is the outcome loop's: `senselab` and `senselab-rsi`
+joiners both reach parity within 5 episodes in ≥ 80 % of units; `pgvector+rerank` in
+≤ 60 %. (P2) Quality is where the loop shows: `senselab-rsi` joiners' changed-class
+first-exposure first-attempt ≥ `senselab`'s by ≥ 10 points **in cells where the veterans
+shipped at least one fix before the join**, and no worse elsewhere; poisoned first
+exposures ≤ 5 % for both SenseLab arms against ≥ 40 % for `pgvector+rerank`. (P3) In the
+RSI arm ≥ 1 platform-authored hit appears in ≥ 50 % of joiner changed-class first
+exposures (the loop's corrective entries reached a reader who never saw the failure); in
+`senselab` that share is what the outcome loop's lesson-contrast entries alone give, and
+the difference is reported. (P4) Disagreement with the veterans' late answer is lowest for
+`senselab-rsi` on changed classes when the veterans' late success is ≥ 0.8, and *highest*
+on the cells where the veterans' late success is < 0.5 (a joiner reading the record rather
+than the team's habit). **What falsifies the claim:** if `senselab-rsi` joiners are no
+better than `senselab` joiners on changed-class first exposures in cells where a fix
+shipped before the join, the repair loop adds nothing to onboarding beyond the outcome
+loop, and the paper says so; if the veterans' loop shipped nothing by episode 60 in most
+cells, the probe is reported as inconclusive on P2/P3 and the join is moved later in the
+confirmatory version, not the prediction. Cell counts are small (24 cells, 2 seeds); this
+is a development readout to set the confirmatory design, not a confirmatory statistic.

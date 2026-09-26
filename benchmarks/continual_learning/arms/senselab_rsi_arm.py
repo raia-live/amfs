@@ -154,8 +154,8 @@ class _RsiSession(_SenseLabSession):
         # Which episode a task came from, for the Tier 2 replay: the platform sends the
         # case's ``task_input`` (the prompt the trace was committed with), not the episode.
         self.arm.episode_by_task.setdefault(_task_key(task_input), self.episode)
-        self.arm.ledger.append({"episode": self.episode, "replica": self.replica, "trace_id": str(trace_id) if trace_id else None,
-                                "sealed_at": time.time(),
+        self.arm.ledger.append({"episode": self.episode, "replica": self.replica, "agent": self.agent_id,
+                                "trace_id": str(trace_id) if trace_id else None, "sealed_at": time.time(),
                                 "success": outcome.success, "severity": outcome.severity,
                                 "canary": self.acct.notes.get("canary"), "memory_branch": self.acct.notes.get("memory_branch")})
 
@@ -263,7 +263,11 @@ class SenseLabRsiArm(SenseLabArm):
         self._agents_ready: set[str] = set()
         self._rubric = ""
         self._scenario_name = ""
+        # The veterans' identity (every replica maps onto it) and, in order of arrival,
+        # every hosted identity the cell has opened — the joiners of the team-grows probe
+        # (amendment (i)) have their own. Fixes, verdicts and incidents are per identity.
         self._agent: str | None = None
+        self._agents: list[str] = []
         # Tier 2 state: the cell's scenario (the environment the replay runs against), the
         # model the cell runs on, which episode each committed task came from, and the record
         # of every replay run here.
@@ -289,8 +293,24 @@ class SenseLabRsiArm(SenseLabArm):
         s = _RsiSession(self, agent_id, episode)
         if self._agent is None:
             self._agent = s.agent_id
-            self._ready(self._agent)
+        # A joiner's first session opens its identity on the platform (judge, repair
+        # settings, replay endpoint) the moment it arrives, as a new agent's would.
+        self._ready(s.agent_id)
         return s
+
+    def _ready(self, agent_id: str) -> None:
+        if agent_id in self._agents_ready:
+            return
+        self._ready_agent(agent_id)
+        if agent_id not in self._agents:
+            self._agents.append(agent_id)
+
+    def _list_fixes_all(self) -> tuple[list[dict[str, Any]], int]:
+        """Every identity's fixes, and the number of calls made."""
+        fixes: list[dict[str, Any]] = []
+        for a in self._agents or ([self._agent] if self._agent else []):
+            fixes.extend(self.pro.list_fixes(a))
+        return fixes, max(1, len(self._agents))
 
     def outcome_for_commit(self, outcome: Outcome, session: _SenseLabSession) -> tuple[str, dict[str, Any]]:
         if self.verdict_source == "judges":
@@ -302,10 +322,8 @@ class SenseLabRsiArm(SenseLabArm):
             extra["verified_by"] = self.verified_by
         return outcome.severity, extra
 
-    # -- per-agent setup (once per cell) ---------------------------------------------
-    def _ready(self, agent_id: str) -> None:
-        if agent_id in self._agents_ready:
-            return
+    # -- per-agent setup (once per identity) -------------------------------------------
+    def _ready_agent(self, agent_id: str) -> None:
         from ..pro_client import ProApiError
 
         t0 = time.perf_counter()
@@ -361,12 +379,13 @@ class SenseLabRsiArm(SenseLabArm):
         if not self.ledger or not self.ledger[-1].get("trace_id"):
             return
         trace_id = self.ledger[-1]["trace_id"]
+        agent = self.ledger[-1].get("agent") or self._agent
         t0 = time.perf_counter()
         deadline = t0 + self.verdict_wait_s
         found = None
         while True:
             try:
-                v = self.pro.verdicts(self._agent, limit=5, trace_id=trace_id)
+                v = self.pro.verdicts(agent, limit=5, trace_id=trace_id)
                 acct.ops += 1
                 items = v.get("items") or v.get("verdicts") or []
                 if items:
@@ -398,8 +417,8 @@ class SenseLabRsiArm(SenseLabArm):
         if self.verdict_wait_s > 0:
             self._await_verdict(acct)
         try:
-            fixes = self.pro.list_fixes(self._agent)
-            acct.ops += 1
+            fixes, calls = self._list_fixes_all()
+            acct.ops += calls
         except Exception as e:  # noqa: BLE001
             acct.notes["fixes_error"] = f"{type(e).__name__}: {e}"[:200]
             acct.memory_ms = (time.perf_counter() - t0) * 1000
@@ -579,7 +598,8 @@ class SenseLabRsiArm(SenseLabArm):
             return None
         from ..pro_client import ProApiError
 
-        out: dict[str, Any] = {"agent_id": self._agent, "scenario": self._scenario_name, "policy": self.repair_policy,
+        out: dict[str, Any] = {"agent_id": self._agent, "agents": list(self._agents),
+                               "scenario": self._scenario_name, "policy": self.repair_policy,
                                "verdict_source": self.verdict_source, "judges_on": self.judges_on,
                                "canary": {"pct": self.canary_pct, "min_outcomes": self.canary_min_outcomes,
                                           "timeout_sessions": self.canary_timeout_sessions, "look_every": self.look_every},
@@ -589,7 +609,7 @@ class SenseLabRsiArm(SenseLabArm):
                                          "replays": self.replay_ledger},
                                "sessions_sealed": self.sessions_sealed, "ledger": self.ledger, "events": self.events}
         try:
-            fixes = self.pro.list_fixes(self._agent)
+            fixes, _ = self._list_fixes_all()
             full = []
             for f in fixes:
                 row = dict(f)
@@ -610,22 +630,33 @@ class SenseLabRsiArm(SenseLabArm):
             out["fixes"] = full
         except Exception as e:  # noqa: BLE001
             out["fixes_error"] = f"{type(e).__name__}: {e}"[:200]
-        for name, fn in (("verdicts", lambda: self.pro.verdicts(self._agent, limit=500)),
-                         ("incidents", lambda: self.pro.incidents(self._agent)),
-                         ("behaviors", lambda: self.pro.behaviors(self._agent)),
-                         ("contract", lambda: self.pro.feedback_contract(self._agent)),
-                         ("repairs_summary", lambda: self.pro.repairs_summary(self._agent))):
-            try:
-                out[name] = fn()
-            except Exception as e:  # noqa: BLE001
-                out[f"{name}_error"] = f"{type(e).__name__}: {e}"[:200]
+        def per_agent(agent: str) -> dict[str, Any]:
+            got: dict[str, Any] = {}
+            for name, fn in (("verdicts", lambda: self.pro.verdicts(agent, limit=500)),
+                             ("incidents", lambda: self.pro.incidents(agent)),
+                             ("behaviors", lambda: self.pro.behaviors(agent)),
+                             ("contract", lambda: self.pro.feedback_contract(agent)),
+                             ("repairs_summary", lambda: self.pro.repairs_summary(agent))):
+                try:
+                    got[name] = fn()
+                except Exception as e:  # noqa: BLE001
+                    got[f"{name}_error"] = f"{type(e).__name__}: {e}"[:200]
+            return got
+
+        # The veterans' identity keeps the report's top-level keys (what every reader of
+        # ``rsi_fixes.jsonl`` expects); each joiner's record sits under ``peers``.
+        out.update(per_agent(self._agent))
+        peers = [a for a in self._agents if a != self._agent]
+        if peers:
+            out["peers"] = {a: per_agent(a) for a in peers}
         return out
 
     def close(self) -> None:
-        if self._hub is not None and self._agent:
+        if self._hub is not None:
             # A replay request for this cell after its end has nowhere to run: the hub answers
             # 404 and the platform's case stays missing until the replay expires.
-            self._hub.unregister(self._agent)
+            for a in self._agents or ([self._agent] if self._agent else []):
+                self._hub.unregister(a)
         try:
             self.pro.close()
         except Exception:  # noqa: BLE001
