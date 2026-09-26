@@ -35,6 +35,7 @@ _SL = int(os.environ.get("CL_SENSELAB_CONCURRENCY", "2"))
 _M0 = int(os.environ.get("CL_MEM0_CONCURRENCY", "6"))
 _ARM_CONCURRENCY = {"mem0": _M0, "zep": 8, "senselab": _SL, "senselab-episode": _SL,
                     "senselab-nofeedback": _SL, "senselab-attempts": _SL, "senselab-nopriors": _SL,
+                    "senselab-nosituation": _SL, "senselab-nocontract": _SL,
                     "senselab-lean": _SL, "senselab-induce": _SL, "skillfile": _SL}
 _sems: dict[str, threading.Semaphore] = {}
 _write_lock = threading.Lock()

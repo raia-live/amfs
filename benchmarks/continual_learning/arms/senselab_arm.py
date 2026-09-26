@@ -64,7 +64,7 @@ import threading
 import time
 from typing import Any
 
-from amfs import AgentMemory
+from amfs import SITUATION_ATTRIBUTE, AgentMemory
 from amfs_adapter_http import HttpAdapter
 from amfs_core.actions import render_priors
 from amfs_core.models import MemoryType, OutcomeType, RecallConfig
@@ -74,6 +74,35 @@ from .base import ArmAccounting, EpisodeSession, MemoryArm, MemoryHit, Outcome
 
 #: Key of the entity's induced decision rules (``SenseLabInduceArm``). One key, versioned.
 INDUCED_RULES_KEY = "decision-rules"
+
+
+def fold_situation(value: Any) -> str:
+    """A situation label as the harness sends it: lowercase, punctuation to spaces, one space
+    between words, at most eight words. The server compares labels folded too (its
+    ``_fold_situation``); folding here as well keeps what the analysis logs equal to what the
+    record is keyed by, whichever server version answers."""
+    text = "".join(ch if ch.isalnum() else " " for ch in str(value or "").casefold())
+    words = text.split()
+    return " ".join(words[:8])
+
+
+#: The standing instruction every SenseLab arm with priors gives the model: how to use the
+#: recommendation and the plan the search footer carries. It is the product's documented
+#: integration contract (``amfs.Run``: act on ``act``, work the plan on a retry, label the kind
+#: of task), applied identically to every SenseLab arm and disclosed as such. Grid v5
+#: (2026-09-20) measured the model without it: on ``ci-fix`` it took the recommended action on
+#: 41% of first attempts and retried an action already failed on this task 29% of the time.
+PRIORS_CONTRACT = (
+    "Memory search results end with a footer: what has been tried on this kind of task, how it "
+    "went, a recommendation (act / explore / escalate / abstain) and an order to try actions in. "
+    "Use it like this: on your first attempt, take the action the footer says to act on unless "
+    "the task text plainly rules it out. If the footer says explore, the record shows the fix has "
+    "changed or is unknown — take its first untried action, or your own best guess among the "
+    "untried ones when it says to use your judgement. On a retry, take the next action in the "
+    "footer's order that you have not tried on this task; never repeat an action that already "
+    "failed on this task. Give every memory_search a `situation` label for the kind of task, "
+    "reusing the labels already in use."
+)
 
 _KIND = {"fact": MemoryType.FACT, "belief": MemoryType.BELIEF, "experience": MemoryType.EXPERIENCE}
 BRIEFING_MAX_CHARS = 2400
@@ -291,6 +320,11 @@ class _SenseLabSession(EpisodeSession):
         self._attempts_marked = 0
         self._tried_this_task: set[str] = set()
         self._footer: str | None = None
+        # The kind of task the agent declared on its first search this episode, as the
+        # product compares it (``fold_situation``). Sent on every retrieve of the episode and
+        # stamped on the trace, so the situation's own outcome record is what the priors
+        # read and what the repair loop groups failing runs by.
+        self.situation: str | None = None
         # Entries the briefing already named as discredited. A retrieve's avoid list names
         # them again; those rows are rendered as a reference to the briefing rather than
         # carried twice in every call of the episode.
@@ -363,9 +397,10 @@ class _SenseLabSession(EpisodeSession):
         return (f"Decision rules induced from this entity's outcome record (v{getattr(e, 'version', '?')}; "
                 f"evidence: {status}, {s} succeeded / {f} failed on tasks that read them):\n{e.value}")
 
-    def search(self, query: str, top_k: int) -> list[MemoryHit]:
+    def search(self, query: str, top_k: int, *, situation: str | None = None) -> list[MemoryHit]:
         cfg = RecallConfig(include_avoid=self.arm.evidence_aware, adaptive_k=self.arm.evidence_aware)
         extra: dict[str, Any] = {}
+        cands: list[str] | None = None
         # Priors and the recommendation are asked for only when the task ends in a choice
         # among a fixed set of actions (the terminal tool has an ``action`` enum) — the
         # product's documented use. Grid v5 (2026-09-20) measured what asking anyway costs:
@@ -379,7 +414,15 @@ class _SenseLabSession(EpisodeSession):
             # picks one untried candidate per agent, so without this it would name the
             # same one on every attempt. What a caller with a fixed action set would do.
             cands = [c for c in self.candidate_actions if c.split(":", 1)[-1] not in self._tried_this_task]
-            extra = {"include_priors": True, "candidate_actions": cands or self.candidate_actions, "compact": True}
+            cands = cands or list(self.candidate_actions)
+            # ``abstain``: when the record cannot say, the server says so ("no outcome for
+            # this situation yet", "no hit is validated") instead of sending nothing — the
+            # documented ``Run.begin`` call. Grid v5 (2026-09-20) measured the silence: 17%
+            # of searched attempts came back with no recommendation at all.
+            extra = {"include_priors": True, "candidate_actions": cands, "compact": True, "abstain": True}
+            label = self._declare_situation(situation)
+            if label:
+                extra["situation"] = label
         self._footer, self.last_recommendation = None, None
         with self._timed():
             rows = self.mem.retrieve(query, entity_path=self.arm.scope,
@@ -388,11 +431,27 @@ class _SenseLabSession(EpisodeSession):
         if self.arm.priors:
             meta = self.mem.last_priors or {}
             rec = meta.get("recommendation")
-            self._footer = render_priors(meta.get("priors"), rec) or None
+            priors = meta.get("priors")
+            # The order may only name what the caller can still take: a retry must not be
+            # told to try the action that just failed because the record has it as a winner.
+            self._footer = render_priors(priors, rec, candidate_actions=cands) or None
             if isinstance(rec, dict) and rec.get("mode"):
                 self.last_recommendation = {"mode": rec.get("mode"), "suggested_action": rec.get("suggested_action"),
                                             "regime_shift": bool(meta.get("regime_shift"))}
+                if rec.get("plan"):
+                    self.last_recommendation["plan"] = [str(a) for a in rec["plan"]][:8]
+                if rec.get("untried") is not None:
+                    self.last_recommendation["untried"] = len(rec["untried"])
+                if rec.get("sweep"):
+                    self.last_recommendation["sweep"] = True
+                record = (priors or {}).get("situation_record") if isinstance(priors, dict) else None
+                if isinstance(record, dict):
+                    self.last_recommendation["situation_outcomes"] = int(record.get("outcomes") or 0)
+                if self.situation:
+                    self.last_recommendation["situation"] = self.situation
                 self.acct.notes[f"rec_{rec['mode']}"] = self.acct.notes.get(f"rec_{rec['mode']}", 0) + 1
+            elif extra:
+                self.acct.notes["rec_none"] = self.acct.notes.get("rec_none", 0) + 1
         hits = []
         for r in rows:
             e = r.entry
@@ -411,6 +470,26 @@ class _SenseLabSession(EpisodeSession):
             self.acct.notes["avoid_served"] = self.acct.notes.get("avoid_served", 0) + sum(h.avoid for h in hits)
         self.read_keys.extend(h.key for h in kept[:1])
         return hits
+
+    def _declare_situation(self, situation: str | None) -> str | None:
+        """The label this episode's retrieves carry, or ``None`` when the arm does not declare
+        one. The first label of the episode sticks: a retry that rephrases the kind of task
+        must not open a second record for the same ticket. The label goes on the trace as
+        the SDK's ``Run.begin`` puts it (``attributes.situation``), once."""
+        if not self.arm.declares_situation:
+            return None
+        if self.situation:
+            return self.situation
+        label = fold_situation(situation)
+        if not label:
+            return None
+        self.situation = label
+        self.arm.note_situation(label)
+        try:
+            self.mem.set_session_attributes({SITUATION_ATTRIBUTE: label[:200]})
+        except Exception as e:  # noqa: BLE001
+            self.acct.notes["situation_attribute_error"] = str(e)[:120]
+        return label
 
     def search_footer(self) -> str | None:
         return self._footer
@@ -458,6 +537,14 @@ class _SenseLabSession(EpisodeSession):
             return
         keys = self._blame(cited_keys)
         severity, extra = self.arm.outcome_for_commit(outcome, self)
+        # The outcome is about this cell's entity whether or not the agent cited an entry
+        # (an episode that read nothing still happened here — without the path its actions
+        # never reach the entity's priors), and it is an outcome of the situation the agent
+        # declared: the label on the record is what partitions the situation's own record
+        # (``Run.complete`` passes both the same way).
+        extra.setdefault("entity_path", self.arm.scope)
+        if self.situation:
+            extra.setdefault("situation", self.situation)
         with self._timed():
             try:
                 affected = self.mem.commit_outcome(
@@ -542,6 +629,15 @@ class SenseLabArm(MemoryArm):
     # retrieve(include_priors=True, candidate_actions=<terminal enum>, compact=True) and
     # action_key on the terminal record_action. CL_SENSELAB_PRIORS=0 turns it off.
     priors = os.environ.get("CL_SENSELAB_PRIORS", "1") not in ("0", "false", "no")
+    # retrieve(situation=<the agent's label for the kind of task>) — the priors are then the
+    # situation's own outcome record (one loss on an unsolved task turns a winner; a first win
+    # is acted on; the untried are swept in the order the entity's record elsewhere gives)
+    # instead of the embedding neighbourhood, where a class's losses pool with its
+    # neighbours' wins. CL_SENSELAB_SITUATION=0 turns it off (the ``-nosituation`` ablation).
+    situations = os.environ.get("CL_SENSELAB_SITUATION", "1") not in ("0", "false", "no")
+    # The standing instruction on how to use the footer (``PRIORS_CONTRACT``).
+    # CL_SENSELAB_CONTRACT=0 turns it off (the ``-nocontract`` ablation).
+    contract = os.environ.get("CL_SENSELAB_CONTRACT", "1") not in ("0", "false", "no")
     # briefing(since=<last briefing this agent received>) — see the module docstring.
     briefing_since = os.environ.get("CL_SENSELAB_SINCE", "1") not in ("0", "false", "no")
     # Whether the rendered briefing carries the hot-context previews (``senselab-lean`` drops them).
@@ -562,11 +658,33 @@ class SenseLabArm(MemoryArm):
     def open(self, scope: str) -> None:
         super().open(scope)
         self._briefed_at: dict[str, Any] = {}
+        # label -> episodes that declared it, this cell. Shown to the agent on the search
+        # tool so the labels converge; the server keeps the record, this is the taxonomy.
+        self._situations: dict[str, int] = {}
+        self._situations_lock = threading.Lock()
 
     def configure(self, scenario) -> None:
         # The cell's agent base (the runner has already suffixed it per cell attempt, e.g.
         # ``support-agent-388584``); fleet members are ``<base>-<n>``.
         self._agent_base = getattr(scenario, "agent_base", "")
+        # The situation record is asked for where the priors are: a task that ends in a
+        # choice among a fixed set of actions. Free-form scenarios get no label parameter.
+        from ..agent.loop import candidate_actions
+
+        self.declares_situation = bool(self.priors and self.situations and candidate_actions(scenario))
+
+    def note_situation(self, label: str) -> None:
+        with getattr(self, "_situations_lock", threading.Lock()):
+            labels = getattr(self, "_situations", None)
+            if labels is not None:
+                labels[label] = labels.get(label, 0) + 1
+
+    def situation_labels(self) -> list[str]:
+        labels = getattr(self, "_situations", None) or {}
+        return [k for k, _ in sorted(labels.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+    def prompt_addendum(self, agent_id: str) -> str | None:
+        return PRIORS_CONTRACT if (self.priors and self.contract) else None
 
     def saas_agent_id(self, member_id: str) -> str:
         """The identity a fleet member acts as on the SaaS: its own, or — with fleet replicas —
@@ -706,6 +824,25 @@ class SenseLabNoPriorsArm(SenseLabArm):
     name = "senselab-nopriors"
     priors = False
     briefing_since = False
+
+
+class SenseLabNoSituationArm(SenseLabArm):
+    """Ablation: ``senselab`` without the situation label — the priors are the embedding
+    neighbourhood's pooled record, as every SenseLab arm ran before 2026-09-26 (grids v4–v5,
+    RSI pilots 1–4). The gap to ``senselab`` is what the situation's own record buys:
+    one-loss turns, first-win acting, the ordered sweep."""
+
+    name = "senselab-nosituation"
+    situations = False
+
+
+class SenseLabNoContractArm(SenseLabArm):
+    """Ablation: ``senselab`` without the standing instruction on how to use the footer
+    (``PRIORS_CONTRACT``). The label and the record are unchanged; only the model's
+    adherence is left to the footer's own wording."""
+
+    name = "senselab-nocontract"
+    contract = False
 
 
 # ---------------------------------------------------------------------------

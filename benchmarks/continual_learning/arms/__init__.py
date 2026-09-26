@@ -37,6 +37,12 @@ def make_arm(name: str) -> MemoryArm:
     if name == "senselab-nopriors":
         from .senselab_arm import SenseLabNoPriorsArm
         return SenseLabNoPriorsArm()
+    if name == "senselab-nosituation":
+        from .senselab_arm import SenseLabNoSituationArm
+        return SenseLabNoSituationArm()
+    if name == "senselab-nocontract":
+        from .senselab_arm import SenseLabNoContractArm
+        return SenseLabNoContractArm()
     if name == "senselab-induce":
         from .senselab_arm import SenseLabInduceArm
         return SenseLabInduceArm()

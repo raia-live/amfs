@@ -41,6 +41,33 @@ MEMORY_TOOLS = [
          "required": ["key", "note", "kind"]}},
 ]
 
+SITUATION_PARAM_DESCRIPTION = (
+    "A short, stable label for the KIND of task — two to four lowercase words naming what "
+    "decides the right action (the issue, the failing check, the request type), never the "
+    "customer's wording, ids or numbers. Use the exact same label for every task of the same "
+    "kind, and a different label when the deciding detail differs (e.g. 'snapshot diff on ui pr' "
+    "vs 'snapshot diff on backend pr')."
+)
+SITUATION_LABELS_SHOWN = 16
+
+
+def memory_tools(arm: MemoryArm) -> list[dict[str, Any]]:
+    """The memory tools for *arm*: the shared schema, plus the ``situation`` parameter on
+    ``memory_search`` for arms that keep a record per kind of task (``declares_situation``).
+    The labels already used in the scope are listed in the parameter's description so the
+    agent reuses them — the same taxonomy a triage step would keep."""
+    if not getattr(arm, "declares_situation", False):
+        return MEMORY_TOOLS
+    search = json.loads(json.dumps(MEMORY_TOOLS[0]))
+    desc = SITUATION_PARAM_DESCRIPTION
+    known = list(arm.situation_labels() or [])[:SITUATION_LABELS_SHOWN]
+    if known:
+        desc += " Labels already in use here (reuse one when it fits): " + "; ".join(known) + "."
+    search["parameters"]["properties"]["situation"] = {"type": "string", "description": desc}
+    search["parameters"]["required"] = ["query", "situation"]
+    return [search] + MEMORY_TOOLS[1:]
+
+
 REFLECT_PROMPT = (
     "The run is over. Outcome: {outcome}.\n"
     "Write exactly ONE memory note that would most help a future agent facing a similar (not "
@@ -169,7 +196,7 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
     terminal_names = {t.name for t in scenario.tools if t.terminal}
     edit_tools = set(getattr(scenario, "edit_tools", ()) or ())
     edit_calls = 0
-    tools = [t.schema() for t in scenario.tools] + (MEMORY_TOOLS if arm.has_memory else [])
+    tools = [t.schema() for t in scenario.tools] + (memory_tools(arm) if arm.has_memory else [])
     session.candidate_actions = candidate_actions(scenario)
 
     messages: list[dict[str, Any]] = [{"role": "system", "content": _system_prompt(scenario, arm, task, session)}]
@@ -198,9 +225,15 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
                 if name == "memory_search":
                     searches += 1
                     q = str(args.get("query", ""))
-                    hits = session.search(q, TOP_K)
+                    sit = args.get("situation")
+                    sit = str(sit).strip()[:120] if isinstance(sit, str) and sit.strip() else None
+                    # Only arms that asked for a label get the keyword: the other arms'
+                    # sessions keep the two-argument signature.
+                    hits = session.search(q, TOP_K, situation=sit) if sit is not None else session.search(q, TOP_K)
                     all_hits.extend(hits)
                     entry = {"attempt": attempts + 1, "query": q[:200], "hits": [h.as_log() for h in hits]}
+                    if sit is not None:
+                        entry["situation"] = sit
                     content = _tool_result_text(hits)
                     footer = session.search_footer()
                     if footer:
@@ -225,6 +258,13 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
                     if res.terminal:
                         attempts += 1
                         answers.append(res.answer)
+                        # What this attempt did, on the searches that preceded it: the
+                        # analysis reads recommendation-followed / outcome from here.
+                        if isinstance(args.get("action"), str):
+                            for e_ in reversed(searches_log):
+                                if e_.get("attempt") != attempts:
+                                    break
+                                e_["taken"] = f"{name}:{args['action']}"
                         if name in edit_tools:
                             edit_calls += 1
                         ok = scenario.noisy(bool(res.success))

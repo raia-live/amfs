@@ -136,7 +136,9 @@ class EpisodeSession:
     def briefing(self) -> str | None:
         return None
 
-    def search(self, query: str, top_k: int) -> list[MemoryHit]:
+    def search(self, query: str, top_k: int, *, situation: str | None = None) -> list[MemoryHit]:
+        """*situation* is the agent's label for the kind of task, when the arm asks for one
+        (``MemoryArm.declares_situation``); arms that keep no per-situation record ignore it."""
         raise NotImplementedError
 
     def search_footer(self) -> str | None:
@@ -191,6 +193,16 @@ class MemoryArm:
     has_memory: bool = True
     # Arms without memory tools that still hand the agent a briefing (the raw-traces control).
     briefs: bool = False
+    # Arms whose memory keeps a record *per kind of task* ask the agent to label the kind on
+    # every search (``memory_search.situation``); the harness adds the parameter to the tool
+    # and shows the labels already used in the scope so the agent reuses them. Arms that
+    # pool every task ignore the label.
+    declares_situation: bool = False
+
+    def situation_labels(self) -> list[str]:
+        """The labels declared so far in this scope, most used first — shown to the agent so
+        a taxonomy forms instead of a new wording per task. Empty for arms without one."""
+        return []
 
     def open(self, scope: str) -> None:
         """Prepare an isolated namespace for one (scenario, seed)."""
