@@ -35,7 +35,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from amfs.replay import EVENT_PING, ReplayError, ReplayRequest, parse_replay_request
 
@@ -114,28 +114,73 @@ class ReplayHub:
                 self._send(status, payload)
 
         self._server = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
+        try:
+            if not self.public_base:
+                self.public_base = self._tunnel()
+        except Exception:
+            # Release the port: a second attempt (the runner retries a failed cell) must not
+            # die on "address already in use" behind the real error.
+            self._server.server_close()
+            self._server = None
+            raise
         threading.Thread(target=self._server.serve_forever, name="cl-replay-http", daemon=True).start()
-        if not self.public_base:
-            self.public_base = self._start_ngrok()
         self.url = f"{self.public_base}{PATH}"
         log.info("replay endpoint up: %s -> 127.0.0.1:%d", self.url, self.port)
 
-    def _start_ngrok(self) -> str:
-        """``ngrok http <port>`` and the https URL it was given (the local ngrok API, 4040+)."""
+    # -- the tunnel -----------------------------------------------------------------------
+    _API_PORTS = (4040, 4041, 4042)
+
+    def _tunnels(self) -> list[tuple[int, dict[str, Any]]]:
+        """Every tunnel any local ngrok agent reports, with the API port it came from."""
+        out: list[tuple[int, dict[str, Any]]] = []
+        for api_port in self._API_PORTS:
+            try:
+                with urlopen(f"http://127.0.0.1:{api_port}/api/tunnels", timeout=2) as r:  # noqa: S310
+                    out.extend((api_port, t) for t in (json.load(r).get("tunnels") or []))
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+
+    def _ours(self, tunnels: list[tuple[int, dict[str, Any]]]) -> str | None:
+        for _, t in tunnels:
+            addr = str((t.get("config") or {}).get("addr") or "")
+            if addr.endswith(f":{self.port}") and str(t.get("public_url", "")).startswith("https://"):
+                return str(t["public_url"]).rstrip("/")
+        return None
+
+    def _tunnel(self) -> str:
+        """The https URL that reaches this port. A free ngrok account runs one agent at a
+        time, so: reuse a tunnel an agent already has to this port; else ask a running agent
+        to open one (its local API); else start ``ngrok http <port>`` and read its URL."""
+        existing = self._tunnels()
+        url = self._ours(existing)
+        if url:
+            return url
+        if existing:
+            api_port = existing[0][0]
+            body = json.dumps({"addr": str(self.port), "proto": "http", "name": f"cl-replay-{self.port}"}).encode()
+            req = Request(f"http://127.0.0.1:{api_port}/api/tunnels", data=body,  # noqa: S310
+                          headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                with urlopen(req, timeout=10) as r:  # noqa: S310
+                    t = json.load(r)
+                if str(t.get("public_url", "")).startswith("https://"):
+                    return str(t["public_url"]).rstrip("/")
+            except Exception as exc:  # noqa: BLE001
+                others = sorted({str((t.get("config") or {}).get("addr")) for _, t in existing})
+                raise RuntimeError(
+                    f"an ngrok agent is already running with tunnel(s) to {others} and would not add one "
+                    f"for :{self.port} ({type(exc).__name__}); stop it, or set CL_REPLAY_PUBLIC_URL"
+                ) from exc
         self._ngrok = subprocess.Popen(["ngrok", "http", str(self.port), "--log=stdout", "--log-format=json"],
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            for api_port in (4040, 4041, 4042):
-                try:
-                    with urlopen(f"http://127.0.0.1:{api_port}/api/tunnels", timeout=2) as r:  # noqa: S310
-                        tunnels = json.load(r).get("tunnels") or []
-                except Exception:  # noqa: BLE001
-                    continue
-                for t in tunnels:
-                    addr = str((t.get("config") or {}).get("addr") or "")
-                    if addr.endswith(f":{self.port}") and str(t.get("public_url", "")).startswith("https://"):
-                        return str(t["public_url"]).rstrip("/")
+            if self._ngrok.poll() is not None:
+                raise RuntimeError(f"ngrok exited with {self._ngrok.returncode} (another agent session on the account?)")
+            url = self._ours(self._tunnels())
+            if url:
+                return url
             time.sleep(0.5)
         raise RuntimeError("ngrok did not report an https tunnel within 30 s (CL_REPLAY_PUBLIC_URL to bypass)")
 
