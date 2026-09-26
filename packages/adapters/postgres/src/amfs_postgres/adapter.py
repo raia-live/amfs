@@ -1454,9 +1454,11 @@ class PostgresAdapter(AdapterABC):
         # tenants can have entries/agents/branches/tags with the same names.
         #
         # ``uq_entry_version`` also includes ``branch``: versions are numbered
-        # per branch — ``write`` reads the newest row on *its* branch and adds
-        # one, ``merge_branch`` renumbers onto the parent — so the same
-        # (entity, key, version) legitimately exists on main and on every
+        # per branch — ``write`` reads the newest row on *its* branch, or for a
+        # key the branch has not touched the parent's live row (the same row
+        # ``read`` returns, so the engine and the adapter agree on the next
+        # number), and adds one; ``merge_branch`` renumbers onto the parent —
+        # so the same (entity, key, version) legitimately exists on every
         # branch that has written the key. Without ``branch`` in the constraint
         # the first write of an existing key on a fresh branch raised
         # ``UniqueViolation`` (seen 2026-09-22: the repair loop could not open a
@@ -1791,6 +1793,34 @@ class PostgresAdapter(AdapterABC):
         """
         return branch_scope_sql(branch, self._parent_branch(cur, branch))
 
+    def _parent_live_row(self, cur: Any, branch: str, entity_path: str, key: str) -> Any:
+        """The parent's live row for a key *branch* has not written, as
+        ``read`` resolves it — or ``None``.
+
+        ``write`` numbers a branch's first version of an inherited key from
+        this row, so the version the engine computed from the overlay read
+        (parent's ``n``, next ``n + 1``) is the one the branch stores. Reading
+        the parent's ``n`` and then insisting on ``1`` is how the repair loop
+        lost every branch for a key main already held (2026-09-26: the first
+        regime-shift fixes the repair agent drafted all fell back to "writes
+        to main on Ship" with ``expected 9, found 0``). Not locked: the parent
+        row is a baseline, not the row being superseded."""
+        parent = self._parent_branch(cur, branch)
+        if parent is None:
+            return None
+        cur.execute(
+            f"""
+            SELECT version, value, confidence{_EVIDENCE_SELECT if self._has_evidence_cols else ""}{", validators" if self._has_validators_col else ""}
+            FROM amfs_memory_entries
+            WHERE namespace = %s AND branch = %s
+              AND entity_path = %s AND key = %s
+              AND superseded_at IS NULL
+            ORDER BY version DESC LIMIT 1
+            """,
+            (self._namespace, parent, entity_path, key),
+        )
+        return cur.fetchone()
+
     def read(
         self,
         entity_path: str,
@@ -1886,6 +1916,9 @@ class PostgresAdapter(AdapterABC):
                         (self._namespace, branch, entry.entity_path, entry.key),
                     )
                     row = cur.fetchone()
+                    own_row = row is not None
+                    if row is None and branch != "main":
+                        row = self._parent_live_row(cur, branch, entry.entity_path, entry.key)
                     current_version = row["version"] if row else 0
                     new_version = current_version + 1
                     if row and self._has_evidence_cols:
@@ -1899,7 +1932,7 @@ class PostgresAdapter(AdapterABC):
                             current_version,
                         )
 
-                    if row:
+                    if own_row:
                         cur.execute(
                             """
                             UPDATE amfs_memory_entries
