@@ -634,6 +634,7 @@ class SenseLabRsiNoReplayArm(SenseLabRsiArm):
     name = "senselab-rsi-noreplay"
     repair_policy = "review"
     canary_regardless_of_test = True
+    tier2 = False   # no replay of either tier: the canary is the only test
 
 
 class SenseLabRsiReviewArm(SenseLabRsiArm):

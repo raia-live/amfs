@@ -612,3 +612,46 @@ the 10 % canary can reach its floor within 60 episodes). The prereg predicts: �
 per cell with `lever ∈ {knowledge, procedure}`, `source = repair_agent`, a branch, a test
 ending `inconclusive` or `passed`, and a canary started. If no canary starts in pilot 4 the
 E1 RSI arms are run with Tier 2 configured from the start rather than as E2b only.
+
+### 2026-09-26 (f) — Tier 2 is the E1 mechanism; the fleet-6 arithmetic in (e) was wrong
+
+Written before pilot 4, after the engine PR (`amfs-internal#779`, merged; prod revision
+`amfs-api-01939-89r` carries worker concurrency 6, budget 180 s, kick-on-seal) and before
+any counted RSI cell.
+
+**Correction.** (e) said fleet 6 would let the 10 % inconclusive canary reach its floor
+within 60 episodes. It would not: the harness's fleet is *round-robin over the same 60
+episodes* (`Scenario.fleet_size`), so a fleet-6 cell seals 60 sessions, not 360. With 40
+post-change sessions a canary capped at 10 % sees ~4 outcomes against `min_outcomes = 8`
+whatever the fleet; the inconclusive-canary path cannot close inside an E1 cell. It can in
+E2 (200 episodes, ~18 canary outcomes) and is kept there.
+
+**Tier 2 in the harness (commit `50c9e550`).** The E1 and E2 `senselab-rsi*` cells run
+with `CL_RSI_TIER2=1`: the runner process serves the OSS SDK's replay contract
+(`amfs.replay`: signed webhook per case, 202 + background run, at-least-once dedup) behind
+an ngrok tunnel, and every RSI cell registers that endpoint in its agent's repair settings
+(`replay_wait_hours = 1`). When a fix's Tier 1 test is `inconclusive` (or nothing could be
+replayed) the platform asks the agent to replay the failing cases; the cell re-runs the
+episode each case came from — same task, same environment, same model — with memory
+checked out on the fix's branch, and commits the outcome under `case_id` / `fix_id` /
+`memory_branch` so the platform's judge grades it. The harness grades awaited replays at
+each look (`POST /fixes/{id}/replay/grade`, what the hourly replay sweep does), so a pass
+reaches the policy inside the cell: `test_passed` → canary at the arm's 50 % /
+`min_outcomes = 8` → ship. This is the product's own Tier 2 exercised as a customer would
+— the harness is the customer's runtime — and is disclosed as such; the ablations keep
+their meaning (`-nocanary` ships on a passed Tier 1 *or* Tier 2 test; `-noreplay` skips
+both). The prereg's "share of tests ending passed / failed / inconclusive" gains a
+`tier2 passed / failed / expired` column, and time-to-repair counts the replay's own
+sessions (ledgered apart, never as `sessions_sealed`).
+
+**Smoke (not counted).** A scratch cell on the account replayed one episode on an existing
+`repair/…` branch: the trace carried the grader's keys and the platform's ping through the
+tunnel answered 200 with a valid signature. Reads on a branch owned by another agent are
+refused (403) — in the real flow the replaying agent is the branch's owner.
+
+**Pilot 4 (revised).** `support` × `senselab-rsi` × GPT-5.5 × seeds 11, 23, fleet 1,
+`CL_RSI_TIER2=1`, `CL_RSI_VERDICT_WAIT=240`, `CL_SENSELAB_TIMEOUT=60` (the SDK's 30 s read
+timeout dropped one smoke commit under the baseline run's load). Predicts, per cell: ≥ 1
+proposal with `lever ∈ {knowledge, procedure}`, `source = repair_agent`, a branch; a Tier 1
+test ending `inconclusive`; a Tier 2 replay requested and graded inside the cell; and a
+canary started. Development run, not counted.
