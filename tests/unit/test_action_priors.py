@@ -2143,3 +2143,23 @@ def test_pooled_classes_name_the_declared_label_as_what_pooled_them() -> None:
         assert "situation label \u201caudit failure\u201d" in text
         assert act.render_priors(priors, None)  # the renderer's own pooled line
         assert "situation label" in act.render_priors(priors, None)
+
+
+def test_a_record_that_still_holds_a_winner_is_not_called_mixed() -> None:
+    """A pre-shift winner under a suspected regime shift, over non-local
+    priors with nothing untried: the act branches decline it and nothing
+    explores. Saying the record 'names no winner' would be false; the
+    mixed abstain stays silent, as before."""
+    pr = {
+        "tried": [
+            {"action_key": "fix:a", "won": 4, "lost": 1, "p": 0.7, "n": 5, "agents": 1,
+             "last_3": ["won", "won", "lost"], "last_at": "2026-09-20T00:00:00+00:00"},
+            {"action_key": "fix:b", "won": 1, "lost": 2, "p": 0.4, "n": 3, "agents": 1},
+        ],
+        "untried": [],
+        "source": "action_stats",
+    }
+    rec = act.recommend(pr, top_hit_status="untested", abstain=True, regime_shift=True,
+                        regime_shift_at=datetime(2026, 9, 25, tzinfo=UTC),
+                        candidate_actions=["fix:a", "fix:b"])
+    assert rec is None or rec.get("mixed") is not True

@@ -907,7 +907,8 @@ def _recommend_mode(
                        f"({described}); treat what follows as hints, not guidance",
             }
     mixed = (
-        len(tried) >= 2
+        not winners
+        and len(tried) >= 2
         and any(int(t.get("won", 0)) for t in tried)
         and any(int(t.get("lost", 0)) for t in tried)
     )
@@ -918,7 +919,10 @@ def _recommend_mode(
         # one — left as None, the CL harness (2026-09-26) saw 15% of its
         # retries come back with no recommendation at all, every one on a
         # situation whose record had split between two actions. A single
-        # thin prior (1/1) stays silent as before: it is thin, not mixed.
+        # thin prior (1/1) stays silent as before: it is thin, not mixed;
+        # so does a record that still holds a winner the branches above
+        # declined to act on (a pre-shift winner under a suspected regime
+        # shift) — "names no winner" would be false of it.
         where = "on this situation" if _declared_situation(priors) else "on similar tasks here"
         shown = ", ".join(f"{t['action_key']} {t['won']}/{t['n']}" for t in tried[:5])
         return {
