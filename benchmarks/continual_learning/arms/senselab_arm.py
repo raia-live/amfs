@@ -142,6 +142,13 @@ class _ThrottledHttpAdapter(HttpAdapter):
         super().__init__(*args, **kwargs)
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        # The bound handle's identity headers (``X-AMFS-Agent-Id``, ``X-AMFS-Session``), as the
+        # SDK's own ``_request`` merges them: they are what lets the hosted server attribute a
+        # read to the agent and put the session in a repair canary's arm. An override that
+        # dropped them would leave every benchmark session unrouted.
+        identity = getattr(self, "_identity_headers", None)
+        if identity:
+            kwargs["headers"] = {**identity, **(kwargs.get("headers") or {})}
         for attempt in range(10):
             _LIMITER.acquire()
             resp = self._client.request(method, path, **kwargs)
@@ -153,6 +160,17 @@ class _ThrottledHttpAdapter(HttpAdapter):
                 continue
             from amfs_adapter_http.adapter import _raise_with_detail
             _raise_with_detail(resp)
+            # The routing layer's answer for this session: ``X-AMFS-Canary`` is
+            # ``<fix_id>; arm=canary|control`` when a repair canary is running for the agent,
+            # ``unrouted`` when one is running but the request named no session, absent when
+            # none is. Kept on the bound handle (one per session) so the episode row can say
+            # which arm the session drew without a second request.
+            canary = resp.headers.get("X-AMFS-Canary")
+            if canary is not None:
+                self.last_canary = canary
+            branch = resp.headers.get("X-AMFS-Memory-Branch")
+            if branch is not None:
+                self.last_branch = branch
             return resp.json()
         raise RuntimeError("unreachable")
 
@@ -240,16 +258,33 @@ class _SenseLabSession(EpisodeSession):
     def __init__(self, arm: "SenseLabArm", agent_id: str, episode: int) -> None:
         super().__init__(arm, agent_id, episode)
         self.arm: SenseLabArm = arm
+        # Fleet as replicas (repair-loop study, HYPOTHESIS_RSI.md): the harness hands out one
+        # identity per fleet member, but fixes, judges, incidents and the canary slot are
+        # scoped per (account, agent_id), so a fleet that should share one repair loop runs
+        # as ``n`` concurrent sessions of ONE agent. The member id stays on the trace as
+        # ``replica`` so propagation across replicas is still measurable.
+        self.replica = agent_id
+        saas_agent = arm.saas_agent_id(agent_id)
+        self.agent_id = saas_agent
         self.mem = AgentMemory(
-            agent_id=agent_id,
+            agent_id=saas_agent,
             adapter=_ThrottledHttpAdapter(base_url=config.AMFS_HTTP_URL,
                                           api_key=config.env("AMFS_API_KEY", required=True)),
         )
         # Stamp the cell's scope on the trace itself (``attributes.entity_path``), not only on
         # the causal entries: an episode that read nothing still belongs to the cell, and a
         # Managed Model scoped to this cell's traces by ``entity_prefix`` must see it too.
+        # ``model`` / ``agent_version`` / ``runtime`` are the confounders the repair loop's
+        # feedback contract requires on traces before it ships anything automatically; every
+        # SenseLab arm stamps them so the control arms' traffic is provenance-identical.
+        attrs: dict[str, Any] = {"entity_path": arm.scope[:256], "bench_episode": episode,
+                                 "runtime": "cl-harness", "agent_version": config.HARNESS_VERSION[:64]}
+        if getattr(arm, "cell_model", ""):
+            attrs["model"] = str(arm.cell_model)[:64]
+        if saas_agent != agent_id:
+            attrs["replica"] = agent_id[:256]
         try:
-            self.mem.set_session_attributes({"entity_path": arm.scope[:256], "bench_episode": episode})
+            self.mem.set_session_attributes(attrs)
         except Exception as e:  # noqa: BLE001
             self.acct.notes["session_attributes_error"] = str(e)[:120]
 
@@ -418,19 +453,34 @@ class _SenseLabSession(EpisodeSession):
         if not self.arm.learns_from_outcomes:
             return
         keys = self._blame(cited_keys)
+        severity, extra = self.arm.outcome_for_commit(outcome, self)
         with self._timed():
             try:
                 affected = self.mem.commit_outcome(
-                    f"{self.agent_id}-ep{self.episode}", OutcomeType(outcome.severity),
+                    f"{self.agent_id}-ep{self.episode}", OutcomeType(severity),
                     causal_entry_keys=keys, task_input=task_input[:2000],
                     response_text=response_text[:2000], decision_summary=outcome.summary[:500],
+                    **extra,
                 )
                 self.acct.trace_verifiable = True
                 self.acct.notes["affected_entries"] = len(affected)
                 if self._attempts_marked:
                     self.acct.notes["attempts_in_trace"] = self._attempts_marked
+                if severity != outcome.severity:
+                    self.acct.notes["committed_severity"] = severity
             except Exception as e:  # noqa: BLE001
                 self.acct.notes["commit_error"] = str(e)[:300]
+        self._note_routing()
+
+    def _note_routing(self) -> None:
+        """Which canary arm the session's requests drew, from the server's response headers."""
+        adapter = getattr(self.mem, "_adapter", None)
+        canary = getattr(adapter, "last_canary", None)
+        if canary:
+            self.acct.notes["canary"] = str(canary)[:120]
+        branch = getattr(adapter, "last_branch", None)
+        if branch and branch != "main":
+            self.acct.notes["memory_branch"] = str(branch)[:120]
 
     def attempt_failed(self, attempt: int, severity: str, cited_keys: list[str], answer: str) -> None:
         if answer:
@@ -493,9 +543,37 @@ class SenseLabArm(MemoryArm):
     # Whether the rendered briefing carries the hot-context previews (``senselab-lean`` drops them).
     briefing_hot_context = True
 
+    # Fleet members share one SaaS agent identity (see ``_SenseLabSession``). Off by default
+    # (the v7 protocol: one identity per member); ``CL_FLEET_REPLICAS=1`` turns it on for every
+    # SenseLab arm of a run so control and repair arms are compared like for like; the
+    # repair-loop arms force it.
+    fleet_replicas = os.environ.get("CL_FLEET_REPLICAS", "0") in ("1", "true", "yes")
+    # ``verified_by`` stamped on every committed outcome: the benchmark's verdict is the
+    # environment's, not the agent's, and the repair loop's canary promotion requires
+    # outcomes verified from outside the agent. ``None`` = omitted (the self-report condition).
+    verified_by: str | None = "benchmark-oracle"
+    # Set by the runner before ``open``: the agent model of the cell, stamped on traces.
+    cell_model: str = ""
+
     def open(self, scope: str) -> None:
         super().open(scope)
         self._briefed_at: dict[str, Any] = {}
+
+    def saas_agent_id(self, member_id: str) -> str:
+        """The identity a fleet member acts as on the SaaS: its own, or — with fleet replicas —
+        the cell's shared one (the member id without its ``-<n>`` suffix)."""
+        if not self.fleet_replicas:
+            return member_id
+        base, sep, tail = member_id.rpartition("-")
+        return base if sep and tail.isdigit() and base else member_id
+
+    def outcome_for_commit(self, outcome: Outcome, session: "_SenseLabSession") -> tuple[str, dict[str, Any]]:
+        """What ``commit_outcome`` sends: the severity and the extra keyword arguments. The
+        default is the environment's verdict, verified by the benchmark oracle."""
+        extra: dict[str, Any] = {}
+        if self.verified_by:
+            extra["verified_by"] = self.verified_by
+        return outcome.severity, extra
 
     def last_briefing_at(self, agent_id: str):
         return getattr(self, "_briefed_at", {}).get(agent_id)

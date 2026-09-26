@@ -127,6 +127,14 @@ class Scenario:
     def changed(self, ep: int) -> bool:
         return bool(self.change_at) and ep >= self.change_at
 
+    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+        """What a maintainer who has been told about the regime change writes to the store: one
+        corrective entry per changed class, in the scenario's own action vocabulary, at
+        confidence 1.0. The ``senselab-oracle-fix-<lag>`` arm writes these ``lag`` episodes
+        after ``change_at`` — the human-in-the-loop upper bound the repair loop is measured
+        against (HYPOTHESIS_RSI.md, H6). Empty for scenarios without a regime change."""
+        return []
+
     def agent_for(self, ep: int) -> str:
         """Identity handling episode ``ep``. With a fleet, each episode goes to a different agent,
         so an agent only ever sees a fraction of the episodes directly; the rest it must learn

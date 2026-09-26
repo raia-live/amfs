@@ -84,6 +84,9 @@ class Outcome:
     success: bool
     severity: str  # "success" | "minor_failure" | "failure" | "critical_failure"
     summary: str
+    # The agent gave up (retry budget spent, step cap hit, or it escalated). What an agent
+    # that reports its own outcome would call a failure; everything else it would call done.
+    escalated: bool = False
 
 
 @dataclass
@@ -237,6 +240,11 @@ class MemoryArm:
         """Version-by-version confidence and evidence for ``keys`` at the end of a cell, for
         arms whose store keeps that history. The analysis plots how fast a stale lesson fell
         and a replacement rose. ``None`` when the arm has no such record."""
+        return None
+
+    def report(self) -> dict[str, Any] | None:
+        """Arm-side record of the cell at its end (the repair arms' fix lifecycle, verdicts and
+        incidents), written by the runner next to the episode rows. ``None`` = nothing."""
         return None
 
     def close(self) -> None:

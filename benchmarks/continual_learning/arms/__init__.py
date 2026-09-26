@@ -52,6 +52,20 @@ def make_arm(name: str) -> MemoryArm:
     if name == "skillfile":
         from .skillfile_arm import SkillFileArm
         return SkillFileArm()
+    if name.startswith("senselab-rsi"):
+        from . import senselab_rsi_arm as rsi
+        cls = {
+            "senselab-rsi": rsi.SenseLabRsiArm, "senselab-rsi-nocanary": rsi.SenseLabRsiNoCanaryArm,
+            "senselab-rsi-noreplay": rsi.SenseLabRsiNoReplayArm, "senselab-rsi-review": rsi.SenseLabRsiReviewArm,
+            "senselab-rsi-minimal": rsi.SenseLabRsiMinimalArm, "senselab-rsi-selfreport": rsi.SenseLabRsiSelfReportArm,
+            "senselab-rsi-judges": rsi.SenseLabRsiJudgesArm,
+        }.get(name)
+        if cls is not None:
+            return cls()
+    if name.startswith("senselab-oracle-fix"):
+        from .oracle_fix_arm import SenseLabOracleFixArm
+        lag = name.rsplit("-", 1)[-1]
+        return SenseLabOracleFixArm(lag=int(lag) if lag.isdigit() else 10)
     if name == "pgvector-diy+outcomes":
         from .pgvector_arm import PgVectorDiyOutcomesArm
         return PgVectorDiyOutcomesArm()

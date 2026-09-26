@@ -259,7 +259,8 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
             severity = "failure"
 
         outcome = Outcome(success=success, severity=severity,
-                          summary=f"{'success' if success else severity} after {attempts} attempt(s); answer={final_answer}")
+                          summary=f"{'success' if success else severity} after {attempts} attempt(s); answer={final_answer}",
+                          escalated=escalated)
 
         # reflection: one note for the future (all arms with memory, identical prompt)
         if arm.has_memory:
@@ -496,7 +497,8 @@ def _run_decision_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Ta
             escalated = True
 
         outcome = Outcome(success=success, severity=severity,
-                          summary=f"{'success' if success else severity} after {attempts} attempt(s); answer={final_answer}")
+                          summary=f"{'success' if success else severity} after {attempts} attempt(s); answer={final_answer}",
+                          escalated=escalated)
 
         if arm.has_memory and getattr(llm, "note_writer", None):
             try:

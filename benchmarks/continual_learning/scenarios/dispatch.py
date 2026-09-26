@@ -204,6 +204,11 @@ class DispatchScenario(Scenario):
         self.sched[ep] = cid
         self.instances[ep] = self._instance(ep, cid, salt)
 
+    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+        return [(f"update-routing-{cid}", f"Routing update — {cid.replace('-', ' ')} tasks now go to {c['fix']} "
+                                          f"(previously {DISPATCH_CLASSES[cid]['fix']}). Reason: {c['why']}.", 1.0)
+                for cid, c in DISPATCH_CHANGES.items()]
+
     def seed_entries(self) -> list[tuple[str, str, float]]:
         # The onboarding routing guide maps every class to the specialist its name suggests:
         # right in 4 of 10 classes, wrong by design in the other 6 (like support's tier-1 playbook).

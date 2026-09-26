@@ -315,6 +315,12 @@ class PolicyQaScenario(Scenario):
         self.sched[ep] = tid
         self.instances[ep] = self._instance(ep, tid, salt)
 
+    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+        return [(f"update-policy-{tid}", f"Policy update — {tid.replace('-', ' ')}: the current value is "
+                                         f"{c['value']['value']}; the {POLICY_TOPICS[tid]['doc']} document still shows "
+                                         f"{POLICY_TOPICS[tid]['current']['value']} and is out of date. Reason: {c['why']}.", 1.0)
+                for tid, c in POLICY_CHANGES.items()]
+
     def seed_entries(self) -> list[tuple[str, str, float]]:
         docs: list[tuple[str, str, float]] = []
         for tid, tp in POLICY_TOPICS.items():

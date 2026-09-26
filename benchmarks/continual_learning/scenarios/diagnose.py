@@ -132,6 +132,11 @@ class DiagnoseScenario(Scenario):
         self.sched[ep] = rid
         self.instances[ep] = self._instance(ep, rid, salt)
 
+    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+        return [(f"update-runbook-{rid}", f"Runbook update — incidents matching the {rid} signature: the fix is now "
+                                          f"{c['fix']} (it used to be {RULES[rid]['fix']}). Root cause: {c['cause']}.", 1.0)
+                for rid, c in RULE_CHANGES.items()]
+
     def _instance(self, ep: int, rid: str, salt: int) -> dict[str, Any]:
         if True:
             r = RULES[rid]

@@ -120,6 +120,11 @@ class SupportScenario(Scenario):
     def changes(self) -> dict[str, dict[str, str]]:
         return SUPPORT_CHANGE_SETS[self.change_variant]
 
+    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+        return [(f"update-{iid}", f"Playbook update — {iid.replace('-', ' ')} tickets: the correct resolution is now "
+                                  f"{c['fix']} (it used to be {SUPPORT_ISSUES[iid]['fix']}). Reason: {c['why']}.", 1.0)
+                for iid, c in self.changes.items()]
+
     def build(self) -> None:
         rng = self.rng
         ids = list(SUPPORT_ISSUES)
@@ -561,6 +566,14 @@ CI_CHANGES: dict[str, str] = {"flaky-integration": "edit_generated_file", "audit
 # where the generic answer used to be right). Neither (class, fix) pair occurs under "A".
 CI_CHANGES_B: dict[str, str] = {"snapshot-ui": "fix_code", "audit-free": "add_audit_exception"}
 CI_CHANGE_SETS = {"A": CI_CHANGES, "B": CI_CHANGES_B}
+# The reasons behind each change, as a maintainer would write them (``oracle_fix_entries``).
+CI_CHANGE_WHY: dict[tuple[str, str], str] = {
+    ("A", "flaky-integration"): "The integration suite replays recorded fixtures; a TimeoutError means the cassette under "
+                                "tests/integration is stale and must be regenerated. Reruns fail again; code changes are wrong.",
+    ("A", "audit-pinned"): "The legacy SDK was retired, so the requests pin is gone; reviewers reject audit exceptions and expect the bump.",
+    ("B", "snapshot-ui"): "Checkout components are under visual-regression review: a snapshot diff is fixed in code; jest -u is rejected.",
+    ("B", "audit-free"): "urllib3 is pinned for the new vendor SDK; the bump breaks it, so the audit exception process applies.",
+}
 
 
 class CiFixScenario(Scenario):
@@ -586,6 +599,12 @@ class CiFixScenario(Scenario):
     @property
     def changes(self) -> dict[str, str]:
         return CI_CHANGE_SETS[self.change_variant]
+
+    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+        return [(f"update-{fid}", f"CI convention update — {fid.replace('-', ' ')} failures ({CI_FAILURES[fid]['log'][:90]}): "
+                                  f"the right fix is now {fix} (it used to be {CI_FAILURES[fid]['fix']}). "
+                                  f"{CI_CHANGE_WHY.get((self.change_variant, fid), '')}".strip(), 1.0)
+                for fid, fix in self.changes.items()]
 
     def regenerate(self, ep: int, salt: int) -> None:
         self.sched[ep] = random.Random(f"ci-focus-{self.seed}-{ep}-{salt}").choice(list(self.changes))

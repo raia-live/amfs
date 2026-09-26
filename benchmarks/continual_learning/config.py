@@ -196,3 +196,25 @@ EMBED_MODEL = env("CL_EMBED_MODEL") or "BAAI/bge-small-en-v1.5"
 # Root scope under which every benchmark entry is written, so it can be found and
 # cleaned up. Each (arm, scenario, seed) gets its own child scope.
 SCOPE_ROOT = env("CL_SCOPE_ROOT") or "clbench"
+
+
+def _harness_version() -> str:
+    """The harness git commit, stamped on every SenseLab trace as ``agent_version`` (one of the
+    two confounders the repair loop's feedback contract requires). ``CL_HARNESS_VERSION``
+    overrides; ``unknown`` when the tree is not a checkout."""
+    if env("CL_HARNESS_VERSION"):
+        return str(env("CL_HARNESS_VERSION"))
+    try:
+        import subprocess
+
+        out = subprocess.run(["git", "rev-parse", "--short=12", "HEAD"], cwd=str(HERE), capture_output=True,
+                             text=True, timeout=5)
+        sha = out.stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain", "--", str(HERE)], cwd=str(HERE),
+                               capture_output=True, text=True, timeout=5).stdout.strip()
+        return f"cl-harness@{sha}{'-dirty' if dirty else ''}" if sha else "unknown"
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+HARNESS_VERSION = _harness_version()

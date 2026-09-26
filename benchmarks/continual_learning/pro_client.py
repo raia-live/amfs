@@ -84,15 +84,17 @@ class ProClient:
 
     # -- judges ---------------------------------------------------------------------
     def ensure_judge(self, judge_id: str, agent_id: str, name: str, prompt: str, *,
-                     model: str | None = None) -> dict[str, Any]:
-        """Create the judge, or return the existing one (judges are per agent)."""
+                     model: str | None = None, mode: str = "on_demand") -> dict[str, Any]:
+        """Create the judge, or return the existing one (judges are per agent). ``mode`` is
+        ``on_demand`` (graded when asked) or ``continuous`` (the eval worker grades every
+        trace the agent seals)."""
         try:
             return self._call("GET", f"/api/v1/eval/judges/{judge_id}", params={"agent_id": agent_id})
         except ProApiError as e:
             if e.status != 404:
                 raise
         body: dict[str, Any] = {"id": judge_id, "agent_id": agent_id, "name": name, "prompt": prompt,
-                                "scoring_type": "binary", "mode": "on_demand", "enabled": True}
+                                "scoring_type": "binary", "mode": mode, "enabled": True}
         if model:
             body["model"] = model
         try:
@@ -141,6 +143,80 @@ class ProClient:
 
     def fix_events(self, fix_id: str, limit: int = 50) -> dict[str, Any]:
         return self._call("GET", f"/api/v1/eval/fixes/{fix_id}/events", params={"limit": limit})
+
+    def list_fixes(self, agent_id: str, *, status: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        """Every fix of one agent (all pages), optionally in one or several comma-separated statuses."""
+        items: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            params: dict[str, Any] = {"agent_id": agent_id, "limit": min(limit, 500)}
+            if status:
+                params["status"] = status
+            if cursor:
+                params["cursor"] = cursor
+            page = self._call("GET", "/api/v1/eval/fixes", params=params)
+            items.extend(i for i in (page.get("items") or []) if isinstance(i, dict))
+            cursor = page.get("next_cursor") or page.get("cursor")
+            if not cursor or len(items) >= limit:
+                return items
+
+    def fix_tests(self, fix_id: str) -> dict[str, Any]:
+        return self._call("GET", f"/api/v1/eval/fixes/{fix_id}/tests")
+
+    def rollback(self, fix_id: str, reason: str = "") -> dict[str, Any]:
+        return self._call("POST", f"/api/v1/eval/fixes/{fix_id}/rollback", json={"reason": reason[:2000]})
+
+    def prevention(self, fix_id: str) -> dict[str, Any]:
+        return self._call("GET", f"/api/v1/eval/fixes/{fix_id}/prevention")
+
+    def recheck(self, fix_id: str) -> dict[str, Any]:
+        return self._call("POST", f"/api/v1/eval/fixes/{fix_id}/recheck")
+
+    # -- canary (Tier 3) ------------------------------------------------------------
+    def agent_canary(self, agent_id: str) -> dict[str, Any]:
+        """``{"active": fix | None, "waiting": [fix, ...]}`` — the agent's canary slot."""
+        return self._call("GET", f"/api/v1/eval/agents/{agent_id}/canary")
+
+    def canary_assignment(self, agent_id: str, session: str) -> dict[str, Any]:
+        return self._call("GET", f"/api/v1/eval/agents/{agent_id}/canary/assignment", params={"session": session})
+
+    def start_canary(self, fix_id: str, *, pct: int | None = None, min_outcomes: int | None = None,
+                     timeout_days: int | None = None) -> dict[str, Any]:
+        body = {k: v for k, v in dict(pct=pct, min_outcomes=min_outcomes, timeout_days=timeout_days).items()
+                if v is not None}
+        return self._call("POST", f"/api/v1/eval/fixes/{fix_id}/canary", json=body)
+
+    def stop_canary(self, fix_id: str, reason: str = "") -> dict[str, Any]:
+        return self._call("POST", f"/api/v1/eval/fixes/{fix_id}/canary/stop", json={"reason": reason[:2000]})
+
+    def evaluate_canary(self, fix_id: str) -> dict[str, Any]:
+        """Re-count both arms and act on the decision, as the hourly sweep would."""
+        return self._call("POST", f"/api/v1/eval/fixes/{fix_id}/canary/evaluate")
+
+    def feedback_contract(self, agent_id: str, policy: str | None = None) -> dict[str, Any]:
+        params = {"policy": policy} if policy else None
+        return self._call("GET", f"/api/v1/eval/agents/{agent_id}/feedback-contract", params=params)
+
+    # -- account-level -----------------------------------------------------------------
+    def readiness(self) -> dict[str, Any]:
+        return self._call("GET", "/api/v1/eval/readiness")
+
+    def budget(self) -> dict[str, Any]:
+        return self._call("GET", "/api/v1/eval/budget")
+
+    def repairs_summary(self, agent_id: str | None = None) -> dict[str, Any]:
+        return self._call("GET", "/api/v1/eval/repairs/summary", params={"agent_id": agent_id} if agent_id else None)
+
+    def verdicts(self, agent_id: str, *, limit: int = 200, **params: Any) -> dict[str, Any]:
+        q: dict[str, Any] = {"agent_id": agent_id, "limit": limit}
+        q.update({k: v for k, v in params.items() if v is not None})
+        return self._call("GET", "/api/v1/eval/verdicts", params=q)
+
+    def incidents(self, agent_id: str, *, limit: int = 100) -> dict[str, Any]:
+        return self._call("GET", "/api/v1/eval/incidents", params={"agent_id": agent_id, "limit": limit})
+
+    def behaviors(self, agent_id: str) -> dict[str, Any]:
+        return self._call("GET", "/api/v1/eval/behaviors", params={"agent_id": agent_id})
 
     # -- repair settings ------------------------------------------------------------
     def get_repair_settings(self, agent_id: str) -> dict[str, Any]:

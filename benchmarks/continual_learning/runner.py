@@ -73,10 +73,19 @@ class Cell:
     # the original and adds nothing to ids; any other value is part of the cell id and scope
     # (``-vB``) so a novel-change evaluation never mixes with the change the students trained on.
     change_variant: str = "A"
+    # Fleet members act as replicas of ONE hosted agent identity (HYPOTHESIS_RSI.md): the
+    # repair loop's fixes, judges, incidents and canary slot are scoped per agent, so a fleet
+    # that shares one loop must share one identity. Part of the cell id (``-rep``) so fleet
+    # rows never mix with the v7 one-identity-per-member protocol. Repair-loop arms force it.
+    fleet_replicas: bool = False
 
     @property
     def _variant(self) -> str:
         return f"-v{self.change_variant}" if self.change_at and self.change_variant != "A" else ""
+
+    @property
+    def _replicas(self) -> str:
+        return "-rep" if self.fleet > 1 and self.fleet_replicas else ""
 
     @property
     def _transfer(self) -> str:
@@ -96,7 +105,7 @@ class Cell:
                 sweep += f"-x{self.change_focus}"
         if self.opaque_ids:
             sweep += "-oid"
-        sweep += self._variant
+        sweep += self._variant + self._replicas
         return f"{self.scenario}|{self.arm}|{self.model}|s{self.seed}|e{self.episodes}{sweep}"
 
     @property
@@ -105,7 +114,7 @@ class Cell:
                f"-n{int(self.label_noise * 100)}-f{self.feedback_delay}-a{self.fleet}{self._transfer}"
                + (f"-c{self.change_at}" if self.change_at else "")
                + (f"-x{int(self.change_focus * 100)}" if self.change_at and self.change_focus else "")
-               + ("-oid" if self.opaque_ids else "") + self._variant)
+               + ("-oid" if self.opaque_ids else "") + self._variant + self._replicas)
         slug = re.sub(r"[^a-z0-9-]", "-", raw.lower())
         return f"{config.SCOPE_ROOT}/{slug}"
 
@@ -166,6 +175,11 @@ def run_cell(cell: Cell, out_path: Path, *, keep_transcript: bool, retry_budget:
     # The newcomer identity (agent N in ``newcomer`` mode); computed after the suffix so it
     # matches the ids Scenario.agent_for() hands out. Only this agent runs on newcomer_model.
     newcomer_id = f"{scenario.agent_base}-{scenario.fleet_size}"
+    # What the arm needs to know about the cell before it opens: the agent model (stamped on
+    # hosted traces as the ``model`` confounder) and whether fleet members are replicas.
+    arm.cell_model = cell.model
+    if cell.fleet_replicas and hasattr(arm, "fleet_replicas"):
+        arm.fleet_replicas = True
     with _sem(cell.arm):
         arm.open(scope)
         arm.configure(scenario)
@@ -189,6 +203,8 @@ def run_cell(cell: Cell, out_path: Path, *, keep_transcript: bool, retry_budget:
                           "fleet_mode": scenario.fleet_mode, "join_at": cell.join_at,
                           "newcomer_model": cell.newcomer_model, "opaque_ids": cell.opaque_ids,
                           "change_variant": cell.change_variant,
+                          "fleet_replicas": bool(getattr(arm, "fleet_replicas", False)) if cell.fleet > 1 else False,
+                          "harness_version": config.HARNESS_VERSION,
                           "ts": time.time()})
                 for sl in rec.searches_log:
                     for h in sl["hits"]:
@@ -216,6 +232,16 @@ def run_cell(cell: Cell, out_path: Path, *, keep_transcript: bool, retry_budget:
                                             "versions": hist}, default=str) + "\n")
             except Exception as e:  # noqa: BLE001
                 print(f"  {cell.id} confidence history skipped: {e}", flush=True)
+            # Arm-side record of the cell (the repair arms' fix lifecycle, verdicts, incidents;
+            # the oracle-fix arm's write). One line per cell, next to the episode rows.
+            try:
+                rep = arm.report()
+                if rep:
+                    with _write_lock, (out_path.parent / "arm_reports.jsonl").open("a") as f:
+                        f.write(json.dumps({"cell": cell.id, "scope": scope, "arm": cell.arm, "model": cell.model,
+                                            "seed": cell.seed, "report": rep}, default=str) + "\n")
+            except Exception as e:  # noqa: BLE001
+                print(f"  {cell.id} arm report skipped: {e}", flush=True)
         finally:
             try:
                 arm.drain_deferred(10**9)  # flush any outcomes still pending at the end of the cell
@@ -268,11 +294,13 @@ def build_cells(args) -> list[Cell]:
                                         focus = (args.change_focus if args.change_focus is not None
                                                  else S.core_change_focus) if ch else 0.0
                                         mode = args.fleet_mode if a > 1 else "rr"
+                                        replicas = bool(getattr(args, "fleet_replicas", False)) or arm.startswith("senselab-rsi")
                                         cells.append(Cell(sc, arm, model, seed, eps, d, n, f, a, ch, focus,
                                                           mode, args.join_at if mode != "rr" else 0,
                                                           newcomer_model if mode == "newcomer" else "",
                                                           bool(getattr(args, "opaque_ids", False)),
-                                                          getattr(args, "change_variant", "A")))
+                                                          getattr(args, "change_variant", "A"),
+                                                          replicas and a > 1))
     # interleave arms so slow hosted arms never monopolise the worker pool
     by_arm: dict[str, list[Cell]] = {}
     for c in cells:
@@ -312,6 +340,9 @@ def main() -> None:
     p.add_argument("--change-variant", default="A", choices=["A", "B"],
                    help="which regime change set applies at --change-at (see Scenario.change_variant); "
                         "B adds -vB to the cell id and scope")
+    p.add_argument("--fleet-replicas", action="store_true",
+                   help="fleet members share one hosted agent identity (HYPOTHESIS_RSI.md); adds -rep to fleet "
+                        "cell ids. Always on for senselab-rsi* arms")
     p.add_argument("--label-noise", nargs="+", type=float, default=[0.0])
     p.add_argument("--feedback-delay", nargs="+", type=int, default=[0])
     p.add_argument("--retry-budget", type=int, default=config.STUDY.retry_budget)
@@ -336,6 +367,8 @@ def main() -> None:
                 "newcomer_model": args.newcomer_model if args.fleet_mode == "newcomer" else "",
                 "judge": config.JUDGE_MODEL, "openai_effort": config.OPENAI_REASONING_EFFORT,
                 "anthropic_effort": config.ANTHROPIC_EFFORT, "retry_budget": args.retry_budget,
+                "harness_version": config.HARNESS_VERSION, "amfs_http_url": config.AMFS_HTTP_URL,
+                "fleet_replicas": bool(getattr(args, "fleet_replicas", False)),
                 "study": config.STUDY.__dict__, "started": time.time()}
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
     print(f"{len(cells)} cells, {len(todo)} to run, {sum(c.episodes for c in todo)} episodes")

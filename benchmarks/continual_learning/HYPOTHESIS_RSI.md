@@ -365,4 +365,62 @@ reported as requests per episode. Nothing is charged to `none` that it does not 
 
 ## Amendments
 
-(none yet; dated entries only, appended below this line)
+Dated entries only, appended below this line. Nothing above is edited.
+
+### 2026-09-26 (a) — routing is the product's, not the harness's
+
+Written before any pilot cell. Rebasing the harness onto the OSS main that the SaaS runs
+(http-server ≥ 0.3.45, PR #432 "canary routing hooks for any client") showed that the hosted
+API itself routes any client that sends the SDK's identity headers: the bound `HttpAdapter`
+carries `X-AMFS-Agent-Id` and `X-AMFS-Session` on every request; `amfs_tenant.http_deps.
+route_canary` applies `amfs_tenant.canary_routing.decide` per request; reads of a canary-arm
+session come from the fix's branch; the seal stamps `canary_fix_id`, `canary_arm` and
+`memory_branch` server-side and strips a client's own claims. The "harness-side canary
+routing" paragraph in *Environment* is therefore withdrawn: the harness routes nothing and
+reproduces no hash. It records the `X-AMFS-Canary` / `X-AMFS-Memory-Branch` response headers
+per session (`arm_notes.canary`, `arm_notes.memory_branch`) and the trace attributes are the
+tally's source of truth. Verified live on the benchmark account (session headers bound; trace
+attributes `model`, `agent_version`, `runtime`, `verified_by`, `replica`, `entity_path`
+present; `GET /agents/{id}/canary/assignment` answers `main` with no canary running).
+
+### 2026-09-26 (b) — arm names, E3 conditions, fleet replicas, judge cadence
+
+- `context-window` is the existing `raw-traces` arm (prior transcripts in context under a
+  token cap, `CL_RAW_TRACES_TOKENS`, set to 24000 for this study); no second implementation.
+- **E3 conditions**, made precise now that the SDK contract is known (`commit_outcome` takes
+  `verified_by`; there is no outcome-less seal):
+  - `oracle` (`senselab-rsi`): the environment's severity, attempt boundaries, `verified_by =
+    "benchmark-oracle"`; the continuous judge on.
+  - `self-report` (`senselab-rsi-selfreport`): identical traffic with `verified_by` omitted.
+    Isolates the provenance contract: same information, unverified.
+  - `judges` (`senselab-rsi-judges`): every outcome committed as `success` unless the agent
+    escalated, no attempt boundaries, no `verified_by`; the continuous judge is the only
+    failure signal and its disagreements reach the evidence through `verdict_outcomes`
+    (weight ≤ 0.6). Isolates detection.
+- **Fleet replicas** apply to every SenseLab-family arm in a fleet cell (`--fleet-replicas`,
+  cell id suffix `-rep`), not only to the repair arms, so `senselab` and `senselab-rsi` are
+  compared under the same identity structure. The v7 one-identity-per-member rows are not
+  reused for RSI comparisons.
+- **Judge cadence.** On the production worker a sealed trace is graded 60–90 s after the
+  seal (measured: two traces, `fail` and `pass`, USD 0.021 and 0.017). An incident, and so a
+  proposal, therefore trails the failing episode by one to two episodes at the harness's
+  pace. Time-to-repair is reported in episodes *and* in wall-clock seconds, and the pilot
+  fixes a pacing floor per agent if the loop's latency is dominated by grading rather than
+  by evidence.
+- **Look schedule** as implemented (`arms/senselab_rsi_arm.py`): every `k = 5` sealed
+  sessions, `POST /fixes/{id}/canary/evaluate` for the running canary; a canary older than
+  60 sessions is stopped by the harness (`CL_RSI_CANARY_TIMEOUT`) and counted as timed out,
+  since the product's own timeout is in days; a freed slot is given to the oldest
+  `test_passed` fix with a branch (`POST /fixes/{id}/canary`, what `_start_next_canary`
+  does hourly); shipped fixes get `POST /fixes/{id}/recheck`. `-noreplay` is realised as
+  policy `review` with the harness starting the canary as soon as a fix has a branch,
+  whatever its Tier 1 verdict, and shipping (`approve-memory`) on a passed canary; the test
+  still runs and is recorded, so what it would have blocked is measured, not assumed.
+- **Set B** for `analytics`, `concierge`, `retention`, `order-ops`, `diagnose`, `policy-qa`,
+  `accounts`, `dispatch` does not exist yet (only `support` and `ci-fix` carry one). They are
+  written before the pilot's analysis freeze; the SHA-256 of `scenarios/` at that commit is
+  registered here in a further entry. Until then E1-B is defined for `support` and `ci-fix`
+  only.
+- Oracle-fix entries (`Scenario.oracle_fix_entries`) exist for `support`, `ci-fix`,
+  `dispatch`, `diagnose`, `policy-qa`; `retention` and `order-ops` receive theirs with
+  their set B.
