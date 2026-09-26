@@ -48,6 +48,7 @@ Run:  .bench-venv/bin/python -m benchmarks.continual_learning.preflight [gate ..
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import uuid
@@ -805,6 +806,102 @@ LOOP_GATES = {
     "compact": gate_compact_budget,
     "provenance": gate_provenance,
 }
+
+
+# ---------------------------------------------------------------------------
+# Gate — the repair loop on the SaaS is wired the way HYPOTHESIS_RSI.md assumes
+# ---------------------------------------------------------------------------
+
+def gate_rsi() -> bool:
+    """Everything the ``senselab-rsi`` arms rely on, checked on a throwaway agent of the
+    benchmark account: judge models callable on the platform; budget headroom; the plan
+    carries ``auto_after_replay`` and ``auto_after_canary``; a continuous judge with the
+    frozen prompt is accepted; the SDK binds identity headers (server-side canary routing);
+    a sealed failing trace is graded within three minutes; the feedback-contract and
+    canary-assignment endpoints answer. Records the http-server version and judge models
+    for the manifest."""
+    from amfs import AgentMemory
+    from amfs_core.models import OutcomeType
+
+    from .arms.senselab_arm import _ThrottledHttpAdapter
+    from .arms.senselab_rsi_arm import JUDGE_ID, JUDGE_PROMPT
+    from .pro_client import ProApiError, ProClient
+
+    detail: dict[str, Any] = {"url": config.AMFS_HTTP_URL}
+    ok = True
+    pro = ProClient()
+    agent = f"cl-preflight-rsi-{int(time.time()) % 100000}"
+    scope = _scope(f"rsi-{agent}")
+    try:
+        r = pro.readiness()
+        detail["readiness"] = {k: r.get(k) for k in ("ready", "cheap_model", "strong_model", "missing", "reason")}
+        ok &= bool(r.get("ready"))
+        b = pro.budget()
+        detail["budget"] = {k: b.get(k) for k in ("monthly_usd_cap", "spent_usd", "remaining_usd")}
+        ok &= float(b.get("remaining_usd") or 0) >= 100.0
+        for policy, ent in (("auto_after_replay", "auto_ship_enabled"), ("auto_after_canary", "canary_enabled")):
+            try:
+                s = pro.set_repair_settings(agent, repair_policy=policy, canary_pct=50, canary_min_outcomes=8,
+                                            canary_timeout_days=1)
+                detail[ent] = s.get("repair_policy") == policy
+            except ProApiError as e:
+                detail[ent] = f"{e.status}: {str(e.detail)[:120]}"
+                detail[ent + "_ok"] = False
+            ok &= detail.get(ent) is True
+        try:
+            j = pro.ensure_judge(JUDGE_ID, agent, "Task failure (benchmark, frozen rubric)",
+                                 JUDGE_PROMPT.format(rubric="preflight"), mode="continuous")
+            detail["judge"] = {"mode": j.get("mode"), "enabled": j.get("enabled"), "version": j.get("version")}
+            ok &= j.get("mode") == "continuous" and bool(j.get("enabled"))
+        except ProApiError as e:
+            detail["judge"] = f"{e.status}: {str(e.detail)[:160]}"
+            ok = False
+        c = pro.feedback_contract(agent)
+        detail["contract"] = {"thresholds": c.get("thresholds"), "shares": sorted((c.get("shares") or {}).keys())}
+        ok &= isinstance(c.get("thresholds"), dict)
+        a = pro.canary_assignment(agent, "preflight-session")
+        detail["assignment"] = {k: a.get(k) for k in ("source", "memory_branch")}
+        ok &= a.get("source") == "main"
+        detail["allow_prod_host"] = os.environ.get("CL_REPAIR_ALLOW_ANY_HOST", "0") in ("1", "true", "yes")
+
+        # One sealed failing session with the provenance the contract needs.
+        mem = AgentMemory(agent_id=agent, adapter=_ThrottledHttpAdapter(
+            base_url=config.AMFS_HTTP_URL, api_key=config.env("AMFS_API_KEY", required=True)))
+        hdrs = getattr(mem._adapter, "identity_headers", {}) or {}
+        detail["identity_headers"] = sorted(hdrs.keys())
+        ok &= {"X-AMFS-Agent-Id", "X-AMFS-Session"} <= set(hdrs)
+        mem.set_session_attributes({"entity_path": scope, "runtime": "cl-preflight", "model": "preflight",
+                                    "agent_version": config.HARNESS_VERSION})
+        mem.write(scope, "playbook", "Declined cards -> update_payment_method.", confidence=0.8)
+        mem.retrieve("card declined", entity_path=scope, limit=2)
+        mem.record_action("resolve", {"action": "update_payment_method"}, result="rejected", success=False,
+                          action_key="resolve:update_payment_method")
+        mem.commit_outcome(f"{agent}-ep0", OutcomeType.FAILURE, causal_entry_keys=[f"{scope}/playbook"],
+                           task_input="Ticket: card declined", response_text="update_payment_method",
+                           decision_summary="failure after 1 attempt", verified_by="benchmark-oracle")
+        detail["branch_header"] = getattr(mem._adapter, "last_branch", None)
+        mem.close()
+        graded = None
+        t0 = time.time()
+        while time.time() - t0 < 180:
+            time.sleep(15)
+            items = (pro.verdicts(agent, limit=5) or {}).get("items") or []
+            if items:
+                graded = {"verdict": items[0].get("verdict"), "seconds": round(time.time() - t0),
+                          "cost_usd": items[0].get("cost_usd")}
+                break
+        detail["graded"] = graded
+        ok &= graded is not None and graded["verdict"] == "fail"
+    except Exception as e:  # noqa: BLE001
+        detail["error"] = f"{type(e).__name__}: {str(e)[:300]}"
+        ok = False
+    finally:
+        pro.close()
+    _gate("rsi", bool(ok), detail)
+    return bool(ok)
+
+
+LOOP_GATES["rsi"] = gate_rsi
 
 
 def main(argv: list[str] | None = None) -> int:

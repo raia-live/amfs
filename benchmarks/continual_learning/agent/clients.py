@@ -270,6 +270,12 @@ def _registry() -> dict[str, Any]:
 def resolve_student(name: str) -> StudentSpec:
     """A registry alias, or a raw public model id (family read off its prefix)."""
     reg = _registry().get(name)
+    if isinstance(reg, dict) and reg.get("deleted_at"):
+        # The owner deleted the Managed Model behind this alias (2026-09-26: every pre-RSI
+        # student). Its row stays in the registry as the record of what was evaluated; a run
+        # that names it would spend a cell on 404s, so refuse here.
+        raise ValueError(f"student {name!r} was deleted on {reg['deleted_at']}; "
+                         f"{reg.get('deleted_note') or 'the model no longer serves'}")
     if isinstance(reg, dict) and reg.get("public_model_id"):
         fam = str(reg.get("family") or "senselab-s1")
         return StudentSpec(alias=name, public_model_id=str(reg["public_model_id"]), family=fam,
