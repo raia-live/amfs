@@ -46,6 +46,26 @@ def _sem(arm: str) -> threading.Semaphore:
     return _sems[arm]
 
 
+_suffixes_used: set[str] = set()
+
+
+def _cell_suffix() -> str:
+    """The per-cell-attempt suffix on the memory scope and every agent id. Random (nine
+    digits) and unique within the process. It used to be ``int(time.time()) % 1e6``: cells
+    started by parallel workers in the same second shared it, and with it the hosted agent
+    identity — a shared judge, repair settings and fix list for the senselab-rsi arm, and a
+    shared agent brief for every SenseLab arm. Found 2026-09-26 on rsi-pilot-2 (both seeds
+    reported ``support-agent-390362``)."""
+    import secrets
+
+    with _write_lock:
+        while True:
+            s = f"{secrets.randbelow(10**9):09d}"
+            if s not in _suffixes_used:
+                _suffixes_used.add(s)
+                return s
+
+
 @dataclass(frozen=True)
 class Cell:
     scenario: str
@@ -164,7 +184,7 @@ def run_cell(cell: Cell, out_path: Path, *, keep_transcript: bool, retry_budget:
     n_ok = 0
     errors = 0
     read_keys: dict[str, None] = {}   # every key any search served this cell, in first-seen order
-    suffix = f"{int(time.time()) % 1_000_000:06d}"
+    suffix = _cell_suffix()
     scope = f"{cell.scope}-{suffix}"  # fresh scope per attempt
     # Agent identities are per cell as well. Hosted systems compile agent-centric context (e.g.
     # SenseLab's agent brief / briefing pulls every entity the agent has touched), so a shared
