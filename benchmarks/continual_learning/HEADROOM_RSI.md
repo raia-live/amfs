@@ -436,6 +436,44 @@ control arms read nothing from the loop — but the confirmatory runs should pla
 non-RSI SenseLab arms on an account (or agents) with auto-propose off, so the separation
 is by construction and not by the loop's silence.
 
+### Pilot 5h, in progress — the loop is reached, and two seams below it
+
+#783 deployed at 13:05Z (`amfs-api-01987-rq2`, `pro-api-00772-844`). 5h is 5g's protocol
+on that engine; the two `senselab-rsi` team-grows halves were launched beside it on
+replay ports 8788/8789. Within twenty minutes the prediction above held on the parts it
+could: the first regime-shift `fix_propose` jobs fired on 5h and the newcomer cell (59 s
+and 173 s — the agent drafting, not the 0.3 s template of 5g), **4 of 4 fixes that hour
+were `source = repair_agent`, model gpt-5**, two from the regime path and two from the
+judge path (`Escalation pingpong`, `Repeated unresolved handoff`), and each went straight
+to Tier 1. The first drafted regime correction rewrote `playbook-tier1` v8 → v9 for the
+iOS login loop; its replay still failed (`Ticket reopened, CSAT 2`) and the fix ended
+`test_failed` — the gate catching a wrong guess, which is the loop working. The second
+(`android-alerts-stopped-settings-fix`) came back `test_inconclusive` at fidelity 0.00:
+a regime trace's tool calls are the harness's, so the internal stand-in replay cannot
+vouch, and the fix moved to `canary_pending`. There it stopped, for a reason below the
+eval package:
+
+1. **Repair branches for rewritten keys never opened.** `open_repair_branch` →
+   `memory.write(..., branch="repair/<id>")` raised
+   `VersionConflictError: expected 9, found 0` on every regime fix. `CoWEngine.write`
+   numbers a write from `read()`, which on a fresh branch resolves to the parent's live
+   row (the overlay); `PostgresAdapter.write` looked only at the branch's own rows and
+   insisted on 1. Fixes that add a new key (the judge path's lessons) were untouched,
+   which is why those two got branches and Tier 2 while the regime fixes fell back to
+   "writes to main on Ship" with no branch to canary or replay. amfs#451 makes the
+   adapter take the parent's live row as the baseline (branch continues main's
+   numbering; both adapters; integration tests through the engine and the async path).
+2. **Tier 2 webhooks were split three ways.** The free ngrok agent gave the three hubs'
+   tunnels one reserved domain and pooled them round-robin (confirmed on the tunnel
+   metrics), and each runner has its own webhook secret, so two thirds of
+   `replay_requested` deliveries hit a hub that refused them (`bad_signature`, no retry).
+   The hub now hands such a request once to its siblings on `CL_REPLAY_SIBLINGS`
+   (`a64666eb`). The two team-grows RSI halves were stopped at 85/71 episodes (results
+   kept as `*-aborted`) and their tunnels removed; they re-run with 5i once #451 is live.
+
+Readout of 5h itself (rates, `rsi_dev`) follows when it completes; what it can already
+answer is the 5g question — the loop is reached, the agent drafts, and Tier 1 grades.
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families
