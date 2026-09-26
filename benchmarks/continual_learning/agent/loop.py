@@ -245,6 +245,10 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
                     if footer:
                         content += "\n\n" + footer
                         session.acct.retrieved_bytes += len(footer)
+                        # The text the agent read, kept with the search: what the
+                        # recommendation *said* is what "followed / ignored" is judged
+                        # against, and pilots 5a-5d could only reconstruct it after the fact.
+                        entry["footer"] = footer[:1500]
                     if session.last_recommendation:
                         entry["recommendation"] = session.last_recommendation
                     searches_log.append(entry)
