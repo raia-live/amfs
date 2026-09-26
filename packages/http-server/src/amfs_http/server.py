@@ -1261,9 +1261,37 @@ def _labels_are_classes(rows: Sequence[Mapping[str, Any]]) -> bool:
     return len(set(labels)) / len(labels) <= LABELS_MAX_DISTINCT_RATIO
 
 
+#: Words that carry no class information in a situation label: what the
+#: label is *of* ("ticket", "issue"), not what it is about. Dropped before
+#: labels are compared, so ``card declined ticket`` and ``card declined`` are
+#: one record.
+_SITUATION_NOISE = frozenset({
+    "a", "an", "the", "of", "on", "in", "for", "with", "and", "or", "to", "at", "by",
+    "ticket", "tickets", "issue", "issues", "problem", "problems", "case", "cases",
+    "request", "requests", "task", "tasks", "failure", "failures", "error", "errors",
+})
+
+
 def _fold_situation(value: Any) -> str:
-    """A situation label as compared: case- and whitespace-folded."""
-    return " ".join(str(value or "").split()).casefold()
+    """A situation label as compared.
+
+    Case, whitespace and punctuation are folded (``Card-Declined`` is ``card
+    declined``), noise words that say what a label is of rather than what it
+    is about are dropped (``card declined ticket``), and the words are compared
+    as a set (``declined card``). Nothing is stemmed: ``ios`` and ``android``,
+    ``ui`` and ``backend`` must stay apart, and the classes a label is meant
+    to separate often differ by exactly one word. Measured on the CL support
+    harness (2026-09-26): a model asked to label the kind of ticket wrote the
+    same class as ``card declined``, ``Card-Declined`` and ``declined card
+    ticket`` across episodes; compared as typed, the class's record split
+    three ways and the one-loss turn never fired.
+    """
+    text = "".join(ch if ch.isalnum() else " " for ch in str(value or "").casefold())
+    words = [w for w in text.split() if w not in _SITUATION_NOISE]
+    if not words:
+        # A label made only of noise words is still a label: compare it as typed.
+        words = text.split()
+    return " ".join(sorted(set(words)))
 
 
 def _nearby_record(
