@@ -171,6 +171,72 @@ others unchanged — a six-family mean of ≈ 96 % against 91.5 % today, and ≥
 E1 families if the four held-out families behave like the six. That is the engineering
 target; the paper reports what the confirmatory runs measure, whatever that is.
 
+*Revised 2026-09-26 (see "What the map turned out to be" below).* With fleet 1 and three
+attempts, the ceiling on a changed class is set by how many episodes the sweep over the
+untried needs: a uniform no-repeat sweep over the ≈ 7 untried support actions loses ≈ 2.3
+episodes per changed class (≈ 20 changed-class episodes per cell ⇒ support cell ≈ 86–87 %);
+a sweep ordered by the entity's record elsewhere, where two of set A's three new support
+fixes are already winners, loses ≈ 1.2 (⇒ 90–92 %). `support` ≈ 95 % is therefore not
+reachable at fleet 1 from the fast loop alone; it needs the repair loop's fleet-wide entry
+rewrite (item 4) or a fleet, and the six-family mean the engineering target should be read
+against is ≈ 93–94 %.
+
+## What the map turned out to be (2026-09-26)
+
+Items 1–3 and 6 have one root cause, found while implementing them: **the harness never used
+the product's situation contract.** `Run.begin(situation=...)` and `retrieve(situation=,
+abstain=True)` are the documented call; the harness's `memory_search` had no `situation`
+parameter and never passed `abstain`. Without a declared situation the engine has no
+per-class record, so every mechanism the map asked for — a turn on one loss on an unsolved
+task (`turned_unsolved`), a first exact win acted on (`_exact_first_win`), the sweep over
+the untried in `elsewhere` order (`sweep_order`), the abstain that says the record cannot
+say — was already in `amfs_core.actions` (since 3c523b86, 2026-09-22, on production as
+amfs-http 0.3.49) and inactive. The pooled record instead said `act` on the class-agnostic
+top action, returned nothing on 17–26 % of searched attempts, and explored by agent hash.
+Verified live on `clbench-rsi`: declaring the situation and committing with `situation=`
+and `entity_path=` yields `situation_record`, `situation_exact` rows and a one-loss
+`explore` sweep ordered by `elsewhere`.
+
+What was done, and where (development seeds 11/23 only; nothing touches a baseline arm, a
+scenario, a change set, a rubric or a metric):
+
+- **Harness (this branch, 1263a82b · 35c1a9cc):** `memory_search` gains a required
+  `situation` parameter for arms whose task ends in an enum action; the label is folded,
+  sticky per episode, declared to the SDK (`Run.begin`'s attribute) and passed on
+  `commit_outcome` with `entity_path`; retrieves carry `abstain=True` and the candidates
+  not yet tried on this task; the priors contract (act on the footer unless the task rules
+  it out; on a retry take the next untried in the footer's order; never repeat a failed
+  action; reuse labels) is in the system prompt of every SenseLab arm. Two ablations:
+  `senselab-nosituation` (no label) and `senselab-nocontract` (no contract text). A label
+  the server reports as pooling two classes is retired from the reuse list and may be
+  refined within the episode. `searches_log` records `situation`, `recommendation`
+  (`mode`, `plan`, `sweep`, `situation_outcomes`, `pooled`, `mixed`) and the action
+  `taken`, so follow rate is measured per attempt.
+- **Engine, OSS PR [#449](https://github.com/raia-live/amfs/pull/449) (awaiting approval):**
+  situation labels compare as word sets without noise words (`card declined` ≡
+  `Card-Declined` ≡ `declined card ticket`; `ios` ≠ `android`); the sweep ranks an action
+  with no record elsewhere at the uniform prior, above one that only lost elsewhere; a
+  mixed record (two actions, wins and losses, no winner) abstains out loud with
+  `abstain=True` instead of returning nothing (this was the 15 % `rec_none` on retries in
+  pilot 5a); the pooled-classes abstain names the declared label and asks for a finer one.
+- **Repair loop, amfs-internal PR [#780](https://github.com/raia-live/amfs-internal/pull/780)
+  (awaiting approval):** the repair agent gets a wall-clock budget
+  (`AMFS_EVAL_REPAIR_TIMEOUT_S` 300, step 120, `MAX_STEPS` 10) and records why it stopped;
+  a template fix's rationale says why the agent's draft was not used; a derived error span
+  among a retrying agent's three `resolve` calls reads as its lost credited call, not as a
+  tool error (the lever `code` misclassification in pilot 4).
+
+What pilot 5a (harness contract, engine as deployed) showed in its first 34 episodes,
+ci-fix, before the run was lost to a closed log pipe: labels were consistent within a cell
+(`snapshot diff on ui pr` / `snapshot diff on backend pr` kept apart), recommendation modes
+`act` 16 / `abstain` 14 / `explore` 9 / none 7 over 46 searched attempts, every `abstain`
+on a label's first episode, every none on a retry over a mixed record — and both audit
+classes, whose fixes are opposite, under one label `audit failure` with the record
+alternating (the engine's `pooled` abstain fired, correctly). Pilots 5a (`senselab`) and 5b
+(`senselab-rsi`) are re-running on support and ci-fix, seeds 11/23, with the label-retirement
+harness; they will be re-run once #449 and #780 are deployed, and the three runs (gridv5c /
+pilot 4 → 5a/5b → post-deploy) are the development evidence for amendment (h).
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families

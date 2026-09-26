@@ -707,3 +707,61 @@ is a PR awaiting approval and is amendment-logged when it ships. Four `POST /tra
 on production stalled 37–224 s and were released at the same instant (05:01:17 UTC) — two
 harness commits timed out client-side but the traces were sealed (no duplicates, one trace
 per episode); the cause is being isolated with a lock sampler on the database.
+
+### 2026-09-26 (h) — the harness adopts the product's situation contract; four engine fixes; repair-agent budget
+
+**Mechanism.** Items 1–3 and 6 of the headroom map had one cause: the harness never declared
+a `situation` on retrieve or commit and never asked for `abstain`, so the engine's per-class
+record and everything computed from it (`turned_unsolved`, `_exact_first_win`,
+`sweep_order`, the abstain modes) was inactive; the pooled record said `act` on the
+class-agnostic top action and was silent on 17–26 % of searched attempts. The change is on
+the caller's side and is the documented use of the product (`Run.begin(situation=...)`):
+
+- harness `memory_search` gains a required `situation` label for arms whose task ends in an
+  enum action; the label is folded, sticky per episode (refinable once the server reports it
+  pools two classes), declared as the SDK's trace attribute, and passed with `entity_path`
+  on `commit_outcome`; retrieves carry `abstain=True` and only the candidates not yet tried
+  on this task; the footer contract (act on the footer unless the task rules it out; on a
+  retry, the next untried in the footer's order; never repeat a failed action; reuse
+  labels; refine a pooled label) is in every SenseLab arm's system prompt. Applied
+  identically to `senselab`, `senselab-rsi` and every SenseLab ablation; ablations
+  `senselab-nosituation` and `senselab-nocontract` isolate the two parts.
+- engine (OSS PR #449, approval pending, deployed with the next amfs-internal deploy):
+  labels compare as word sets without noise words; the sweep ranks a never-tried action at
+  the uniform prior; a mixed record abstains out loud under `abstain=True`; the
+  pooled-classes abstain names the declared label.
+- repair loop (amfs-internal PR #780, approval pending): repair-agent wall-clock budget
+  (300 s, 120 s per step, 10 steps) with a recorded stop reason; the template's rationale
+  says why the agent's draft was not used; a derived error span among a retrying agent's
+  same-tool calls reads as its lost credited call (the pilot-4 lever `code`).
+
+**Evidence.** Grid v5c / pilot 4: `act` on 400/720 and 603/700 searched attempts, 39 % /
+29 % re-tries of an already-failed action, 26 % of episodes with no recommendation,
+changed-class post-change success ≈ 55 % (support) / 65 % (ci-fix). Live smoke on
+`clbench-rsi` with the contract: `situation_record`, `situation_exact` rows, a one-loss
+`explore` sweep ordered by `elsewhere`. Pilot 5a (first 34 ci-fix episodes, harness contract
+on the deployed engine): every `abstain` on a label's first episode, every missing
+recommendation on a retry over a mixed record (7/46), both audit classes pooled under one
+label and detected as such by the engine.
+
+**Predictions (development seeds 11/23, fleet 1, set A, `senselab` and `senselab-rsi`).**
+(i) Recommendation present on ≥ 98 % of searched attempts once #449 is deployed (`rec_none`
+< 2 %); (ii) re-try of an action that already failed on the same task < 5 % of attempts;
+(iii) a changed class's first post-change loss on an unsolved task turns its record to
+`explore` on the next episode of that class (recovery ≤ 3 episodes of the class for ≥ 80 %
+of changed classes); (iv) changed-class post-change success ≥ 80 % in support and ≥ 85 % in
+ci-fix; (v) cell success over episodes 20–59: support ≥ 0.86 with the deployed engine and
+≥ 0.90 after #449, ci-fix ≥ 0.90; (vi) `senselab-rsi`: first proposal ≤ 3 episodes after
+the change, `source = repair_agent` ≥ 80 %, lever ∈ {knowledge, procedure} after #780.
+**Ceiling correction.** The map's `support ≈ 95 %` at fleet 1 was too high: with three
+attempts, the sweep over ≈ 7 untried actions loses ≈ 2.3 episodes per changed class
+uniformly and ≈ 1.2 in `elsewhere` order (two of three new support fixes are winners
+elsewhere in set A), which bounds a support cell at ≈ 90–92 % from the fast loop alone;
+95 % needs the repair loop's fleet-wide rewrite or a fleet. H8's threshold (0.92 over the
+ten families, late window) is unchanged.
+
+**Run status.** Pilot 4 complete (support `senselab-rsi`, s11/s23: 60 episodes each,
+s23 49/60). Pilots 5a (`senselab`) and 5b (`senselab-rsi`), support + ci-fix, s11/s23, are
+running with the contract on the deployed engine; a first 5a attempt (34 episodes) was lost
+to a closed log pipe and is kept as `rsi-pilot-5a-partial`. Both are re-run after #449 and
+#780 deploy; the three points are this amendment's development evidence.
