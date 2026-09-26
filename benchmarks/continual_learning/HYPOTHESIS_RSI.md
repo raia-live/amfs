@@ -1163,3 +1163,20 @@ RSI cells are the pre-(k) baseline; no confirmatory seed has been run on either 
 Bruno approved (1) and option (a) on 2026-09-26; the corrected reading of what (a) is —
 the look schedule already existed; the change is what the look schedule *starts* — is
 recorded here rather than silently substituted.
+
+**Cut time (recorded 2026-09-26).** amfs-internal #785 merged to `main` at 22:15:19Z as
+`ea189b5e` after a Bugbot round (`5ca0a4cb`: attempt-charged regime failures — a failed
+`amfs_record_attempt` whose `causal_entry_keys` name the implicated entry — now count as
+a read and as a recurrence, so a run that read the shifted entry, failed on it and
+recovered is graded and recurred rather than passed). Deployed by run 36275674268:
+`amfs-api-02011-4wj` at 100 % from 22:23:47Z, `pro-api-00775-dkt` from 22:21:43Z; deploy,
+Room lifecycle smoke and Notify SRE dispatch all green. Treated run `rsi-pilot-5k`
+launched 22:27:29Z from harness commit `98ecd4c3` with the 5h knobs (`CL_RSI_TIER2=1`,
+`CL_RSI_VERDICT_WAIT=240`, `CL_SENSELAB_TIMEOUT=90`, fleet 1, workers 2, dev seeds 11/23,
+support + ci-fix, 240 episodes). Every RSI cell that started before 22:23:47Z (5h, 5j,
+the team-grows halves) is pre-(k) baseline for K1–K4; the platform's hourly sweep also
+runs the new grading, so canaries from those cells that are still running on the ledger
+will start grading from this revision — the K3 "before" number is the arm state read
+before the cut, not a later re-read. Stale ngrok tunnels for the team-grows hubs
+(8788/8789, no listeners) were removed before launch so the reserved domain routes every
+Tier 2 webhook to the single live hub on 8787.
