@@ -774,7 +774,7 @@ def _recommend_mode(
                 "mode": "abstain",
                 "suggested_action": None,
                 "pooled": pooled,
-                "why": _pooled_why(pooled),
+                "why": _pooled_why(pooled, situation=_declared_situation(priors)),
             }
         from_contrast = _act_from_contrast(
             contrasts,
@@ -866,8 +866,16 @@ def _recommend_mode(
         # and the sweep over the untried is then the plan (:func:`_sweep`).
         unsolved = _sweep(priors)
         if unsolved:
+            # The order is the record's — winners elsewhere first, then the
+            # never-tried — and the record knows nothing about *which* of the
+            # never-tried fits this task; the agent may. CL support (pilot 5a,
+            # 2026-09-26): the android class's new fix, reinstall_app, sat
+            # fourth behind three winners elsewhere and cost a swept episode
+            # the agent's own reading of the ticket would have saved.
             why += (f"your own pick has already failed on this situation ({unsolved} unsolved) — "
-                    f"work through the {len(untried)} untried in the order given, starting with {pick}")
+                    f"work through the {len(untried)} untried without repeating any: if the task's "
+                    f"own details point to one of them, take it first; otherwise in the order given, "
+                    f"starting with {pick}")
         else:
             why += (f"{len(untried)} untried on this kind of task and nothing in the record orders them — "
                     f"use your own judgement; {pick} is this agent's exploration assignment if you have no better guess")
@@ -906,6 +914,35 @@ def _recommend_mode(
                 "why": f"no action has been tried on similar tasks here and no hit is validated "
                        f"({described}); treat what follows as hints, not guidance",
             }
+    mixed = (
+        not winners
+        and len(tried) >= 2
+        and any(int(t.get("won", 0)) for t in tried)
+        and any(int(t.get("lost", 0)) for t in tried)
+    )
+    if abstain and mixed:
+        # Two or more actions tried, wins and losses among them, no winner
+        # and not every one lost: mixed. The caller asked to be told when
+        # the record cannot say, and this is that case as much as an empty
+        # one — left as None, the CL harness (2026-09-26) saw 15% of its
+        # retries come back with no recommendation at all, every one on a
+        # situation whose record had split between two actions. A single
+        # thin prior (1/1) stays silent as before: it is thin, not mixed;
+        # so does a record that still holds a winner the branches above
+        # declined to act on (a pre-shift winner under a suspected regime
+        # shift) — "names no winner" would be false of it.
+        where = "on this situation" if _declared_situation(priors) else "on similar tasks here"
+        shown = ", ".join(f"{t['action_key']} {t['won']}/{t['n']}" for t in tried[:5])
+        return {
+            "mode": "abstain",
+            "suggested_action": None,
+            "mixed": True,
+            "why": (
+                f"the record {where} is mixed and names no winner ({shown}); nothing has won "
+                "often enough to act on — weigh the task's own details, and prefer what is "
+                "untried here over repeating what lost"
+            ),
+        }
     return None
 
 
@@ -1052,7 +1089,12 @@ def sweep_order(
         i, a = i_a
         t = by_key.get(a)
         won = float(t.get("won", 0)) if t else 0.0
-        p = float(t.get("p", 0)) if t else 0.0
+        # An action never tried anywhere on the entity ranks at the uniform
+        # prior (0.5), above one that was tried elsewhere and only lost: a
+        # 0/1 elsewhere is evidence against, no record is not. Read as 0.0
+        # the untried came last and the sweep opened with the entity's known
+        # loser (CL support smoke, 2026-09-26).
+        p = float(t.get("p", 0.5)) if t else 0.5
         return (-won, -p, i)
 
     return [a for _, a in sorted(enumerate(rotated), key=rank)]
@@ -1417,15 +1459,36 @@ def priors_local(priors: Mapping[str, Any] | None) -> bool:
     return (priors or {}).get("source") != "action_stats"
 
 
-def _pooled_why(pooled: Mapping[str, Any]) -> str:
+def _pooled_why(pooled: Mapping[str, Any], *, situation: str | None = None) -> str:
+    """*situation*, when the caller declared one, is the label the two kinds
+    of task share: the fix is then a finer label, and the reason says so. CL
+    ci-fix harness (2026-09-26): two audit classes with opposite fixes were
+    both declared ``audit failure`` and the record alternated for the rest of
+    the run; the agent was told the record disagreed but not that its label
+    was what pooled it."""
     a, b = pooled["actions"]
     seq = list(pooled.get("sequence") or [])
+    shared = (
+        f"two kinds of task share the situation label \u201c{str(situation)[:80]}\u201d; declare a "
+        "more specific label that names what distinguishes this task, and decide from that, "
+        "not from the action record"
+        if situation else
+        "two kinds of task share this description; decide from what distinguishes this one, "
+        "not from the action record"
+    )
     return (
         f"outcomes on near-identical tasks here disagree: {a} resolved what {b} failed and "
         f"{b} resolved what {a} failed, alternating over time "
-        f"({seq.count(a)}x {a}, {seq.count(b)}x {b}) — two kinds of task share this "
-        "description; decide from what distinguishes this one, not from the action record"
+        f"({seq.count(a)}x {a}, {seq.count(b)}x {b}) — {shared}"
     )
+
+
+def _declared_situation(priors: Mapping[str, Any] | None) -> str | None:
+    """The label the caller declared, when the record is partitioned by it."""
+    record = (priors or {}).get("situation_record")
+    if isinstance(record, Mapping) and record.get("situation"):
+        return str(record["situation"])
+    return None
 
 
 def _act_from_contrast(
@@ -1593,7 +1656,8 @@ def render_priors(
         # Two "near-identical" lines that contradict each other read as a
         # coin toss; one line that names the contradiction reads as a warning.
         # (When the recommendation is the abstain that says the same, it says it.)
-        lines.append(_pooled_why(pooled)[0].upper() + _pooled_why(pooled)[1:] + ".")
+        why = _pooled_why(pooled, situation=_declared_situation(priors))
+        lines.append(why[0].upper() + why[1:] + ".")
     for c in ([] if pooled is not None else contrasts[:2]):
         failed = ", ".join(str(a) for a in (c.get("failed") or [])[:3])
         if failed and c.get("resolved_with"):
@@ -1671,10 +1735,30 @@ def render_priors(
         u for u in untried
         if u in in_plan and u not in backed and u not in hedged_keys and u not in barred
     ]
+    # What each untried candidate did on the entity's other situations, when
+    # there is such a record: the sweep's order is drawn from it, and a plan
+    # whose order the agent can see the reason for is one it can weigh
+    # against the task instead of following blind. The CL support pilot
+    # (2026-09-26) had a class whose fix changed to the textbook answer — an
+    # action that had never won anywhere, so the record put it last; the
+    # agent walked five winners-elsewhere first because nothing told it the
+    # sixth was merely untested rather than known to fail.
+    # Only the untried get a note: an explore's head can also hold an action
+    # tried here (a loser with a win that has not stopped working), whose
+    # record is the "Tried" line above, not a blank slate elsewhere.
+    untried_set = set(untried)
+    note = (
+        _elsewhere_notes(priors, [a for a in [*head, *tail] if a in untried_set])
+        if mode == "explore" else {}
+    )
+
+    def _shown(a: str) -> str:
+        return f"{a} ({note[a]})" if a in note else a
+
     if head:
-        line = f"Try {head[0]} first"
+        line = f"Try {_shown(head[0])} first"
         if head[1:]:
-            line += ", then " + " -> ".join(head[1:])
+            line += ", then " + " -> ".join(_shown(a) for a in head[1:])
         lines.append(line + ". Do not repeat an action that failed on this task.")
     for a in hedge[:1]:
         h = next(t for t in hedged if str(t.get("action_key")) == a)
@@ -1684,11 +1768,40 @@ def render_priors(
             "task nothing solved — the fix may have changed, and one attempt on it is cheap if it did not."
         )
     if tail:
-        lines.append(
-            f"Untried {here}: " + ", ".join(tail[:8])
-            + " — the record cannot order these; choose among them by your own judgement of the task."
-        )
+        if any(a in note for a in tail[:8]):
+            lines.append(
+                f"Untried {here}: " + ", ".join(_shown(a) for a in tail[:8])
+                + " — the record for this situation has nothing on them; the brackets are what "
+                "each did on this queue's other situations. Weigh that against the task's own "
+                "details: untested anywhere means unknown, not ruled out."
+            )
+        else:
+            lines.append(
+                f"Untried {here}: " + ", ".join(tail[:8])
+                + " — the record cannot order these; choose among them by your own judgement of the task."
+            )
     return "\n".join(lines)
+
+
+def _elsewhere_notes(priors: Mapping[str, Any] | None, actions: Sequence[str]) -> dict[str, str]:
+    """A short record-elsewhere note per action in *actions*, when the entity
+    has a record elsewhere at all: ``9/10 elsewhere`` for one tried on other
+    situations, ``untested anywhere`` for one with no record on the entity.
+    Empty when there is no record elsewhere — then every candidate would
+    read ``untested anywhere`` and the line would say nothing."""
+    rec = (priors or {}).get("elsewhere")
+    tried = list(rec.get("tried") or []) if isinstance(rec, Mapping) else []
+    if not tried:
+        return {}
+    by_key = {str(t.get("action_key")): t for t in tried}
+    out: dict[str, str] = {}
+    for a in actions:
+        t = by_key.get(a)
+        if t is None:
+            out[a] = "untested anywhere"
+        else:
+            out[a] = f"{int(t.get('won', 0))}/{int(t.get('n', 0))} elsewhere"
+    return out
 
 
 def _evidence_backed(

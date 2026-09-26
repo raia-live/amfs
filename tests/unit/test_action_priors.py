@@ -1743,7 +1743,16 @@ def test_a_sweep_is_ordered_by_the_entitys_record_elsewhere() -> None:
     rec = act.recommend(pr, agent_id="x", candidate_actions=cands)
     assert rec["sweep"] is True and rec["suggested_action"] == "resolve:e"
     assert rec["plan"][:3] == ["resolve:e", "resolve:c", "resolve:d"]
-    assert "Try resolve:e first, then resolve:c -> resolve:d." in act.render_priors(pr, rec, candidate_actions=cands)
+    # Each candidate carries its record elsewhere, so the agent can see why
+    # the order is what it is — and that the last one is unknown, not a loser.
+    assert (
+        "Try resolve:e (9/10 elsewhere) first, then resolve:c (2/2 elsewhere) -> "
+        "resolve:d (untested anywhere)."
+    ) in act.render_priors(pr, rec, candidate_actions=cands)
+    # The order is the record's, and the record knows nothing about which never-tried
+    # action fits this task: the agent is told to put one the task points to first.
+    assert "if the task's own details point to one of them, take it first" in rec["why"]
+    assert "without repeating any" in rec["why"]
     # No record elsewhere: the rotation, and the same first pick from both.
     del pr["elsewhere"]
     rec = act.recommend(pr, agent_id="x", candidate_actions=cands)
@@ -2009,3 +2018,203 @@ def test_a_lesson_barred_action_is_not_offered_as_an_untried_choice() -> None:
     rec2 = act.recommend(pr2, agent_id="x", candidate_actions=cands, lessons=lessons)
     text2 = act.render_priors(pr2, rec2, candidate_actions=cands, lessons=lessons)
     assert not any(line.startswith("Untried") and "resolve:b" in line for line in text2.splitlines())
+
+
+def test_situation_labels_compare_as_word_sets_without_noise_words() -> None:
+    """CL support harness (2026-09-26): a model asked to label the kind of
+    ticket wrote one class as ``card declined``, ``Card-Declined`` and
+    ``declined card ticket`` across episodes. Compared as typed the record
+    split three ways and the one-loss turn never fired. Case, punctuation,
+    word order and words that say what a label is *of* fold away; the words
+    that separate classes (``ios`` / ``android``, ``ui`` / ``backend``) do not."""
+    from amfs_http.server import _fold_situation as fold
+
+    assert fold("card declined") == fold("Card-Declined") == fold("declined card ticket") == fold(" the card_declined issue ")
+    assert fold("ios login loop") != fold("android login loop")
+    assert fold("snapshot diff on ui pr") != fold("snapshot diff on backend pr")
+    assert fold("snapshot diff on ui pr") == fold("UI PR snapshot diff")
+    # A label of nothing but noise words is still a label, compared as typed.
+    assert fold("issue") == fold("Issue") and fold("issue") != fold("ticket")
+    assert fold(None) == "" and fold("   ") == ""
+
+
+def test_the_situations_record_folds_labels_the_same_way(client, server_mem) -> None:
+    """The equality that partitions the record uses the fold: three outcomes
+    labelled three ways for one class are one record of three, and the
+    label shown back is the one the caller declared."""
+    from amfs_http import server
+
+    cands = ["resolve:escalate_tier2", "resolve:resend_email", "resolve:refund"]
+    entity_record = [
+        _sit_row("card declined", [("resolve:escalate_tier2", True)]),
+        _sit_row("Card-Declined", [("resolve:escalate_tier2", True)], days_ago=1),
+        _sit_row("declined card ticket", [("resolve:escalate_tier2", False)], outcome="failure", days_ago=2),
+        _sit_row("ios login loop", [("resolve:refund", False)], outcome="failure", days_ago=2),
+    ]
+    server_mem._adapter.similar_outcomes = lambda entity_path, embedding, **kw: []  # type: ignore[attr-defined]
+    server_mem._adapter.action_stats = lambda entity_path, **kw: list(entity_record)  # type: ignore[attr-defined]
+    server._get_server_embedder = lambda: _StubEmbedder()
+    body = {"query": "my card was declined again", "entity_path": "acme/support", "include_priors": True,
+            "agent_id": "a9", "candidate_actions": cands, "abstain": True, "situation": "the declined card"}
+    pr = client.post("/api/v1/retrieve", json=body).json()[-1]["priors"]
+    assert pr["situation_record"] == {"situation": "the declined card", "outcomes": 3}
+    assert [(t["action_key"], t["won"], t["lost"]) for t in pr["tried"]] == [("resolve:escalate_tier2", 2, 1)]
+    assert pr["elsewhere"]["outcomes"] == 1
+
+
+def test_a_sweep_puts_the_never_tried_above_what_only_lost_elsewhere() -> None:
+    """CL support smoke on production (2026-09-26): with ``reset_password``
+    0/1 elsewhere and two candidates never tried anywhere, the sweep opened
+    with ``reset_password`` — an untried action's missing record was read as
+    ``p = 0``, under a known loser's 0.33. No record is the uniform prior."""
+    cands = ["resolve:a", "resolve:b", "resolve:c", "resolve:d"]
+    pr = act.aggregate_priors(
+        [_sit_row("card declined", [("resolve:a", False)], outcome="failure")],
+        candidate_actions=cands, situation_exact=True,
+    )
+    pr["situation_record"] = {"situation": "card declined", "outcomes": 1}
+    pr["elsewhere"] = {"outcomes": 3, "tried": [
+        {"action_key": "resolve:d", "won": 0, "lost": 1, "n": 1, "p": 0.333},
+        {"action_key": "resolve:a", "won": 2, "lost": 0, "n": 2, "p": 0.75},
+    ]}
+    order = act.sweep_order(pr, pr["untried"], "x")
+    assert order[-1] == "resolve:d", order
+    assert set(order[:2]) == {"resolve:b", "resolve:c"}
+    # A winner elsewhere still leads the never-tried.
+    pr["elsewhere"]["tried"].append({"action_key": "resolve:c", "won": 3, "lost": 0, "n": 3, "p": 0.8})
+    assert act.sweep_order(pr, pr["untried"], "x") == ["resolve:c", "resolve:b", "resolve:d"]
+
+
+def test_a_mixed_record_abstains_out_loud_when_asked() -> None:
+    """CL harness (2026-09-26): 15% of retries came back with no
+    recommendation at all, each on a situation whose record had split between
+    two actions with no winner and not every one lost. With ``abstain`` the
+    record says it is mixed; without it, silent as before. A single thin
+    prior is thin, not mixed, and stays silent either way."""
+    mixed = {
+        "tried": [
+            {"action_key": "fix:a", "won": 1, "lost": 1, "p": 0.5, "n": 2, "agents": 1},
+            {"action_key": "fix:b", "won": 1, "lost": 1, "p": 0.5, "n": 2, "agents": 1},
+        ],
+        "untried": ["fix:c", "fix:d"],
+        "situation_record": {"situation": "audit failure", "outcomes": 4},
+    }
+    rec = act.recommend(mixed, top_hit_status="untested", abstain=True,
+                        candidate_actions=["fix:a", "fix:b", "fix:c", "fix:d"])
+    assert rec["mode"] == "abstain" and rec["suggested_action"] is None and rec.get("mixed") is True
+    assert "mixed and names no winner" in rec["why"] and "on this situation" in rec["why"]
+    assert "fix:a 1/2" in rec["why"] and "untried" in rec["why"]
+    assert act.recommend(mixed, top_hit_status="untested") is None
+    pooled_free = dict(mixed)
+    pooled_free.pop("situation_record")
+    assert "on similar tasks here" in act.recommend(pooled_free, top_hit_status="untested", abstain=True)["why"]
+    thin = {"tried": [{"action_key": "fix:b", "won": 1, "lost": 0, "p": 0.67, "n": 1, "agents": 1}], "untried": []}
+    assert act.recommend(thin, top_hit_status="untested", abstain=True) is None
+    all_lost = {"tried": [{"action_key": "fix:a", "won": 0, "lost": 2, "p": 0.2, "n": 2, "agents": 1},
+                          {"action_key": "fix:b", "won": 0, "lost": 1, "p": 0.33, "n": 1, "agents": 1}],
+                "untried": ["fix:c"]}
+    assert act.recommend(all_lost, top_hit_status="untested", abstain=True,
+                         candidate_actions=["fix:a", "fix:b", "fix:c"])["mode"] == "explore"
+
+
+def test_pooled_classes_name_the_declared_label_as_what_pooled_them() -> None:
+    """CL ci-fix harness (2026-09-26): two audit classes with opposite fixes
+    were both declared ``audit failure``; the record alternated for the rest
+    of the run and the agent was told it disagreed, not that the label was
+    why. With a declared situation the reason asks for a finer label; the
+    rendered block says the same."""
+    pooled = {"actions": ["fix:add_audit_exception", "fix:bump_dependency"],
+              "sequence": ["fix:add_audit_exception", "fix:bump_dependency", "fix:add_audit_exception"],
+              "reversals": 2, "outcome_refs": ["o1", "o2", "o3"]}
+    why = act._pooled_why(pooled, situation="audit failure")
+    assert "share the situation label \u201caudit failure\u201d" in why
+    assert "more specific label" in why
+    assert "share this description" in act._pooled_why(pooled)
+    contrasts = [
+        {"failed": ["fix:bump_dependency"], "resolved_with": "fix:add_audit_exception", "weight": 0.9,
+         "outcome_ref": "o1", "committed_at": "2026-09-26T01:00:00+00:00"},
+        {"failed": ["fix:add_audit_exception"], "resolved_with": "fix:bump_dependency", "weight": 0.9,
+         "outcome_ref": "o2", "committed_at": "2026-09-26T02:00:00+00:00"},
+        {"failed": ["fix:bump_dependency"], "resolved_with": "fix:add_audit_exception", "weight": 0.9,
+         "outcome_ref": "o3", "committed_at": "2026-09-26T03:00:00+00:00"},
+    ]
+    priors = {
+        "tried": [{"action_key": "fix:add_audit_exception", "won": 2, "lost": 1, "p": 0.6, "n": 3, "agents": 1},
+                  {"action_key": "fix:bump_dependency", "won": 1, "lost": 2, "p": 0.4, "n": 3, "agents": 1}],
+        "untried": ["fix:rerun_job"], "contrasts": contrasts, "source": "similar_outcomes",
+        "situation_record": {"situation": "audit failure", "outcomes": 6},
+    }
+    if act.pooled_classes(contrasts) is not None:
+        rec = act.recommend(priors, top_hit_status="untested", abstain=True,
+                            candidate_actions=["fix:add_audit_exception", "fix:bump_dependency", "fix:rerun_job"])
+        assert rec["mode"] == "abstain" and "situation label \u201caudit failure\u201d" in rec["why"]
+        text = act.render_priors(priors, rec, candidate_actions=["fix:add_audit_exception", "fix:bump_dependency", "fix:rerun_job"])
+        assert "situation label \u201caudit failure\u201d" in text
+        assert act.render_priors(priors, None)  # the renderer's own pooled line
+        assert "situation label" in act.render_priors(priors, None)
+
+
+def test_a_record_that_still_holds_a_winner_is_not_called_mixed() -> None:
+    """A pre-shift winner under a suspected regime shift, over non-local
+    priors with nothing untried: the act branches decline it and nothing
+    explores. Saying the record 'names no winner' would be false; the
+    mixed abstain stays silent, as before."""
+    pr = {
+        "tried": [
+            {"action_key": "fix:a", "won": 4, "lost": 1, "p": 0.7, "n": 5, "agents": 1,
+             "last_3": ["won", "won", "lost"], "last_at": "2026-09-20T00:00:00+00:00"},
+            {"action_key": "fix:b", "won": 1, "lost": 2, "p": 0.4, "n": 3, "agents": 1},
+        ],
+        "untried": [],
+        "source": "action_stats",
+    }
+    rec = act.recommend(pr, top_hit_status="untested", abstain=True, regime_shift=True,
+                        regime_shift_at=datetime(2026, 9, 25, tzinfo=UTC),
+                        candidate_actions=["fix:a", "fix:b"])
+    assert rec is None or rec.get("mixed") is not True
+
+
+def test_the_untried_carry_their_record_elsewhere_so_the_agent_can_weigh_them() -> None:
+    """CL support pilot 5a (2026-09-26): after the change, android's fix moved
+    to the textbook answer — an action that had never won anywhere on the
+    queue, so the elsewhere order put it last and the agent walked five
+    winners-elsewhere first. Nothing in the text said the sixth was merely
+    untested. Each untried candidate now shows its record on the queue's
+    other situations — ``9/10 elsewhere``, ``0/3 elsewhere``, ``untested
+    anywhere`` — on the sweep's plan and on the unordered untried line, and
+    the untried line says what the brackets mean. Without a record elsewhere
+    the text is unchanged: every bracket would say the same thing."""
+    cands = ["resolve:a", "resolve:b", "resolve:c", "resolve:d"]
+    pr = {"tried": [_prior("resolve:a", 0, 2, ["lost", "lost"])],
+          "untried": ["resolve:b", "resolve:c", "resolve:d"],
+          "elsewhere": {"outcomes": 13, "tried": [
+              {"action_key": "resolve:b", "won": 9, "lost": 1, "n": 10, "p": 0.83},
+              {"action_key": "resolve:c", "won": 0, "lost": 3, "n": 3, "p": 0.2},
+          ]}}
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "explore" and not rec.get("sweep")
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    assert (
+        "Untried on tasks like this: resolve:b (9/10 elsewhere), resolve:c (0/3 elsewhere), "
+        "resolve:d (untested anywhere) — the record for this situation has nothing on them"
+    ) in text
+    assert "untested anywhere means unknown, not ruled out" in text
+    assert "the record cannot order these" not in text
+    # An act's head line is the record here, not elsewhere: no brackets.
+    pr_act = {"tried": [_prior("resolve:a", 4, 4, ["won"] * 4)], "untried": ["resolve:b"],
+              "elsewhere": pr["elsewhere"]}
+    rec_act = act.recommend(pr_act, agent_id="a", candidate_actions=cands)
+    assert rec_act["mode"] == "act"
+    assert "(9/10 elsewhere)" not in act.render_priors(pr_act, rec_act, candidate_actions=cands)
+    # An explore whose plan still names an action tried *here* (a 1/3 that has
+    # not stopped working) shows that action bare: its record is the "Tried"
+    # line, and "untested anywhere" would contradict it.
+    pr_mixed = {"tried": [_prior("resolve:a", 1, 3, ["won", "lost", "lost"])],
+                "untried": ["resolve:b", "resolve:d"],
+                "elsewhere": {"outcomes": 10, "tried": [
+                    {"action_key": "resolve:b", "won": 9, "lost": 1, "n": 10, "p": 0.83}]}}
+    rec_mixed = act.recommend(pr_mixed, agent_id="a", candidate_actions=cands)
+    assert rec_mixed["mode"] == "explore"
+    text_mixed = act.render_priors(pr_mixed, rec_mixed, candidate_actions=cands)
+    assert "resolve:a (" not in text_mixed
+    assert "resolve:b (9/10 elsewhere)" in text_mixed and "resolve:d (untested anywhere)" in text_mixed
