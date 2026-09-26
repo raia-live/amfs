@@ -1744,6 +1744,10 @@ def test_a_sweep_is_ordered_by_the_entitys_record_elsewhere() -> None:
     assert rec["sweep"] is True and rec["suggested_action"] == "resolve:e"
     assert rec["plan"][:3] == ["resolve:e", "resolve:c", "resolve:d"]
     assert "Try resolve:e first, then resolve:c -> resolve:d." in act.render_priors(pr, rec, candidate_actions=cands)
+    # The order is the record's, and the record knows nothing about which never-tried
+    # action fits this task: the agent is told to put one the task points to first.
+    assert "if the task's own details point to one of them, take it first" in rec["why"]
+    assert "without repeating any" in rec["why"]
     # No record elsewhere: the rotation, and the same first pick from both.
     del pr["elsewhere"]
     rec = act.recommend(pr, agent_id="x", candidate_actions=cands)

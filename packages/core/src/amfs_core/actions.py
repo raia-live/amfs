@@ -866,8 +866,16 @@ def _recommend_mode(
         # and the sweep over the untried is then the plan (:func:`_sweep`).
         unsolved = _sweep(priors)
         if unsolved:
+            # The order is the record's — winners elsewhere first, then the
+            # never-tried — and the record knows nothing about *which* of the
+            # never-tried fits this task; the agent may. CL support (pilot 5a,
+            # 2026-09-26): the android class's new fix, reinstall_app, sat
+            # fourth behind three winners elsewhere and cost a swept episode
+            # the agent's own reading of the ticket would have saved.
             why += (f"your own pick has already failed on this situation ({unsolved} unsolved) — "
-                    f"work through the {len(untried)} untried in the order given, starting with {pick}")
+                    f"work through the {len(untried)} untried without repeating any: if the task's "
+                    f"own details point to one of them, take it first; otherwise in the order given, "
+                    f"starting with {pick}")
         else:
             why += (f"{len(untried)} untried on this kind of task and nothing in the record orders them — "
                     f"use your own judgement; {pick} is this agent's exploration assignment if you have no better guess")
