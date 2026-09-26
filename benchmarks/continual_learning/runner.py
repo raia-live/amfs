@@ -342,6 +342,27 @@ def build_cells(args) -> list[Cell]:
     return out
 
 
+def _client_core_provenance() -> dict[str, str]:
+    """Where ``amfs_core`` was imported from and the git commit of that checkout,
+    so a run whose footer was rendered by a branch on ``PYTHONPATH`` says so."""
+    import subprocess
+
+    try:
+        import amfs_core
+
+        path = str(Path(amfs_core.__file__).resolve().parent)
+    except Exception:  # noqa: BLE001 - provenance must never stop a run
+        return {"path": "", "commit": ""}
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"], cwd=path, capture_output=True,
+            text=True, timeout=5, check=False,
+        ).stdout.strip()
+    except Exception:  # noqa: BLE001
+        commit = ""
+    return {"path": path, "commit": commit}
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--run", required=True)
@@ -400,6 +421,10 @@ def main() -> None:
                 "judge": config.JUDGE_MODEL, "openai_effort": config.OPENAI_REASONING_EFFORT,
                 "anthropic_effort": config.ANTHROPIC_EFFORT, "retry_budget": args.retry_budget,
                 "harness_version": config.HARNESS_VERSION, "amfs_http_url": config.AMFS_HTTP_URL,
+                # The footer is rendered client-side by amfs_core.actions.render_priors; the
+                # recommendation it renders comes from the server. Which core rendered it
+                # (a checkout on PYTHONPATH, say) is provenance the readout needs.
+                "client_core": _client_core_provenance(),
                 "fleet_replicas": bool(getattr(args, "fleet_replicas", False)),
                 # The repair-loop arms' knobs (canary, pacing floor, Tier 2), for provenance.
                 "rsi_env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("CL_RSI_")},

@@ -765,3 +765,46 @@ s23 49/60). Pilots 5a (`senselab`) and 5b (`senselab-rsi`), support + ci-fix, s1
 running with the contract on the deployed engine; a first 5a attempt (34 episodes) was lost
 to a closed log pipe and is kept as `rsi-pilot-5a-partial`. Both are re-run after #449 and
 #780 deploy; the three points are this amendment's development evidence.
+
+**Pilot 5a result (2026-09-26, contract v2 — judgement-first sweep — on the deployed
+engine; `analysis.rsi_dev`).** Support `senselab`, 120 episodes: success 92.5 % (grid v5c
+82.1 %), late window 91.2 % (80.0 %), changed-class post-change 82.5 % (61.2 %), first-try
+83.3 % (67.9 %), re-tries 21.6 % of episodes (36.3 %), repeat of a failed action 0.0 %,
+recommendation present 100 %, `act` followed 100 %, recovery ≤ 3 class-episodes 6/6 (2/6).
+Ci-fix `senselab`, 120 episodes: 95.8 % (92.1 %), late 95.0 % (88.8 %), changed-class
+post-change 90.0 % (77.5 %), recovery 3/4 (the fourth exactly 3). Against the predictions:
+(i) met (97.9–100 %); (ii) met (0 % repeats; 21.6 % of episodes still need a second
+attempt, which is the sweep, not repetition); (iii) met; (iv) met (82.5 % / 90.0 %);
+(v) met on the deployed engine (0.912 / 0.950); (vi) awaits 5b. The 13 residual failures
+are 3 pre-change first encounters and 10 post-change sweeps, none with an error. In the
+sweeps the new fix was reached in the 2nd or 3rd class-episode: the new fix that is the
+textbook answer (`android-notifications → reinstall_app`) had never won anywhere on the
+queue, so `elsewhere` order left it out of the five-action plan (`untried = 7`) behind
+`explain_and_close`, `resend_email`, `advise_workaround`; and the agent's own picks under
+the judgement-first rule (`clear_app_data`, `escalate_tier2`) were no better than the
+order — at s23 ep 27 it overrode a correct `resend_email` suggestion on two attempts. The
+ceiling paragraph above stands: a support cell at fleet 1 is bounded near 92–93 % by the
+sweep's one unavoidable loss per changed class plus the search cost of the textbook case.
+
+**Pilot 5c (launched 2026-09-26 07:5x UTC).** `senselab`, same cells as 5a, with #449's
+`amfs_core` on the harness's `PYTHONPATH` (manifest `client_core.commit = 704fb753`): the
+footer rendered client-side now brackets each untried candidate with its record elsewhere
+(`resend_email (12/12 elsewhere)`, `reinstall_app (untested anywhere)`), while the
+recommendation is still the deployed server's. Isolates the rendering half of #449 before
+the deploy. Prediction: support late window ≥ 0.92 and changed-class post-change ≥ 85 %,
+with `android-notifications` recovered in ≤ 2 class-episodes on both seeds.
+
+**Seal stalls (root cause, 2026-09-26).** The `commit_outcome` stalls seen since pilot 2
+(seals held 37–224 s, released together) were a lock convoy on `amfs_immutable_traces`:
+the eval worker ran each job inside the tenant pool wrapper's per-checkout transaction,
+so a repair job idle in an LLM call held `ACCESS SHARE` on the table for minutes; a
+pro-api instance starting under load ran `schema_pro.sql` (whose `ALTER TABLE` takes
+`ACCESS EXCLUSIVE`) and queued behind it; every seal's `SELECT content_hash` queued behind
+the DDL. Captured live with a `pg_blocking_pids` sampler at 07:06–07:07 UTC. Fixes:
+amfs-internal #780 (jobs and LLM-calling routes on a non-transactional checkout) and #781
+(the traces schema runs once per database behind a fingerprint marker, under
+`lock_timeout`). No 5a episode records an error, so the numbers above are not affected;
+the stalls cost wall-clock, and in 5b they delayed the repair loop's proposals; the same
+idle transaction was terminated twice by production's 5-minute
+`idle_in_transaction_session_timeout` during 5b (07:08, 07:09 UTC), losing those repair
+runs mid-flight.

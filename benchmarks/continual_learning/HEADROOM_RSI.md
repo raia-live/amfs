@@ -237,6 +237,47 @@ alternating (the engine's `pooled` abstain fired, correctly). Pilots 5a (`sensel
 harness; they will be re-run once #449 and #780 are deployed, and the three runs (gridv5c /
 pilot 4 → 5a/5b → post-deploy) are the development evidence for amendment (h).
 
+### Pilot 5a, complete (contract v2 on the deployed engine)
+
+| cell (senselab, gpt-5.5, s11+s23) | grid v5c | pilot 5a |
+|---|---|---|
+| support success / late (20+) | 82.1 % / 80.0 % | **92.5 % / 91.2 %** |
+| support changed-class post-change | 61.2 % | **82.5 %** |
+| support recovery ≤ 3 class-episodes | 2/6 | **6/6** |
+| support retries / repeats of a failed action | 36.3 % / 0.8 % | 21.6 % / **0.0 %** |
+| ci-fix success / late | 92.1 % / 88.8 % | **95.8 % / 95.0 %** |
+| ci-fix changed-class post-change | 77.5 % | **90.0 %** |
+| recommendation present | 72–88 % | **98–100 %** |
+
+Items 1–3 and 6 of the map are closed by the contract alone (no engine change deployed yet).
+The 13 residual failures (3 pre-change first encounters, 10 post-change sweeps, no errors)
+locate the remaining headroom precisely: the post-change **search order**. Two of set A's
+three new support fixes are winners elsewhere and the sweep finds them in ≤ 2 attempts;
+the third (`android → reinstall_app`, the textbook answer) has never won anywhere on the
+queue and sits at the tail of the `elsewhere` order, costing 2–3 class-episodes per seed.
+The agent's own judgement, which contract v2 asks for first, did not pick it either — the
+pre-change memory notes say reinstall is wrong for android — and at s23 ep 27 the agent
+overrode a correct `resend_email` suggestion twice. Two remedies are in flight: #449 item 6
+brackets every untried candidate with its record elsewhere (`reinstall_app (untested
+anywhere)`), giving the judgement rule something to weigh; pilot 5c runs 5a's cells with
+that rendering client-side (`client_core.commit = 704fb753`) before the deploy. What would
+close the rest is a fleet or the repair loop: one agent's sweep cannot avoid the first
+post-change loss per class, so a support cell at fleet 1 is bounded near 92–93 %; the
+six-family late-window target of 93–94 % rests on ci-fix-like families averaging above it.
+
+### The seal stall, found
+
+The `commit_outcome` stalls since pilot 2 were a lock convoy on `amfs_immutable_traces`,
+captured live with a 5-second `pg_blocking_pids` sampler at 07:06–07:07 UTC: an eval repair
+job idle in an LLM call inside the tenant pool wrapper's per-checkout transaction (holding
+`ACCESS SHARE`) ← a pro-api instance's start-up run of `schema_pro.sql` (`ACCESS EXCLUSIVE`)
+← every seal's `SELECT content_hash`. Fixes in amfs-internal #780 (jobs and LLM-calling
+routes on a non-transactional checkout) and #781 (traces schema once per database behind a
+fingerprint marker, under `lock_timeout`). The same idle transaction is what production's
+5-minute `idle_in_transaction_session_timeout` terminated twice during pilot 5b (07:08 and
+07:09 UTC, `FATAL: terminating connection due to idle-in-transaction timeout`), losing those
+repair runs mid-flight; #780's non-transactional checkout removes that failure mode too.
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families
