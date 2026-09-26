@@ -417,6 +417,7 @@ class SenseLabRsiArm(SenseLabArm):
                                "verdict_source": self.verdict_source, "judges_on": self.judges_on,
                                "canary": {"pct": self.canary_pct, "min_outcomes": self.canary_min_outcomes,
                                           "timeout_sessions": self.canary_timeout_sessions, "look_every": self.look_every},
+                               "pacing": {"verdict_wait_s": self.verdict_wait_s, "verdict_poll_s": self.verdict_poll_s},
                                "sessions_sealed": self.sessions_sealed, "ledger": self.ledger, "events": self.events}
         try:
             fixes = self.pro.list_fixes(self._agent)
