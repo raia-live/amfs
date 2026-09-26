@@ -34,6 +34,9 @@ def make_arm(name: str) -> MemoryArm:
     if name == "senselab-nopriors":
         from .senselab_arm import SenseLabNoPriorsArm
         return SenseLabNoPriorsArm()
+    if name == "senselab-induce":
+        from .senselab_arm import SenseLabInduceArm
+        return SenseLabInduceArm()
     if name == "senselab-lean":
         from .senselab_arm import SenseLabLeanArm
         return SenseLabLeanArm()
@@ -46,6 +49,9 @@ def make_arm(name: str) -> MemoryArm:
     if name == "raw-traces":
         from .raw_traces_arm import RawTracesArm
         return RawTracesArm()
+    if name == "skillfile":
+        from .skillfile_arm import SkillFileArm
+        return SkillFileArm()
     if name == "pgvector-diy+outcomes":
         from .pgvector_arm import PgVectorDiyOutcomesArm
         return PgVectorDiyOutcomesArm()

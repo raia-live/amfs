@@ -1,0 +1,14 @@
+[
+  {"alias": "ci-skill-k0", "scenario": "ci-fix", "arm": "skillfile",
+   "model": ["gpt-5.5", "claude-opus-5"],
+   "seeds": [101, 113, 127], "runs": ["distill-skill-ci-fix"], "cell_params": "-oid",
+   "family": "senselab-s1", "gate": "relaxed",
+   "serving": {"context_k": 3, "avoid_rows": true, "priors": true, "retrieval": "server", "fallback": false},
+   "note": "K0: distilled from the skill-file arm's traces (WikiSkill-lite: the agent reads SKILL.md, no memory served) on seeds 101/113/127, both frontier teachers so the trace count matches the v2 students (12 cells). Evaluated on seeds 131/137/149, which K1 never ran on, under none and senselab."},
+  {"alias": "sup-skill-k0", "scenario": "support", "arm": "skillfile",
+   "model": ["gpt-5.5", "claude-opus-5"],
+   "seeds": [101, 113, 127], "runs": ["distill-skill-support"], "cell_params": "-oid",
+   "family": "senselab-s1", "gate": "relaxed",
+   "serving": {"context_k": 3, "avoid_rows": true, "priors": true, "retrieval": "server", "fallback": false},
+   "note": "K0 (support): same recipe as ci-skill-k0."}
+]

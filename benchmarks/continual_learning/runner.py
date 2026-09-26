@@ -27,12 +27,15 @@ from .arms import make_arm
 from .scenarios import make_scenario
 
 # Hosted arms share one production database; 12 concurrent SenseLab cells at 1000 RPM saturated a
-# 2-vCPU Cloud SQL instance on 2026-09-16. Keep SenseLab at 2 (override with CL_SENSELAB_CONCURRENCY)
-# until the instance is resized; the client-side limiter (AMFS_RPM) caps total request rate.
+# 2-vCPU Cloud SQL instance on 2026-09-16. The default stays at 2 (override with
+# CL_SENSELAB_CONCURRENCY; gridv4 sets 24 against the resized instance and 12-instance API tier);
+# the client-side limiter (AMFS_RPM) caps total request rate. Mem0 likewise (CL_MEM0_CONCURRENCY).
+# The semaphore is per arm, so --workers is the binding cap when several arms run in one process.
 _SL = int(os.environ.get("CL_SENSELAB_CONCURRENCY", "2"))
-_ARM_CONCURRENCY = {"mem0": 6, "zep": 8, "senselab": _SL, "senselab-episode": _SL,
+_M0 = int(os.environ.get("CL_MEM0_CONCURRENCY", "6"))
+_ARM_CONCURRENCY = {"mem0": _M0, "zep": 8, "senselab": _SL, "senselab-episode": _SL,
                     "senselab-nofeedback": _SL, "senselab-attempts": _SL, "senselab-nopriors": _SL,
-                    "senselab-lean": _SL}
+                    "senselab-lean": _SL, "senselab-induce": _SL, "skillfile": _SL}
 _sems: dict[str, threading.Semaphore] = {}
 _write_lock = threading.Lock()
 
@@ -58,10 +61,31 @@ class Cell:
     change_focus: float = 0.0
     fleet_mode: str = "rr"     # rr | pioneer | newcomer (see Scenario)
     join_at: int = 0
+    # Cross-model onboarding (newcomer protocol only): the model the arriving agent N runs on.
+    # "" = same model as the veterans. Veterans keep ``model``; the newcomer's episode rows
+    # carry ``newcomer_model`` in their ``model`` field because EpisodeRecord.model is llm.model.
+    newcomer_model: str = ""
+    # Task identifiers drawn from the instance rng instead of counted from the episode index
+    # (see Scenario.opaque_ids). Part of the cell id (``-oid``) so results never mix with
+    # cells whose ticket numbers encoded the regime.
+    opaque_ids: bool = False
+    # Which regime change set applies at ``change_at`` (see Scenario.change_variant). "A" is
+    # the original and adds nothing to ids; any other value is part of the cell id and scope
+    # (``-vB``) so a novel-change evaluation never mixes with the change the students trained on.
+    change_variant: str = "A"
+
+    @property
+    def _variant(self) -> str:
+        return f"-v{self.change_variant}" if self.change_at and self.change_variant != "A" else ""
 
     @property
     def _transfer(self) -> str:
-        return f"-{self.fleet_mode}{self.join_at}" if self.fleet > 1 and self.fleet_mode != "rr" else ""
+        if not (self.fleet > 1 and self.fleet_mode != "rr"):
+            return ""
+        seg = f"-{self.fleet_mode}{self.join_at}"
+        if self.newcomer_model:
+            seg += f"-nm{self.newcomer_model}"
+        return seg
 
     @property
     def id(self) -> str:
@@ -70,6 +94,9 @@ class Cell:
             sweep += f"-c{self.change_at}"
             if self.change_focus:
                 sweep += f"-x{self.change_focus}"
+        if self.opaque_ids:
+            sweep += "-oid"
+        sweep += self._variant
         return f"{self.scenario}|{self.arm}|{self.model}|s{self.seed}|e{self.episodes}{sweep}"
 
     @property
@@ -77,7 +104,8 @@ class Cell:
         raw = (f"{self.scenario}-{self.arm}-{self.model}-s{self.seed}-d{self.distractors}"
                f"-n{int(self.label_noise * 100)}-f{self.feedback_delay}-a{self.fleet}{self._transfer}"
                + (f"-c{self.change_at}" if self.change_at else "")
-               + (f"-x{int(self.change_focus * 100)}" if self.change_at and self.change_focus else ""))
+               + (f"-x{int(self.change_focus * 100)}" if self.change_at and self.change_focus else "")
+               + ("-oid" if self.opaque_ids else "") + self._variant)
         slug = re.sub(r"[^a-z0-9-]", "-", raw.lower())
         return f"{config.SCOPE_ROOT}/{slug}"
 
@@ -111,9 +139,19 @@ def run_cell(cell: Cell, out_path: Path, *, keep_transcript: bool, retry_budget:
     scenario = make_scenario(cell.scenario, cell.seed, cell.episodes, distractors=cell.distractors,
                              label_noise=cell.label_noise, feedback_delay=cell.feedback_delay, fleet=cell.fleet,
                              change_at=cell.change_at, change_focus=cell.change_focus,
-                             fleet_mode=cell.fleet_mode, join_at=cell.join_at)
+                             fleet_mode=cell.fleet_mode, join_at=cell.join_at, opaque_ids=cell.opaque_ids,
+                             change_variant=cell.change_variant)
     arm = make_arm(cell.arm)
-    llm = get_llm(cell.model)
+    llm_main = get_llm(cell.model)
+    if hasattr(arm, "attach"):   # skillfile: validation replays need same-shaped instances of another seed
+        arm.attach(scenario, lambda s: make_scenario(cell.scenario, s, cell.episodes, distractors=cell.distractors,
+                                                     label_noise=cell.label_noise, feedback_delay=cell.feedback_delay,
+                                                     fleet=cell.fleet, change_at=cell.change_at,
+                                                     change_focus=cell.change_focus, fleet_mode=cell.fleet_mode,
+                                                     join_at=cell.join_at, opaque_ids=cell.opaque_ids,
+                                                     change_variant=cell.change_variant),
+                   llm_main, retry_budget=retry_budget)
+    llm_new = get_llm(cell.newcomer_model) if cell.newcomer_model else llm_main
     n_ok = 0
     errors = 0
     read_keys: dict[str, None] = {}   # every key any search served this cell, in first-seen order
@@ -125,6 +163,9 @@ def run_cell(cell: Cell, out_path: Path, *, keep_transcript: bool, retry_budget:
     # the senselab vs senselab-nofeedback ablation. Found on 2026-09-16; SenseLab cells run
     # before this change are kept separately as the "shared-identity" variant.
     scenario.agent_base = f"{scenario.agent_base}-{suffix}"
+    # The newcomer identity (agent N in ``newcomer`` mode); computed after the suffix so it
+    # matches the ids Scenario.agent_for() hands out. Only this agent runs on newcomer_model.
+    newcomer_id = f"{scenario.agent_base}-{scenario.fleet_size}"
     with _sem(cell.arm):
         arm.open(scope)
         arm.configure(scenario)
@@ -137,6 +178,7 @@ def run_cell(cell: Cell, out_path: Path, *, keep_transcript: bool, retry_budget:
             for ep in range(cell.episodes):
                 arm.drain_deferred(ep)
                 task = scenario.task(ep)
+                llm = llm_new if (cell.newcomer_model and task.agent_id == newcomer_id) else llm_main
                 rec = run_episode(scenario, arm, llm, task, seed=cell.seed, retry_budget=retry_budget,
                                   keep_transcript=keep_transcript)
                 rec.judge_score = judge(scenario, task, rec) if rec.final_answer else None
@@ -144,11 +186,14 @@ def run_cell(cell: Cell, out_path: Path, *, keep_transcript: bool, retry_budget:
                 d.update({"cell": cell.id, "scope": scope, "distractors": cell.distractors,
                           "label_noise": cell.label_noise, "feedback_delay": cell.feedback_delay,
                           "fleet": cell.fleet, "change_at": cell.change_at, "change_focus": cell.change_focus,
-                          "fleet_mode": scenario.fleet_mode, "join_at": cell.join_at, "ts": time.time()})
+                          "fleet_mode": scenario.fleet_mode, "join_at": cell.join_at,
+                          "newcomer_model": cell.newcomer_model, "opaque_ids": cell.opaque_ids,
+                          "change_variant": cell.change_variant,
+                          "ts": time.time()})
                 for sl in rec.searches_log:
                     for h in sl["hits"]:
                         read_keys.setdefault(h["key"], None)
-                extra = arm.after_episode(ep, llm)
+                extra = arm.after_episode(ep, llm_main)  # store maintenance stays on the veterans' model
                 if extra is not None:
                     d["memory"]["after_episode"] = extra.as_dict()
                 with _write_lock, out_path.open("a") as f:
@@ -199,6 +244,12 @@ def build_cells(args) -> list[Cell]:
     (fleet probe keeps its own 4), no change."""
     S = config.STUDY
     cells = []
+    # --newcomer-model is a cell attribute, not a loop dimension: it only applies to fleet
+    # cells in ``newcomer`` mode (single-agent and rr/pioneer cells have no newcomer).
+    newcomer_model = getattr(args, "newcomer_model", "") or ""
+    if newcomer_model and args.fleet_mode != "newcomer":
+        print(f"--newcomer-model {newcomer_model} ignored: only meaningful with --fleet-mode newcomer")
+        newcomer_model = ""
     for sc in args.scenarios:
         core = sc in S.core_scenarios
         eps = args.episodes or (S.core_episodes if core else S.episodes)
@@ -218,7 +269,10 @@ def build_cells(args) -> list[Cell]:
                                                  else S.core_change_focus) if ch else 0.0
                                         mode = args.fleet_mode if a > 1 else "rr"
                                         cells.append(Cell(sc, arm, model, seed, eps, d, n, f, a, ch, focus,
-                                                          mode, args.join_at if mode != "rr" else 0))
+                                                          mode, args.join_at if mode != "rr" else 0,
+                                                          newcomer_model if mode == "newcomer" else "",
+                                                          bool(getattr(args, "opaque_ids", False)),
+                                                          getattr(args, "change_variant", "A")))
     # interleave arms so slow hosted arms never monopolise the worker pool
     by_arm: dict[str, list[Cell]] = {}
     for c in cells:
@@ -249,6 +303,15 @@ def main() -> None:
                    help="knowledge-transfer protocol for fleet cells (see Scenario.fleet_mode)")
     p.add_argument("--join-at", type=int, default=0,
                    help="pioneer: episode the other agents join; newcomer: episode the new agent takes over")
+    p.add_argument("--newcomer-model", default="",
+                   help="newcomer mode only: run the arriving agent on this model while the veterans keep "
+                        "--models (cross-model onboarding); adds -nm<model> to the cell id and scope")
+    p.add_argument("--opaque-ids", action="store_true",
+                   help="ticket/PR numbers from the instance rng, not the episode index (see Scenario.opaque_ids); "
+                        "adds -oid to the cell id and scope")
+    p.add_argument("--change-variant", default="A", choices=["A", "B"],
+                   help="which regime change set applies at --change-at (see Scenario.change_variant); "
+                        "B adds -vB to the cell id and scope")
     p.add_argument("--label-noise", nargs="+", type=float, default=[0.0])
     p.add_argument("--feedback-delay", nargs="+", type=int, default=[0])
     p.add_argument("--retry-budget", type=int, default=config.STUDY.retry_budget)
@@ -270,6 +333,7 @@ def main() -> None:
         out_path.write_text("\n".join(keep) + ("\n" if keep else ""))
         print(f"re-running {len(partial)} partial cells from scratch")
     manifest = {"run": args.run, "cells": [c.id for c in cells], "models": args.models,
+                "newcomer_model": args.newcomer_model if args.fleet_mode == "newcomer" else "",
                 "judge": config.JUDGE_MODEL, "openai_effort": config.OPENAI_REASONING_EFFORT,
                 "anthropic_effort": config.ANTHROPIC_EFFORT, "retry_budget": args.retry_budget,
                 "study": config.STUDY.__dict__, "started": time.time()}
@@ -311,6 +375,27 @@ def main() -> None:
             print("CELL DONE", json.dumps(s), flush=True)
             with _write_lock:
                 cells_path.write_text(json.dumps(list(summaries.values()), indent=2))
+    _drop_sdk_backlog()
+
+
+def _drop_sdk_backlog() -> None:
+    """Let the process exit once the cells are done.
+
+    The AMFS SDK logs an event and materialises graph edges after every write and commit
+    on a single background thread. At 48 cells in flight that thread falls hours behind,
+    and Python joins it at exit: gridv5-core-sl finished its 120 cells at 00:43 and was
+    still posting edges at 07:10, holding the family's chain on a phase that was over.
+    Events and edges are not read by any arm or metric here, so the backlog is dropped."""
+    try:
+        from amfs import memory as _sdk_memory
+    except Exception:  # noqa: BLE001 — local-only runs never import the SDK
+        return
+    ex = getattr(_sdk_memory, "_sdk_bg_executor", None)
+    if ex is not None:
+        pending = getattr(getattr(ex, "_work_queue", None), "qsize", lambda: -1)()
+        ex.shutdown(wait=False, cancel_futures=True)
+        print(f"dropped {pending} queued SDK background tasks (events/edges) so the run can exit",
+              flush=True)
 
 
 if __name__ == "__main__":

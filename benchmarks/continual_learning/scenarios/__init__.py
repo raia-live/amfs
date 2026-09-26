@@ -18,12 +18,17 @@ def registry() -> dict[str, type[Scenario]]:
                                 RetentionScenario, SupportScenario)
         from .runbook import FleetScenario, RunbookScenario, UnknownsScenario
         from .triage import TriageScenario
+        # Grid v4 (2026-09-19): RAG on its home turf, multi-user personalisation, routing.
+        from .accounts import AccountsScenario
+        from .dispatch import DispatchScenario
+        from .policyqa import PolicyQaScenario
 
         _REGISTRY = {c.name: c for c in (
             RunbookScenario, UnknownsScenario, FleetScenario, DriftFactScenario, DriftToolScenario,
             TriageScenario, HandoffScenario, DiagnoseScenario, SizingScenario,
             SupportScenario, ConciergeScenario, RetentionScenario, OrderOpsScenario, CiFixScenario, AnalyticsScenario,
             DisjointFleetScenario,
+            PolicyQaScenario, AccountsScenario, DispatchScenario,
         )}
     return _REGISTRY
 

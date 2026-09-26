@@ -52,8 +52,29 @@ PRICES: dict[str, Price] = {
 }
 
 
+# SenseLab Managed Models (the "students") and their Gemini base models. Students are priced at
+# the customer list price for served inference (the overage tier in amfs-internal
+# packages/managed-models/catalog.py, 2026-09-19): what a SenseLab user pays per token, which is
+# the number comparable with the frontier list prices above. The provider cost SenseLab itself
+# pays is lower (s1 0.25 / 1.50; s1-pro 0.30 / 2.50) and is reported separately by the analysis
+# as ``STUDENT_PROVIDER_PRICES``. Base models (``serve_base`` twins) are priced at Google's list
+# price for the same model, since that is what a team calling Gemini directly would pay.
+STUDENT_PRICES: dict[str, Price] = {
+    "senselab-s1": Price(1.00, 1.00, 5.00),
+    "senselab-s1-pro": Price(1.25, 1.25, 8.00),
+    "gemini-2.5-flash-lite": Price(0.10, 0.025, 0.40),
+    "gemini-2.5-flash": Price(0.30, 0.03, 2.50),
+}
+STUDENT_PROVIDER_PRICES: dict[str, Price] = {
+    "senselab-s1": Price(0.25, 0.25, 1.50),
+    "senselab-s1-pro": Price(0.30, 0.30, 2.50),
+}
+# alias -> {public_model_id, family, price, serve_base, ...}; written by student/train.py.
+STUDENT_REGISTRY = RESULTS_DIR / "students" / "registry.json"
+
+
 def cost_usd(model: str, prompt: int, completion: int, cached: int = 0) -> float:
-    p = PRICES.get(model)
+    p = PRICES.get(model) or STUDENT_PRICES.get(model)
     if p is None:
         return 0.0
     uncached = max(prompt - cached, 0)
@@ -74,14 +95,17 @@ ANTHROPIC_EFFORT: str = env("CL_ANTHROPIC_EFFORT") or "low"
 
 @dataclass(frozen=True)
 class Study:
-    # Scale (amended 2026-09-16, before the main run, on the owner's instruction to prioritise
-    # credibility over cost): core scenarios run 40 episodes, in both a single-agent and a
-    # 6-agent fleet configuration, over 6 seeds, against a store pre-loaded with 300 realistic
-    # distractor entries. Probes run 20 episodes, single agent, 5 seeds, clean store.
-    # Grid v2 (2026-09-17): core scenarios run 60 episodes with a regime change at episode 20,
-    # and half of the post-change tasks drawn from the classes whose truth changed. 40 post-
-    # change episodes is what it takes to see a stale lesson fall and a replacement rise
-    # within one cell; grid v1's 40/20 split left ~15 changed-class tasks per cell.
+    # Grid v4 (2026-09-19). Core scenarios run 60 episodes with a regime change at episode 20
+    # and half of the post-change tasks drawn from the classes whose truth changed (the grid v2
+    # split: 40 post-change episodes is what it takes to see a stale lesson fall and a
+    # replacement rise within one cell). Every core scenario runs in three fleet configurations
+    # — single agent, a 6-agent fleet, and a 10-agent fleet (see ``fleet_large*``) — with BOTH
+    # agent models on the full grid, over 6 seeds, against a store pre-loaded with 300 realistic
+    # distractor entries. Three new real-world families join the core tier (policy-qa, accounts,
+    # dispatch), and the knowledge-transfer protocols (pioneer / newcomer, including a
+    # cross-model newcomer via ``--newcomer-model``) report onboarding metrics: episodes and
+    # tokens to parity with the veterans and the joining agent's cold-start curve
+    # (analysis/transfer.py). Probes run 20 episodes, single agent, 5 seeds, clean store.
     episodes: int = 20                 # probes
     core_episodes: int = 60            # core scenarios
     core_change_at: int = 20
@@ -91,6 +115,14 @@ class Study:
     probe_seeds: tuple[int, ...] = (11, 23, 37, 41, 59)        # probes
     sweep_seeds: tuple[int, ...] = (11, 23, 37)
     fleet_sizes: tuple[int, ...] = (1, 6)                       # core scenarios run in both
+    # Large fleet. Ten agents over the standard 60 episodes would give each agent only 6
+    # episodes — too few for a per-agent learning curve or an episodes-to-parity reading — so
+    # the large-fleet cells run 100 episodes with the regime change at 30 (10 per agent, 7 of
+    # them after the change). These are not loop defaults: the runner is invoked explicitly
+    # with ``--fleet 10 --episodes 100 --change-at 30`` for those cells.
+    fleet_large: int = 10
+    fleet_large_episodes: int = 100
+    fleet_large_change_at: int = 30
     core_distractors: int = 300
     retry_budget: int = 3
     burn_in: int = 5
@@ -107,11 +139,13 @@ class Study:
     # regime-change cells could be produced. The arm implementation stays for reproduction.
     arms: tuple[str, ...] = (
         "none", "pgvector", "pgvector-diy", "pgvector-diy+outcomes", "mem0",
-        "senselab", "senselab-episode", "senselab-nofeedback",
+        "senselab", "senselab-episode", "senselab-nofeedback", "senselab-nopriors", "senselab-induce",
     )
-    # Real-world families (what teams deploy today) — full seed count
+    # Real-world families (what teams deploy today) — full seed count. policy-qa, accounts and
+    # dispatch are the grid v4 additions (scenario modules land separately).
     core_scenarios: tuple[str, ...] = (
         "support", "ci-fix", "analytics", "concierge", "retention", "order-ops", "diagnose",
+        "policy-qa", "accounts", "dispatch",
     )
     # Mechanism probes (isolate one failure mode each) — reduced seed count
     probe_scenarios: tuple[str, ...] = (

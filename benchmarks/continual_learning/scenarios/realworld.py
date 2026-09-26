@@ -85,6 +85,22 @@ SUPPORT_CHANGES: dict[str, dict[str, str]] = {
                        "why": "the export service now emails the file asynchronously; customers must enable export "
                               "notifications in settings, neither splitting the range nor escalating helps"},
 }
+# Change set "B" (see Scenario.change_variant): three classes that "A" leaves alone, moved to
+# fixes no "A" episode ever pairs them with — so a model that learned "A" from traces has
+# never seen these (class, fix) pairs and can only get them from memory. Same design as "A":
+# two quirk-to-quirk changes and one change to the textbook answer.
+SUPPORT_CHANGES_B: dict[str, dict[str, str]] = {
+    "ios-login-loop": {"fix": "reinstall_app",
+                       "why": "iOS app v9 keeps the session token in a new keychain access group that clearing app data "
+                              "does not touch; only a reinstall drops the stale token"},
+    "webhook-late": {"fix": "advise_settings_change",
+                     "why": "webhook delivery moved to per-endpoint concurrency limits; the customer raises the "
+                            "endpoint's concurrency in dashboard settings, tier 2 cannot change it and backoff is not the cause"},
+    "2fa-lost-phone": {"fix": "reset_password",
+                       "why": "self-service 2FA recovery now runs inside the password-reset flow (email plus ID check); "
+                              "tier 1 sends the reset, escalations bounce back"},
+}
+SUPPORT_CHANGE_SETS = {"A": SUPPORT_CHANGES, "B": SUPPORT_CHANGES_B}
 
 
 class SupportScenario(Scenario):
@@ -100,6 +116,10 @@ class SupportScenario(Scenario):
                                 "reply": {"type": "string"}}, ["action", "reply"]), terminal=True),
     ]
 
+    @property
+    def changes(self) -> dict[str, dict[str, str]]:
+        return SUPPORT_CHANGE_SETS[self.change_variant]
+
     def build(self) -> None:
         rng = self.rng
         ids = list(SUPPORT_ISSUES)
@@ -111,17 +131,19 @@ class SupportScenario(Scenario):
         irng = random.Random(f"sup-{self.seed}-{ep}" + (f"-{salt}" if salt else ""))
         iss = SUPPORT_ISSUES[iid]
         fix, why, old = iss["fix"], iss["why"], None
-        if self.changed(ep) and iid in SUPPORT_CHANGES:
-            old, fix, why = fix, SUPPORT_CHANGES[iid]["fix"], SUPPORT_CHANGES[iid]["why"]
+        if self.changed(ep) and iid in self.changes:
+            old, fix, why = fix, self.changes[iid]["fix"], self.changes[iid]["why"]
         return {"issue": iid, "msg": irng.choice(iss["msgs"]),
+                # See Scenario.opaque_ids: a counted ticket number is the episode index.
+                "ticket": irng.randint(10000, 99999) if self.opaque_ids else 4400 + ep,
                 "email": f"user{irng.randint(1000, 9999)}@example.com",
                 "plan": irng.choice(["free", "pro", "team"]),
                 "platform": "iOS" if "ios" in iid else "Android" if "android" in iid else irng.choice(["web", "iOS", "Android"]),
                 "fix": fix, "generic": iss["generic"], "why": why, "old_fix": old,
-                "change_class": iid in SUPPORT_CHANGES}
+                "change_class": iid in self.changes}
 
     def regenerate(self, ep: int, salt: int) -> None:
-        iid = random.Random(f"sup-focus-{self.seed}-{ep}-{salt}").choice(list(SUPPORT_CHANGES))
+        iid = random.Random(f"sup-focus-{self.seed}-{ep}-{salt}").choice(list(self.changes))
         self.sched[ep] = iid
         self.instances[ep] = self._instance(ep, iid, salt)
 
@@ -134,7 +156,7 @@ class SupportScenario(Scenario):
 
     def task(self, ep: int) -> Task:
         i = self.instances[ep]
-        prompt = (f"Ticket SUP-{4400 + ep} from {i['email']} ({i['plan']} plan, {i['platform']}):\n\"{i['msg']}\"")
+        prompt = (f"Ticket SUP-{i['ticket']} from {i['email']} ({i['plan']} plan, {i['platform']}):\n\"{i['msg']}\"")
         return Task(ep, prompt, dict(i), self.agent_for(ep),
                     {"issue": i["issue"], "quirk": i["fix"] != i["generic"],
                      **change_tags(self, ep, i["change_class"])})
@@ -532,6 +554,13 @@ CI_FAILURES: dict[str, dict[str, Any]] = {
 # pin is gone; reviewers now reject audit exceptions and expect the bump). One quirk-to-quirk
 # change and one quirk-to-textbook change, deliberately.
 CI_CHANGES: dict[str, str] = {"flaky-integration": "edit_generated_file", "audit-pinned": "bump_dependency"}
+# Change set "B" (see Scenario.change_variant): two classes "A" leaves alone. The checkout
+# components went under visual-regression review (a snapshot diff is now fixed in code; jest -u
+# is rejected — quirk to textbook), and urllib3 got pinned for the new vendor SDK (the bump
+# breaks it; the audit exception process applies — textbook to quirk, a new quirk appearing
+# where the generic answer used to be right). Neither (class, fix) pair occurs under "A".
+CI_CHANGES_B: dict[str, str] = {"snapshot-ui": "fix_code", "audit-free": "add_audit_exception"}
+CI_CHANGE_SETS = {"A": CI_CHANGES, "B": CI_CHANGES_B}
 
 
 class CiFixScenario(Scenario):
@@ -554,8 +583,12 @@ class CiFixScenario(Scenario):
         # step 5 is coprime with len(ids)=8, so the first 16 episodes cover every failure type twice
         self.sched = [ids[(ep * 5 + self.seed) % len(ids)] if ep < 2 * len(ids) else rng.choice(ids) for ep in range(self.episodes)]
 
+    @property
+    def changes(self) -> dict[str, str]:
+        return CI_CHANGE_SETS[self.change_variant]
+
     def regenerate(self, ep: int, salt: int) -> None:
-        self.sched[ep] = random.Random(f"ci-focus-{self.seed}-{ep}-{salt}").choice(list(CI_CHANGES))
+        self.sched[ep] = random.Random(f"ci-focus-{self.seed}-{ep}-{salt}").choice(list(self.changes))
 
     def seed_entries(self) -> list[tuple[str, str, float]]:
         out = [("repo-readme-ci", "CI: black, mypy, jest, alembic check, pip-audit run on every PR. Fix failures in the PR branch.", 0.8),
@@ -565,13 +598,15 @@ class CiFixScenario(Scenario):
     def task(self, ep: int) -> Task:
         fid = self.sched[ep]
         f = CI_FAILURES[fid]
-        pr = 3000 + ep * 7 + self.seed
+        # See Scenario.opaque_ids: a counted PR number is the episode index.
+        pr = (random.Random(f"ci-pr-{self.seed}-{ep}").randint(1000, 9999) if self.opaque_ids
+              else 3000 + ep * 7 + self.seed)
         prompt = f"CI is red on PR #{pr} (\"{fid.replace('-', ' ')} related change\"). Investigate and fix it."
         truth = {"pr": pr, "fid": fid, **f, "old_fix": None}
-        if self.changed(ep) and fid in CI_CHANGES:
-            truth["old_fix"], truth["fix"] = f["fix"], CI_CHANGES[fid]
+        if self.changed(ep) and fid in self.changes:
+            truth["old_fix"], truth["fix"] = f["fix"], self.changes[fid]
         return Task(ep, prompt, truth, self.agent_for(ep),
-                    {"failure": fid, "quirk": truth["fix"] != f["generic"], **change_tags(self, ep, fid in CI_CHANGES)})
+                    {"failure": fid, "quirk": truth["fix"] != f["generic"], **change_tags(self, ep, fid in self.changes)})
 
     def step(self, task: Task, name: str, args: dict[str, Any]) -> StepResult:
         t = task.truth

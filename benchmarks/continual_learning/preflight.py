@@ -37,7 +37,12 @@ Pro 097 — on the API under test):
   provenance successes committed by two agent ids give validators_n == 2, and the author
              is the writer.
 
-Run:  .bench-venv/bin/python -m benchmarks.continual_learning.preflight [gate ...]
+Results gate (``infra``; reads local results only, never fails): the share of episodes per
+arm whose ``error`` is an infrastructure failure (timeout / connection / 5xx) in
+``results/<prefix>*/episodes.jsonl``. Above 5% for an arm it prints a WARN — that arm's
+success rates understate its learning signal; read the "excl. infra" columns in the reports.
+
+Run:  .bench-venv/bin/python -m benchmarks.continual_learning.preflight [gate ...] [--runs <prefix>]
 """
 
 from __future__ import annotations
@@ -46,11 +51,14 @@ import json
 import sys
 import time
 import uuid
+from collections import Counter
+from pathlib import Path
 from typing import Any
 
 from . import config
 
 REPORT: dict[str, Any] = {"gates": {}}
+INFRA_WARN_SHARE = 0.05
 
 
 def _gate(name: str, ok: bool, detail: Any) -> None:
@@ -729,6 +737,62 @@ def gate_provenance() -> bool:
     return bool(ok)
 
 
+# ---------------------------------------------------------------------------
+# Results gate — infrastructure errors in recorded episodes
+# ---------------------------------------------------------------------------
+
+def infra_error_shares(prefix: str = "") -> dict[str, dict[str, Any]]:
+    """Per arm over ``results/<prefix>*/episodes.jsonl``: episodes, infra-error count and share,
+    and the most common infra error strings. Report directories are skipped."""
+    from .analysis.regime_change import is_infra
+
+    root: Path = config.RESULTS_DIR
+    files = sorted(p for p in root.glob(f"{prefix}*/episodes.jsonl") if not p.parent.name.endswith("-report"))
+    n: Counter[str] = Counter()
+    bad: Counter[str] = Counter()
+    kinds: dict[str, Counter[str]] = {}
+    for p in files:
+        for line in p.read_text().splitlines():
+            try:
+                x = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            arm = x.get("arm", "?")
+            n[arm] += 1
+            err = x.get("error")
+            if is_infra(err):
+                bad[arm] += 1
+                # "reflection: ReadTimeout: ..." -> "reflection: ReadTimeout"; "ReadTimeout: ..." -> "ReadTimeout"
+                head = str(err).split(":")
+                kind = ": ".join(h.strip() for h in head[:2 if head[0].strip() == "reflection" else 1])
+                kinds.setdefault(arm, Counter())[kind[:60]] += 1
+    return {a: {"episodes": n[a], "infra_errors": bad[a], "share": round(bad[a] / n[a], 4),
+                "top": [k for k, _ in kinds.get(a, Counter()).most_common(3)], "files": len(files)}
+            for a in sorted(n)}
+
+
+def gate_infra_errors(prefix: str = "") -> bool:
+    """Never fails: prints the infra-error share per arm and WARNs above INFRA_WARN_SHARE."""
+    shares = infra_error_shares(prefix)
+    if not shares:
+        _gate("infra_errors", True, {"prefix": prefix or "*", "note": "no episodes.jsonl found"})
+        return True
+    warned = []
+    for arm, d in shares.items():
+        flag = "WARN" if d["share"] > INFRA_WARN_SHARE else "  ok"
+        print(f"  [{flag}] infra_errors {arm:<24} {d['infra_errors']:>5}/{d['episodes']:<6} = {100 * d['share']:5.1f}%"
+              + (f"  ({', '.join(d['top'])})" if d["top"] else ""))
+        if d["share"] > INFRA_WARN_SHARE:
+            warned.append(arm)
+    detail = {"prefix": prefix or "*", "threshold": INFRA_WARN_SHARE, "shares": {a: d["share"] for a, d in shares.items()},
+              "warn": warned}
+    if warned:
+        print(f"  WARN: {', '.join(warned)} above {100 * INFRA_WARN_SHARE:.0f}% infra errors — success rates for these "
+              f"arms understate the learning signal; read the 'excl. infra' columns")
+    _gate("infra_errors", True, detail)
+    return True
+
+
 LOOP_GATES = {
     "evidence": gate_evidence_model,
     "embedding": gate_embedding_survives_outcome,
@@ -744,9 +808,16 @@ LOOP_GATES = {
 
 
 def main(argv: list[str] | None = None) -> int:
-    argv = argv if argv is not None else sys.argv[1:]
+    argv = list(argv if argv is not None else sys.argv[1:])
+    prefix = ""
+    if "--runs" in argv:
+        i = argv.index("--runs")
+        prefix = argv[i + 1] if i + 1 < len(argv) else ""
+        del argv[i:i + 2]
     only = set(argv)
     results = []
+    if not only or "infra" in only:
+        results.append(gate_infra_errors(prefix))
     if not only or "llms" in only:
         results.append(gate_llms())
     if not only or "pgvector" in only:
@@ -764,6 +835,14 @@ def main(argv: list[str] | None = None) -> int:
                 results.append(False)
     config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out = config.RESULTS_DIR / "preflight.json"
+    if only and out.exists():
+        # a partial run (e.g. just ``infra``) updates its gates in the existing report
+        # rather than replacing the record of the live-API gates
+        try:
+            prev = json.loads(out.read_text()).get("gates") or {}
+            REPORT["gates"] = {**prev, **REPORT["gates"]}
+        except (json.JSONDecodeError, OSError):
+            pass
     REPORT["ok"] = all(results)
     REPORT["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     out.write_text(json.dumps(REPORT, indent=2, default=str))

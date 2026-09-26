@@ -25,3 +25,6 @@ pytest-of-*/
 .env
 *.env
 !.env.example
+
+# continual-learning benchmark artefacts (1 GB of episode JSONL, logs, student registries)
+benchmarks/continual_learning/results/

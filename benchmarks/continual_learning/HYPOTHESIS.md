@@ -289,6 +289,27 @@ and `outcome_count` must move. If it does not, the study does not run.
 Budget: no ceiling (amended 2026-09-16, before the main run; the original USD 600 ceiling
 and its fallback rules are superseded). Spend is reported in full in the results.
 
+Re-runs after a memory-API outage (amended 2026-09-19, during `gridv4-core`, before any
+analysis of it). A hosted memory API failing hits only the arm that talks to it, so an
+affected cell is not comparable with its `none`/`pgvector` twins even after the analysis
+drops the failed episodes (`is_infra`): the episodes that lost their post-episode write leave
+that store thinner for the rest of the cell. Rule: every cell with at least one episode whose
+error is the arm's own HTTP client failing (`ReadTimeout`, `ConnectError`, `ConnectTimeout`,
+`HTTPStatusError`, mem0 `NetworkError`) is dropped and re-run from scratch in a fresh scope,
+by `gridv4 --purge-infra <family> --apply` followed by `--launch`; the dropped rows are kept in
+`purged-episodes.jsonl` and each dropped cell is listed in `purged.jsonl`. LLM-provider
+incidents (Anthropic 529 `OverloadedError`, the SDKs' `APIConnectionError`) hit every arm
+alike, stay in the data and are excluded from rates as before. First application: the
+SenseLab API degradation of 2026-09-19 ~18:00–18:50 JST (read timeouts, then connection
+refused, 503 "tenant resolution failed" and 429) — 55 `sl` cells / 2,893 rows and 11 `mem0`
+cells / 647 rows (mem0 saw "connection refused" in the same window) were purged; `local` had
+no memory-API failures and was left running. The relaunch at the study's pacing (48 cells in
+flight) produced timeouts again within minutes — the API's database lock queue (idle
+in-transaction sessions around the trace-embedding lookup) saturates under that load — so
+from 21:30 JST the `sl` family runs at 24 cells in flight (`gridv4 --launch sl
+--concurrency 24`). Pacing changes wall-clock and the measured memory latency, which is
+reported as measured; it does not change what any cell sees.
+
 ## Known limits, stated up front
 
 - SenseLab is our product. The harness, seeds and raw per-episode JSONL are published.

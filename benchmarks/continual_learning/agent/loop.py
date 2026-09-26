@@ -91,6 +91,10 @@ class EpisodeRecord:
     #: change the agent made to the world that it then had to undo or supersede. The narrow
     #: intervention claim (Phase 0.A) is measured on this, not only on success.
     unnecessary_edits: int = 0
+    # Wall-clock from episode start to the agent's first domain action (the first decision it
+    # commits to, terminal or not): its time to first response. None for records written
+    # before this field existed and for episodes that never acted.
+    first_action_ms: float | None = None
     explanation: str = ""
     judge_score: int | None = None
     error: str | None = None
@@ -127,8 +131,20 @@ def _mentions_stale(hit: MemoryHit, task: Task) -> bool:
     return str(old).lower() in hit.text.lower()
 
 
+def _system_prompt(scenario: Scenario, arm: MemoryArm, task: Task, session: EpisodeSession) -> str:
+    text = scenario.system_prompt(arm.has_memory)
+    addendum = arm.prompt_addendum(task.agent_id) if hasattr(arm, "prompt_addendum") else None
+    if addendum:
+        text += "\n\n" + addendum
+        session.acct.retrieved_bytes += len(addendum)
+    return text
+
+
 def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
                 seed: int, retry_budget: int, keep_transcript: bool = False) -> EpisodeRecord:
+    if getattr(llm, "decision_mode", False):
+        return _run_decision_episode(scenario, arm, llm, task, seed=seed, retry_budget=retry_budget,
+                                     keep_transcript=keep_transcript)
     t0 = time.perf_counter()
     session: EpisodeSession = arm.session(task.agent_id, task.episode)
     usage, r_usage = Usage(), Usage()
@@ -139,6 +155,7 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
     written: list[str] = []
     flags: dict[str, Any] = {}
     attempts = 0
+    first_action_ms: float | None = None
     success = False
     severity = "failure"
     escalated = False
@@ -155,7 +172,7 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
     tools = [t.schema() for t in scenario.tools] + (MEMORY_TOOLS if arm.has_memory else [])
     session.candidate_actions = candidate_actions(scenario)
 
-    messages: list[dict[str, Any]] = [{"role": "system", "content": scenario.system_prompt(arm.has_memory)}]
+    messages: list[dict[str, Any]] = [{"role": "system", "content": _system_prompt(scenario, arm, task, session)}]
     try:
         # ``briefs`` lets a control arm without memory tools (raw-traces) still put text in
         # front of the agent before the task.
@@ -201,6 +218,8 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
                     content = "Saved."
                 else:
                     domain_calls += 1
+                    if first_action_ms is None:
+                        first_action_ms = (time.perf_counter() - t0) * 1000
                     res: StepResult = scenario.step(task, name, args)
                     content = res.content
                     if res.terminal:
@@ -296,8 +315,244 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
         stale_in_context=sum(1 for h in all_hits if not h.avoid and _mentions_stale(h, task)),
         discredited_served=sum(1 for h in all_hits if h.avoid), cited_keys=cited, written_keys=written, flags=flags,
         tags=task.tags, usage=asdict(usage), reflection_usage=asdict(r_usage), memory=session.acct.as_dict(),
-        wall_ms=(time.perf_counter() - t0) * 1000, steps=steps,
+        wall_ms=(time.perf_counter() - t0) * 1000, steps=steps, first_action_ms=first_action_ms,
         unnecessary_edits=max(0, edit_calls - (1 if success else 0)),
+        explanation=explanation, error=error,
+        transcript=transcript,
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# Decision mode: one served decision per attempt.
+#
+# The Managed Models student (and the frontier ``@decision`` control that answers the identical
+# rendered prompt) does not run the tool loop. The gateway retrieves from the cell's scope,
+# renders the prompt the student was trained on and returns one action. The harness executes
+# it; a failed attempt goes back as a failed tool result, which the gateway renders as the
+# "Tried in this task" block — the same shape a fail-then-succeed teacher trace trained on.
+# Diagnostic tools are not available: the student was trained on the last consequential call,
+# and a diagnostic answer here is a failed attempt (it shows up as tried, so the next answer
+# moves on). The student writes no reflection of its own; ``llm.note_writer`` names a cheap
+# model that writes the one note the full-loop agent would have, charged to the condition.
+# ---------------------------------------------------------------------------------------------
+
+NOTE_WRITER_PROMPT = (
+    "You are the reflection step for a decision agent that has just finished a task. Below is the "
+    "task, the memory it was shown, what it tried and how each attempt went.\n\n{body}\n\n"
+)
+
+
+def _hits_from_amfs(block: dict[str, Any]) -> list[MemoryHit]:
+    hits: list[MemoryHit] = []
+    for e in block.get("context") or []:
+        if not isinstance(e, dict) or not e.get("key"):
+            continue
+        hits.append(MemoryHit(key=str(e["key"]), text=str(e.get("value") or ""),
+                              confidence=float(e.get("confidence") or 0.0),
+                              evidence_status=str(e.get("evidence_status") or "untested"),
+                              success_count=int(e.get("success_count") or 0),
+                              failure_count=int(e.get("failure_count") or 0)))
+    for a in block.get("avoid") or []:
+        if not isinstance(a, dict) or not a.get("key"):
+            continue
+        hits.append(MemoryHit(key=str(a["key"]), text=str(a.get("value") or ""), evidence_status="discredited",
+                              success_count=int(a.get("success_count") or 0),
+                              failure_count=int(a.get("failure_count") or 0), avoid=True))
+    return hits
+
+
+def _run_decision_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
+                          seed: int, retry_budget: int, keep_transcript: bool = False) -> EpisodeRecord:
+    from .clients import get_llm
+
+    t0 = time.perf_counter()
+    session: EpisodeSession = arm.session(task.agent_id, task.episode)
+    usage, r_usage = Usage(), Usage()
+    all_hits: list[MemoryHit] = []
+    searches_log: list[dict[str, Any]] = []
+    answers: list[str] = []
+    cited: list[str] = []
+    written: list[str] = []
+    flags: dict[str, Any] = {}
+    attempts = 0
+    first_action_ms: float | None = None
+    success = False
+    severity = "failure"
+    escalated = False
+    final_answer = ""
+    explanation = ""
+    domain_calls = diag_calls = searches = writes = 0
+    steps = 0
+    error = None
+    deferred = False
+    transcript: list[dict[str, Any]] = []
+    served_by: list[str] = []
+    trace_ids: list[str] = []
+    attempt_log: list[tuple[str, str]] = []   # (answer, environment result) per attempt, for the note-writer
+    terminal_names = {t.name for t in scenario.tools if t.terminal}
+    session.candidate_actions = candidate_actions(scenario)
+    # The system message is for the transcript and the note-writer; the gateway substitutes the
+    # instruction the student was trained on, and the control sees that same instruction.
+    messages: list[dict[str, Any]] = [{"role": "system", "content": _system_prompt(scenario, arm, task, session)},
+                                      {"role": "user", "content": task.prompt}]
+    meta = {"entity_path": arm.scope, "agent_id": task.agent_id,
+            "outcome_ref": f"{task.agent_id}-ep{task.episode}", "candidate_actions": session.candidate_actions}
+    try:
+        while attempts < retry_budget:
+            steps += 1
+            turn = llm.chat(messages, None, max_tokens=config.STUDY.max_tokens_per_turn, amfs=meta)
+            usage.add(turn.usage)
+            messages.append(turn.assistant_message)
+            block = turn.amfs or {}
+            hits = _hits_from_amfs(block)
+            all_hits.extend(hits)
+            searches += 1
+            session.acct.ops += 1
+            prompt_user = str((block.get("prompt") or {}).get("user") or "")
+            session.acct.retrieved_bytes += max(0, len(prompt_user) - len(task.prompt))
+            served_by.append(str(block.get("served_by") or "?"))
+            if block.get("trace_id"):
+                trace_ids.append(str(block["trace_id"]))
+            entry: dict[str, Any] = {"attempt": attempts + 1, "query": task.prompt[:200],
+                                     "hits": [h.as_log() for h in hits], "retrieval": block.get("retrieval"),
+                                     "served_by": block.get("served_by"), "trace_id": block.get("trace_id")}
+            rec = (block.get("priors") or {}).get("recommendation") if isinstance(block.get("priors"), dict) else None
+            if isinstance(rec, dict) and rec.get("mode"):
+                session.last_recommendation = {"mode": rec.get("mode"), "suggested_action": rec.get("suggested_action"),
+                                               "regime_shift": bool((block.get("priors") or {}).get("regime_shift"))}
+                entry["recommendation"] = session.last_recommendation
+                session.acct.notes[f"rec_{rec['mode']}"] = session.acct.notes.get(f"rec_{rec['mode']}", 0) + 1
+            searches_log.append(entry)
+            kept = [h for h in hits if not h.avoid]
+            session.read_keys.extend(h.key for h in kept[:1])
+            if any(h.avoid for h in hits):
+                session.acct.notes["avoid_served"] = session.acct.notes.get("avoid_served", 0) + sum(h.avoid for h in hits)
+            if keep_transcript:
+                transcript.append({"assistant": turn.text, "tool_calls": [asdict(c) for c in turn.tool_calls],
+                                   "prompt": block.get("prompt"), "served_by": block.get("served_by")})
+
+            attempts += 1
+            if not turn.tool_calls:
+                # Not an action. At temperature 0 the same prompt yields the same prose, so a
+                # retry would be a duplicate call; the attempt is a failure and the task escalates.
+                answers.append("")
+                attempt_log.append(("", f"not a tool call: {turn.text[:200]}"))
+                flags["unparseable"] = flags.get("unparseable", 0) + 1
+                severity, escalated = "failure", True
+                break
+
+            call = turn.tool_calls[0]
+            name, args = call.name, call.arguments
+            if name not in terminal_names:
+                # The action written where the tool goes (``refund`` for ``resolve(action=refund)``)
+                # names a decision as unambiguously as the tool call does; the candidate keys are
+                # the scenario's own enum. Same leniency for every condition through this branch.
+                for key in candidate_actions(scenario) or []:
+                    tool, _, action = key.partition(":")
+                    if name == action and "action" not in args:
+                        name, args = tool, {"action": action, **args}
+                        call.name, call.arguments = name, args
+                        break
+            stop = False
+            if name not in terminal_names:
+                diag_calls += 1
+                answers.append(f"<{name}>")
+                flags["non_terminal_answers"] = flags.get("non_terminal_answers", 0) + 1
+                content = json.dumps({"success": False, "error": f"{name} is not available in single-shot mode; "
+                                                                  f"answer with the terminal tool ({', '.join(sorted(terminal_names))})."})
+                session.record_action(name, args, "not executed: diagnostic call in decision mode", False)
+                if attempts >= retry_budget:
+                    severity, escalated, stop = "failure", True, True
+                else:
+                    severity = "failure"
+                    session.attempt_failed(attempts, "failure", [], f"<{name}>")
+            else:
+                domain_calls += 1
+                if first_action_ms is None:
+                    first_action_ms = (time.perf_counter() - t0) * 1000
+                res: StepResult = scenario.step(task, name, args)
+                answers.append(res.answer)
+                ok = scenario.noisy(bool(res.success))
+                flags.update(res.flags)
+                final_answer = res.answer
+                explanation = " — ".join(str(args[k]) for k in ("root_cause", "explanation", "rationale", "reason")
+                                         if args.get(k))
+                session.record_action(name, {k: v for k, v in args.items() if k != "used_memory_keys"}, res.content, ok)
+                content = json.dumps({"success": ok, ("result" if ok else "error"): res.content})
+                if ok:
+                    success, severity, stop = True, "success", True
+                elif attempts >= retry_budget:
+                    severity, escalated, stop = res.severity, True, True
+                else:
+                    severity = res.severity
+                    session.attempt_failed(attempts, res.severity, [], res.answer)
+            messages.append({"role": "tool", "tool_call_id": call.id, "name": name, "content": content})
+            attempt_log.append((answers[-1], content))
+            if keep_transcript:
+                transcript.append({"tool": name, "result": content[:500]})
+            if stop:
+                break
+        else:
+            escalated = True
+
+        outcome = Outcome(success=success, severity=severity,
+                          summary=f"{'success' if success else severity} after {attempts} attempt(s); answer={final_answer}")
+
+        if arm.has_memory and getattr(llm, "note_writer", None):
+            try:
+                writer = get_llm(llm.note_writer)
+                lines = [f"TASK:\n{task.prompt}", "MEMORY SHOWN:\n" + render_hits(all_hits)]
+                for i, (a, result) in enumerate(attempt_log, 1):
+                    lines.append(f"ATTEMPT {i}: chose {a or '(no action)'} -> {result[:300]}")
+                body = "\n\n".join(lines)
+                wmsgs = [{"role": "system", "content": scenario.system_prompt(True)},
+                         {"role": "user", "content": NOTE_WRITER_PROMPT.format(body=body) + REFLECT_PROMPT.format(outcome=outcome.summary)}]
+                rt = writer.chat(wmsgs, MEMORY_TOOLS[1:], tool_choice="memory_write", max_tokens=400)
+                r_usage.add(rt.usage)
+                for c in rt.tool_calls:
+                    if c.name == "memory_write":
+                        writes += 1
+                        a = c.arguments
+                        wkey = str(a.get("key", f"lesson-ep{task.episode}"))[:80]
+                        written.append(wkey)
+                        session.write(wkey, str(a.get("note", ""))[:1200],
+                                      confidence=float(a.get("confidence", 0.7) or 0.7), kind=str(a.get("kind", "experience")))
+                        if keep_transcript:
+                            transcript.append({"reflection": a, "writer": llm.note_writer})
+            except Exception as e:  # noqa: BLE001
+                error = f"note-writer: {type(e).__name__}: {e}"[:400]
+
+        if scenario.feedback_delay > 0:
+            def _fire(s=session, o=outcome, ti=task.prompt, rt=explanation or final_answer, ck=list(cited)):
+                try:
+                    s.end(o, task_input=ti, response_text=rt, cited_keys=ck)
+                finally:
+                    s.close()
+            arm.deferred.append((task.episode + scenario.feedback_delay, _fire))
+            deferred = True
+        else:
+            session.end(outcome, task_input=task.prompt, response_text=explanation or final_answer, cited_keys=cited)
+    except Exception as e:  # noqa: BLE001
+        error = f"{type(e).__name__}: {e}"[:400]
+        if not attempts:
+            escalated = True
+    finally:
+        if not deferred:
+            session.close()
+
+    flags["decision"] = {"served_by": served_by, "trace_ids": trace_ids,
+                         "fallback_served": sum(1 for s in served_by if s == "fallback")}
+    return EpisodeRecord(
+        scenario=scenario.name, arm=arm.name, model=llm.model, seed=seed, episode=task.episode,
+        agent_id=task.agent_id, task_prompt=task.prompt, success=success, severity=severity,
+        attempts=attempts, escalated=escalated, first_attempt_success=bool(answers) and success and attempts == 1,
+        answers=answers, final_answer=final_answer, domain_tool_calls=domain_calls, diagnostic_calls=diag_calls,
+        memory_searches=searches, memory_writes=writes, hits_total=len(all_hits),
+        contradictions_in_context=scenario.contradictions(all_hits), searches_log=searches_log,
+        stale_in_context=sum(1 for h in all_hits if not h.avoid and _mentions_stale(h, task)),
+        discredited_served=sum(1 for h in all_hits if h.avoid), cited_keys=cited, written_keys=written, flags=flags,
+        tags=task.tags, usage=asdict(usage), reflection_usage=asdict(r_usage), memory=session.acct.as_dict(),
+        wall_ms=(time.perf_counter() - t0) * 1000, steps=steps, first_action_ms=first_action_ms,
         explanation=explanation, error=error,
         transcript=transcript,
     )

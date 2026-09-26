@@ -7,6 +7,7 @@ accounting (prompt, cached-prompt, completion tokens, latency, USD).
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -46,6 +47,10 @@ class Turn:
     tool_calls: list[ToolCall]
     usage: Usage
     assistant_message: dict[str, Any]  # neutral form, appended to history by the caller
+    # The gateway's annotations on a served decision (``amfs`` block: trace_id, retrieval path,
+    # the context and avoid rows it rendered, the prompt bytes when echoed). Frontier clients
+    # leave it ``None``.
+    amfs: dict[str, Any] | None = None
 
 
 # Neutral message format:
@@ -55,6 +60,12 @@ class Turn:
 
 
 class LLM:
+    # Frontier clients run the full tool-calling loop. Clients that answer one decision per call
+    # from a rendered prompt (the Managed Models students and the ``@decision`` control) set this
+    # and the harness takes the single-shot branch of ``run_episode``.
+    decision_mode: bool = False
+    note_writer: str | None = None
+
     def __init__(self, model: str) -> None:
         self.model = model
         self.vendor = "anthropic" if model.startswith("claude") else "openai"
@@ -206,10 +217,315 @@ class LLM:
         return Turn(text="".join(text_parts), tool_calls=calls, usage=usage, assistant_message=assistant)
 
 
+# ---------------------------------------------------------------------------------------------
+# Managed Models students (served through the SenseLab inference gateway) and the frontier
+# ``@decision`` control that answers the identical rendered prompt.
+#
+# Model strings the runner accepts, beyond the frontier ids above:
+#   <alias>                         a student from results/students/registry.json, or a raw
+#                                   public model id (``senselab-s1-...``)
+#   <alias>+notes=<frontier-model>  the same student with a cheap note-writer running the
+#                                   reflection turn after each episode (cost charged to the run)
+#   <frontier>@decision=<alias>     the control: the gateway renders the prompt for <alias>
+#                                   (retrieval, avoid rows, priors — whatever that model's
+#                                   serving options say) and <frontier> answers it in one shot.
+#                                   ``CL_DECISION_RENDER_MODEL`` supplies <alias> when omitted.
+#   <alias>~<variant>               the same model served narrower (SERVING_VARIANTS): the
+#                                   gateway's per-request ``serving`` block switches avoid rows,
+#                                   priors or context off for an ablation without another model.
+# ---------------------------------------------------------------------------------------------
+
+STUDENT_ID_PREFIX = "senselab-"
+_DECISION = "@decision"
+_NOTES = "+notes="
+_VARIANT = "~"
+SERVING_VARIANTS: dict[str, dict[str, Any]] = {
+    "plain": {"avoid_rows": False, "priors": False},          # memory context only, no outcome record
+    "noavoid": {"avoid_rows": False},
+    "nopriors": {"priors": False},
+    "k0": {"context_k": 0, "avoid_rows": False, "priors": False},  # the bare task: weights alone
+    "k1": {"context_k": 1},
+    "fallback": {},                                            # placeholder: fallback stays as configured
+}
+_NOTE_WRITER_DEFAULT = config.env("CL_NOTE_WRITER") or None
+
+
+@dataclass(frozen=True)
+class StudentSpec:
+    alias: str
+    public_model_id: str
+    family: str                 # senselab-s1 | senselab-s1-pro
+    price_key: str              # key into config.STUDENT_PRICES
+    serve_base: bool = False
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+def _registry() -> dict[str, Any]:
+    try:
+        return json.loads(config.STUDENT_REGISTRY.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def resolve_student(name: str) -> StudentSpec:
+    """A registry alias, or a raw public model id (family read off its prefix)."""
+    reg = _registry().get(name)
+    if isinstance(reg, dict) and reg.get("public_model_id"):
+        fam = str(reg.get("family") or "senselab-s1")
+        return StudentSpec(alias=name, public_model_id=str(reg["public_model_id"]), family=fam,
+                           price_key=str(reg.get("price") or fam), serve_base=bool(reg.get("serve_base")),
+                           meta={k: v for k, v in reg.items() if k not in ("public_model_id", "family", "price")})
+    if name.startswith(STUDENT_ID_PREFIX):
+        fam = "senselab-s1-pro" if name.startswith("senselab-s1-pro-") else "senselab-s1"
+        return StudentSpec(alias=name, public_model_id=name, family=fam, price_key=fam)
+    raise ValueError(f"unknown model {name!r}: not a frontier id, not in {config.STUDENT_REGISTRY}")
+
+
+def is_student_model(model: str) -> bool:
+    base = model.split(_NOTES, 1)[0].split(_VARIANT, 1)[0]
+    return _DECISION in base or base.startswith(STUDENT_ID_PREFIX) or base in _registry()
+
+
+def _openai_shape(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Neutral history -> the OpenAI chat shape the gateway reads ``tried_from_messages`` off.
+    System messages are dropped: the gateway's system instruction is the one the student was
+    trained on, and the control must see the same bytes."""
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        if m["role"] == "system":
+            continue
+        if m["role"] == "user":
+            out.append({"role": "user", "content": m["content"]})
+        elif m["role"] == "assistant":
+            calls = [{"id": tc["id"], "type": "function",
+                      "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"])}}
+                     for tc in m.get("tool_calls") or []]
+            msg: dict[str, Any] = {"role": "assistant", "content": m.get("content") or ""}
+            if calls:
+                msg["tool_calls"] = calls
+            out.append(msg)
+        elif m["role"] == "tool":
+            out.append({"role": "tool", "tool_call_id": m["tool_call_id"], "content": m["content"]})
+    return out
+
+
+def parse_action(text: str) -> tuple[str | None, dict[str, Any]]:
+    """The gateway's own parser, duplicated so the harness does not import amfs-internal:
+    ``{"tool": ..., "arguments": {...}}``, tolerant of code fences and a ``tool_name`` key."""
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1] if "\n" in cleaned else ""
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+    if not cleaned.startswith("{"):
+        i, j = cleaned.find("{"), cleaned.rfind("}")
+        if i >= 0 and j > i:
+            cleaned = cleaned[i:j + 1]
+    try:
+        parsed = json.loads(cleaned)
+    except (json.JSONDecodeError, ValueError):
+        return None, {}
+    if not isinstance(parsed, dict):
+        return None, {}
+    tool = parsed.get("tool") or parsed.get("tool_name") or parsed.get("name")
+    args = parsed.get("arguments") if "arguments" in parsed else parsed.get("input")
+    if not isinstance(tool, str) or not isinstance(args, dict):
+        return None, {}
+    # A decision key in the tool slot — ``resolve:escalate_tier2`` — is the ``tool:action`` form
+    # the rendered priors use. Read it as the tool plus its action rather than an unknown tool,
+    # so a model is graded on the decision it made, not on where it wrote the colon. Applied
+    # to every condition that answers through this parser (students, base-served, decision
+    # controls that answer in JSON); an ``action`` already in the arguments wins.
+    if ":" in tool and not tool.startswith("<"):
+        head, _, action = tool.partition(":")
+        if head and action and "action" not in args:
+            tool, args = head, {"action": action, **args}
+    return tool, args
+
+
+def _action_turn(text: str, usage: Usage, *, amfs: dict[str, Any] | None, call_id: str) -> Turn:
+    name, args = parse_action(text)
+    calls = [ToolCall(id=call_id, name=name, arguments=args)] if name else []
+    assistant = {"role": "assistant", "content": "" if name else text,
+                 "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls]}
+    return Turn(text=text, tool_calls=calls, usage=usage, assistant_message=assistant, amfs=amfs)
+
+
+class _Gateway:
+    """One HTTP client to the SenseLab inference gateway, paced by the same process-global
+    limiter the senselab arm uses (one production API key serves both)."""
+
+    def __init__(self) -> None:
+        import httpx
+
+        self.url = config.AMFS_HTTP_URL.rstrip("/") + "/api/v1/chat/completions"
+        self._c = httpx.Client(timeout=httpx.Timeout(float(config.env("CL_STUDENT_TIMEOUT") or 120.0), connect=10.0),
+                               headers={"Authorization": f"Bearer {config.env('AMFS_API_KEY', required=True)}",
+                                        "Content-Type": "application/json"})
+        try:
+            from ..arms.senselab_arm import _LIMITER
+            self._limiter = _LIMITER
+        except Exception:  # noqa: BLE001
+            self._limiter = None
+
+    def post(self, body: dict[str, Any]) -> dict[str, Any]:
+        import httpx
+
+        last: Exception | None = None
+        for attempt in range(8):
+            if self._limiter is not None:
+                self._limiter.acquire()
+            try:
+                r = self._c.post(self.url, json=body)
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                last = e
+                time.sleep(min(2.0 * (attempt + 1), 20.0))
+                continue
+            if r.status_code in (429, 502, 503, 504) and attempt < 7:
+                wait = min(max(float(r.headers.get("Retry-After", 2.0)), 1.0) * (1.5 ** attempt), 30.0)
+                time.sleep(wait)
+                continue
+            if r.status_code >= 400:
+                raise RuntimeError(f"gateway {r.status_code}: {r.text[:300]}")
+            return r.json()
+        raise RuntimeError(f"gateway unreachable: {last}")
+
+
+_GATEWAY: _Gateway | None = None
+_GATEWAY_LOCK = threading.Lock()
+
+
+def _gateway() -> _Gateway:
+    global _GATEWAY
+    with _GATEWAY_LOCK:
+        if _GATEWAY is None:
+            _GATEWAY = _Gateway()
+        return _GATEWAY
+
+
+def _amfs_meta(amfs: dict[str, Any] | None, **extra: Any) -> dict[str, Any]:
+    meta = {k: v for k, v in (amfs or {}).items() if v is not None}
+    meta.update({k: v for k, v in extra.items() if v is not None})
+    return {"amfs": meta}
+
+
+def _split_variant(name: str) -> tuple[str, dict[str, Any] | None]:
+    if _VARIANT not in name:
+        return name, None
+    alias, variant = name.split(_VARIANT, 1)
+    if variant not in SERVING_VARIANTS:
+        raise ValueError(f"unknown serving variant {variant!r}; known: {sorted(SERVING_VARIANTS)}")
+    return alias, SERVING_VARIANTS[variant] or None
+
+
+class StudentLLM(LLM):
+    """A Managed Models student served by the gateway: one rendered prompt in, one action out.
+
+    The gateway does the retrieval (scoped to ``amfs.entity_path`` — the cell's scope), renders
+    the prompt the student was trained on, seals the decision as a trace and returns the
+    ``amfs`` block the harness turns into memory hits. ``chat`` keeps the ``LLM`` signature
+    plus ``amfs=`` (entity_path, agent_id, outcome_ref, candidate_actions) so the loop can pass
+    per-episode scope without touching shared client state.
+    """
+
+    decision_mode = True
+
+    def __init__(self, model: str, spec: StudentSpec, *, note_writer: str | None = None,
+                 serving: dict[str, Any] | None = None) -> None:  # noqa: D107
+        self.model = model
+        self.spec = spec
+        self.vendor = "senselab"
+        self.note_writer = note_writer
+        self.serving = serving
+        self._gw = _gateway()
+
+    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, *,
+             tool_choice: str | None = None, max_tokens: int = 700, amfs: dict[str, Any] | None = None) -> Turn:
+        t0 = time.perf_counter()
+        body = {"model": self.spec.public_model_id, "messages": _openai_shape(messages),
+                "max_tokens": min(max_tokens, 400), "temperature": 0,
+                "metadata": _amfs_meta(amfs, echo_context=True, serving=self.serving)}
+        res = self._gw.post(body)
+        text = ((res.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        u = res.get("usage") or {}
+        usage = Usage(prompt_tokens=int(u.get("prompt_tokens") or 0), completion_tokens=int(u.get("completion_tokens") or 0))
+        usage.latency_ms = (time.perf_counter() - t0) * 1000
+        usage.calls = 1
+        block = dict(res.get("amfs") or {})
+        # A base-served twin or a fallback leg is priced as what actually answered.
+        price = self.spec.price_key
+        served = block.get("served_by")
+        if served == "base" or self.spec.serve_base:
+            price = {"senselab-s1": "gemini-2.5-flash-lite", "senselab-s1-pro": "gemini-2.5-flash"}.get(self.spec.family, price)
+        usage.cost_usd = config.cost_usd(price, usage.prompt_tokens, usage.completion_tokens)
+        block["price_key"] = price
+        return _action_turn(text, usage, amfs=block, call_id=f"gw_{res.get('id', 'x')[-12:]}")
+
+
+class DecisionLLM(LLM):
+    """The frontier control for the students: the gateway renders the prompt exactly as it
+    would for ``render_for`` (``render_only`` — nothing upstream, nothing sealed, nothing
+    billed) and the frontier model answers those bytes in one shot. Same prompt, different
+    model: the gap to the student is what the weights learned; the gap to the frontier full
+    loop is what the tool loop and the agent's own reflection are worth."""
+
+    decision_mode = True
+
+    def __init__(self, model: str, base: LLM, render_for: StudentSpec, *, note_writer: str | None = None,
+                 serving: dict[str, Any] | None = None) -> None:  # noqa: D107
+        self.model = model
+        self.base = base
+        self.render_for = render_for
+        self.vendor = base.vendor
+        self.note_writer = note_writer
+        self.serving = serving
+        self._gw = _gateway()
+
+    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, *,
+             tool_choice: str | None = None, max_tokens: int = 700, amfs: dict[str, Any] | None = None) -> Turn:
+        t0 = time.perf_counter()
+        body = {"model": self.render_for.public_model_id, "messages": _openai_shape(messages),
+                "metadata": _amfs_meta(amfs, render_only=True, serving=self.serving)}
+        res = self._gw.post(body)
+        block = dict(res.get("amfs") or {})
+        prompt = block.get("prompt") or {}
+        render_ms = (time.perf_counter() - t0) * 1000
+        turn = self.base.chat([{"role": "system", "content": prompt.get("system") or ""},
+                               {"role": "user", "content": prompt.get("user") or ""}], None, max_tokens=max_tokens)
+        block["render_ms"] = round(render_ms, 1)
+        block["served_by"] = f"control:{self.base.model}"
+        out = _action_turn(turn.text, turn.usage, amfs=block, call_id=f"dc_{res.get('id', 'x')[-12:]}")
+        out.usage.latency_ms += render_ms
+        return out
+
+    def complete_text(self, prompt: str, *, max_tokens: int = 600) -> tuple[str, Usage]:
+        return self.base.complete_text(prompt, max_tokens=max_tokens)
+
+
+def _build(model: str) -> LLM:
+    note_writer = _NOTE_WRITER_DEFAULT
+    base_str = model
+    if _NOTES in model:
+        base_str, note_writer = model.split(_NOTES, 1)
+        note_writer = note_writer or None
+    if _DECISION in base_str:
+        frontier, _, alias = base_str.partition(_DECISION)
+        alias = alias.lstrip("=") or (config.env("CL_DECISION_RENDER_MODEL") or "")
+        if not alias:
+            raise ValueError(f"{model!r}: name the model to render for (…@decision=<alias>) or set CL_DECISION_RENDER_MODEL")
+        alias, serving = _split_variant(alias)
+        return DecisionLLM(model, get_llm(frontier), resolve_student(alias), note_writer=note_writer, serving=serving)
+    alias, serving = _split_variant(base_str)
+    if alias.startswith(STUDENT_ID_PREFIX) or alias in _registry():
+        return StudentLLM(model, resolve_student(alias), note_writer=note_writer, serving=serving)
+    return LLM(model)
+
+
 _CACHE: dict[str, LLM] = {}
 
 
 def get_llm(model: str) -> LLM:
     if model not in _CACHE:
-        _CACHE[model] = LLM(model)
+        _CACHE[model] = _build(model)
     return _CACHE[model]

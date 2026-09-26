@@ -223,6 +223,12 @@ class MemoryArm:
     def session(self, agent_id: str, episode: int) -> EpisodeSession:
         raise NotImplementedError
 
+    def prompt_addendum(self, agent_id: str) -> str | None:
+        """Text appended to the system prompt for every episode (a skill file, a standing
+        instruction). Arms whose knowledge reaches the model as prompt rather than as tool
+        results return it here; the harness counts it as retrieved bytes. ``None`` = nothing."""
+        return None
+
     def after_episode(self, episode: int, llm) -> ArmAccounting | None:
         """Arm-side maintenance between episodes (DIY consolidation). Returns accounting."""
         return None

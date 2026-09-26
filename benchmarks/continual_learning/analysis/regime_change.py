@@ -29,10 +29,13 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import statistics as st
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
+
+from .. import config
 
 RESULTS = Path(__file__).resolve().parents[1] / "results"
 OUT = RESULTS / "gridv2-report"
@@ -53,12 +56,73 @@ SOURCES = {
 }
 ARMS = list(SOURCES)
 HEAD = ["none", "pgvector", "pgvector-diy+outcomes", "mem0", "senselab-nofeedback", "senselab-episode", "senselab"]
+# Canonical arm order for tables and figures: baselines, then the SenseLab ablations, then
+# the full continual-learning arm last. Arms not listed are appended alphabetically.
+ARM_ORDER = ["none", "pgvector", "pgvector-diy", "pgvector-diy+outcomes", "mem0", "zep", "senselab-nofeedback",
+             "senselab-episode", "senselab-attempts", "senselab-nopriors", "senselab-lean", "senselab"]
 LABEL = {
     "none": "no memory", "pgvector": "pgvector RAG", "pgvector-diy": "pgvector + reflection + consolidation",
-    "pgvector-diy+outcomes": "pgvector DIY + outcome counter", "mem0": "Mem0", "senselab-nofeedback": "SenseLab, no outcomes",
-    "senselab-episode": "SenseLab, episode-level outcomes", "senselab": "SenseLab, continual learning",
-    "senselab-nopriors": "SenseLab, no action priors",
+    "pgvector-diy+outcomes": "pgvector DIY + outcome counter", "mem0": "Mem0", "zep": "Zep",
+    "senselab-nofeedback": "SenseLab, no outcomes",
+    "senselab-episode": "SenseLab, episode-level outcomes", "senselab-attempts": "SenseLab, attempt-level outcomes",
+    "senselab": "SenseLab, outcome loop on",
+    "senselab-nopriors": "SenseLab, no action priors", "senselab-lean": "SenseLab, lean briefing",
 }
+
+# The tag that names a task's class in each scenario (what ``first_exposures`` and the
+# actions-per-class table key on). Scenarios not listed fall back to ``tags["class"]``.
+CLASS_TAG = {"support": "issue", "ci-fix": "failure", "order-ops": "request", "retention": "expected",
+             "diagnose": "rule", "concierge": "kind", "analytics": "kind",
+             "policy-qa": "topic", "accounts": "class", "dispatch": "task_class"}
+
+
+def class_of(x: dict) -> str | None:
+    """The task class of an episode row, or None when the scenario's class tag is absent."""
+    tags = x.get("tags") or {}
+    v = tags.get(CLASS_TAG.get(x.get("scenario", ""), "class"))
+    return None if v is None else str(v)
+
+
+# Infrastructure failures: an episode that died on the network or a 5xx from a hosted memory
+# service (or the model API) rather than on the task. An episode that never reached an
+# attempt for that reason (``attempts == 0``; in practice an Anthropic 529 "overloaded" on
+# the first model call) is dropped by ``load`` for every arm alike — it carries no information
+# about the memory layer and would otherwise be scored as an escalated failure. The count
+# dropped is reported (``DROPPED_NO_ATTEMPT``). Rows whose error came after a verdict
+# ("reflection: ReadTimeout ...", a failed commit) stay in every metric; the ``infra_err``
+# share and the "excl. infra" success rate are added alongside so the learning signal can be
+# read net of them too.
+INFRA_RE = re.compile(r"timeout|connection|ReadTimeout|ConnectError|RemoteProtocolError|5\d\d|"
+                      r"Server disconnected|ServiceUnavailable|OverloadedError|overloaded", re.I)
+#: (arm, scenario) -> episodes dropped by ``load`` because an infrastructure error preceded any attempt.
+DROPPED_NO_ATTEMPT: dict[tuple[str, str], int] = {}
+#: ``--paper``: (arm, scenario) -> the one run the paper reads for it (see paper_sources.py).
+SCENARIO_RUN: dict[tuple[str, str], str] = {}
+
+
+def is_infra(error) -> bool:
+    return bool(error) and bool(INFRA_RE.search(str(error)))
+
+
+def infra_rate(rows) -> float:
+    return mean((is_infra(x.get("error")) for x in rows), 3)
+
+
+def success_excl(rows, field: str = "success"):
+    """Success rate over the rows without an infrastructure error (nan if none remain)."""
+    return mean(x[field] for x in rows if not is_infra(x.get("error")))
+
+
+def order_arms(arms) -> list[str]:
+    seen = list(dict.fromkeys(arms))
+    return [a for a in ARM_ORDER if a in seen] + sorted(a for a in seen if a not in ARM_ORDER)
+
+
+def order_scenarios(scenarios) -> list[str]:
+    """Study order (config core then probe scenarios) first, anything else alphabetical."""
+    seen = set(scenarios)
+    known = [s for s in config.STUDY.scenarios if s in seen]
+    return known + sorted(seen - set(known))
 
 
 def use_runs(prefix: str) -> None:
@@ -68,7 +132,7 @@ def use_runs(prefix: str) -> None:
     # The transfer protocols, the probes and the long-horizon run have their own analyses
     # (transfer.py, probes.py); mixing them in here would pool 20- and 120-episode cells with
     # the 60-episode regime-change cells.
-    skip = ("-report", "-xfer-", "-probes", "-long", "-dry")
+    skip = ("-report", "-xfer-", "-probes", "-long", "-dry", "-sweep-")
     runs = sorted(p.name for p in RESULTS.glob(f"{prefix}*") if (p / "episodes.jsonl").exists()
                   and not any(s in p.name[len(prefix):] or p.name.endswith(s) for s in skip))
     arms: list[str] = []
@@ -79,9 +143,7 @@ def use_runs(prefix: str) -> None:
                 arms.append(a)
     SOURCES = {a: runs for a in arms}
     ARMS = list(SOURCES)
-    order = ["none", "pgvector", "pgvector-diy", "pgvector-diy+outcomes", "mem0", "senselab-nofeedback",
-             "senselab-episode", "senselab-nopriors", "senselab"]
-    HEAD = [a for a in order if a in arms] + [a for a in arms if a not in order]
+    HEAD = order_arms(arms)
     for a in arms:
         LABEL.setdefault(a, a)
     OUT = RESULTS / f"{prefix}-report"
@@ -100,6 +162,8 @@ def load() -> list[dict]:
                     continue
                 if RUNS_PREFIX and x.get("fleet_mode", "rr") != "rr":
                     continue  # transfer-protocol cells belong to analysis/transfer.py
+                if SCENARIO_RUN and not _paper_keep(arm, x["scenario"], run):
+                    continue  # the paper reads one build per scenario for the SenseLab arms
                 x["run"] = run
                 x["tokens"] = x["usage"]["prompt_tokens"] + x["usage"]["completion_tokens"] + sum(
                     (x.get("reflection_usage") or {}).get(k, 0) for k in ("prompt_tokens", "completion_tokens"))
@@ -109,8 +173,25 @@ def load() -> list[dict]:
                 x["changed"] = bool((x.get("tags") or {}).get("change_class"))
                 x["post"] = x["episode"] >= (x.get("change_at") or 20)
                 x["stale"] = bool((x.get("flags") or {}).get("stale_pick"))
+                x["infra"] = is_infra(x.get("error"))
+                if x["infra"] and not x.get("attempts"):
+                    k = (x["arm"], x["scenario"])
+                    DROPPED_NO_ATTEMPT[k] = DROPPED_NO_ATTEMPT.get(k, 0) + 1
+                    continue
                 rows.append(x)
+    if SCENARIO_RUN:
+        # --paper: every arm is read on the (scenario, fleet size) pairs the SenseLab arm has cells
+        # for, so the pooled rows of a table compare the same task mix across arms. Per fleet size,
+        # not per scenario: the fleet-of-10 run covers scenarios the single-agent grid does not, and
+        # its rows must not admit other arms' single-agent cells on those scenarios.
+        have = {(x["scenario"], x["fleet"]) for x in rows if x["arm"] == "senselab"}
+        rows = [x for x in rows if (x["scenario"], x["fleet"]) in have]
     return rows
+
+
+def _paper_keep(arm: str, scenario: str, run: str) -> bool:
+    from . import paper_sources
+    return paper_sources.keep_row(arm, scenario, run)
 
 
 def mean(xs, nd=2):
@@ -183,11 +264,17 @@ def flip_rate(cell_rows) -> float:
 
 
 def main() -> None:
-    if "--runs" in sys.argv:
+    if "--paper" in sys.argv:
+        from . import paper_sources
+        paper_sources.configure(sys.modules[__name__])
+    elif "--runs" in sys.argv:
         use_runs(sys.argv[sys.argv.index("--runs") + 1])
     rows = load()
     OUT.mkdir(parents=True, exist_ok=True)
     md: list[str] = [f"# {RUNS_PREFIX or 'Grid v2'}: continual learning vs memory under regime change\n"]
+    if SCENARIO_RUN:
+        from . import paper_sources
+        md.append("```\n" + paper_sources.describe() + "\n```\n")
     n_by = {a: len(sel(rows, arm=a)) for a in ARMS}
     md.append("Episodes per arm: " + ", ".join(f"{a} {n}" for a, n in n_by.items() if n) + ".\n")
     mem0_scen = sorted({x["scenario"] for x in sel(rows, arm="mem0")})
@@ -206,14 +293,21 @@ def main() -> None:
             lines.append([
                 LABEL[a], len(r), mean(x["first_attempt_success"] for x in pre),
                 f"{mean(x['first_attempt_success'] for x in r)} [{lo:.2f},{hi:.2f}]",
-                mean(x["success"] for x in r), mean(x["stale"] for x in r),
+                mean(x["success"] for x in r), success_excl(r), infra_rate(r), mean(x["stale"] for x in r),
                 mean(x["escalated"] for x in r), mean(x["attempts"] for x in r),
                 f"{mean((x['tokens'] for x in r), 0):.0f}", f"{mean((x['wall_s'] for x in r), 1)}",
             ])
-        return table(["arm", "n", "pre 1st", "post-change 1st-attempt [95% CI]", "success", "stale-pick",
-                      "escalated", "attempts", "tok/ep", "wall s"], lines)
+        return table(["arm", "n", "pre 1st", "post-change 1st-attempt [95% CI]", "success", "success excl. infra",
+                      "infra_err", "stale-pick", "escalated", "attempts", "tok/ep", "wall s"], lines)
 
     md.append("## 1. After the world changes: changed-class tasks, episodes 20-59, single agent\n")
+    md.append("`infra_err` = share of episodes whose `error` is an infrastructure failure (timeout / connection / "
+              "5xx) after a verdict was reached; `success excl. infra` = success rate over the other episodes. "
+              "Episodes that never reached an attempt because of such an error (a model-API 529 on the first "
+              "call) are excluded from every column for every arm: "
+              f"{sum(DROPPED_NO_ATTEMPT.values())} episodes"
+              + (" (" + ", ".join(f"{a}/{sc} {n}" for (a, sc), n in sorted(DROPPED_NO_ATTEMPT.items())) + ")"
+                 if DROPPED_NO_ATTEMPT else "") + ".\n")
     md.append(headline(None, "all") + "\n")
     if set(mem0_scen) != {x["scenario"] for x in rows}:
         md.append("### 1b. Same, restricted to the Mem0 scenarios (M)\n")
@@ -258,7 +352,7 @@ def main() -> None:
 
     # ---- 1d. per scenario --------------------------------------------------------------
     md.append("### 1d. Post-change changed-class first-attempt success by scenario (single agent)\n")
-    scen_all = sorted({x["scenario"] for x in rows})
+    scen_all = order_scenarios(x["scenario"] for x in rows)
     lines = []
     for a in HEAD:
         cells = []
@@ -278,6 +372,23 @@ def main() -> None:
         if any(c != "-" for c in cells):
             lines.append([LABEL[a], *cells])
     md.append(table(["arm", *scen_all], lines) + "\n")
+
+    # ---- 1f. infrastructure errors by arm x scenario -----------------------------------
+    md.append("### 1f. Infrastructure-error share by scenario (all episodes, all fleet sizes)\n")
+    md.append("Share of episodes per arm x scenario whose `error` matches the infra pattern, with the "
+              "eventual-success rate raw and excluding those episodes (all episodes of the cell, not only "
+              "changed-class).\n")
+    lines = []
+    for a in HEAD:
+        r_all = sel(rows, arm=a)
+        if not r_all:
+            continue
+        cells = []
+        for s in scen_all:
+            r = sel(r_all, scenarios=[s])
+            cells.append(infra_rate(r) if r else "-")
+        lines.append([LABEL[a], *cells, infra_rate(r_all), mean(x["success"] for x in r_all), success_excl(r_all)])
+    md.append(table(["arm", *scen_all, "all", "success", "success excl. infra"], lines) + "\n")
 
     # ---- 2. recovery curve -----------------------------------------------------------
     md.append("## 2. Recovery curve: first-attempt success on changed classes by 10-episode block\n")
@@ -345,13 +456,14 @@ def main() -> None:
         fa = by_cell(r, lambda x: x["first_attempt_success"])
         lo, hi = boot_ci(fa)
         lines.append([LABEL[a], n, f"{mean(x['first_attempt_success'] for x in r)} [{lo:.2f},{hi:.2f}]",
-                      mean(x["success"] for x in r), f"{1000 * mean(x['escalated'] for x in r):.0f}",
+                      mean(x["success"] for x in r), success_excl(r), infra_rate(r),
+                      f"{1000 * mean(x['escalated'] for x in r):.0f}",
                       mean(x["attempts"] for x in r), f"{sum(x['tokens'] for x in r) / n * 1000 / 1e6:.2f}M",
                       f"{sum(x['cost'] for x in r) / n * 1000:.0f}", f"{sum(x['wall_s'] for x in r) / n:.1f}",
                       f"{sum(x['memory']['memory_ms'] for x in r) / n / 1000:.1f}"])
-    md.append(table(["arm", "n", "1st-attempt [95% CI]", "eventual success", "escalations / 1000",
-                     "attempts / task", "tokens / 1000 tasks", "$ / 1000 tasks", "wall s / task",
-                     "memory s / task"], lines) + "\n")
+    md.append(table(["arm", "n", "1st-attempt [95% CI]", "eventual success", "success excl. infra", "infra_err",
+                     "escalations / 1000", "attempts / task", "tokens / 1000 tasks", "$ / 1000 tasks",
+                     "wall s / task", "memory s / task"], lines) + "\n")
 
     # ---- 5. predictability ------------------------------------------------------------
     md.append("## 5. Predictability after the change (changed-class tasks)\n")
@@ -372,26 +484,35 @@ def main() -> None:
     md.append(table(["arm", "cross-seed std of 1st-attempt rate", "flip rate (episode to episode)"], lines) + "\n")
 
     # ---- 6. fleet -------------------------------------------------------------------
-    md.append("## 6. Fleet of 6 agents sharing one store (support, ci-fix)\n")
-    lines = []
-    for a in HEAD:
-        r6 = sel(rows, arm=a, fleet=6, pre=False, changed=True)
-        r1 = sel(rows, arm=a, fleet=1, pre=False, changed=True, scenarios=["support", "ci-fix"])
-        if not r6:
-            continue
-        # propagation: per cell, the first post-change changed-class exposure of each agent
-        first = []
-        for c in {x["cell"] for x in r6}:
-            seen = set()
-            for x in sorted((y for y in r6 if y["cell"] == c), key=lambda y: y["episode"]):
-                if x["agent_id"] not in seen:
-                    seen.add(x["agent_id"])
-                    first.append(x)
-        lines.append([LABEL[a], len(r6), mean(x["first_attempt_success"] for x in r1), mean(x["first_attempt_success"] for x in r6),
-                      mean(x["stale"] for x in r6), mean(x["escalated"] for x in r6),
-                      mean(x["first_attempt_success"] for x in first), mean(x["stale"] for x in first)])
-    md.append(table(["arm", "n", "single-agent 1st", "fleet 1st", "fleet stale", "fleet escalated",
-                     "each agent's FIRST post-change exposure: 1st-attempt", "...stale"], lines) + "\n")
+    # One table per fleet size present in the data (6 in grid v3; 10 in grid v4). The single-
+    # agent reference is restricted to the scenarios that fleet actually ran, derived from
+    # the rows rather than a fixed list.
+    fleet_sizes = sorted({x["fleet"] for x in rows if x["fleet"] > 1})
+    if not fleet_sizes:
+        md.append("## 6. Fleet of agents sharing one store\n\n_(no fleet cells)_\n")
+    for fi, n_fleet in enumerate(fleet_sizes):
+        fleet_scen = order_scenarios(x["scenario"] for x in sel(rows, fleet=n_fleet))
+        md.append(f"## 6{'' if fi == 0 else chr(ord('a') + fi)}. Fleet of {n_fleet} agents sharing one store "
+                  f"({', '.join(fleet_scen)})\n")
+        lines = []
+        for a in HEAD:
+            r6 = sel(rows, arm=a, fleet=n_fleet, pre=False, changed=True)
+            r1 = sel(rows, arm=a, fleet=1, pre=False, changed=True, scenarios=fleet_scen)
+            if not r6:
+                continue
+            # propagation: per cell, the first post-change changed-class exposure of each agent
+            first = []
+            for c in {x["cell"] for x in r6}:
+                seen = set()
+                for x in sorted((y for y in r6 if y["cell"] == c), key=lambda y: y["episode"]):
+                    if x["agent_id"] not in seen:
+                        seen.add(x["agent_id"])
+                        first.append(x)
+            lines.append([LABEL[a], len(r6), mean(x["first_attempt_success"] for x in r1), mean(x["first_attempt_success"] for x in r6),
+                          mean(x["stale"] for x in r6), mean(x["escalated"] for x in r6), infra_rate(r6),
+                          mean(x["first_attempt_success"] for x in first), mean(x["stale"] for x in first)])
+        md.append(table(["arm", "n", "single-agent 1st", "fleet 1st", "fleet stale", "fleet escalated", "infra_err",
+                         "each agent's FIRST post-change exposure: 1st-attempt", "...stale"], lines) + "\n")
 
     # ---- 7. mechanism ---------------------------------------------------------------
     md.append("## 7. Mechanism: what the loop did to the entries (SenseLab arms)\n")
@@ -516,8 +637,11 @@ def main() -> None:
 
 
 def _task_class(x: dict) -> str:
+    c = class_of(x)
+    if c is not None:
+        return c
     t = x.get("tags") or {}
-    for k in ("issue", "failure", "request", "expected"):
+    for k in ("issue", "failure", "request", "expected", "rule", "topic", "class", "task_class", "kind"):
         if t.get(k):
             return str(t[k])
     return "?"
@@ -538,8 +662,15 @@ def _figures(rows: list[dict]) -> None:
     except Exception:  # noqa: BLE001
         return
     colors = {"none": "#999999", "pgvector": "#1f77b4", "pgvector-diy+outcomes": "#17becf", "mem0": "#ff7f0e",
-              "senselab-nofeedback": "#bcbd22", "senselab-episode": "#9467bd", "senselab": "#d62728",
-              "senselab-nopriors": "#e377c2", "pgvector-diy": "#8c564b"}
+              "zep": "#2ca02c", "senselab-nofeedback": "#bcbd22", "senselab-episode": "#9467bd",
+              "senselab-attempts": "#7f7f7f", "senselab": "#d62728", "senselab-nopriors": "#e377c2",
+              "senselab-lean": "#8c6d31", "pgvector-diy": "#8c564b"}
+    single = sel(rows, fleet=1)
+    n_models = len({x["model"] for x in single})
+    n_seeds = len({x["seed"] for x in single})
+    n_scen = len({x["scenario"] for x in single})
+    setting = (f"{', '.join(sorted({x['model'] for x in single}))}; {n_seeds} seeds x {n_scen} scenarios"
+               if n_models <= 2 else f"{n_models} models; {n_seeds} seeds x {n_scen} scenarios")
     # `use_runs` adds whatever arms the run directories hold to HEAD, so any arm
     # without a colour above gets one from the cycle rather than a KeyError
     # after the markdown report has already been written.
@@ -565,7 +696,7 @@ def _figures(rows: list[dict]) -> None:
     ax.set_ylabel("first-attempt success")
     ax.set_ylim(0, 1)
     ax.legend(fontsize=8, ncol=2)
-    ax.set_title("Learning, then unlearning: first-attempt success across a regime change (gpt-5.5, 3 seeds x 5 scenarios)")
+    ax.set_title(f"Learning, then unlearning: first-attempt success across a regime change ({setting})")
     fig.tight_layout()
     fig.savefig(OUT / "fig1_learning_curve.png", dpi=150)
     # Fig 2: tokens per successful task, post-change changed-class

@@ -27,19 +27,25 @@ READY_TIMEOUT_S = 25.0
 class _PacedClient:
     """Proxy around ``MemoryClient`` that paces calls process-wide (MEM0_RPM, default 240)
     and retries Mem0's 'requests too frequently' RateLimitError with back-off. Six cells
-    seeding in parallel tripped the burst limit on the Pro plan within a minute."""
+    seeding in parallel tripped the burst limit on the Pro plan within a minute.
+
+    The pacer state is class-level: one ``_PacedClient`` is built per cell, and until
+    2026-09-19 each carried its own clock, so N cells ran at N x MEM0_RPM (12 cells at the
+    grid-v4 concurrency produced 360 429s in the first 90 s of seeding)."""
+
+    _lock = threading.Lock()
+    _next = 0.0
 
     def __init__(self, client) -> None:
         self._c = client
         self._interval = 60.0 / float(os.environ.get("MEM0_RPM", "240"))
-        self._lock = threading.Lock()
-        self._next = 0.0
 
     def _pace(self) -> None:
-        with self._lock:
+        cls = type(self)
+        with cls._lock:
             now = time.monotonic()
-            wait = max(0.0, self._next - now)
-            self._next = max(now, self._next) + self._interval
+            wait = max(0.0, cls._next - now)
+            cls._next = max(now, cls._next) + self._interval
         if wait:
             time.sleep(wait)
 

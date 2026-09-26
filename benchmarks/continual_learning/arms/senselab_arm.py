@@ -70,7 +70,10 @@ from amfs_core.actions import render_priors
 from amfs_core.models import MemoryType, OutcomeType, RecallConfig
 
 from .. import config
-from .base import EpisodeSession, MemoryArm, MemoryHit, Outcome
+from .base import ArmAccounting, EpisodeSession, MemoryArm, MemoryHit, Outcome
+
+#: Key of the entity's induced decision rules (``SenseLabInduceArm``). One key, versioned.
+INDUCED_RULES_KEY = "decision-rules"
 
 _KIND = {"fact": MemoryType.FACT, "belief": MemoryType.BELIEF, "experience": MemoryType.EXPERIENCE}
 BRIEFING_MAX_CHARS = 2400
@@ -200,11 +203,18 @@ def _render_briefing(digests: list[Any], *, hot_context: bool = True) -> str | N
         tried = summary.get("tried_here")
         if isinstance(tried, list) and tried:
             lines.append("Actions tried here: " + "; ".join(
-                f"{it.get('action_key')} {int(it.get('won') or 0)}/{int(it.get('n') or 0)}"
+                f"{it.get('action_key') or it.get('action')} {int(it.get('won') or 0)}/{int(it.get('n') or 0)}"
                 for it in tried[:6] if isinstance(it, dict)))
         explore = summary.get("explore")
         if isinstance(explore, dict) and explore.get("suggested_action"):
             lines.append(f"Explore: try {explore['suggested_action']} first. {explore.get('why', '')}".rstrip())
+        elif isinstance(explore, dict) and (explore.get("avoid") or explore.get("thin_evidence")):
+            bits = []
+            if explore.get("avoid"):
+                bits.append("avoid " + ", ".join(map(str, explore["avoid"][:6])))
+            if explore.get("thin_evidence"):
+                bits.append("thin evidence on " + ", ".join(map(str, explore["thin_evidence"][:6])))
+            lines.append("Explore: " + "; ".join(bits) + ".")
         for k in ("hot_context", "entries", "facts", "patterns", "key_facts", "risks"):
             if not hot_context:
                 break
@@ -235,8 +245,16 @@ class _SenseLabSession(EpisodeSession):
             adapter=_ThrottledHttpAdapter(base_url=config.AMFS_HTTP_URL,
                                           api_key=config.env("AMFS_API_KEY", required=True)),
         )
+        # Stamp the cell's scope on the trace itself (``attributes.entity_path``), not only on
+        # the causal entries: an episode that read nothing still belongs to the cell, and a
+        # Managed Model scoped to this cell's traces by ``entity_prefix`` must see it too.
+        try:
+            self.mem.set_session_attributes({"entity_path": arm.scope[:256], "bench_episode": episode})
+        except Exception as e:  # noqa: BLE001
+            self.acct.notes["session_attributes_error"] = str(e)[:120]
 
         self._attempts_marked = 0
+        self._tried_this_task: set[str] = set()
         self._footer: str | None = None
         # Entries the briefing already named as discredited. A retrieve's avoid list names
         # them again; those rows are rendered as a reference to the briefing rather than
@@ -284,15 +302,49 @@ class _SenseLabSession(EpisodeSession):
                 if isinstance(it, dict) and it.get("key"):
                     self._briefed_discredited.add(str(it["key"]))
         text = _render_briefing(kept, hot_context=self.arm.briefing_hot_context)
+        rules = self._induced_rules() if getattr(self.arm, "induces", False) else None
+        if rules:
+            text = rules + ("\n\n" + text if text else "")
         if text:
             self.acct.retrieved_bytes += len(text)
         return text
 
+    def _induced_rules(self) -> str | None:
+        """The entity's induced decision rules (``SenseLabInduceArm``), read by key the way
+        an agent recalls a runbook it knows exists. The read is in the trace, so the
+        episode's outcome lands on the rules entry and its evidence status is shown."""
+        with self._timed():
+            try:
+                e = self.mem.read(self.arm.scope, INDUCED_RULES_KEY)
+            except Exception as ex:  # noqa: BLE001
+                self.acct.notes["rules_read_error"] = str(ex)[:120]
+                return None
+        if e is None:
+            return None
+        status = getattr(e, "evidence_status", None) or "untested"
+        s, f = int(getattr(e, "success_count", 0) or 0), int(getattr(e, "failure_count", 0) or 0)
+        self.read_keys.append(e.key)
+        self.acct.notes["rules_version"] = int(getattr(e, "version", 0) or 0)
+        return (f"Decision rules induced from this entity's outcome record (v{getattr(e, 'version', '?')}; "
+                f"evidence: {status}, {s} succeeded / {f} failed on tasks that read them):\n{e.value}")
+
     def search(self, query: str, top_k: int) -> list[MemoryHit]:
         cfg = RecallConfig(include_avoid=self.arm.evidence_aware, adaptive_k=self.arm.evidence_aware)
         extra: dict[str, Any] = {}
-        if self.arm.priors:
-            extra = {"include_priors": True, "candidate_actions": self.candidate_actions, "compact": True}
+        # Priors and the recommendation are asked for only when the task ends in a choice
+        # among a fixed set of actions (the terminal tool has an ``action`` enum) — the
+        # product's documented use. Grid v5 (2026-09-20) measured what asking anyway costs:
+        # on concierge, whose terminal tool proposes an option with no enum, the server still
+        # returned ``mode: act`` on 92% of episodes (top hit validated), and GPT-5.5 followed
+        # the top hit over the task's own constraints — 42% first-attempt failures against 6%
+        # for the same protocol without priors. Scenarios with an enum are unchanged.
+        if self.arm.priors and self.candidate_actions:
+            # On a retry the candidates are the actions not yet tried on this task: the
+            # actions already tried in this episode are known to fail here, and ``explore``
+            # picks one untried candidate per agent, so without this it would name the
+            # same one on every attempt. What a caller with a fixed action set would do.
+            cands = [c for c in self.candidate_actions if c.split(":", 1)[-1] not in self._tried_this_task]
+            extra = {"include_priors": True, "candidate_actions": cands or self.candidate_actions, "compact": True}
         self._footer, self.last_recommendation = None, None
         with self._timed():
             rows = self.mem.retrieve(query, entity_path=self.arm.scope,
@@ -381,6 +433,8 @@ class _SenseLabSession(EpisodeSession):
                 self.acct.notes["commit_error"] = str(e)[:300]
 
     def attempt_failed(self, attempt: int, severity: str, cited_keys: list[str], answer: str) -> None:
+        if answer:
+            self._tried_this_task.add(str(answer))
         if self.arm.attempt_boundaries and self.arm.learns_from_outcomes:
             # Local bookkeeping only: the boundary and the entries it blames leave with the
             # terminal commit_outcome, inside the same trace. Zero extra round trips.
@@ -744,3 +798,118 @@ class SenseLabComposeArm(SenseLabRepairArm):
     name = "senselab-compose"
     compose = True
     lever_override = "procedure"
+
+
+INDUCE_PROMPT = """You maintain the decision rules for an agent that repeatedly handles tasks of one kind on one system. Below is that agent's outcome record: for each past task, the task as it was posed, what the agent observed, the actions it attempted in order with the result of each, and the final outcome. Records are in time order, oldest first.
+
+Induce the smallest set of rules of the form "IF <conditions on the task or observations> THEN <action>" that best predicts success on the next task of this kind. Requirements:
+- Every rule is grounded in the record: give the count of successes and failures that support it.
+- Newer records outrank older ones. If an action that used to succeed on some kind of task has been failing on it recently, state the current rule, say that the old one no longer holds, and mark roughly where in the record it changed.
+- Where the record is insufficient, say which cases are uncertain and which actions have not been tried on them, so the agent can try those first.
+- Do not invent conditions the record cannot support. Prefer conditions the agent can check from the task text or its observations.
+
+Plain text, at most 12 rules, then a short "uncertain / untried" section. No preamble.
+
+OUTCOME RECORD ({n} tasks):
+{record}
+"""
+
+
+class SenseLabInduceArm(SenseLabArm):
+    """The ``senselab`` protocol plus rule induction from the outcome record.
+
+    Every ``induce_every`` episodes the arm reads the entity's decision traces — the task as
+    posed, the non-memory tool results, the terminal actions attempted with each result, the
+    outcome — and asks the model to induce conditional rules from them, written to one
+    versioned key (``INDUCED_RULES_KEY``). Each episode's briefing then opens with the current
+    rules, read by key, so the episode's outcome lands on the rules entry and its evidence
+    status (validated / contested / discredited) is shown next to them.
+
+    What this tests: grid v5 showed every memory arm — including ``senselab`` and
+    ``pgvector-diy+outcomes``, whose consolidation summarises the agent's *notes* with win/loss
+    tallies — plateauing at 0.55-0.65 first-attempt success on tasks whose answer is a
+    conditional rule over task attributes (retention: five rules over four fields). Retrieved
+    episodes and per-action priors are both marginal over the attributes; the rule has to be
+    induced, and the outcome record is the one place the evidence for it is complete and not
+    filtered by what the agent chose to write down. ``pgvector`` has no such record."""
+
+    name = "senselab-induce"
+    induces = True
+    induce_every = int(os.environ.get("CL_INDUCE_EVERY", "10"))
+    induce_window = 120     # traces read per induction (newest first from the API)
+
+    def open(self, scope: str) -> None:
+        super().open(scope)
+        self._inducer = AgentMemory(
+            agent_id=f"{scope.rsplit('/', 1)[-1][:40]}-inducer",
+            adapter=_ThrottledHttpAdapter(base_url=config.AMFS_HTTP_URL,
+                                          api_key=config.env("AMFS_API_KEY", required=True)),
+        )
+        self._terminal_tool: str | None = None
+
+    def after_episode(self, episode: int, llm) -> ArmAccounting | None:
+        if (episode + 1) % self.induce_every != 0:
+            return None
+        acct = ArmAccounting()
+        t0 = time.perf_counter()
+        try:
+            traces = self._inducer.list_traces(entity_path=self.scope, limit=self.induce_window)
+        except Exception as e:  # noqa: BLE001
+            acct.notes = {"induce_error": f"list_traces: {e}"[:200]}
+            return acct
+        rows = []
+        for t in reversed(list(traces)):       # oldest first
+            d = t.model_dump(mode="json") if hasattr(t, "model_dump") else dict(getattr(t, "__dict__", {}))
+            calls = d.get("tool_calls") or []
+            obs, attempts = [], []
+            for c in calls:
+                name = str(c.get("tool_name") or "")
+                if name in ("memory_search", "memory_write", "amfs_retrieve", "amfs_write") or not name:
+                    continue
+                args = c.get("arguments") or {}
+                res = str(c.get("result_summary") or "")
+                if isinstance(args, dict) and "action" in args:
+                    attempts.append(f"{args.get('action')} -> {res[:160]}")
+                else:
+                    obs.append(f"{name}({json.dumps(args, default=str)[:60]}): {res[:160]}")
+            if not attempts and d.get("response_text"):
+                attempts.append(f"{str(d['response_text'])[:60]} -> {d.get('outcome_type')}")
+            rows.append(
+                f"- task: {str(d.get('task_input') or '')[:320]}\n"
+                + (f"  observed: {' | '.join(obs)[:480]}\n" if obs else "")
+                + f"  attempts: {' ; '.join(attempts)[:600]}\n"
+                + f"  outcome: {d.get('outcome_type')}"
+            )
+        if len(rows) < 4:
+            acct.notes = {"induce_skipped": f"{len(rows)} traces"}
+            return acct
+        try:
+            text, usage = llm.complete_text(INDUCE_PROMPT.format(n=len(rows), record="\n".join(rows)), max_tokens=1100)
+        except Exception as e:  # noqa: BLE001
+            acct.notes = {"induce_error": f"llm: {e}"[:200]}
+            return acct
+        acct.extra_prompt_tokens += usage.prompt_tokens
+        acct.extra_completion_tokens += usage.completion_tokens
+        acct.extra_cost_usd += usage.cost_usd
+        text = (text or "").strip()
+        if not text:
+            acct.notes = {"induce_error": "empty"}
+            return acct
+        try:
+            self._inducer.write(self.scope, INDUCED_RULES_KEY,
+                                f"Induced at episode {episode + 1} from {len(rows)} recorded outcomes.\n{text}"[:6000],
+                                confidence=0.85, memory_type=MemoryType.FACT)
+        except Exception as e:  # noqa: BLE001
+            acct.notes = {"induce_error": f"write: {e}"[:200]}
+            return acct
+        acct.ops = 2
+        acct.memory_ms = (time.perf_counter() - t0) * 1000
+        acct.notes = {"induced_from": len(rows), "chars": len(text)}
+        return acct
+
+    def close(self) -> None:
+        try:
+            self._inducer.close()
+        except Exception:  # noqa: BLE001
+            pass
+        super().close()

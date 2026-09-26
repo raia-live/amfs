@@ -72,10 +72,28 @@ class Scenario:
     def __init__(self, seed: int, episodes: int, *, distractors: int = 0,
                  label_noise: float = 0.0, feedback_delay: int = 0, fleet: int = 0,
                  change_at: int = 0, change_focus: float = 0.0, fleet_mode: str = "rr",
-                 join_at: int = 0, **_: Any) -> None:
+                 join_at: int = 0, opaque_ids: bool = False, change_variant: str = "A",
+                 **_: Any) -> None:
         self.seed = seed
         self.episodes = episodes
         self.rng = random.Random(f"{self.name}-{seed}")
+        # Which regime change happens at ``change_at``. "A" is the scenario's original change
+        # set — the one every training trace in the distillation study contains. "B" changes
+        # different classes to different fixes, none of which appears as a (class, fix) pair
+        # anywhere in "A": a model fine-tuned on "A" traces has both of A's regimes in its
+        # weights and only needs memory to tell which one applies; under "B" nothing in the
+        # weights knows the new fix, so what it recovers after the change is what its memory
+        # gives it. Scenarios without a second change set ignore the value.
+        self.change_variant = change_variant
+        # Identifiers in task prompts (ticket numbers, PR numbers) drawn from the instance's
+        # own rng rather than counted up from the episode index. Counted identifiers encode
+        # the episode number, and with the regime change always at the same episode they
+        # encode the regime too: a model fine-tuned on traces of this benchmark learned
+        # "SUP-442x and up -> the new fix" and scored 0.81 on post-change tickets with no
+        # memory at all, where the frontier without memory scores 0.04. Found 2026-09-19 on
+        # the first distilled student. Off by default so studies already in flight keep
+        # their identifiers; every distillation cell turns it on.
+        self.opaque_ids = opaque_ids
         self.distractors = distractors
         self.label_noise = label_noise
         self.feedback_delay = feedback_delay

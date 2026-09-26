@@ -1,0 +1,14 @@
+[
+  {"alias": "ci-self-v3", "scenario": "ci-fix", "arm": "senselab",
+   "model": ["ci-sl-gpt55-v2", "ci-sl-gpt55-v2+notes=gpt-5.4-mini"], "parent": "ci-sl-gpt55-v2",
+   "seeds": [101, 113, 127], "runs": ["distill-main-ci-fix"], "cell_params": "-oid",
+   "family": "senselab-s1", "gate": "relaxed",
+   "serving": {"context_k": 3, "avoid_rows": true, "priors": true, "retrieval": "server", "fallback": false},
+   "note": "v3, self-retrained: trained on the v2 student's own sealed traces from its evaluation cells (S1 and S1n, seeds 101/113/127); no frontier model in the loop. Evaluated on seeds 131/137/149 against its parent."},
+  {"alias": "sup-self-v3", "scenario": "support", "arm": "senselab",
+   "model": ["sup-sl-gpt55-v2", "sup-sl-gpt55-v2+notes=gpt-5.4-mini"], "parent": "sup-sl-gpt55-v2",
+   "seeds": [101, 113, 127], "runs": ["distill-main2-support"], "cell_params": "-oid",
+   "family": "senselab-s1", "gate": "relaxed",
+   "serving": {"context_k": 3, "avoid_rows": true, "priors": true, "retrieval": "server", "fallback": false},
+   "note": "v3, self-retrained (support): same recipe as ci-self-v3."}
+]

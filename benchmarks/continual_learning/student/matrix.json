@@ -1,0 +1,151 @@
+[
+ {
+  "alias": "sup-base-s1",
+  "scenario": "support",
+  "arm": "senselab",
+  "model": "gpt-5.5",
+  "seeds": [
+   11,
+   23,
+   37,
+   41,
+   59,
+   73
+  ],
+  "runs": [
+   "gridv4-core-sl"
+  ],
+  "family": "senselab-s1",
+  "serve_base": true,
+  "gate": "relaxed",
+  "serving": {
+   "context_k": 3,
+   "avoid_rows": true,
+   "priors": true,
+   "retrieval": "server",
+   "fallback": false
+  }
+ },
+ {
+  "alias": "ci-base-s1",
+  "scenario": "ci-fix",
+  "arm": "senselab",
+  "model": "gpt-5.5",
+  "seeds": [
+   11,
+   23,
+   37,
+   41,
+   59,
+   73
+  ],
+  "runs": [
+   "gridv4-core-sl"
+  ],
+  "family": "senselab-s1",
+  "serve_base": true,
+  "gate": "relaxed"
+ },
+ {
+  "alias": "sup-sl-gpt55",
+  "scenario": "support",
+  "arm": "senselab",
+  "model": "gpt-5.5",
+  "seeds": [
+   11,
+   23,
+   37,
+   41,
+   59,
+   73
+  ],
+  "runs": [
+   "gridv4-core-sl"
+  ],
+  "family": "senselab-s1",
+  "gate": "relaxed",
+  "serving": {
+   "context_k": 3,
+   "avoid_rows": true,
+   "priors": true,
+   "retrieval": "server",
+   "fallback": false
+  }
+ },
+ {
+  "alias": "ci-sl-gpt55",
+  "scenario": "ci-fix",
+  "arm": "senselab",
+  "model": "gpt-5.5",
+  "seeds": [
+   11,
+   23,
+   37,
+   41,
+   59,
+   73
+  ],
+  "runs": [
+   "gridv4-core-sl"
+  ],
+  "family": "senselab-s1",
+  "gate": "relaxed"
+ },
+ {
+  "alias": "sup-sl-opus5",
+  "scenario": "support",
+  "arm": "senselab",
+  "model": "claude-opus-5",
+  "seeds": [
+   11,
+   23,
+   37,
+   41,
+   59,
+   73
+  ],
+  "runs": [
+   "gridv4-core-sl"
+  ],
+  "family": "senselab-s1",
+  "gate": "relaxed"
+ },
+ {
+  "alias": "ci-sl-opus5",
+  "scenario": "ci-fix",
+  "arm": "senselab",
+  "model": "claude-opus-5",
+  "seeds": [
+   11,
+   23,
+   37,
+   41,
+   59,
+   73
+  ],
+  "runs": [
+   "gridv4-core-sl"
+  ],
+  "family": "senselab-s1",
+  "gate": "relaxed"
+ },
+ {
+  "alias": "sup-nopriors-gpt55",
+  "scenario": "support",
+  "arm": "senselab-nopriors",
+  "model": "gpt-5.5",
+  "seeds": [
+   11,
+   23,
+   37,
+   41,
+   59,
+   73
+  ],
+  "runs": [
+   "gridv4-core-sl"
+  ],
+  "family": "senselab-s1",
+  "gate": "relaxed"
+ }
+]

@@ -29,8 +29,7 @@ from pathlib import Path
 from . import regime_change as rc
 
 RESULTS = rc.RESULTS
-ORDER = ["none", "pgvector", "pgvector-diy", "pgvector-diy+outcomes", "mem0", "senselab-nofeedback",
-         "senselab-nopriors", "senselab"]
+ORDER = rc.ARM_ORDER
 
 
 def load(prefix: str, kind: str) -> list[dict]:
@@ -42,13 +41,31 @@ def load(prefix: str, kind: str) -> list[dict]:
                 (x.get("reflection_usage") or {}).get(k, 0) for k in ("prompt_tokens", "completion_tokens"))
             x["flags"] = x.get("flags") or {}
             x["tags"] = x.get("tags") or {}
+            x["infra"] = rc.is_infra(x.get("error"))
+            if x["infra"] and not x.get("attempts"):
+                continue   # no attempt reached: see regime_change.DROPPED_NO_ATTEMPT
+            if ARM_FILTER and x["arm"] not in ARM_FILTER:
+                continue   # --paper: arms outside the paper's set are not read
             rows.append(x)
     return rows
 
 
+#: ``--paper``: only these arms are read (None = all).
+ARM_FILTER: list[str] | None = None
+
+
 def arms(rows) -> list[str]:
-    seen = {x["arm"] for x in rows}
-    return [a for a in ORDER if a in seen] + sorted(a for a in seen if a not in ORDER)
+    return rc.order_arms(x["arm"] for x in rows)
+
+
+def infra(rows) -> float:
+    """Share of rows whose ``error`` is an infrastructure failure (see regime_change.INFRA_RE)."""
+    return rc.infra_rate(rows)
+
+
+def excl(rows, field: str = "first_attempt_success"):
+    """Rate of ``field`` over the rows without an infrastructure error."""
+    return rc.success_excl(rows, field)
 
 
 def label(a: str) -> str:
@@ -101,14 +118,35 @@ def slope(cell_rows, start: int) -> float | None:
 
 
 def main() -> None:
-    prefix = sys.argv[sys.argv.index("--runs") + 1] if "--runs" in sys.argv else "gridv3"
-    out_dir = RESULTS / f"{prefix}-report"
+    global ARM_FILTER
+    if "--paper" in sys.argv:
+        from . import paper_sources
+        paper_sources.configure()
+        prefix, out_dir = paper_sources.FAMILY_PREFIX, paper_sources.OUT
+        ARM_FILTER = list(paper_sources.PAPER_ARMS)
+    else:
+        prefix = sys.argv[sys.argv.index("--runs") + 1] if "--runs" in sys.argv else "gridv3"
+        out_dir = RESULTS / f"{prefix}-report"
     out_dir.mkdir(parents=True, exist_ok=True)
     probes = load(prefix, "probes")
     long = load(prefix, "long")
     md: list[str] = [f"# {prefix}: proof points — what a retrieval layer cannot do\n",
                      f"Probe episodes loaded: {len(probes)}; long-horizon episodes loaded: {len(long)}.\n"]
     mean, table, boot_ci = rc.mean, rc.table, rc.boot_ci
+
+    # ---- 0. infrastructure errors ------------------------------------------------------
+    md.append("## 0. Infrastructure errors by arm x scenario\n")
+    md.append("`infra_err` = share of episodes whose `error` is an infrastructure failure (timeout / connection / 5xx "
+              "from a hosted service). Such episodes stay in every table below; each table also carries the "
+              "first-attempt rate excluding them (`excl. infra`).\n")
+    both = probes + long
+    scen_all = rc.order_scenarios(x["scenario"] for x in both)
+    lines = []
+    for a in arms(both):
+        r_all = sel(both, arm=a)
+        cells_ = [infra(sel(r_all, scenario=s)) if sel(r_all, scenario=s) else "-" for s in scen_all]
+        lines.append([label(a), *cells_, infra(r_all), mean(x["first_attempt_success"] for x in r_all), excl(r_all)])
+    md.append(table(["arm", *scen_all, "all", "1st-attempt", "1st-attempt excl. infra"], lines) + "\n")
 
     # ---- A. runbook ----------------------------------------------------------------
     md.append("## A. runbook: two near-tie procedures, one causes an outage\n")
@@ -127,11 +165,13 @@ def main() -> None:
         blocks = [mean(x["first_attempt_success"] for x in r if x["episode"] // 5 == k) for k in range(4)]
         bad = [mean(x["flags"].get("wrong_guidance", False) for x in r if x["episode"] // 5 == k) for k in range(4)]
         lines.append([label(a), len(r), f"{mean(x['first_attempt_success'] for x in r)} [{lo:.2f},{hi:.2f}]",
+                      excl(r), infra(r),
                       *blocks, f"{len(got)}/{len(cs)}", st.median(got) if got else "-",
                       f"{bad[0]} -> {bad[3]}", mean(x["escalated"] for x in r),
                       cross_seed_std(r), mean(rc.flip_rate(v) for v in cs.values())])
-    md.append(table(["arm", "n", "1st-attempt [95% CI]", "ep 0-4", "5-9", "10-14", "15-19",
-                     "cells converged (5 in a row)", "median converge ep", "followed the outage procedure ep0-4 -> 15-19",
+    md.append(table(["arm", "n", "1st-attempt [95% CI]", "1st-attempt excl. infra", "infra_err", "ep 0-4", "5-9",
+                     "10-14", "15-19", "cells converged (5 in a row)", "median converge ep",
+                     "followed the outage procedure ep0-4 -> 15-19",
                      "escalated", "cross-seed std (ep 5+)", "flip rate"], lines) + "\n")
 
     # ---- B. unknowns ------------------------------------------------------------------
@@ -148,10 +188,11 @@ def main() -> None:
         lines.append([label(a), len(unk), mean(x["flags"].get("abstained_correctly", False) for x in unk),
                       mean(x["flags"].get("hallucinated", False) for x in unk),
                       mean(x["flags"].get("hallucinated", False) for x in unk if x["episode"] >= 10),
-                      len(known), mean(x["first_attempt_success"] for x in known),
-                      mean(x["flags"].get("unnecessary_escalation", False) for x in known)])
+                      len(known), mean(x["first_attempt_success"] for x in known), excl(known),
+                      mean(x["flags"].get("unnecessary_escalation", False) for x in known), infra(r)])
     md.append(table(["arm", "no-runbook tasks", "escalated correctly", "hallucinated a deploy",
-                     "...ep 10+", "runbook tasks", "1st-attempt", "unnecessary escalation"], lines) + "\n")
+                     "...ep 10+", "runbook tasks", "1st-attempt", "1st-attempt excl. infra", "unnecessary escalation",
+                     "infra_err"], lines) + "\n")
 
     # ---- C. handoff -------------------------------------------------------------------
     md.append("## C. handoff: a new agent inherits eight findings, one of them wrong\n")
@@ -172,9 +213,11 @@ def main() -> None:
         lines.append([label(a), len(pois), mean(x["flags"].get("poisoned_follow", False) for x in first),
                       mean(x["flags"].get("poisoned_follow", False) for x in later) if later else "-",
                       mean(x["first_attempt_success"] for x in pois),
-                      len(good), mean(x["first_attempt_success"] for x in good), mean(x["escalated"] for x in r)])
+                      len(good), mean(x["first_attempt_success"] for x in good), excl(good),
+                      mean(x["escalated"] for x in r), infra(r)])
     md.append(table(["arm", "poisoned tasks", "followed the poison: 1st exposure", "...later exposures",
-                     "1st-attempt on poisoned", "clean tasks", "1st-attempt on clean", "escalated"], lines) + "\n")
+                     "1st-attempt on poisoned", "clean tasks", "1st-attempt on clean", "1st-attempt on clean excl. infra",
+                     "escalated", "infra_err"], lines) + "\n")
 
     # ---- D. drift ---------------------------------------------------------------------
     for scen, what in (("drift-fact", "an operational fact changes at episode 8"),
@@ -189,11 +232,12 @@ def main() -> None:
             post = [x for x in r if x["tags"].get("post_drift")]
             blocks = [mean(x["first_attempt_success"] for x in post if (x["episode"] - 8) // 4 == k) for k in range(3)]
             lines.append([label(a), len(pre), mean(x["first_attempt_success"] for x in pre), len(post),
-                          mean(x["first_attempt_success"] for x in post), *blocks,
+                          mean(x["first_attempt_success"] for x in post), excl(post), infra(r), *blocks,
                           mean(x["flags"].get("stale_pick", False) for x in post),
                           mean(x["escalated"] for x in post), mean(x["attempts"] for x in post)])
-        md.append(table(["arm", "pre n", "pre 1st", "post n", "post 1st", "ep 8-11", "12-15", "16-19",
-                         "stale follow (post)", "escalated (post)", "attempts (post)"], lines) + "\n")
+        md.append(table(["arm", "pre n", "pre 1st", "post n", "post 1st", "post 1st excl. infra", "infra_err",
+                         "ep 8-11", "12-15", "16-19", "stale follow (post)", "escalated (post)", "attempts (post)"],
+                        lines) + "\n")
 
     # ---- E. long horizon ----------------------------------------------------------------
     md.append("## E. Long horizon: 120 episodes, no regime change (support, diagnose; 300 distractors)\n")
@@ -211,11 +255,45 @@ def main() -> None:
             toks = [f"{mean((x['tokens'] for x in r if x['episode'] // 20 == k), 0):.0f}" for k in (0, 5)]
             sl = [s for s in (slope(v, 20) for v in cells(r).values()) if s is not None]
             lo, hi = boot_ci({str(i): [100 * s] for i, s in enumerate(sl)}) if sl else (float("nan"), float("nan"))
-            lines.append([label(a), len(r), *blocks, f"{100 * mean(sl, 4):+.2f} [{lo:+.2f},{hi:+.2f}]" if sl else "-",
+            lines.append([label(a), len(r), mean(x["first_attempt_success"] for x in r), excl(r), infra(r), *blocks,
+                          f"{100 * mean(sl, 4):+.2f} [{lo:+.2f},{hi:+.2f}]" if sl else "-",
                           mean(x["escalated"] for x in r if x["episode"] >= 100), f"{toks[0]} -> {toks[1]}"])
-        md.append(table(["arm", "n", "ep 0-19", "20-39", "40-59", "60-79", "80-99", "100-119",
+        md.append(table(["arm", "n", "1st-attempt", "1st-attempt excl. infra", "infra_err", "ep 0-19", "20-39",
+                         "40-59", "60-79", "80-99", "100-119",
                          "slope ep 20-119 (pts / 100 ep) [95% CI]", "escalated ep 100+", "tok/ep ep0-19 -> 100-119"],
                         lines) + "\n")
+
+    # ---- F. sensitivity sweeps (runbook) ---------------------------------------------------
+    sweeps = load(prefix, "sweep")
+    if sweeps:
+        # The clean runbook probe cells (0 distractors, no noise, no delay) are the baseline point on
+        # every axis; sweep cells vary exactly one knob. Seeds are restricted to those the sweeps ran.
+        seeds = {x["seed"] for x in sweeps}
+        base = [x for x in probes if x["scenario"] == "runbook" and x["seed"] in seeds
+                and x.get("distractors", 0) == 0 and not x.get("label_noise") and not x.get("feedback_delay")]
+        sweep_arms = arms(sweeps)
+        md.append("## F. Sensitivity: runbook probe under distractor volume, label noise and feedback delay\n")
+        md.append(f"Seeds {sorted(seeds)}; 20 episodes per cell; the 0 / 0.0 / 0 column is the clean probe cell "
+                  "of section A restricted to the same seeds. Label noise flips that share of outcome labels "
+                  "before they reach the memory layer; feedback delay withholds the outcome for that many "
+                  "episodes. A layer whose gain depends on clean, immediate labels loses it here.\n")
+        axes_ = (("distractors", "distractors", lambda x: x.get("distractors", 0)),
+                 ("label noise", "label_noise", lambda x: round(x.get("label_noise") or 0.0, 2)),
+                 ("feedback delay (episodes)", "feedback_delay", lambda x: x.get("feedback_delay") or 0))
+        for title, field, val in axes_:
+            on_axis = [x for x in sweeps if val(x) != val({}) and all(
+                v(x) == v({}) for _, f, v in axes_ if f != field)]
+            levels = sorted({val(x) for x in on_axis} | {val({})})
+            md.append(f"### F.{field}: first-attempt success (n) and tokens/episode by level\n")
+            lines = []
+            for a in sweep_arms:
+                cells_ = []
+                for lv in levels:
+                    r = [x for x in (base if lv == val({}) else on_axis) if x["arm"] == a and val(x) == lv]
+                    cells_.append(f"{mean(x['first_attempt_success'] for x in r):.2f} ({len(r)}) "
+                                  f"{mean(x['tokens'] for x in r):.0f}t" if r else "-")
+                lines.append([label(a), *cells_])
+            md.append(table(["arm", *[f"{title} = {lv}" for lv in levels]], lines) + "\n")
 
     (out_dir / "PROOF_POINTS.md").write_text("\n".join(md))
     print("\n".join(md))

@@ -1,0 +1,1130 @@
+\documentclass[11pt]{article}
+
+\usepackage{geometry}
+\geometry{letterpaper, margin=1in}
+\usepackage{graphicx}
+\graphicspath{{./}{../results/distill-report/}}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage[hidelinks]{hyperref}
+
+\captionsetup{font=small, labelfont=bf}
+% Identifiers set in \texttt cannot hyphenate; let those lines stretch rather than overrun.
+\setlength{\emergencystretch}{2.5em}
+\newcommand{\ci}[2]{\,[#1,\,#2]}
+\newcommand{\arm}[1]{\texttt{#1}}
+\newcommand{\cond}[1]{\textsf{#1}}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.12}
+
+\title{\vspace{-2.2em}\bfseries Experience in the weights:\\[0.2em]
+\large distilling a frontier agent's continual-learning memory into a small model,\\
+and what the memory still does at inference}
+
+\author{SenseLab\\[0.3em]\normalsize\url{https://sense-lab.ai}}
+\date{September 2026}
+
+\begin{document}
+\maketitle
+\vspace{-1.2em}
+
+\begin{abstract}
+\noindent
+% Framing rule for every prose slot (abstract, results, novel, self, conclusion): lead with the
+% frontier agent on SenseLab (F1 over F0) as the first step and the source of the student; present
+% the Managed Model as the later cost/robustness step for a frequent decision, served with the same
+% memory, with the frontier staying in the loop as teacher and fallback. Never 'replaces the frontier'.
+% Never name the student's base model: 'SenseLab-tuned Managed Model'.
+% Voice: a research team writing plainly. No em dashes (use commas, colons, parentheses or a new
+% sentence); no 'not X, but Y' / 'not just X' / 'Y rather than X' parallelisms; no rule-of-three
+% flourishes; no bold inline headers in lists; no puffery (persuasive, decisive, crucial, robust,
+% highlight, underscore, showcase, enhance, leverage, foster, landscape, testament); prefer 'is'/'are'
+% to 'serves as'/'represents'; say 'we' and hedge where we are unsure.
+We ran the pipeline WikiSkill describes, with one change at the end: the skill layer is a
+model. Two frontier agents (gpt-5.5 and claude-opus-5) worked two operations scenarios, a
+support desk and a CI-fix queue, for 60 episodes each on a memory layer whose entries gain or
+lose confidence with the outcomes of the decisions that read them, through a regime change at
+episode 20 where the right fix for some task classes silently changes. Memory is worth a lot
+to the frontier on its own: 0.12 more success and 0.19 more first-try success than the same
+agent with no memory, most of it after the change. We then trained SenseLab-tuned Managed
+Models on the frontier's sealed decision traces, one per scenario and teacher, and served them
+through a gateway that retrieves from the memory the teacher built. Under the change the
+teacher lived through, the student with memory reaches 0.94 and 0.92 success where the
+frontier with memory reaches 0.84 and 0.82, at about one fortieth of the list price per solved
+task. Under a change no training trace contains, the student matches the frontier on success
+within noise and recovers about seven tenths of the frontier's first-try gain from memory.
+Memory still does work at inference for a tuned model: switching it off costs 0.26 first-try
+success after the change, and serving the context without the outcome record costs 0.24. A
+skill file maintained the WikiSkill way, with a validation gate, sits 0.10 below the memory
+layer after the change and costs more per solved task than the frontier on memory. A student
+trained on its own traces, with no frontier in the loop, improves on its parent. The order
+matters: the frontier agent on memory is where an account starts and what produces every
+trace; the tuned model is a later step for a decision that has volume, and the frontier stays
+in the loop as teacher and fallback.
+\end{abstract}
+
+\section{The question}
+
+WikiSkill~\cite{wikiskill} argues that an agent's experience should live in three layers: the
+raw record of what happened, a curated body of knowledge, and a procedural skill file the
+agent reads before every task. The paper shows a frontier model carrying its task
+performance forward through the skill file alone. The skill layer is text, and the model
+that reads it is the same frontier model that produced the experience, at the same price per
+token, for every task.
+
+We wanted to know what happens one step further on. A frontier agent running on a
+continual-learning memory layer accumulates more than a skill file. Its store carries
+entries whose confidence goes up or down with the outcomes of the decisions that read them,
+an action record that says which of the available actions worked here and which did not,
+and a sealed decision trace for every task (the request, what was retrieved, what the agent
+did, how it turned out). That trace is a supervised example. So: can the experience a
+frontier agent accumulates be distilled into a model an order of magnitude smaller, how
+close does that student come to the frontier agent it learned from, and once the experience
+is in the weights, does the memory layer still do anything useful at inference?
+
+SenseLab already keeps the three layers. Decision traces are the raw layer; the memory,
+with its outcome-reinforced confidence and action record, is the wiki; and \emph{Managed
+Models}, tuned on the account's own traces and served through an inference gateway that
+retrieves from the same memory the teacher used, are the skill layer in weights. This paper
+is that pipeline run end to end on a benchmark whose ground truth we control, with the
+frontier teacher measured on the same held-out seeds, under the same harness, at the same
+list prices. The study is preregistered~\cite{prereg-distill}. The harness, the training
+matrix, the dataset snapshots and every per-episode record are published with it.
+
+\paragraph{The order of operations.} Nothing here starts with a small model. The first
+step, and the one every account takes, is a frontier agent running on the memory layer.
+That is where we measure what memory is worth to a frontier agent (\cond{F1} against
+\cond{F0} in \S\ref{sec:results}), and it is also the step that produces everything a
+student is made of: the sealed traces are its training set, and the store it is later
+served from was built by the frontier agent's reads, writes and outcomes. Distillation comes
+after that store exists, once some decision has become frequent enough that its cost
+matters. At that point the frontier agent has learned the job on SenseLab, and a Managed
+Model is trained to make that one decision at a fraction of the price, served with the same
+memory. The frontier does not leave the loop. It is still the teacher for the next scenario
+and the next regime, it still handles every task outside a student's scope, and the gateway
+can route an unusable student answer back to it (we switched that off here so that a
+student's failures are its own). What we are asking is how much of the frontier agent's
+experience survives the hand-off, and what the memory still does for the student afterwards.
+
+\section{What is being compared}
+\label{sec:conditions}
+
+\paragraph{The benchmark.} We reuse the continual-learning benchmark of our companion
+study~\cite{memory-not-learning}. An operations agent works a stream of tasks that never
+repeat exactly (support tickets, CI failures) against a store pre-loaded with 300 realistic
+distractor notes, in a world whose rules change at episode 20, when half the task classes
+acquire a new correct action. Sixty episodes, run both as a single agent and as a fleet of
+six sharing one store, with a retry budget of three. Every result below is on three seeds
+that no teacher cell used. Task identifiers (ticket and PR numbers) are drawn at random per
+task; \S\ref{sec:leak} explains why we have to say so.
+
+\paragraph{Metrics.} \emph{Success} means the task was solved within the retry budget;
+\emph{first-try} means it was solved on the first attempt; \emph{escalated} means the
+budget was spent without a solution. The budget matters for how the numbers read. An agent
+that knows the handful of plausible fixes for a task class can reach the right one on a
+second attempt with no memory at all, so success saturates for such an agent. What memory
+buys then shows up as first-try success (the decision made before any feedback) and as
+fewer attempts per solved task. We report both everywhere and give the paired tests on both.
+
+\paragraph{Teachers.} \cond{F1} is a frontier model (GPT-5.5 or Claude Opus 5) running the
+full tool loop on the SenseLab arm: a briefing, retrieval with the outcome record, domain
+and diagnostic tools, a reflection note after each episode, and an outcome commit that
+credits the memories it read. \cond{F0} is the same model with no memory. The teacher grid
+produced 720 sealed traces per (scenario, teacher model), of which 81 to 87\% are successes;
+the rest are labelled failures with the failing attempt marked.
+
+\paragraph{Students.} A student is a SenseLab Managed Model of the \arm{senselab-s1}
+family: a small model that SenseLab fine-tunes through its own pipeline on the traces of one
+teacher's cells, and on nothing else in the account. Scoping is by the cells' memory paths
+(\S\ref{sec:method}). A training row is what the product's renderer produced for the
+teacher: the task, the memory context the teacher saw, the actions already tried in that
+task and how they fared, and the outcome record's recommendation. The target is the
+teacher's last consequential action. The student is served by the inference gateway, which
+retrieves from the \emph{evaluation} cell's own store, renders the same prompt shape, and
+seals the decision as a trace. One action per call. We trained ten students. For each
+scenario there is a GPT-5.5 student and a Claude Opus 5 student, each in two generations:
+\emph{v1} on the teacher grid of the companion study and \emph{v2} on a fresh teacher grid
+run after the fix in \S\ref{sec:leak}. For the support scenario there is also a student of a
+teacher that was served without action priors. We treat the generations as replicates;
+every student was evaluated on the same held-out seeds.
+
+\paragraph{Decision mode.} The student never runs the tool loop. The harness puts the task
+to the gateway, an action comes back, and the environment executes it. A failed attempt goes
+back as a failed tool result, which the gateway renders as \emph{Tried in this task}, the
+same shape a fail-then-succeed teacher trace was trained on. Diagnostic tools are not
+available, so a diagnostic answer counts as a failed attempt. The student writes no
+reflection of its own.
+
+\paragraph{Conditions.} Table~\ref{tab:conditions} defines them. The letter says whose
+weights answer. \cond{F} is the frontier model running the full agent loop; \cond{D} is the
+frontier model answering the student's rendered prompt in one shot; \cond{S} is the
+\emph{student}, the SenseLab Managed Model fine-tuned on the teacher's traces; \cond{B} is
+the same Managed Model before tuning. The digit says whether SenseLab is live at inference:
+under \cond{1} the condition reads from and writes to a memory store that fills over the
+run, under \cond{0} the store is empty and nothing is served. A suffix narrows what the live
+store serves to the student.
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{llp{8.2cm}}
+\toprule
+id & whose weights & memory at inference, and what the condition isolates \\
+\midrule
+\cond{F1} & frontier, full agent loop & SenseLab live; the teacher on held-out seeds (the bar) \\
+\cond{F0} & frontier, full agent loop & no memory \\
+\cond{D1} & frontier, one shot & the student's rendered prompt, SenseLab live; the prompt's worth \\
+\cond{D0} & frontier, one shot & the student's rendered prompt, empty store \\
+\cond{S1} & SenseLab-tuned Managed Model & SenseLab live: context, avoid rows, action priors; the claim \\
+\cond{S1n} & SenseLab-tuned Managed Model & \cond{S1} plus a GPT-5.4-mini note-writer after each episode \\
+\cond{S1p} & SenseLab-tuned Managed Model & context only, no avoid rows, no priors \\
+\cond{S1k} & SenseLab-tuned Managed Model & store present, nothing served; the weights alone \\
+\cond{S0} & SenseLab-tuned Managed Model & empty store; the weights alone \\
+\cond{B1} & Managed Model base, untuned & SenseLab live on the same prompt; what tuning added \\
+\bottomrule
+\end{tabular}
+\caption{Conditions. Every condition runs the same scenarios, seeds, episodes, regime change,
+distractor load and retry budget; students and controls run in decision mode.}
+\label{tab:conditions}
+\end{table}
+
+In more detail:
+
+\begin{itemize}[leftmargin=1.6em, itemsep=0.15em]
+\item \cond{S1} is the SenseLab-tuned Managed Model, served by the inference gateway with
+  the full memory it was trained to read: retrieved context, avoid rows for entries that
+  have been discredited here, and the action record with its recommendation. The memory is
+  the evaluation cell's own. It starts empty and is written by the outcomes the harness
+  commits, the same way the teacher's was. This is the condition the paper is about.
+\item \cond{S0} is the same tuned weights with an empty store, so nothing is retrieved.
+  Everything \cond{S0} knows is in the weights. \cond{S1}$-$\cond{S0} is what the memory is
+  worth at inference on top of the experience already distilled.
+\item \cond{S1k} is the tuned weights with the store present and written to, and nothing
+  served (a context of zero entries). It checks that \cond{S0} is not an artefact of the
+  empty store.
+\item \cond{S1p} is the tuned weights served the memory context without the outcome record
+  (no avoid rows, no action priors). \cond{S1}$-$\cond{S1p} is what the outcome record adds.
+\item \cond{S1n} is \cond{S1} plus a cheap note-writer (GPT-5.4-mini) that reflects after
+  each episode, so the store keeps learning from the student's own outcomes the way the
+  teacher's did from its reflections.
+\item \cond{B1} is the Managed Model's base weights before tuning, on the identical served
+  prompt with live memory. \cond{S1}$-$\cond{B1} is what tuning added.
+\item \cond{F1} and \cond{F0} are the frontier teacher (GPT-5.5 or Claude Opus 5) running
+  the full tool loop, with SenseLab live (\cond{F1}, the bar we measure the student against)
+  and with no memory (\cond{F0}).
+\item \cond{D1} and \cond{D0} are the frontier model given the identical rendered prompt the
+  student receives (the gateway's \texttt{render\_only} mode returns the bytes and sends
+  nothing upstream), with live memory (\cond{D1}) and on an empty store (\cond{D0}).
+  \cond{D1}$-$\cond{S1} is what the frontier's weights add to the same prompt, and
+  \cond{F1}$-$\cond{D1} is what the tool loop and the agent's own reflection add.
+\end{itemize}
+
+\paragraph{A skill-file arm.} To put the WikiSkill design on the same axes we add
+\arm{skillfile}, a small but faithful implementation. It keeps raw episode records. A
+maintainer call every five episodes folds them into a wiki (\texttt{patterns.md}). A
+proposer drafts \texttt{SKILL.md} from the wiki, the current file and the impact log, and
+the draft is accepted only if a validation replay on regenerated instances (another seed,
+same regime) does at least as well as the current file, and strictly better when one
+exists. The file is prepended to the system prompt; the arm has no memory tools. Its
+maintainer, proposer and validation calls are charged to the arm. Every episode is also
+sealed as a SenseLab trace, so the skill-file agent can be a teacher too (\cond{K1} is the
+arm, \cond{K0} its student).
+
+\section{Method}
+\label{sec:method}
+
+\paragraph{Scoping a student to a teacher.} A Managed Model learns from the account's traces
+that fall in its scope. The harness names each cell's memory by a path unique to the cell
+(\path{clbench/support-senselab-gpt-5-5-s11-...}). Every trace the cell seals carries that
+path on the entries it read and, since this study, as a trace attribute. A student's scope
+is the list of its teacher cells' paths (\texttt{entity\_prefix}, a \texttt{|}-separated
+list, matched exactly or as a parent). We checked the predicate against the production
+store before training: for the v1 students, whose teacher traces predate the scope attribute, the predicate selected 632 to 696 of each teacher's 660 to 720 sealed traces (the rest are episodes in which the agent read nothing, so no entry carried the cell's path); for the v2 students, whose traces carry the scope as an attribute, 705 to 720 of 720. Every selected trace had a target call and an outcome, and the product's readiness check found 8 task shapes and a positive share of 0.74 to 0.90 in every scope.
+
+\paragraph{What a training row contains.} The renderer that builds training rows is the
+renderer that serves. A row has the task text; up to three memory entries with their
+evidence status; the actions already tried in this task with their result; the action
+record's recommendation when one exists; and the target, the last non-exploratory tool call
+as a JSON object. Fail-then-succeed traces yield a row per attempt boundary, so the student
+sees ``tried X, failed'' and then the teacher's next choice. Rows are split 70/15/15 into
+tuning, tuning-validation and a held-out evaluation set that the product scores every
+version on: tool agreement, decision agreement (tool plus the action argument), exact
+argument agreement, parse rate, failure reproduction, and stability under rewording. We
+publish the dataset hashes and the rows themselves.
+
+\paragraph{The gate.} The product refuses to promote a version that fails its default bars
+(tool agreement $\geq 0.75$, exact agreement $\geq 0.45$, parse rate $\geq 0.90$). A student
+that fails the gate is a finding in itself, so the study promotes under relaxed bars and
+reports the default verdict beside every student.
+
+\paragraph{Serving.} Per-model serving options fix what the prompt contains: context
+entries, avoid rows, priors, the retrieval path, and whether an unusable answer falls back
+to a frontier model. Fallback is off for every student here, so a student's failures are
+its own. The ablations \cond{S1p} and \cond{S1k} are the same weights served narrower
+through a per-request option the gateway only honours in the tightening direction.
+
+\paragraph{Reading an answer.} Decision-mode answers are one JSON object naming a tool and
+its arguments. The untuned base tends to write the decision key where the tool name goes
+(\texttt{resolve:escalate\_tier2}), or the bare action (\texttt{refund}). The harness reads
+both as the terminal tool with that action, for every condition that answers in this form,
+so a model is graded on the decision it made and not on where it put the colon. A
+diagnostic tool named in place of a decision (\texttt{get\_pr\_commits}) stays what it is: a
+non-terminal answer, counted as a failed attempt.
+
+\paragraph{Cost.} We use list prices for every model (\S\ref{sec:cost}) and report the
+provider cost SenseLab pays for a student separately. The note-writer's calls and the
+skill-file arm's maintenance calls are charged to their conditions.
+
+\subsection{A shortcut the first student found, and the fix}
+\label{sec:leak}
+
+The first student we trained scored 0.81 post-change success on the changed task classes with no memory at all (a store it had never written to and read nothing from), where the frontier model without memory scores 0.04. Nothing in the weights should know that the world changed at episode 20. Something did. The benchmark's ticket and PR numbers were counted from the episode index (\texttt{SUP-4400+ep}, \texttt{PR \#3000+7ep+seed}), and since the regime change always falls at the same episode, the identifier encoded the regime. The student had learned ``\texttt{SUP-442x} and up means the new fix'' from six seeds of teacher traces. No memory layer is needed for that shortcut, and no human agent could use it.
+
+The fix is a scenario flag (\texttt{opaque\_ids}) that draws identifiers from the task instance's own random stream. Every distillation cell runs with it. Every run before the fix is archived under a \texttt{leaky-} prefix and appears in no table of this paper. The v1 students keep the weights they learned from counted identifiers and are evaluated where the shortcut cannot fire; the v2 students were trained on a fresh teacher grid run on the fixed scenario, so the two generations differ only in whether the artefact was in their training data. We report the episode because a distillation pipeline will find this kind of thing in any benchmark whose surface form correlates with its hidden state, and because a memory paper that had missed it would have credited the memory with the student's clairvoyance.
+
+\subsection{A change the weights have never seen}
+\label{sec:novel-method}
+
+Under the benchmark's regime change, every post-change (task class, correct action) pair occurs in the students' training traces: the teachers lived through the change, and their traces from episodes 20 to 60 show the new fix winning. A student trained on those traces carries both regimes in its weights. What it needs memory for is to tell which regime the current task is in, and as \S\ref{sec:results} shows, a retry budget of three lets it find out by trying. That makes the trained-on change a weak test of memory at inference.
+
+So we added a second change set, B, and ran the students under it with nothing retrained. B changes classes that A leaves alone (three of eight in support, two of eight in CI) to actions that no A episode ever pairs them with, following A's own design: in support, two quirk-to-quirk changes and one change to the textbook answer; in CI, one quirk-to-textbook and one textbook-to-quirk change. The pre-change world is identical to A's. Under B nothing in a student's weights knows the new fix, so whatever it recovers after episode 20 is what its memory gives it. We wrote the preregistration's amendment (H8) when 77 frontier and 17 student episodes of the B grid existed and no student-with-memory rows. It predicts that \cond{S0}'s first-try success on the changed classes after the change falls to \cond{F0}'s, and that \cond{S1} recovers above \cond{S0} by at least the gap measured under A.
+
+\section{Results}
+\label{sec:results}
+
+Tables~\ref{tab:res1} and \ref{tab:res2} give every condition on the
+held-out seeds (101, 113, 127; fleets of 1 and 6; 60 episodes; models pooled per condition),
+and Tables~\ref{tab:hyp} and \ref{tab:hyp-first} give the paired deltas the
+hypotheses are stated in, over all episodes, before the change, and after it.
+
+Step one is the frontier on memory. \cond{F1} over \cond{F0} is $+0.12$ success and $+0.19$
+first-try success over the run; before the change the two are level on success and memory
+already adds $0.11$ first-try, after it memory adds $0.19$ success and $0.23$ first-try. On
+the changed support classes the frontier without memory recovers to 0.04; with memory it
+reaches 0.55. That gain comes with no training and nothing changed in the agent beyond the
+memory tools, and every trace a student learns from below was sealed while it was being
+earned.
+
+The students learned the job. \cond{S1}, the SenseLab-tuned Managed Model served with the
+same memory, is at 0.94 success on CI-fix and 0.92 on support, against 0.84 and 0.82 for
+the frontier on memory, and it escalates a third as often. Paired by task, \cond{S1} is
+$+0.22$ over \cond{F0} where the teacher's own gain was $+0.12$ (H1 holds with room to
+spare), at \$0.0014 per solved task against \$0.061 for \cond{F1} at list prices. We are
+careful about what this says: under change set A the students' training traces contain both
+regimes, so a student knows the post-change fixes in its weights and the frontier has to
+learn them from memory during the run. \S\ref{sec:novel} takes that advantage away.
+
+Memory does work at inference even so. \cond{S1} over \cond{S0} is $+0.05$ success and
+$+0.12$ first-try; split around the change it is $-0.03$ and $-0.15$ before, $+0.09$ and
+$+0.26$ after (H2). \cond{S1k}, which has a store present but is served nothing, is
+indistinguishable from \cond{S0}, so the effect is the served context and not the presence
+of the store. Serving the context without the outcome record (\cond{S1p}, no avoid rows and
+no priors) gives back most of that: \cond{S1} over \cond{S1p} is $+0.24$ first-try after the
+change (H3). The pre-change numbers are a real cost and we report them as such: on a young
+store, before any outcome has been committed, the avoid rows and priors point at the wrong
+things often enough to lose 0.15 first-try success. Table~\ref{tab:per-student} shows the same
+shape for all ten students; the gpt-5.5 students pay more before the change than the
+claude-opus-5 students and gain about the same after it.
+
+The prompt is not the whole story. The frontier answering the student's exact served prompt
+(\cond{D1}) is $0.13$ success below the student (H4), so the weights carry something the
+prompt does not, and the full tool loop with the agent's own reflection (\cond{F1} over
+\cond{D1}) adds $0.03$ success and $0.12$ first-try, most of it before the change. The
+frontier in decision mode with an empty store (\cond{D0}) escalated every task and is not a
+usable control; we say more in the threats. A cheap note-writer reflecting after each
+student episode (\cond{S1n}) did not help ($-0.02$, H5 falsified) and costs two and a half
+times as much. The tuning is what made the student competent: the untuned
+base behind the same prompt (\cond{B1}) is $0.49$ success below \cond{S1} (H6).
+
+The skill file (\cond{K1}, the frontier reading a SKILL.md that a maintainer, a proposer and
+a validation gate rebuild every five episodes) is level with the memory layer before the
+change and $0.10$ below it on the changed classes after it (H7). On CI-fix it lands exactly
+on the frontier with no memory: 714 of 720 tasks end the same way. The impact logs say why:
+after the change, the proposer's new drafts tie the current file on the four-episode
+validation replay and the gate rolls them back, so the file never learns the new fixes. The
+gate is also where the money goes. Counting the maintainer, the proposer and the two replays
+per checkpoint, \cond{K1} costs \$0.087 per solved task, above the frontier on memory.
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrr}
+\toprule
+\textbf{condition} & \textbf{n} & \textbf{success} & \textbf{first-try} & \textbf{escalated} & \textbf{tokens/ep} & \textbf{\$/success} & \textbf{pre$\rightarrow$post(changed)} & \textbf{unparse/ep} \\
+\midrule
+F1 frontier, full loop + SenseLab & 720 & 0.844 [0.81,0.88] & 0.753 [0.71,0.79] & 0.156 [0.12,0.19] & 10735 & \$0.0618 & 0.983 $\rightarrow$ 0.550 & 0.0 \\
+F0 frontier, full loop, no memory & 720 & 0.787 [0.76,0.82] & 0.664 [0.63,0.70] & 0.212 [0.18,0.24] & 2481 & \$0.0176 & 0.963 $\rightarrow$ 0.400 & 0.0 \\
+D1 frontier @decision (served prompt) + SenseLab & 1440 & 0.818 [0.79,0.84] & 0.608 [0.58,0.64] & 0.182 [0.16,0.21] & 1194 & \$0.0127 & 0.835 $\rightarrow$ 0.633 & 0.0 \\
+D0 frontier @decision, empty store & 1440 & 0.001 [0.00,0.00] & 0.000 [0.00,0.00] & 0.999 [1.00,1.00] & 1206 & \$42.4754 & 0.000 $\rightarrow$ 0.000 & 0.01 \\
+S1 student + SenseLab & 1440 & 0.942 [0.91,0.97] & 0.794 [0.74,0.85] & 0.058 [0.03,0.09] & 819 & \$0.0011 & 0.971 $\rightarrow$ 0.858 & 0.0 \\
+S1n student + SenseLab + note-writer & 1440 & 0.925 [0.89,0.96] & 0.780 [0.74,0.81] & 0.075 [0.04,0.11] & 2538 & \$0.0032 & 0.914 $\rightarrow$ 0.879 & 0.0 \\
+S1p student + context only (no avoid/priors) & 1440 & 0.919 [0.88,0.95] & 0.742 [0.72,0.77] & 0.081 [0.05,0.12] & 543 & \$0.0009 & 1.000 $\rightarrow$ 0.758 & 0.0 \\
+S1k student, nothing served (k0) & 1440 & 0.913 [0.87,0.95] & 0.722 [0.70,0.75] & 0.087 [0.05,0.13] & 186 & \$0.0005 & 1.000 $\rightarrow$ 0.742 & 0.0 \\
+S0 student, no memory & 5760 & 0.914 [0.90,0.93] & 0.723 [0.71,0.74] & 0.086 [0.07,0.10] & 186 & \$0.0005 & 1.000 $\rightarrow$ 0.744 & 0.0 \\
+B1 untuned base + SenseLab & 360 & 0.381 [0.27,0.51] & 0.247 [0.17,0.34] & 0.619 [0.49,0.74] & 1754 & \$0.0005 & 0.483 $\rightarrow$ 0.050 & 0.0 \\
+K1 frontier, full loop + skill file & 720 & 0.787 [0.76,0.82] & 0.706 [0.67,0.74] & 0.212 [0.18,0.24] & 14166 & \$0.0889 & 0.963 $\rightarrow$ 0.400 & 0.0 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Held-out results, \arm{ci-fix} scenario, fleet sizes pooled.}
+\label{tab:res1}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrr}
+\toprule
+\textbf{condition} & \textbf{n} & \textbf{success} & \textbf{first-try} & \textbf{escalated} & \textbf{tokens/ep} & \textbf{\$/success} & \textbf{pre$\rightarrow$post(changed)} & \textbf{unparse/ep} \\
+\midrule
+F1 frontier, full loop + SenseLab & 720 & 0.818 [0.79,0.85] & 0.696 [0.67,0.72] & 0.182 [0.15,0.21] & 9622 & \$0.0594 & 0.933 $\rightarrow$ 0.550 & 0.0 \\
+F0 frontier, full loop, no memory & 720 & 0.629 [0.61,0.65] & 0.410 [0.39,0.43] & 0.371 [0.35,0.39] & 2439 & \$0.0231 & 0.958 $\rightarrow$ 0.042 & 0.0 \\
+D1 frontier @decision (served prompt) + SenseLab & 2160 & 0.780 [0.75,0.81] & 0.603 [0.59,0.62] & 0.220 [0.19,0.25] & 1264 & \$0.0153 & 0.850 $\rightarrow$ 0.551 & 0.0 \\
+D0 frontier @decision, empty store & 2160 & 0.000 [0.00,0.00] & 0.000 [0.00,0.00] & 1.000 [1.00,1.00] & 1297 & --- & 0.000 $\rightarrow$ 0.000 & 0.001 \\
+S1 student + SenseLab & 2160 & 0.918 [0.90,0.94] & 0.747 [0.72,0.77] & 0.082 [0.06,0.10] & 1030 & \$0.0016 & 0.936 $\rightarrow$ 0.829 & 0.0 \\
+S1n student + SenseLab + note-writer & 2160 & 0.905 [0.89,0.92] & 0.746 [0.73,0.76] & 0.095 [0.08,0.11] & 2667 & \$0.0037 & 0.923 $\rightarrow$ 0.810 & 0.001 \\
+S1p student + context only (no avoid/priors) & 2160 & 0.884 [0.86,0.91] & 0.583 [0.56,0.60] & 0.116 [0.09,0.14] & 692 & \$0.0014 & 0.982 $\rightarrow$ 0.701 & 0.001 \\
+S1k student, nothing served (k0) & 2160 & 0.844 [0.82,0.87] & 0.570 [0.55,0.59] & 0.156 [0.13,0.18] & 296 & \$0.0010 & 0.963 $\rightarrow$ 0.639 & 0.0 \\
+S0 student, no memory & 8640 & 0.843 [0.83,0.86] & 0.570 [0.56,0.58] & 0.156 [0.14,0.17] & 297 & \$0.0010 & 0.963 $\rightarrow$ 0.632 & 0.0 \\
+B1 untuned base + SenseLab & 360 & 0.503 [0.45,0.57] & 0.383 [0.34,0.43] & 0.497 [0.43,0.55] & 1588 & \$0.0004 & 0.592 $\rightarrow$ 0.300 & 0.006 \\
+K1 frontier, full loop + skill file & 720 & 0.743 [0.70,0.78] & 0.588 [0.54,0.64] & 0.257 [0.22,0.30] & 11562 & \$0.0854 & 0.963 $\rightarrow$ 0.296 & 0.0 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Held-out results, \arm{support} scenario, fleet sizes pooled.}
+\label{tab:res2}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrr}
+\toprule
+\textbf{test} & \textbf{all episodes} & \textbf{pre-change} & \textbf{post-change} \\
+\midrule
+H1 student recovers the teacher's gain & +0.222 [+0.18,+0.26] n=720 & -0.007 [-0.02,+0.01] n=240 & +0.336 [+0.27,+0.40] n=480 \\
+teacher's gain (reference) & +0.123 [+0.08,+0.17] n=720 & -0.002 [-0.04,+0.03] n=240 & +0.185 [+0.12,+0.25] n=480 \\
+H2 memory at inference: S1 $-$ S0 & +0.051 [+0.04,+0.07] n=720 & -0.028 [-0.04,-0.02] n=240 & +0.091 [+0.07,+0.12] n=480 \\
+H2 memory at inference: S1 $-$ S1k & +0.051 [+0.04,+0.07] n=720 & -0.028 [-0.04,-0.02] n=240 & +0.091 [+0.07,+0.12] n=480 \\
+H3 outcome record: S1 $-$ S1p & +0.028 [+0.02,+0.04] n=720 & -0.037 [-0.05,-0.03] n=240 & +0.061 [+0.05,+0.07] n=480 \\
+H4 frontier weights on the same prompt: D1 $-$ S1 & -0.131 [-0.16,-0.10] n=720 & -0.111 [-0.17,-0.05] n=240 & -0.142 [-0.17,-0.12] n=480 \\
+H4 tool loop + own reflection: F1 $-$ D1 & +0.032 [+0.00,+0.06] n=720 & +0.116 [+0.07,+0.16] n=240 & -0.009 [-0.05,+0.03] n=480 \\
+H5 note-writer: S1n $-$ S1 & -0.015 [-0.03,-0.00] n=720 & -0.035 [-0.06,-0.02] n=240 & -0.005 [-0.02,+0.01] n=480 \\
+H6 tuning over base: S1 $-$ B1 & +0.489 [+0.42,+0.57] n=720 & +0.416 [+0.34,+0.50] n=240 & +0.525 [+0.45,+0.61] n=480 \\
+H7 skill file vs memory: K1 $-$ F1 & -0.066 [-0.10,-0.04] n=720 & +0.004 [-0.03,+0.04] n=240 & -0.101 [-0.14,-0.06] n=480 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Paired success-rate deltas (condition A minus B), 95\% bootstrap intervals over cells.}
+\label{tab:hyp}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrr}
+\toprule
+\textbf{test} & \textbf{all episodes} & \textbf{pre-change} & \textbf{post-change} \\
+\midrule
+H1 student recovers the teacher's gain & +0.234 [+0.17,+0.30] n=720 & +0.067 [+0.01,+0.12] n=240 & +0.317 [+0.23,+0.39] n=480 \\
+teacher's gain (reference) & +0.188 [+0.12,+0.25] n=720 & +0.110 [+0.08,+0.15] n=240 & +0.226 [+0.13,+0.32] n=480 \\
+H2 memory at inference: S1 $-$ S0 & +0.124 [+0.09,+0.15] n=720 & -0.148 [-0.17,-0.12] n=240 & +0.260 [+0.21,+0.31] n=480 \\
+H2 memory at inference: S1 $-$ S1k & +0.124 [+0.09,+0.15] n=720 & -0.149 [-0.17,-0.13] n=240 & +0.260 [+0.21,+0.31] n=480 \\
+H3 outcome record: S1 $-$ S1p & +0.108 [+0.07,+0.14] n=720 & -0.147 [-0.17,-0.12] n=240 & +0.236 [+0.19,+0.28] n=480 \\
+H4 frontier weights on the same prompt: D1 $-$ S1 & -0.166 [-0.18,-0.15] n=720 & -0.231 [-0.28,-0.19] n=240 & -0.133 [-0.15,-0.12] n=480 \\
+H4 tool loop + own reflection: F1 $-$ D1 & +0.119 [+0.09,+0.15] n=720 & +0.275 [+0.20,+0.35] n=240 & +0.042 [+0.01,+0.07] n=480 \\
+H5 note-writer: S1n $-$ S1 & -0.008 [-0.03,+0.01] n=720 & -0.038 [-0.07,-0.01] n=240 & +0.007 [-0.01,+0.03] n=480 \\
+H6 tuning over base: S1 $-$ B1 & +0.455 [+0.39,+0.53] n=720 & +0.410 [+0.36,+0.47] n=240 & +0.478 [+0.40,+0.56] n=480 \\
+H7 skill file vs memory: K1 $-$ F1 & -0.078 [-0.11,-0.04] n=720 & -0.008 [-0.05,+0.03] n=240 & -0.113 [-0.17,-0.06] n=480 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Paired first-attempt success deltas (condition A minus B), 95\% bootstrap intervals over cells.}
+\label{tab:hyp-first}
+\end{table}
+
+{\scriptsize\setlength{\tabcolsep}{3pt}
+\begin{longtable}{lrrrrrr}
+\caption{Each student: held-out task success and the product's own evaluation of the promoted version.}\label{tab:students} \\
+\toprule
+\textbf{model} & \textbf{cond} & \textbf{success} & \textbf{first-try} & \textbf{\$/success} & \textbf{dec-agr} & \textbf{parse} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{model} & \textbf{cond} & \textbf{success} & \textbf{first-try} & \textbf{\$/success} & \textbf{dec-agr} & \textbf{parse} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+ci-base-s1 & B1 & 0.381 [0.27,0.51] & 0.247 [0.17,0.34] & \$0.0005 & --- & --- \\
+ci-sl-gpt55 & S1 & 0.814 [0.77,0.86] & 0.603 [0.53,0.68] & \$0.0019 & 0.9877 & 1.0 \\
+ci-sl-gpt55 & S0 & 0.808 [0.76,0.86] & 0.656 [0.61,0.70] & \$0.0007 & 0.9877 & 1.0 \\
+ci-sl-gpt55+notes=gpt-5.4-mini & S1n & 0.811 [0.78,0.84] & 0.658 [0.62,0.70] & \$0.0044 & 0.9877 & 1.0 \\
+ci-sl-gpt55+notes=gpt-5.4-mini & S0 & 0.808 [0.76,0.86] & 0.656 [0.61,0.70] & \$0.0007 & 0.9877 & 1.0 \\
+ci-sl-gpt55-v2 & S1 & 0.964 [0.94,0.99] & 0.792 [0.77,0.82] & \$0.0011 & 0.9406 & 1.0 \\
+ci-sl-gpt55-v2 & S0 & 1.000 [1.00,1.00] & 0.761 [0.72,0.80] & \$0.0005 & 0.9406 & 1.0 \\
+ci-sl-gpt55-v2+notes=gpt-5.4-mini & S1n & 0.927 [0.89,0.96] & 0.804 [0.78,0.83] & \$0.0033 & 0.9406 & 1.0 \\
+ci-sl-gpt55-v2+notes=gpt-5.4-mini & S0 & 1.000 [1.00,1.00] & 0.761 [0.72,0.80] & \$0.0005 & 0.9406 & 1.0 \\
+ci-sl-gpt55-v2\textasciitilde{}k0 & S1k & 1.000 [1.00,1.00] & 0.761 [0.72,0.80] & \$0.0005 & 0.9406 & 1.0 \\
+ci-sl-gpt55-v2\textasciitilde{}k0 & S0 & 1.000 [1.00,1.00] & 0.761 [0.72,0.80] & \$0.0005 & 0.9406 & 1.0 \\
+ci-sl-gpt55-v2\textasciitilde{}plain & S1p & 1.000 [1.00,1.00] & 0.761 [0.72,0.80] & \$0.0008 & 0.9406 & 1.0 \\
+ci-sl-gpt55-v2\textasciitilde{}plain & S0 & 1.000 [1.00,1.00] & 0.761 [0.72,0.80] & \$0.0005 & 0.9406 & 1.0 \\
+ci-sl-gpt55\textasciitilde{}k0 & S1k & 0.803 [0.76,0.84] & 0.656 [0.61,0.70] & \$0.0007 & 0.9877 & 1.0 \\
+ci-sl-gpt55\textasciitilde{}k0 & S0 & 0.800 [0.76,0.84] & 0.656 [0.61,0.70] & \$0.0007 & 0.9877 & 1.0 \\
+ci-sl-gpt55\textasciitilde{}plain & S1p & 0.861 [0.82,0.90] & 0.683 [0.65,0.71] & \$0.0011 & 0.9877 & 1.0 \\
+ci-sl-gpt55\textasciitilde{}plain & S0 & 0.803 [0.76,0.84] & 0.656 [0.61,0.70] & \$0.0007 & 0.9877 & 1.0 \\
+ci-sl-opus5 & S1 & 0.992 [0.99,1.00] & 0.908 [0.88,0.93] & \$0.0008 & 0.9886 & 1.0 \\
+ci-sl-opus5 & S0 & 0.844 [0.81,0.88] & 0.761 [0.72,0.80] & \$0.0005 & 0.9886 & 1.0 \\
+ci-sl-opus5+notes=gpt-5.4-mini & S1n & 0.972 [0.93,1.00] & 0.824 [0.76,0.88] & \$0.0026 & 0.9886 & 1.0 \\
+ci-sl-opus5+notes=gpt-5.4-mini & S0 & 0.853 [0.83,0.88] & 0.761 [0.72,0.80] & \$0.0005 & 0.9886 & 1.0 \\
+ci-sl-opus5-v2 & S1 & 1.000 [1.00,1.00] & 0.875 [0.85,0.90] & \$0.0009 & 0.9773 & 0.9714 \\
+ci-sl-opus5-v2 & S0 & 1.000 [1.00,1.00] & 0.719 [0.67,0.77] & \$0.0004 & 0.9773 & 0.9714 \\
+ci-sl-opus5-v2+notes=gpt-5.4-mini & S1n & 0.992 [0.97,1.00] & 0.833 [0.81,0.86] & \$0.0026 & 0.9773 & 0.9714 \\
+ci-sl-opus5-v2+notes=gpt-5.4-mini & S0 & 0.997 [0.99,1.00] & 0.706 [0.68,0.73] & \$0.0004 & 0.9773 & 0.9714 \\
+ci-sl-opus5-v2\textasciitilde{}k0 & S1k & 0.997 [0.99,1.00] & 0.714 [0.68,0.75] & \$0.0004 & 0.9773 & 0.9714 \\
+ci-sl-opus5-v2\textasciitilde{}k0 & S0 & 0.997 [0.99,1.00] & 0.714 [0.68,0.75] & \$0.0004 & 0.9773 & 0.9714 \\
+ci-sl-opus5-v2\textasciitilde{}plain & S1p & 1.000 [1.00,1.00] & 0.761 [0.72,0.80] & \$0.0007 & 0.9773 & 0.9714 \\
+ci-sl-opus5-v2\textasciitilde{}plain & S0 & 1.000 [1.00,1.00] & 0.722 [0.69,0.76] & \$0.0004 & 0.9773 & 0.9714 \\
+ci-sl-opus5\textasciitilde{}k0 & S1k & 0.852 [0.82,0.88] & 0.759 [0.72,0.80] & \$0.0005 & 0.9886 & 1.0 \\
+ci-sl-opus5\textasciitilde{}k0 & S0 & 0.867 [0.84,0.89] & 0.761 [0.72,0.80] & \$0.0005 & 0.9886 & 1.0 \\
+ci-sl-opus5\textasciitilde{}plain & S1p & 0.817 [0.78,0.85] & 0.761 [0.72,0.80] & \$0.0010 & 0.9886 & 1.0 \\
+ci-sl-opus5\textasciitilde{}plain & S0 & 0.853 [0.83,0.88] & 0.761 [0.72,0.80] & \$0.0005 & 0.9886 & 1.0 \\
+sup-base-s1 & B1 & 0.503 [0.45,0.57] & 0.383 [0.34,0.43] & \$0.0004 & --- & --- \\
+sup-nopriors-gpt55 & S1 & 0.856 [0.82,0.89] & 0.653 [0.60,0.70] & \$0.0019 & 0.9851 & 1.0 \\
+sup-nopriors-gpt55 & S0 & 0.828 [0.81,0.84] & 0.492 [0.48,0.50] & \$0.0011 & 0.9851 & 1.0 \\
+sup-nopriors-gpt55+notes=gpt-5.4-mini & S1n & 0.831 [0.80,0.87] & 0.660 [0.63,0.69] & \$0.0045 & 0.9851 & 1.0 \\
+sup-nopriors-gpt55+notes=gpt-5.4-mini & S0 & 0.833 [0.81,0.86] & 0.486 [0.48,0.49] & \$0.0011 & 0.9851 & 1.0 \\
+sup-nopriors-gpt55-v2 & S1 & 0.839 [0.80,0.88] & 0.714 [0.70,0.73] & \$0.0018 & 0.9737 & 1.0 \\
+sup-nopriors-gpt55-v2 & S0 & 0.767 [0.74,0.79] & 0.594 [0.59,0.61] & \$0.0011 & 0.9737 & 1.0 \\
+sup-nopriors-gpt55-v2+notes=gpt-5.4-mini & S1n & 0.881 [0.87,0.89] & 0.742 [0.71,0.77] & \$0.0038 & 0.9737 & 1.0 \\
+sup-nopriors-gpt55-v2+notes=gpt-5.4-mini & S0 & 0.761 [0.72,0.79] & 0.600 [0.59,0.61] & \$0.0011 & 0.9737 & 1.0 \\
+sup-nopriors-gpt55-v2\textasciitilde{}k0 & S1k & 0.758 [0.73,0.79] & 0.594 [0.58,0.61] & \$0.0011 & 0.9737 & 1.0 \\
+sup-nopriors-gpt55-v2\textasciitilde{}k0 & S0 & 0.742 [0.71,0.77] & 0.583 [0.57,0.59] & \$0.0011 & 0.9737 & 1.0 \\
+sup-nopriors-gpt55-v2\textasciitilde{}plain & S1p & 0.825 [0.80,0.84] & 0.614 [0.60,0.62] & \$0.0014 & 0.9737 & 1.0 \\
+sup-nopriors-gpt55-v2\textasciitilde{}plain & S0 & 0.744 [0.70,0.78] & 0.589 [0.58,0.60] & \$0.0011 & 0.9737 & 1.0 \\
+sup-nopriors-gpt55\textasciitilde{}k0 & S1k & 0.828 [0.81,0.85] & 0.492 [0.48,0.50] & \$0.0011 & 0.9851 & 1.0 \\
+sup-nopriors-gpt55\textasciitilde{}k0 & S0 & 0.825 [0.81,0.84] & 0.489 [0.48,0.50] & \$0.0011 & 0.9851 & 1.0 \\
+sup-nopriors-gpt55\textasciitilde{}plain & S1p & 0.889 [0.87,0.91] & 0.514 [0.49,0.53] & \$0.0015 & 0.9851 & 1.0 \\
+sup-nopriors-gpt55\textasciitilde{}plain & S0 & 0.822 [0.81,0.84] & 0.494 [0.49,0.51] & \$0.0011 & 0.9851 & 1.0 \\
+sup-sl-gpt55 & S1 & 0.983 [0.97,1.00] & 0.811 [0.78,0.84] & \$0.0012 & 0.8861 & 1.0 \\
+sup-sl-gpt55 & S0 & 0.908 [0.89,0.92] & 0.558 [0.55,0.57] & \$0.0009 & 0.8861 & 1.0 \\
+sup-sl-gpt55+notes=gpt-5.4-mini & S1n & 0.969 [0.93,1.00] & 0.807 [0.79,0.82] & \$0.0029 & 0.8861 & 1.0 \\
+sup-sl-gpt55+notes=gpt-5.4-mini & S0 & 0.906 [0.89,0.92] & 0.556 [0.54,0.56] & \$0.0009 & 0.8861 & 1.0 \\
+sup-sl-gpt55-v2 & S1 & 0.919 [0.90,0.94] & 0.781 [0.74,0.81] & \$0.0015 & 1.0 & 0.9907 \\
+sup-sl-gpt55-v2 & S0 & 0.925 [0.91,0.94] & 0.644 [0.64,0.65] & \$0.0008 & 1.0 & 0.9907 \\
+sup-sl-gpt55-v2+notes=gpt-5.4-mini & S1n & 0.883 [0.86,0.90] & 0.756 [0.74,0.78] & \$0.0038 & 1.0 & 0.9907 \\
+sup-sl-gpt55-v2+notes=gpt-5.4-mini & S0 & 0.942 [0.93,0.95] & 0.644 [0.64,0.65] & \$0.0008 & 1.0 & 0.9907 \\
+sup-sl-gpt55-v2\textasciitilde{}k0 & S1k & 0.936 [0.92,0.95] & 0.650 [0.65,0.65] & \$0.0008 & 1.0 & 0.9907 \\
+sup-sl-gpt55-v2\textasciitilde{}k0 & S0 & 0.933 [0.92,0.94] & 0.650 [0.65,0.65] & \$0.0008 & 1.0 & 0.9907 \\
+sup-sl-gpt55-v2\textasciitilde{}plain & S1p & 0.956 [0.94,0.97] & 0.642 [0.64,0.65] & \$0.0011 & 1.0 & 0.9907 \\
+sup-sl-gpt55-v2\textasciitilde{}plain & S0 & 0.933 [0.92,0.95] & 0.644 [0.64,0.65] & \$0.0008 & 1.0 & 0.9907 \\
+sup-sl-gpt55\textasciitilde{}k0 & S1k & 0.917 [0.91,0.93] & 0.558 [0.55,0.57] & \$0.0009 & 0.8861 & 1.0 \\
+sup-sl-gpt55\textasciitilde{}k0 & S0 & 0.911 [0.90,0.92] & 0.561 [0.55,0.57] & \$0.0009 & 0.8861 & 1.0 \\
+sup-sl-gpt55\textasciitilde{}plain & S1p & 0.938 [0.92,0.95] & 0.621 [0.60,0.64] & \$0.0011 & 0.8861 & 1.0 \\
+sup-sl-gpt55\textasciitilde{}plain & S0 & 0.917 [0.90,0.93] & 0.556 [0.55,0.56] & \$0.0009 & 0.8861 & 1.0 \\
+sup-sl-opus5 & S1 & 0.928 [0.91,0.94] & 0.750 [0.72,0.78] & \$0.0017 & 0.9634 & 1.0 \\
+sup-sl-opus5 & S0 & 0.747 [0.74,0.76] & 0.511 [0.50,0.52] & \$0.0014 & 0.9634 & 1.0 \\
+sup-sl-opus5+notes=gpt-5.4-mini & S1n & 0.914 [0.90,0.93] & 0.725 [0.69,0.76] & \$0.0039 & 0.9634 & 1.0 \\
+sup-sl-opus5+notes=gpt-5.4-mini & S0 & 0.742 [0.74,0.75] & 0.514 [0.51,0.52] & \$0.0014 & 0.9634 & 1.0 \\
+sup-sl-opus5-v2 & S1 & 0.983 [0.97,0.99] & 0.772 [0.75,0.79] & \$0.0015 & 0.9545 & 1.0 \\
+sup-sl-opus5-v2 & S0 & 0.894 [0.88,0.91] & 0.617 [0.61,0.63] & \$0.0010 & 0.9545 & 1.0 \\
+sup-sl-opus5-v2+notes=gpt-5.4-mini & S1n & 0.953 [0.91,0.98] & 0.786 [0.77,0.80] & \$0.0032 & 0.9545 & 1.0 \\
+sup-sl-opus5-v2+notes=gpt-5.4-mini & S0 & 0.892 [0.87,0.91] & 0.628 [0.62,0.63] & \$0.0010 & 0.9545 & 1.0 \\
+sup-sl-opus5-v2\textasciitilde{}k0 & S1k & 0.894 [0.88,0.91] & 0.617 [0.61,0.63] & \$0.0010 & 0.9545 & 1.0 \\
+sup-sl-opus5-v2\textasciitilde{}k0 & S0 & 0.894 [0.88,0.91] & 0.625 [0.62,0.63] & \$0.0010 & 0.9545 & 1.0 \\
+sup-sl-opus5-v2\textasciitilde{}plain & S1p & 0.961 [0.94,0.99] & 0.608 [0.59,0.62] & \$0.0013 & 0.9545 & 1.0 \\
+sup-sl-opus5-v2\textasciitilde{}plain & S0 & 0.894 [0.88,0.91] & 0.622 [0.61,0.63] & \$0.0010 & 0.9545 & 1.0 \\
+sup-sl-opus5\textasciitilde{}k0 & S1k & 0.733 [0.72,0.75] & 0.511 [0.50,0.52] & \$0.0014 & 0.9634 & 1.0 \\
+sup-sl-opus5\textasciitilde{}k0 & S0 & 0.742 [0.72,0.76] & 0.506 [0.49,0.51] & \$0.0014 & 0.9634 & 1.0 \\
+sup-sl-opus5\textasciitilde{}plain & S1p & 0.736 [0.72,0.75] & 0.500 [0.50,0.50] & \$0.0020 & 0.9634 & 1.0 \\
+sup-sl-opus5\textasciitilde{}plain & S0 & 0.739 [0.72,0.76] & 0.514 [0.51,0.52] & \$0.0014 & 0.9634 & 1.0 \\
+\end{longtable}}
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{student} & \textbf{teacher} & \textbf{S1$-$S0 pre} & \textbf{S1$-$S0 post} & \textbf{S1$-$S1p pre} & \textbf{S1$-$S1p post} \\
+\midrule
+ci-sl-gpt55 & gpt-5.5 & -0.225 [-0.27,-0.17] n=120 & +0.033 [-0.02,+0.08] n=240 & -0.258 [-0.33,-0.18] n=120 & +0.008 [-0.03,+0.05] n=240 \\
+ci-sl-gpt55-v2 & gpt-5.5 & -0.250 [-0.28,-0.21] n=120 & +0.171 [+0.10,+0.25] n=240 & -0.250 [-0.28,-0.21] n=120 & +0.171 [+0.10,+0.25] n=240 \\
+ci-sl-opus5 & claude-opus-5 & -0.017 [-0.03,+0.00] n=120 & +0.229 [+0.17,+0.28] n=240 & -0.017 [-0.03,+0.00] n=120 & +0.229 [+0.17,+0.28] n=240 \\
+ci-sl-opus5-v2 & claude-opus-5 & -0.083 [-0.15,-0.02] n=120 & +0.281 [+0.22,+0.34] n=240 & -0.142 [-0.20,-0.08] n=120 & +0.242 [+0.18,+0.30] n=240 \\
+sup-nopriors-gpt55 & gpt-5.5 & -0.102 [-0.18,-0.02] n=120 & +0.295 [+0.24,+0.35] n=240 & -0.117 [-0.22,+0.00] n=120 & +0.267 [+0.20,+0.33] n=240 \\
+sup-nopriors-gpt55-v2 & gpt-5.5 & -0.092 [-0.16,-0.01] n=120 & +0.229 [+0.20,+0.27] n=240 & -0.092 [-0.17,+0.00] n=120 & +0.196 [+0.17,+0.23] n=240 \\
+sup-sl-gpt55 & gpt-5.5 & -0.073 [-0.12,-0.03] n=120 & +0.417 [+0.38,+0.46] n=240 & -0.102 [-0.16,-0.04] n=118 & +0.332 [+0.30,+0.37] n=238 \\
+sup-sl-gpt55-v2 & gpt-5.5 & -0.300 [-0.34,-0.25] n=120 & +0.352 [+0.30,+0.39] n=240 & -0.233 [-0.28,-0.17] n=120 & +0.325 [+0.28,+0.36] n=240 \\
+sup-sl-opus5 & claude-opus-5 & -0.117 [-0.19,-0.04] n=120 & +0.417 [+0.37,+0.47] n=240 & -0.042 [-0.13,+0.05] n=120 & +0.396 [+0.33,+0.46] n=240 \\
+sup-sl-opus5-v2 & claude-opus-5 & -0.229 [-0.26,-0.20] n=120 & +0.339 [+0.30,+0.36] n=240 & -0.183 [-0.20,-0.15] n=120 & +0.338 [+0.30,+0.37] n=240 \\
+\bottomrule
+\end{tabular}
+}
+\caption{What memory does for each student's first attempt, before and after the change: full serving minus no memory (S1$-$S0) and full serving minus context only (S1$-$S1p), paired.}
+\label{tab:per-student}
+\end{table}
+
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig_d1_learning_curves.png}
+\caption{Success rate by episode (5-episode bins), every condition, both scenarios. The
+dotted line is the regime change.}
+\label{fig:curves}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.6\textwidth]{fig_d2_cost_vs_success.png}
+\caption{Cost of a solved task against success rate, by condition, list prices.}
+\label{fig:cost}
+\end{figure}
+
+\section{A change the weights have never seen}
+\label{sec:novel}
+
+Change set B replaces the classes that change and the fixes they change to
+(\S\ref{sec:novel-method}); nothing in any student's training traces contains a post-change
+(class, fix) pair from it. Tables~\ref{tab:res-b1} and \ref{tab:res-b2} give
+the conditions, Table~\ref{tab:a-vs-b} puts A and B side by side on the changed classes,
+and Tables~\ref{tab:hyp-b} and \ref{tab:hyp-first-b} give the deltas.
+
+The frontier's gain from memory is larger here, as it should be when the weights know
+nothing: \cond{F1} over \cond{F0} is $+0.06$ success and $+0.37$ first-try, $+0.50$ first-try
+after the change. The student with memory now matches the frontier with memory on success
+within noise ($-0.01$ \ci{-0.06}{+0.04}) and recovers $0.27$ of the frontier's $0.37$
+first-try gain, at \$0.0010 and \$0.0022 per solved task against \$0.044 and \$0.047. That
+is the version of H1 we would defend. The frontier on the student's own prompt (\cond{D1})
+is now level with the student on success and first-try, so under a change the weights have
+never seen, what the tuned weights add to the prompt is about what the frontier's weights
+add.
+
+What the student recovers after the change is what memory gives it. \cond{S1} over
+\cond{S0} is $+0.125$ success and $+0.25$ first-try after the change, against $+0.09$ and
+$+0.26$ under A; the outcome record is worth $+0.09$ success and $+0.24$ first-try over
+context alone (H8). The two scenarios end differently. On CI-fix the student with memory
+solves every changed task after the change, as does the frontier with memory, where the
+frontier without memory solves 0.84 and the student without memory 0.71. On support the
+student without memory falls to 0.26 on the changed classes, memory brings it to 0.50, and
+the frontier with memory is at 0.90; the frontier without memory is at 0.68. A student
+carries its old fix strongly, memory recovers half of what it lost, and on the harder change
+the frontier on memory is still the better agent. That is why the frontier stays in the loop.
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+\textbf{condition} & \textbf{n} & \textbf{success} & \textbf{first-try} & \textbf{escalated} & \textbf{tokens/ep} & \textbf{\$/success} & \textbf{pre$\rightarrow$post(changed)} \\
+\midrule
+F1 frontier, full loop + SenseLab & 720 & 0.997 [0.99,1.00] & 0.844 [0.81,0.87] & 0.003 [0.00,0.01] & 8843 & \$0.0441 & 0.992 $\rightarrow$ 1.000 \\
+F0 frontier, full loop, no memory & 720 & 0.921 [0.88,0.96] & 0.454 [0.41,0.50] & 0.079 [0.04,0.12] & 2872 & \$0.0173 & 0.958 $\rightarrow$ 0.838 \\
+D1 frontier @decision (served prompt) + SenseLab & 360 & 0.967 [0.95,0.98] & 0.758 [0.72,0.79] & 0.033 [0.02,0.05] & 931 & \$0.0075 & 0.908 $\rightarrow$ 0.992 \\
+S1 student + SenseLab & 1440 & 0.990 [0.98,1.00] & 0.772 [0.75,0.79] & 0.010 [0.00,0.02] & 770 & \$0.0010 & 0.981 $\rightarrow$ 1.000 \\
+S1p student + context only (no avoid/priors) & 1080 & 0.946 [0.92,0.97] & 0.571 [0.55,0.59] & 0.054 [0.03,0.08] & 599 & \$0.0009 & 1.000 $\rightarrow$ 0.839 \\
+S0 student, no memory & 1440 & 0.903 [0.87,0.94] & 0.558 [0.53,0.58] & 0.097 [0.06,0.13] & 206 & \$0.0006 & 1.000 $\rightarrow$ 0.708 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Held-out results, \arm{ci-fix} scenario, fleet sizes pooled, change set B.}
+\label{tab:res-b1}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrr}
+\toprule
+\textbf{condition} & \textbf{n} & \textbf{success} & \textbf{first-try} & \textbf{escalated} & \textbf{tokens/ep} & \textbf{\$/success} & \textbf{pre$\rightarrow$post(changed)} & \textbf{unparse/ep} \\
+\midrule
+F1 frontier, full loop + SenseLab & 720 & 0.936 [0.92,0.96] & 0.782 [0.75,0.81] & 0.064 [0.04,0.09] & 8474 & \$0.0469 & 0.925 $\rightarrow$ 0.895 & 0.0 \\
+F0 frontier, full loop, no memory & 720 & 0.883 [0.87,0.90] & 0.424 [0.41,0.44] & 0.117 [0.10,0.13] & 2223 & \$0.0149 & 0.971 $\rightarrow$ 0.679 & 0.0 \\
+D1 frontier @decision (served prompt) + SenseLab & 360 & 0.833 [0.76,0.91] & 0.639 [0.61,0.66] & 0.167 [0.09,0.25] & 1232 & \$0.0139 & 0.842 $\rightarrow$ 0.700 & 0.0 \\
+S1 student + SenseLab & 2160 & 0.794 [0.77,0.82] & 0.639 [0.61,0.67] & 0.206 [0.18,0.23] & 1258 & \$0.0022 & 0.925 $\rightarrow$ 0.496 & 0.001 \\
+S1p student + context only (no avoid/priors) & 1440 & 0.741 [0.72,0.77] & 0.626 [0.62,0.64] & 0.259 [0.23,0.28] & 729 & \$0.0017 & 0.979 $\rightarrow$ 0.244 & 0.0 \\
+S0 student, no memory & 2160 & 0.733 [0.72,0.75] & 0.628 [0.62,0.64] & 0.267 [0.25,0.28] & 300 & \$0.0012 & 0.965 $\rightarrow$ 0.258 & 0.001 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Held-out results, \arm{support} scenario, fleet sizes pooled, change set B.}
+\label{tab:res-b2}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+\textbf{scenario} & \textbf{condition} & \textbf{n (A)} & \textbf{success A} & \textbf{first-try A} & \textbf{n (B)} & \textbf{success B} & \textbf{first-try B} \\
+\midrule
+ci-fix & F1 frontier, full loop + SenseLab & 240 & 0.550 [0.44,0.66] & 0.483 [0.38,0.60] & 240 & 1.000 [1.00,1.00] & 0.746 [0.67,0.83] \\
+ci-fix & F0 frontier, full loop, no memory & 240 & 0.400 [0.32,0.49] & 0.400 [0.32,0.49] & 240 & 0.838 [0.76,0.91] & 0.000 [0.00,0.00] \\
+ci-fix & D1 frontier @decision (served prompt) + SenseLab & 480 & 0.633 [0.57,0.69] & 0.554 [0.50,0.61] & 120 & 0.992 [0.97,1.00] & 0.867 [0.82,0.90] \\
+ci-fix & S1 student + SenseLab & 480 & 0.858 [0.75,0.95] & 0.787 [0.68,0.88] & 480 & 1.000 [1.00,1.00] & 0.683 [0.61,0.76] \\
+ci-fix & S1p student + context only (no avoid/priors) & 480 & 0.758 [0.64,0.86] & 0.400 [0.34,0.46] & 360 & 0.839 [0.74,0.93] & 0.000 [0.00,0.00] \\
+ci-fix & S0 student, no memory & 1920 & 0.744 [0.69,0.80] & 0.400 [0.37,0.43] & 480 & 0.708 [0.61,0.81] & 0.000 [0.00,0.00] \\
+support & F1 frontier, full loop + SenseLab & 240 & 0.550 [0.48,0.61] & 0.433 [0.37,0.50] & 240 & 0.895 [0.84,0.94] & 0.649 [0.59,0.71] \\
+support & F0 frontier, full loop, no memory & 240 & 0.042 [0.01,0.08] & 0.000 [0.00,0.00] & 240 & 0.679 [0.63,0.73] & 0.058 [0.03,0.10] \\
+support & D1 frontier @decision (served prompt) + SenseLab & 720 & 0.551 [0.51,0.59] & 0.401 [0.36,0.44] & 120 & 0.700 [0.59,0.78] & 0.433 [0.39,0.47] \\
+support & S1 student + SenseLab & 720 & 0.829 [0.76,0.89] & 0.583 [0.53,0.64] & 720 & 0.496 [0.43,0.56] & 0.304 [0.26,0.35] \\
+support & S1p student + context only (no avoid/priors) & 720 & 0.701 [0.63,0.77] & 0.007 [0.00,0.02] & 480 & 0.244 [0.17,0.31] & 0.029 [0.01,0.05] \\
+support & S0 student, no memory & 2880 & 0.632 [0.61,0.66] & 0.000 [0.00,0.00] & 720 & 0.258 [0.20,0.32] & 0.078 [0.05,0.11] \\
+\bottomrule
+\end{tabular}
+}
+\caption{Post-change episodes of the changed classes only: the change the students trained on (A) against one their weights never saw (B).}
+\label{tab:a-vs-b}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrr}
+\toprule
+\textbf{test} & \textbf{all episodes} & \textbf{pre-change} & \textbf{post-change} \\
+\midrule
+H1 student recovers the teacher's gain & -0.010 [-0.06,+0.04] n=720 & -0.011 [-0.04,+0.01] n=240 & -0.010 [-0.08,+0.05] n=480 \\
+teacher's gain (reference) & +0.064 [+0.05,+0.08] n=720 & -0.006 [-0.04,+0.02] n=240 & +0.099 [+0.08,+0.12] n=480 \\
+H2 memory at inference: S1 $-$ S0 & +0.074 [+0.06,+0.09] n=720 & -0.030 [-0.04,-0.02] n=240 & +0.125 [+0.11,+0.14] n=480 \\
+H3 outcome record: S1 $-$ S1p & +0.048 [+0.04,+0.06] n=720 & -0.036 [-0.05,-0.02] n=240 & +0.090 [+0.07,+0.11] n=480 \\
+H4 frontier weights on the same prompt: D1 $-$ S1 & +0.008 [-0.04,+0.06] n=720 & -0.078 [-0.15,-0.01] n=240 & +0.051 [+0.00,+0.10] n=480 \\
+H4 tool loop + own reflection: F1 $-$ D1 & +0.066 [+0.03,+0.11] n=720 & +0.083 [+0.03,+0.15] n=240 & +0.057 [+0.02,+0.10] n=480 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Paired success-rate deltas (condition A minus B), 95\% bootstrap intervals over cells under change set B.}
+\label{tab:hyp-b}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrr}
+\toprule
+\textbf{test} & \textbf{all episodes} & \textbf{pre-change} & \textbf{post-change} \\
+\midrule
+H1 student recovers the teacher's gain & +0.266 [+0.23,+0.30] n=720 & +0.054 [+0.01,+0.10] n=240 & +0.372 [+0.32,+0.43] n=480 \\
+teacher's gain (reference) & +0.374 [+0.34,+0.41] n=720 & +0.113 [+0.07,+0.15] n=240 & +0.504 [+0.47,+0.55] n=480 \\
+H2 memory at inference: S1 $-$ S0 & +0.112 [+0.05,+0.17] n=720 & -0.159 [-0.19,-0.13] n=240 & +0.247 [+0.17,+0.33] n=480 \\
+H3 outcome record: S1 $-$ S1p & +0.106 [+0.05,+0.16] n=720 & -0.165 [-0.19,-0.13] n=240 & +0.242 [+0.17,+0.32] n=480 \\
+H4 frontier weights on the same prompt: D1 $-$ S1 & -0.006 [-0.04,+0.03] n=720 & -0.216 [-0.29,-0.15] n=240 & +0.099 [+0.06,+0.14] n=480 \\
+H4 tool loop + own reflection: F1 $-$ D1 & +0.114 [+0.09,+0.14] n=720 & +0.275 [+0.20,+0.35] n=240 & +0.033 [-0.03,+0.09] n=480 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Paired first-attempt success deltas (condition A minus B), 95\% bootstrap intervals over cells under change set B.}
+\label{tab:hyp-first-b}
+\end{table}
+
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig_d1_learning_curves_novel.png}
+\caption{Success rate by episode under change set B, which no training trace contains. The
+dotted line is the regime change.}
+\label{fig:curves-novel}
+\end{figure}
+
+\section{Closing the loop: a student trained on its own traces}
+\label{sec:self}
+
+A student's evaluation cells are themselves decision traces: the student's decisions, the
+outcomes the harness committed, sealed through the same gateway. We trained a third
+generation from them. \texttt{ci-self-v3} and \texttt{sup-self-v3} are tuned on the v2
+student's own traces from its evaluation cells (served with memory, with and without the
+note-writer), with no frontier model anywhere in the loop, and compared with the v2 parent on three
+seeds neither has seen (131, 137, 149), under the trained-on change (Tables~\ref{tab:self} and \ref{tab:self-delta}).
+
+The child improves on the parent, mostly in the weights. Without memory the child's first-try
+success is $+0.10$ over the parent on CI-fix and $+0.19$ on support, and after the change
+$+0.20$ and $+0.42$: the corrections the parent made with memory in front of it are now what
+the child does first. With memory served the child is $+0.02$ and $+0.03$ first-try;
+on CI-fix it loses $0.05$ success to escalations that the parent did not make, on support it
+gains $0.08$. We read this as memory turning into weights one generation at a time. It is a
+same-change result and we did not run the child under change set B, so it says nothing yet
+about a change the second generation has never seen.
+
+On the same seeds we also trained a student from the skill-file agent's traces (\cond{K0}:
+both teachers' \cond{K1} cells, twelve cells, the same trace count as a v2 student). The
+CI-fix one never went live. The product's evaluation gate found that on held-out decisions
+that had gone wrong it repeated the failed action 67\% of the time, against a bar of 50\%
+that the API does not allow to be lowered, and every student trained on memory-layer traces
+had cleared that bar. We think the reason is in the traces: a skill-file agent's context
+carries no outcome record, so its student cannot tell a failed decision from a successful one
+and imitates both. The support one went live (Table~\ref{tab:k0}) and is $0.18$ success and $0.25$ first-try
+below the memory-trace student under the same served memory, and $0.33$ first-try below it
+after the change. Served with memory it does worse than served with nothing (0.73 against
+0.88), which
+fits: it never saw served context in training. Without memory it is above the frontier without
+memory on first-try, as any tuned student here is.
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+\textbf{scenario} & \textbf{model} & \textbf{cond} & \textbf{success} & \textbf{first-try} & \textbf{escalated} & \textbf{\$/success} & \textbf{pre$\rightarrow$post(changed)} \\
+\midrule
+ci-fix & ci-self-v3 child & S1 & 0.922 [0.88,0.95] & 0.825 [0.79,0.85] & 0.078 [0.05,0.12] & \$0.0013 & 0.933 $\rightarrow$ 0.833 \\
+ci-fix & ci-self-v3 child & S0 & 1.000 [1.00,1.00] & 0.911 [0.89,0.93] & 0.000 [0.00,0.00] & \$0.0003 & 1.000 $\rightarrow$ 1.000 \\
+ci-fix & ci-sl-gpt55-v2 parent & S1 & 0.975 [0.97,0.98] & 0.803 [0.77,0.83] & 0.025 [0.02,0.03] & \$0.0011 & 0.950 $\rightarrow$ 0.975 \\
+ci-fix & ci-sl-gpt55-v2 parent & S0 & 1.000 [1.00,1.00] & 0.811 [0.78,0.84] & 0.000 [0.00,0.00] & \$0.0005 & 1.000 $\rightarrow$ 1.000 \\
+ci-fix & claude-opus-5 & F1 & 0.911 [0.89,0.93] & 0.817 [0.81,0.83] & 0.089 [0.07,0.11] & \$0.0586 & 1.000 $\rightarrow$ 0.733 \\
+ci-fix & claude-opus-5 & F0 & 0.831 [0.80,0.86] & 0.778 [0.74,0.81] & 0.169 [0.14,0.20] & \$0.0180 & 0.892 $\rightarrow$ 0.600 \\
+ci-fix & gpt-5.5 & F1 & 0.928 [0.91,0.94] & 0.797 [0.77,0.82] & 0.072 [0.06,0.09] & \$0.0463 & 1.000 $\rightarrow$ 0.783 \\
+ci-fix & gpt-5.5 & F0 & 0.864 [0.83,0.89] & 0.689 [0.65,0.73] & 0.136 [0.11,0.17] & \$0.0121 & 0.992 $\rightarrow$ 0.600 \\
+support & claude-opus-5 & F1 & 0.897 [0.88,0.92] & 0.767 [0.74,0.80] & 0.103 [0.08,0.12] & \$0.0592 & 0.983 $\rightarrow$ 0.708 \\
+support & claude-opus-5 & F0 & 0.639 [0.63,0.65] & 0.411 [0.38,0.44] & 0.361 [0.35,0.37] & \$0.0276 & 0.950 $\rightarrow$ 0.017 \\
+support & gpt-5.5 & F1 & 0.810 [0.79,0.83] & 0.623 [0.58,0.66] & 0.190 [0.17,0.21] & \$0.0558 & 0.950 $\rightarrow$ 0.517 \\
+support & gpt-5.5 & F0 & 0.669 [0.66,0.68] & 0.417 [0.39,0.44] & 0.331 [0.32,0.34] & \$0.0157 & 1.000 $\rightarrow$ 0.033 \\
+support & sup-self-v3 child & S1 & 0.983 [0.97,0.99] & 0.803 [0.76,0.84] & 0.017 [0.01,0.03] & \$0.0012 & 0.950 $\rightarrow$ 1.000 \\
+support & sup-self-v3 child & S0 & 0.994 [0.99,1.00] & 0.836 [0.82,0.85] & 0.006 [0.00,0.01] & \$0.0005 & 0.983 $\rightarrow$ 1.000 \\
+support & sup-skill-k0 & K0 & 0.728 [0.71,0.75] & 0.522 [0.50,0.54] & 0.272 [0.25,0.29] & \$0.0027 & 0.950 $\rightarrow$ 0.308 \\
+support & sup-skill-k0 & K0n & 0.878 [0.86,0.90] & 0.722 [0.71,0.73] & 0.122 [0.10,0.14] & \$0.0008 & 1.000 $\rightarrow$ 0.633 \\
+support & sup-sl-gpt55-v2 parent & S1 & 0.908 [0.89,0.93] & 0.775 [0.74,0.81] & 0.092 [0.07,0.11] & \$0.0015 & 0.883 $\rightarrow$ 0.858 \\
+support & sup-sl-gpt55-v2 parent & S0 & 0.956 [0.94,0.96] & 0.644 [0.63,0.66] & 0.044 [0.04,0.06] & \$0.0007 & 1.000 $\rightarrow$ 0.867 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Self-retrained students (v3) and their parents on seeds neither has seen, with the frontier teachers on the same seeds.}
+\label{tab:self}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{comparison} & \textbf{success} & \textbf{success post-change} & \textbf{first-try} & \textbf{first-try post-change} \\
+\midrule
+ci-self-v3 $-$ ci-sl-gpt55-v2, S1 & -0.053 [-0.09,-0.03] n=360 & -0.071 [-0.12,-0.03] n=240 & +0.022 [-0.01,+0.06] n=360 & -0.013 [-0.07,+0.04] n=240 \\
+ci-self-v3 $-$ ci-sl-gpt55-v2, S0 & +0.000 [+0.00,+0.00] n=360 & +0.000 [+0.00,+0.00] n=240 & +0.100 [+0.07,+0.13] n=360 & +0.200 [+0.16,+0.24] n=240 \\
+sup-self-v3 $-$ sup-sl-gpt55-v2, S1 & +0.075 [+0.05,+0.11] n=360 & +0.079 [+0.04,+0.12] n=240 & +0.028 [+0.02,+0.03] n=360 & +0.021 [-0.02,+0.07] n=240 \\
+sup-self-v3 $-$ sup-sl-gpt55-v2, S0 & +0.039 [+0.03,+0.05] n=360 & +0.067 [+0.05,+0.08] n=240 & +0.192 [+0.17,+0.21] n=360 & +0.417 [+0.38,+0.45] n=240 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Child minus parent, paired by scenario, seed, fleet and episode; 95\% bootstrap intervals over cells.}
+\label{tab:self-delta}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{scenario} & \textbf{comparison} & \textbf{success} & \textbf{success post-change} & \textbf{first-try} & \textbf{first-try post-change} \\
+\midrule
+support & sup-skill-k0 K0 $-$ sup-sl-gpt55-v2 S1 & -0.181 [-0.22,-0.14] n=360 & -0.304 [-0.36,-0.25] n=240 & -0.253 [-0.29,-0.22] n=360 & -0.325 [-0.37,-0.28] n=240 \\
+support & sup-skill-k0 K0 $-$ frontier F1 & -0.126 [-0.15,-0.10] n=360 & -0.181 [-0.21,-0.15] n=240 & -0.172 [-0.21,-0.14] n=360 & -0.212 [-0.24,-0.18] n=240 \\
+support & sup-skill-k0 K0n $-$ sup-sl-gpt55-v2 S0 & -0.078 [-0.09,-0.06] n=360 & -0.117 [-0.14,-0.09] n=240 & +0.078 [+0.06,+0.10] n=360 & +0.108 [+0.07,+0.14] n=240 \\
+support & sup-skill-k0 K0n $-$ frontier F0 & +0.224 [+0.21,+0.24] n=360 & +0.323 [+0.30,+0.35] n=240 & +0.308 [+0.29,+0.33] n=360 & +0.279 [+0.27,+0.29] n=240 \\
+\bottomrule
+\end{tabular}
+}
+\caption{The student distilled from the skill-file agent's traces (K0) against the memory-trace student and the frontier on the same seeds, paired; 95\% bootstrap intervals over cells.}
+\label{tab:k0}
+\end{table}
+
+
+\section{Cost and latency}
+\label{sec:cost}
+
+Cost per success is the cell's spend at list price divided by its successes; for the students
+the provider price of the tuned model is in parentheses. An arm's checkpoint work (the
+skill file's maintainer, proposer and validation replays) is the arm's spend and is counted.
+
+Latency is the same accounting in seconds. Wall is episode start to the sealed conclusion,
+all attempts included; model time is the time inside model calls, which for a student is the
+gateway call and so includes the server-side retrieval and render; memory time is the
+harness's own memory operations, which for a student is only the outcome commit that seals
+the trace at the end. We report medians and p90 because the retrieval and commit calls are
+heavy-tailed under load, and wall per success as the latency analogue of cost per success.
+Two cautions. The grid ran 36 to 52 concurrent workers on one machine against a memory API
+that another study was also using, so absolute values are load-dependent and the paired
+deltas (same seed, fleet and episode, so the same time window within a cell) are what to
+read. And time to the first action was not recorded when this grid ran; the runner carries
+it from 2026-09-20 on, so the column is empty here. For a student, whose attempt is one
+gateway call, the model-time column is close to it.
+
+What the tables say. The student on memory is about 19 seconds an episode faster than the
+frontier on memory (15 against 26 to 36 seconds median; paired S1 $-$ F1 $-19.1$ s
+[$-22.6$, $-15.6$]) and takes 21 to 22 seconds of wall per success against the frontier's
+41 to 53. It is slower than a frontier with no memory (S1 $-$ F0 $+11.9$ s) and than the
+same student with no memory (S1 $-$ S0 $+13.0$ s); that is the price of the memory, split
+about evenly between the retrieval inside the gateway call and the outcome commit at the
+end. The commit is on the critical path only because the harness runs episodes one after
+another; a deployment can return the answer and commit afterwards, which would take the
+student to about 9 seconds. The skill file is the fastest arm with memory (8 to 10 seconds),
+since the file is prompt text and its maintenance runs between episodes; that maintenance is
+where its cost went. Under change set B on the changed classes after the change, the student
+on memory stays ahead of the frontier on memory on wall (13 to 17 against 27 to 30 seconds
+median) and on wall per success on \arm{ci-fix} (15 against 35 seconds); on \arm{support},
+where its success on those classes is lower, its wall per success is about the frontier's
+(35 against 32).
+
+\begin{table}[H]
+\centering\scriptsize
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{condition} & \textbf{n} & \textbf{\$/success} & \textbf{tokens/ep} & \textbf{wall/ep} \\
+\midrule
+F1 frontier, full loop + SenseLab & 1440 & \$0.0606 & 10178 & 39.2s \\
+F0 frontier, full loop, no memory & 1440 & \$0.0201 & 2460 & 8.1s \\
+D1 frontier @decision (served prompt) + SenseLab & 3599 & \$0.0142 & 1236 & 24.3s \\
+D0 frontier @decision, empty store & 3600 & \$109.9294 & 1261 & 28.8s \\
+S1 student + SenseLab & 3600 & \$0.0014 (\$0.0004) & 946 & 20.2s \\
+S1n student + SenseLab + note-writer & 3582 & \$0.0035 (\$0.0021) & 2614 & 20.8s \\
+S1p student + context only (no avoid/priors) & 3596 & \$0.0012 (\$0.0003) & 633 & 17.7s \\
+S1k student, nothing served (k0) & 3597 & \$0.0008 (\$0.0002) & 253 & 11.4s \\
+S0 student, no memory & 14400 & \$0.0008 (\$0.0002) & 253 & 7.1s \\
+B1 untuned base + SenseLab & 720 & \$0.0004 & 1671 & 29.8s \\
+K1 frontier, full loop + skill file & 1440 & \$0.0872 & 12864 & 10.1s \\
+\bottomrule
+\end{tabular}
+\caption{Cost per success (list price; provider price for students in parentheses)}
+\label{tab:cost}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+\textbf{condition} & \textbf{n} & \textbf{wall med pre/post} & \textbf{wall p90 pre/post} & \textbf{model med} & \textbf{memory med} & \textbf{attempts} & \textbf{s/success} \\
+\midrule
+F1 frontier, full loop + SenseLab & 720 & 36.0 / 38.7 & 52.3 / 61.5 & 9.6 & 27.1 & 1.42 & 53.0 \\
+F0 frontier, full loop, no memory & 720 & 4.4 / 4.6 & 9.7 / 11.9 & 4.6 & 0.0 & 1.57 & 10.6 \\
+D1 frontier @decision (served prompt) + SenseLab & 1440 & 20.6 / 17.6 & 44.9 / 42.1 & 8.6 & 6.5 & 1.62 & 28.7 \\
+D0 frontier @decision, empty store & 1440 & 23.6 / 22.0 & 44.7 / 43.3 & 22.5 & 0.0 & 2.99 & --- \\
+S1 student + SenseLab & 1440 & 15.0 / 13.3 & 36.2 / 36.0 & 6.0 & 6.4 & 1.28 & 20.9 \\
+S1n student + SenseLab + note-writer & 1435 & 19.0 / 15.9 & 39.5 / 35.0 & 6.8 & 7.4 & 1.32 & 22.8 \\
+S1p student + context only (no avoid/priors) & 1440 & 11.7 / 12.9 & 30.2 / 33.7 & 5.5 & 5.3 & 1.35 & 18.7 \\
+S1k student, nothing served (k0) & 1437 & 7.4 / 8.7 & 23.7 / 27.1 & 3.0 & 3.7 & 1.44 & 13.3 \\
+S0 student, no memory & 5760 & 3.0 / 4.1 & 11.1 / 16.1 & 3.6 & 0.0 & 1.44 & 7.2 \\
+B1 untuned base + SenseLab & 360 & 26.8 / 26.6 & 37.3 / 44.4 & 17.4 & 8.7 & 2.41 & 80.2 \\
+K1 frontier, full loop + skill file & 720 & 7.7 / 8.2 & 15.3 / 16.4 & 4.0 & 2.9 & 1.51 & 12.5 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Latency, \arm{ci-fix} scenario: wall-clock to the sealed conclusion (median and p90, before and after the change), time inside model calls, the harness's memory time, attempts, and wall per success. Absolute values are load-dependent (36 to 52 concurrent workers, shared memory API).}
+\label{tab:lat-ci-fix}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+\textbf{condition} & \textbf{n} & \textbf{wall med pre/post} & \textbf{wall p90 pre/post} & \textbf{model med} & \textbf{memory med} & \textbf{attempts} & \textbf{s/success} \\
+\midrule
+F1 frontier, full loop + SenseLab & 720 & 25.9 / 28.1 & 48.3 / 49.7 & 10.3 & 15.5 & 1.52 & 41.2 \\
+F0 frontier, full loop, no memory & 720 & 4.8 / 7.0 & 7.9 / 12.6 & 6.5 & 0.0 & 2.01 & 12.6 \\
+D1 frontier @decision (served prompt) + SenseLab & 2159 & 17.5 / 19.1 & 39.8 / 44.1 & 8.7 & 5.5 & 1.69 & 31.8 \\
+D0 frontier @decision, empty store & 2160 & 22.3 / 23.2 & 40.3 / 41.7 & 22.8 & 0.0 & 3.00 & --- \\
+S1 student + SenseLab & 2160 & 15.0 / 14.3 & 37.3 / 37.0 & 6.8 & 6.0 & 1.37 & 22.3 \\
+S1n student + SenseLab + note-writer & 2147 & 16.5 / 16.7 & 32.7 / 34.7 & 7.5 & 7.2 & 1.39 & 22.8 \\
+S1p student + context only (no avoid/priors) & 2156 & 11.2 / 15.3 & 25.7 / 34.6 & 7.0 & 5.1 & 1.62 & 20.4 \\
+S1k student, nothing served (k0) & 2160 & 6.5 / 9.2 & 15.7 / 22.8 & 3.7 & 3.3 & 1.67 & 12.9 \\
+S0 student, no memory & 8640 & 3.1 / 6.0 & 9.6 / 16.8 & 4.8 & 0.0 & 1.67 & 8.9 \\
+B1 untuned base + SenseLab & 360 & 24.4 / 25.0 & 42.9 / 44.4 & 14.3 & 8.9 & 2.15 & 57.8 \\
+K1 frontier, full loop + skill file & 720 & 8.1 / 10.2 & 15.9 / 16.0 & 5.0 & 3.2 & 1.73 & 13.9 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Latency, \arm{support} scenario: wall-clock to the sealed conclusion (median and p90, before and after the change), time inside model calls, the harness's memory time, attempts, and wall per success. Absolute values are load-dependent (36 to 52 concurrent workers, shared memory API).}
+\label{tab:lat-support}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrr}
+\toprule
+\textbf{pair} & \textbf{all episodes} & \textbf{pre-change} & \textbf{post-change} \\
+\midrule
+S1 $-$ F1 & -19.130 [-22.62,-15.61] n=720 & -18.837 [-21.91,-15.79] n=240 & -19.277 [-23.92,-14.47] n=480 \\
+S1 $-$ F0 & +11.932 [+10.70,+13.25] n=720 & +12.060 [+8.49,+15.87] n=240 & +11.868 [+10.08,+13.56] n=480 \\
+S1 $-$ S0 & +13.030 [+12.12,+13.96] n=720 & +15.226 [+13.42,+17.28] n=240 & +11.933 [+11.00,+12.87] n=480 \\
+S1 $-$ S1p & +2.492 [+1.29,+3.70] n=720 & +4.563 [+2.50,+6.98] n=240 & +1.457 [+0.08,+2.79] n=480 \\
+S1 $-$ S1k & +8.545 [+7.35,+9.69] n=720 & +10.056 [+7.42,+12.63] n=240 & +7.789 [+6.79,+8.87] n=480 \\
+D1 $-$ S1 & +4.078 [+3.08,+5.07] n=720 & +2.900 [+0.82,+4.89] n=240 & +4.667 [+3.57,+5.94] n=480 \\
+F1 $-$ F0 & +31.062 [+27.92,+34.14] n=720 & +30.897 [+28.14,+33.62] n=240 & +31.145 [+25.45,+36.52] n=480 \\
+K1 $-$ F1 & -29.113 [-32.51,-25.73] n=720 & -29.860 [-32.07,-27.65] n=240 & -28.740 [-33.37,-23.88] n=480 \\
+K0 $-$ S1 (skill-file student vs memory-trace student, third seeds) & +3.425 [+0.08,+6.58] n=360 & +1.681 [-0.20,+4.19] n=120 & +4.297 [+0.22,+8.29] n=240 \\
+\bottomrule
+\end{tabular}
+}
+\caption{Paired wall-clock deltas in seconds (a $-$ b) over the same seed, fleet and episode, so within one cell's time window; 95\% bootstrap intervals over cells.}
+\label{tab:lat-paired}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\begin{tabular}{lrrrrrr}
+\toprule
+\textbf{scenario} & \textbf{condition} & \textbf{n} & \textbf{wall med} & \textbf{wall p90} & \textbf{attempts} & \textbf{s/success} \\
+\midrule
+ci-fix & F1 frontier, full loop + SenseLab & 236 & 30.4 & 56.4 & 1.28 & 34.6 \\
+ci-fix & F0 frontier, full loop, no memory & 240 & 8.3 & 11.4 & 2.58 & 9.6 \\
+ci-fix & D1 frontier @decision (served prompt) + SenseLab & 120 & 18.1 & 35.0 & 1.14 & 20.5 \\
+ci-fix & S1 student + SenseLab & 480 & 13.2 & 24.1 & 1.32 & 15.0 \\
+ci-fix & S1p student + context only (no avoid/priors) & 360 & 16.4 & 29.6 & 2.18 & 22.9 \\
+ci-fix & S0 student, no memory & 480 & 9.1 & 17.7 & 2.40 & 15.6 \\
+support & F1 frontier, full loop + SenseLab & 239 & 26.8 & 39.9 & 1.57 & 32.3 \\
+support & F0 frontier, full loop, no memory & 240 & 7.5 & 12.2 & 2.50 & 11.9 \\
+support & D1 frontier @decision (served prompt) + SenseLab & 120 & 32.6 & 69.5 & 1.98 & 65.5 \\
+support & S1 student + SenseLab & 720 & 16.8 & 26.4 & 2.24 & 35.1 \\
+support & S1p student + context only (no avoid/priors) & 480 & 21.1 & 36.3 & 2.84 & 104.8 \\
+support & S0 student, no memory & 720 & 8.8 & 15.5 & 2.71 & 40.2 \\
+\bottomrule
+\end{tabular}
+\caption{Wall-clock under change set B, post-change episodes of the changed classes.}
+\label{tab:lat-b}
+\end{table}
+
+
+\section{A path, in order}
+\label{sec:path}
+
+The conditions in this paper are also the stages an account goes through, and each
+transition has a paired comparison above that says what it is worth. Here they are in the
+order they happen.
+
+\begin{enumerate}[leftmargin=1.8em, itemsep=0.3em]
+\item Run the frontier agent you already have on the memory layer, with the outcome record
+  on. This is \cond{F1} against \cond{F0}: what memory is worth to a frontier agent on day
+  one, with no training and nothing changed in the agent beyond the memory tools. It is also
+  the stage that builds what the later stages use, namely the store and one sealed decision
+  trace per task.
+  On this benchmark that is $+0.12$ success and $+0.19$ first-try
+success over the run, $+0.19$ and $+0.23$ after the change; on the changed support classes the
+frontier goes from 0.04 without memory to 0.55 with it. Under the novel change set the first-try
+gain is $+0.37$.
+\item Let the store age through a change. The outcome record earns its keep when the world
+  moves: entries that stop working get discredited, the action record turns against the fix
+  that used to work, and the briefing says so. Before the first change the store is young and
+  costs a little on the first attempt (see the pre-change columns in \S\ref{sec:results});
+  after it, the same memory is what carries the agent through. We would expect this shape
+  and would not switch the outcome record off for the dip.
+  For the frontier there is no dip: memory already adds $0.11$ first-try
+before the change. A student pays $0.15$ first-try before the change and gets $0.26$ back after
+it, under both change sets.
+\item When a decision is frequent, distill it. Once one decision the agent makes has volume
+  (the same tool, the same kind of task, hundreds of sealed traces), train a Managed Model on
+  those traces alone, scoped by the memory paths the agent used, and serve it through the
+  gateway with the same memory. This is \cond{S1} against \cond{F1}: what the hand-off
+  preserves, at the student's price. The traces are already there and nothing is labelled by
+  hand.
+  Here the student reached 0.94 and 0.92 success against 0.84 and 0.82
+for the frontier on memory under the trained-on change, at \$0.0014 against \$0.061 per solved
+task, and matched the frontier on success within noise under a change it had never seen, at
+\$0.0010 to \$0.0022 against \$0.044 to \$0.047.
+\item Keep the memory on for the student. The weights carry the experience of the regimes
+  the teacher lived through; the memory carries whatever comes next. \cond{S1}$-$\cond{S0}
+  under the trained-on change, and under a change the weights have never seen
+  (\S\ref{sec:novel}), is the cost of switching it off. Serve the outcome record too, since
+  context alone leaves most of that on the table (\cond{S1}$-$\cond{S1p}).
+  \cond{S1} over \cond{S0} is $+0.26$ first-try after the trained-on
+change and $+0.25$ after the novel one; \cond{S1} over \cond{S1p} is $+0.24$ under both.
+\item Keep the frontier in the loop. The frontier agent stays on every task outside the
+  student's scope, it is the teacher for the next scenario and the next regime, and it is the
+  gateway's fallback for an unusable student answer. Its traces keep feeding the store the
+  student reads from, and the student's own sealed traces become the training set for its
+  successor (\S\ref{sec:self}).
+  The self-trained child is $+0.10$ and $+0.19$ first-try over its
+parent without memory ($+0.20$ and $+0.42$ after the change). The same recipe run on a
+skill-file agent's traces gave a student the gate would not serve on one scenario and one
+$0.21$ success below the memory-trace student on the other.
+\end{enumerate}
+
+\section{Threats to validity}
+
+\begin{itemize}[leftmargin=1.4em, itemsep=2pt]
+\item One student family and one training recipe, the product's. We are measuring what the
+product delivers; a better student is surely possible.
+\item A student is narrow by construction: one scenario, one decision, trained on the traces
+of a frontier agent that had already learned the job on the memory layer. The result says
+that such a student, served with the memory, can beat its teacher on that job under the
+change it trained through and match it on success under a new one, and that on the harder
+new change the frontier on memory is still ahead on the changed classes. It says nothing
+about a small model replacing the frontier agent. The frontier's gain from
+memory (\cond{F1}$-$\cond{F0}) is available on day one with no training, it is the source of
+every trace a student learns from, and it stays the route for tasks a student was never
+trained for. We are comparing two ways of running a decision the account already makes
+well.
+\item Students are trained on all six teacher seeds and evaluated on three new seeds of the
+same generators: the same company, the same eight task classes, the same quirks. That is
+what institutional knowledge looks like, and it is also why \cond{S0} is strong under the
+trained-on change. \S\ref{sec:novel} is the control for it. We make no claim about
+cross-scenario generalisation.
+\item The retry budget of three lets any condition that knows a class's few plausible fixes
+reach the right one by elimination. Success is therefore a lenient metric for students and
+frontier alike, and the memory comparisons rest on first-try success.
+\item Decision mode gives the student no diagnostics. Where the frontier's advantage comes
+from diagnostic calls the student is under-stated; \cond{D1} runs under the same
+restriction, so the frontier-versus-student comparison on the same prompt is fair.
+\item The v1 students were trained on traces whose task identifiers encoded the episode
+index (\S\ref{sec:leak}). At evaluation the identifiers are random, so the shortcut cannot
+fire. Whether it displaced anything the v1 weights would otherwise have learned is what the
+v1 to v2 comparison measures.
+\item About 5\% of the teacher traces carry no memory reference (episodes where the agent
+read nothing) and fell outside the scope predicate. Runs from this point on stamp the scope
+on every trace.
+\item \cond{D0} is degenerate. The frontier in decision mode with nothing served escalated
+every task on both scenarios (success 0.00), so the pair \cond{D1}$-$\cond{D0} that was meant
+to price the served context for the frontier measures nothing, and the \cond{D0} cost per
+success in the tables is an artefact of that. We report the row and do not use it. The
+served-prompt format with an empty context section reads to the frontier as a task it has no
+basis to act on; a student trained on that format does not react that way (\cond{S0}).
+\item The skill-file arm is our reading of WikiSkill, with a maintainer every five episodes,
+a proposer, and a validation replay of four regenerated tasks as the gate. Another gate would
+adapt differently after a change, and we chose ours before seeing the results. The student
+trained from its traces (\cond{K0}) used both teachers' cells to match a v2 student's trace
+count, so it mixes teachers where the v2 students do not, and only the support one could be
+evaluated: the CI-fix one was refused by the product's evaluation gate (failure reproduction
+67\% against a bar of 50\%). We report the refusal as a result, since the bar is the same one
+every memory-trace student cleared.
+\item The self-retrained students were evaluated under the change their parents trained
+through. What they show is memory-informed corrections moving into the weights; whether a
+second generation adapts to a change neither generation has seen is not tested here.
+\item SenseLab is our product. The harness, seeds, matrix, dataset snapshots and per-episode
+JSONL are published, and the sections that go against us are reported in the same detail.
+\end{itemize}
+
+\section{Conclusion}
+
+Start with the frontier agent on the memory layer. On this benchmark it is worth 0.12
+success and 0.19 first-try success over the same agent with no memory, most of it when the
+world changes, and it needs no training. It also produces, as a side effect of working, one
+sealed decision trace per task. When a decision has volume, those traces train a
+SenseLab-tuned Managed Model that does the job at about one fortieth of the frontier's price
+per solved task: better than the frontier on memory under the change it was trained through,
+level with it on success and seven tenths of its first-try gain under a change it has never
+seen. Keep the memory on for the student; switching it off costs a quarter of first-try
+success after a change, and so does dropping the outcome record from what is served. Keep the
+frontier in the loop; on the harder novel change it is still the better agent, it is the
+teacher for the next scenario, and its traces keep the store learning. A student trained on
+its own traces improves on its parent, so the loop runs without a frontier once it has
+started, though we have only shown that under the change the parent trained through.
+Against the alternative of a text skill file rebuilt behind a validation gate, the memory
+layer adapts faster after a change, costs less per solved task, and produces traces that make
+a better student.
+
+\begin{thebibliography}{9}
+\bibitem{wikiskill} WikiSkill: Self-evolving agent skills from experience. Google, 2026.
+\bibitem{memory-not-learning} SenseLab. Memory is not learning: agents that reconcile
+knowledge on outcomes recover from a changing world; agents that only retrieve do not.
+2026.
+\bibitem{prereg-distill} SenseLab. Preregistration: distilling an agent's experience into a
+small model. \texttt{benchmarks/continual\_learning/student/HYPOTHESIS\_DISTILL.md}, 2026.
+\end{thebibliography}
+
+\end{document}
