@@ -107,6 +107,10 @@ REGIME_TURN_STREAK = 2
 POOLED_WEIGHT_RATIO = 0.6
 #: Longest plan :func:`plan_actions` returns.
 PLAN_MAX = 5
+#: Most actions the footer's "Tried" and "Do not spend an attempt on" lines
+#: name. An action set is rarely longer; when it is, the most-taken and the
+#: most-lost are what must not be cut.
+RENDER_TRIED_MAX = 10
 
 _WHITESPACE = re.compile(r"\s")
 
@@ -1075,6 +1079,18 @@ def sweep_order(
     (2026-09-22): after the change, three classes' new fixes were found in
     2, 8 and 9 attempts under a hash order; two of the three fixes were the
     queue's top winners elsewhere and would have been first.
+
+    Only wins elsewhere order the untried; losses elsewhere do not demote.
+    An action's losses on *other* situations are the times it was the wrong
+    guess for another kind of task, and every action is wrong for most kinds
+    of task — they say nothing about this one. What they do measure is how
+    often agents *guess* an action, and the textbook answers are guessed
+    most: on the CL support and CI pilots (2026-09-26) the two classes whose
+    fix changed to the textbook action (``reinstall_app`` 0/2 elsewhere,
+    ``edit_generated_file`` 0/4 elsewhere — guessed wrong on other classes)
+    had that action ranked under every never-tried candidate and out of the
+    five-slot plan on all nine post-change exposures, while an untested
+    action carries no more information than a losing one.
     """
     rec = (priors or {}).get("elsewhere")
     by_key: dict[str, Mapping[str, Any]] = {}
@@ -1085,17 +1101,11 @@ def sweep_order(
     start = stable_bucket(agent_id, n) if n else 0
     rotated = [untried[(start + i) % n] for i in range(n)]
 
-    def rank(i_a: tuple[int, str]) -> tuple[float, float, int]:
+    def rank(i_a: tuple[int, str]) -> tuple[float, int]:
         i, a = i_a
         t = by_key.get(a)
         won = float(t.get("won", 0)) if t else 0.0
-        # An action never tried anywhere on the entity ranks at the uniform
-        # prior (0.5), above one that was tried elsewhere and only lost: a
-        # 0/1 elsewhere is evidence against, no record is not. Read as 0.0
-        # the untried came last and the sweep opened with the entity's known
-        # loser (CL support smoke, 2026-09-26).
-        p = float(t.get("p", 0.5)) if t else 0.5
-        return (-won, -p, i)
+        return (-won, i)
 
     return [a for _, a in sorted(enumerate(rotated), key=rank)]
 
@@ -1582,8 +1592,14 @@ def render_priors(
     priors_are_local: bool | None = None,
     candidate_actions: Sequence[str] | None = None,
     lessons: Sequence[Mapping[str, Any]] | None = None,
+    agent_id: str = "",
 ) -> str:
     """One compact block for an agent's context. Empty string when nothing to show.
+
+    *agent_id* seeds the rotation that orders the untried candidates where the
+    record elsewhere does not (:func:`sweep_order`), so two agents on the same
+    problem are told different first picks — pass the one the plan was
+    computed for.
 
     Contrasts — and the pooled-classes warning read from them — are shown only
     over local priors (*priors_are_local*, else :func:`priors_local` on the
@@ -1619,6 +1635,14 @@ def render_priors(
     exact = isinstance(record, Mapping)
     here = "on this situation" if exact else "on tasks like this"
     if tried:
+        # Every action tried here when the record is short; else the most
+        # taken. The server sorts ``tried`` by posterior, so a fixed cut from
+        # the top dropped the *most-failed* actions: on the CL CI pilot
+        # (2026-09-26) a situation with seven tried showed five 0/1s and hid
+        # ``fix_code`` 0/4 — the action the agent then took a fifth time.
+        shown = tried if len(tried) <= RENDER_TRIED_MAX else sorted(
+            tried, key=lambda t: -int(t.get("n", 0))
+        )[:RENDER_TRIED_MAX]
         parts = [
             f"{t['action_key']} {t['won']}/{t['n']}"
             + ("" if int(t.get('agents', 0)) <= 1 else f" ({t['agents']} agents)")
@@ -1628,7 +1652,7 @@ def render_priors(
                 if turned_unsolved(t) and not turned(t) and not _recently_failing(t)
                 else (f", lost last {_leading_losses(t)}" if _stopped_working(t) and int(t.get("won", 0)) else "")
             )
-            for t in tried[:6]
+            for t in shown
         ]
         lines.append(("Tried on this situation: " if exact else "Tried on similar tasks here: ") + "; ".join(parts))
     elif exact:
@@ -1704,15 +1728,18 @@ def render_priors(
         t for t in stopped
         if turned_unsolved(t) and not turned(t) and not _recently_failing(t) and not _superseded(t, tried)
     ]
-    failed = [
-        t for t in tried
-        if t not in stopped and int(t.get("won", 0)) == 0
-    ]
+    # Most-lost first: the record is sorted by posterior, so a fixed cut
+    # from its top kept the 0/1s and dropped the 0/4 (CL CI pilot,
+    # 2026-09-26 — the agent took the hidden action a fifth time).
+    failed = sorted(
+        (t for t in tried if t not in stopped and int(t.get("won", 0)) == 0),
+        key=lambda t: -int(t.get("lost", 0)),
+    )
     avoid = [
         f"{t['action_key']} ({t['won']}/{t['n']}, "
         + ("superseded here" if _superseded(t, tried) else "stopped working") + ")"
-        for t in stopped[:3] if t not in hedged
-    ] + [f"{t['action_key']} (0/{t['n']})" for t in failed[:5]]
+        for t in stopped[:5] if t not in hedged
+    ] + [f"{t['action_key']} (0/{t['n']})" for t in failed[:RENDER_TRIED_MAX]]
     if avoid:
         lines.append("Do not spend an attempt on: " + "; ".join(avoid) + f" — these failed {here}.")
     backed = _evidence_backed(plan, tried, contrasts if local else [], lessons, recommendation)
@@ -1721,36 +1748,51 @@ def render_priors(
     # choice anywhere in the text: the record may not hold that attempt
     # (another agent's memory, a scan cap), but the lesson does.
     barred = _lesson_barred(lessons)
-    if (recommendation or {}).get("sweep"):
-        # The agent's judgement has failed on this exact situation; the
-        # order over the untried is the plan, not a hint.
-        backed = backed | {a for a in plan if a in set(untried) and a not in barred}
-    head = [a for a in plan if a in backed and a not in hedged_keys]
-    hedge = [a for a in plan if a in hedged_keys]
-    in_plan = set(plan)
-    # The candidates' own order, not the plan's: the plan rotates them by the
-    # agent's name so a fleet spreads out, and a list said to be unordered
-    # should not carry an order.
-    tail = [
-        u for u in untried
-        if u in in_plan and u not in backed and u not in hedged_keys and u not in barred
-    ]
-    # What each untried candidate did on the entity's other situations, when
-    # there is such a record: the sweep's order is drawn from it, and a plan
-    # whose order the agent can see the reason for is one it can weigh
-    # against the task instead of following blind. The CL support pilot
-    # (2026-09-26) had a class whose fix changed to the textbook answer — an
-    # action that had never won anywhere, so the record put it last; the
-    # agent walked five winners-elsewhere first because nothing told it the
-    # sixth was merely untested rather than known to fail.
-    # Only the untried get a note: an explore's head can also hold an action
-    # tried here (a loser with a win that has not stopped working), whose
-    # record is the "Tried" line above, not a blank slate elsewhere.
     untried_set = set(untried)
-    note = (
-        _elsewhere_notes(priors, [a for a in [*head, *tail] if a in untried_set])
-        if mode == "explore" else {}
-    )
+    # Every untried candidate, in the sweep's order (:func:`sweep_order`:
+    # most-won elsewhere first, then the rotation) — not the plan's cut of
+    # them. The plan is capped at ``PLAN_MAX``; a footer that named only the
+    # candidates inside the cap left the rest invisible, and on the CL
+    # support and CI pilots (2026-09-26) the fix that a change had moved to
+    # was outside it on every post-change exposure of two classes.
+    open_untried = [u for u in untried if u not in barred]
+    sweep = bool((recommendation or {}).get("sweep"))
+    # What each untried candidate has *won* on the entity's other situations,
+    # when there is such a record: the sweep's order is drawn from it, and a
+    # plan whose order the agent can see the reason for is one it can weigh
+    # against the task instead of following blind. Only wins are shown —
+    # losses elsewhere are the times an action was the wrong guess for
+    # another kind of task, and a ``0/2 elsewhere`` read as a verdict on this
+    # one (the CL support pilot's ``reinstall_app``, 2026-09-26: guessed
+    # wrong on two other classes, then the fix here). Only the untried get a
+    # note: an explore's head can also hold an action tried here, whose
+    # record is the "Tried" line above.
+    note = _elsewhere_notes(priors, open_untried) if mode == "explore" else {}
+    head = [a for a in plan if a in backed and a not in hedged_keys and a not in untried_set]
+    if sweep:
+        # The agent's judgement has failed on this exact situation; the
+        # order over the untried is the plan, not a hint — and all of them,
+        # not the plan's cut.
+        ordered = _untried_order(priors, plan, open_untried, agent_id)
+        backed = backed | set(ordered)
+        head += [a for a in ordered if a not in head]
+        tail: list[str] = []
+    else:
+        # A list the agent is told to order by its own judgement: the
+        # winners elsewhere first, since their bracket is the one thing the
+        # record can say, then the candidates' own order — not the plan's,
+        # whose rotation by the agent's name is not knowledge.
+        # Every one of them under an explore, where they are the choice; under
+        # an act the winner is, and the plan's cut of them is the fallback.
+        in_plan = set(plan)
+        rest = [
+            u for u in open_untried
+            if u not in backed and u not in hedged_keys and (mode == "explore" or u in in_plan)
+        ]
+        tail = sorted(
+            (a for a in rest if a in note), key=lambda a: -int(note[a].split("/", 1)[0])
+        ) + [a for a in rest if a not in note]
+    hedge = [a for a in plan if a in hedged_keys]
 
     def _shown(a: str) -> str:
         return f"{a} ({note[a]})" if a in note else a
@@ -1759,7 +1801,13 @@ def render_priors(
         line = f"Try {_shown(head[0])} first"
         if head[1:]:
             line += ", then " + " -> ".join(_shown(a) for a in head[1:])
-        lines.append(line + ". Do not repeat an action that failed on this task.")
+        line += ". Do not repeat an action that failed on this task."
+        if any(a in note for a in head):
+            line += (
+                " A bracket is what the action won on this queue's other situations; the rest "
+                "have no win anywhere here yet, which is not evidence against them."
+            )
+        lines.append(line)
     for a in hedge[:1]:
         h = next(t for t in hedged if str(t.get("action_key")) == a)
         lead = "If that fails" if head else "Make your own pick first; if it fails"
@@ -1768,27 +1816,50 @@ def render_priors(
             "task nothing solved — the fix may have changed, and one attempt on it is cheap if it did not."
         )
     if tail:
-        if any(a in note for a in tail[:8]):
+        if any(a in note for a in tail):
             lines.append(
-                f"Untried {here}: " + ", ".join(_shown(a) for a in tail[:8])
-                + " — the record for this situation has nothing on them; the brackets are what "
-                "each did on this queue's other situations. Weigh that against the task's own "
-                "details: untested anywhere means unknown, not ruled out."
+                f"Untried {here}: " + ", ".join(_shown(a) for a in tail)
+                + " — the record for this situation has nothing on them. A bracket is what the "
+                "action won on this queue's other situations; the rest have no win anywhere here "
+                "yet, which is not evidence against them. Choose by the task's own details."
             )
         else:
             lines.append(
-                f"Untried {here}: " + ", ".join(tail[:8])
+                f"Untried {here}: " + ", ".join(tail)
                 + " — the record cannot order these; choose among them by your own judgement of the task."
             )
     return "\n".join(lines)
 
 
+def _untried_order(
+    priors: Mapping[str, Any] | None,
+    plan: Sequence[str],
+    untried: Sequence[str],
+    agent_id: str,
+) -> list[str]:
+    """Every action in *untried*, in the order the footer names them.
+
+    With an *agent_id* the order is :func:`sweep_order`'s — the same
+    computation the plan came from, so the two agree when the plan was made
+    by the same build, and the footer's order is the current one when it was
+    not. Without one the rotation cannot be reproduced, so the plan's order
+    is kept for the candidates it covers and the rest follow in the sweep's.
+    """
+    if agent_id:
+        return sweep_order(priors, untried, agent_id)
+    allowed = set(untried)
+    covered = [a for a in plan if a in allowed]
+    seen = set(covered)
+    return covered + [a for a in sweep_order(priors, untried, "") if a not in seen]
+
+
 def _elsewhere_notes(priors: Mapping[str, Any] | None, actions: Sequence[str]) -> dict[str, str]:
-    """A short record-elsewhere note per action in *actions*, when the entity
-    has a record elsewhere at all: ``9/10 elsewhere`` for one tried on other
-    situations, ``untested anywhere`` for one with no record on the entity.
-    Empty when there is no record elsewhere — then every candidate would
-    read ``untested anywhere`` and the line would say nothing."""
+    """A short record-elsewhere note per action in *actions* that has *won*
+    on the entity's other situations: ``9/10 elsewhere``. Actions with no win
+    elsewhere — never tried anywhere, or tried and lost — get no note: a loss
+    on another kind of task is not evidence about this one, and a bracket
+    saying ``0/2`` reads as if it were. Empty when there is no record
+    elsewhere at all."""
     rec = (priors or {}).get("elsewhere")
     tried = list(rec.get("tried") or []) if isinstance(rec, Mapping) else []
     if not tried:
@@ -1797,9 +1868,7 @@ def _elsewhere_notes(priors: Mapping[str, Any] | None, actions: Sequence[str]) -
     out: dict[str, str] = {}
     for a in actions:
         t = by_key.get(a)
-        if t is None:
-            out[a] = "untested anywhere"
-        else:
+        if t is not None and int(t.get("won", 0)) > 0:
             out[a] = f"{int(t.get('won', 0))}/{int(t.get('n', 0))} elsewhere"
     return out
 
