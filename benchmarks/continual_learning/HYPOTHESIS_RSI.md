@@ -1060,3 +1060,27 @@ were left running: their `support` cells (join at 60; joiner first exposures at 
 60–70, all sealed before 14:50Z) are pre-#784, their `ci-fix` cells post-#784 — a
 scenario × treatment confound that the (i)/(j) readout reports rather than pools. Treated
 run of the 5h protocol: `rsi-pilot-5j`, launched 15:05Z on the new revision.
+
+**Treated-run readout (recorded 2026-09-26, dev seeds).** 5j completed 16:12Z: support
+57/60 (s11), 55/60 (s23); ci-fix 57/60, 56/60 — pooled 93.3 % / 94.2 % against 5h's
+92.5 % / 95.0 %, flat within noise, as it has to be: the mechanism fires only on a failed
+or shipped fix, and on the new revision **no fix failed, regressed or shipped**. Post-#784
+ledger (10 fixes, 5j and the probe-(i) `ci-fix` cells together): `canary` 5,
+`test_passed` 2, `test_inconclusive` 2, `proposed` 1; Tier 1 tests 3 passed (fidelity
+1.0), 5 inconclusive (0.59, "could not be replayed"), 2 skipped. Hence 0 `lesson-fix-*`,
+0 `decision-fix-*`, 0 events carrying `recorded` — the hooks were never reached, not
+bypassed. **G1–G3 are undefined on both sides**: the pre-#784 baseline has two
+`test_failed` fixes (`playbook-tier1`, `procedure-avoid-improper-escalation-loop`) and no
+later draft by the same agent on either entry, so the repeat-draft denominator is 0/0
+before and after; G2 has no second drafts; G3 no shipped fix on a class whose first draft
+failed. G4: the probe-(i) `ci-fix` joiner contexts held no `lesson-fix-*` /
+`decision-fix-*` entry (none existed to be retrieved), so P4 is not evaluable there
+either. The structural reason is stronger than sample size: `prior_fixes` is agent-scoped
+and every cell is a fresh agent, so a second draft on a failed entry needs ≥ 2 drafts on
+*one* entry inside *one* 60-episode cell, and the observed rate is ~1.25 drafts per cell
+(5 across 5j's four cells, 0–2 each). On dev seeds the paper therefore reports (j) as
+**prophylactic, exercised by its tests, not measured** — the falsifier's own wording — and
+defers the measured readout to E2 (200 episodes, fleet-10, two changes), where the same
+agent drafts repeatedly, and to amendment (k) if adopted, which raises the number of fixes
+that reach a ship or a failed canary at all. Nothing about the mechanism is changed by
+this readout.

@@ -525,6 +525,45 @@ for the primary arm, with the canary-gated arm as the safety ablation. (a) chang
 nothing about what ships or on what evidence, only *when the loop looks*; it is the one
 that keeps the canary as the primary gate and is the recommendation for (k).
 
+### Pilot 5j complete — (j) is live and untriggered, seam 3 confirmed, the lock sampler retired
+
+5j (the 5h protocol on `amfs-api-02003-hcb`, launched 15:05Z) finished 16:12Z with 0
+errors: support 57/60, 55/60; ci-fix 57/60, 56/60. Pooled against 5h — 93.3 % vs
+92.5 % (support), 94.2 % vs 95.0 % (ci-fix); late-window 91.2 % / 91.2 % vs 90.0 % /
+92.5 %; changed-post 82.5 % / 82.5 % vs 80.0 % / 85.0 % — flat, and flat is the correct
+result: (j) only writes on a failed or shipped fix and the new revision has seen neither.
+The (j) readout is in `HYPOTHESIS_RSI.md` under the amendment; the headroom finding is the
+same one from a different angle:
+
+- **The loop drafted 5 fixes across 5j's four cells (0, 2, 1, 2) and shipped none** —
+  three sit in `canary`, two are `test_inconclusive`. Same signature as 5h (3 fixes, 0
+  shipped) and the probe-(i) RSI cells. Across everything on the new revision: 10 fixes,
+  `canary` 5, `test_passed` 2, `test_inconclusive` 2, `proposed` 1. Zero failed, zero
+  regressed, zero shipped, so zero `lesson-fix-*` / `decision-fix-*` entries and zero
+  events with `recorded`. The mechanism sits behind seam 3 like everything else that
+  needs a verdict.
+- **(j) also has a reach problem of its own at this cell length.** `prior_fixes` is
+  agent-scoped and each cell is a fresh agent; a second draft on a failed entry needs two
+  drafts on one entry inside one 60-episode cell, at an observed ~1.25 drafts per cell.
+  Pre-#784 the two `test_failed` fixes of the day were never followed by a second draft
+  on their entry, so G1 is 0/0 on both sides. E2 (200 episodes, fleet-10, two changes)
+  is where the same agent drafts often enough for a second draft to occur; (k)(a) is
+  what lets a first draft reach `shipped` or `canary_failed` inside a cell at all. Both
+  are already on the plan; neither changes the mechanism.
+- **Replay fidelity is still the Tier 1 ceiling.** Post-#784 tests: 3 passed at fidelity
+  1.0 (all three rewrites of `repo-readme-ci`, one per `ci-fix` cell), 5 inconclusive at
+  a mean 0.59 (three judge-path lessons at 0.70–0.75, two rewrites at 0.75 and 0.00; "1
+  of 3 / 3 of 3 predicted run(s) could not be replayed"), 2 skipped ("nothing could be
+  replayed"). Inconclusive fixes take the 10 % canary ladder, the slow lane of seam 3.
+- **The lock sampler is retired.** `LOCKWAIT` samples by UTC hour: 07Z 165, 11Z 6, 13Z
+  115, 14Z 152, 15Z 1, 16Z 0 — every burst sits inside a rollout window (07Z, the
+  13:57–14:01Z #451 rollout, one sample at 14:59 for #784), steady state is clean, and 5h
+  and 5j both finished with 0 errors, so the seal stall of 5f/5g is closed by #780/#781.
+  `IDLETX` (idle-in-transaction sessions holding the Cortex's `SELECT … FROM
+  amfs_memory_entries`) ran at a steady ~340 samples per hour all day, independent of
+  load; it is not a benchmark blocker and stays a separate PR candidate against
+  amfs-internal. Sampler stopped 16:14Z; `/tmp/lockwatch.log` kept for that PR.
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families
