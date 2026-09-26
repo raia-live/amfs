@@ -1373,6 +1373,44 @@ def test_lessons_for_the_exact_situation_reorder_the_plan() -> None:
     assert act.rank_by_lessons([], failed) == []
 
 
+def test_a_lesson_endorsed_action_untried_here_stays_on_the_try_line() -> None:
+    """A lesson for this situation says fix_code worked, and fix_code has no
+    row on this record. It is backed, so it belongs on the Try line — under an
+    act after the act's own action, under a non-sweep explore at the head, and
+    under a sweep before the order over the rest of the untried. PR #450's
+    first cut kept every untried candidate out of the head and the backed ones
+    out of the Untried list, so the one action the record could stand behind
+    was on neither line."""
+    pr = {"tried": [_prior("fix:add_audit_exception", 9, 10, ["lost", "won", "won"]),
+                    _prior("fix:bump_dependency", 1, 2, ["won", "lost"]),
+                    _prior("fix:edit_generated_file", 0, 1, ["lost"])],
+          "untried": ["fix:fix_code", "fix:run_formatter", "fix:regen_migrations"]}
+    cands = ["fix:add_audit_exception", "fix:bump_dependency", "fix:edit_generated_file",
+             "fix:fix_code", "fix:run_formatter", "fix:regen_migrations"]
+    worked = [{"action": "fix:fix_code", "worked": True, "evidence_status": "untested"}]
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands, lessons=worked)
+    assert rec["mode"] == "act" and rec["plan"][:2] == ["fix:add_audit_exception", "fix:fix_code"]
+    text = act.render_priors(pr, rec, candidate_actions=cands, lessons=worked)
+    assert "Try fix:add_audit_exception first, then fix:fix_code" in text, text
+    # A non-sweep explore: the endorsed action leads, and is not repeated below.
+    explore = dict(rec, mode="explore", suggested_action="fix:fix_code", sweep=False)
+    text = act.render_priors(pr, explore, candidate_actions=cands, lessons=worked)
+    assert text.count("fix:fix_code") == 1 and "Try fix:fix_code first" in text, text
+    # A sweep: the endorsement outranks the order over the rest of the untried.
+    swept = act.aggregate_priors(
+        [_sit_row("pinned audit", [("fix:add_audit_exception", False), ("fix:bump_dependency", False)],
+                  outcome="failure")],
+        candidate_actions=cands, situation_exact=True,
+    )
+    swept["situation_record"] = {"situation": "pinned audit", "outcomes": 1}
+    swept["elsewhere"] = {"outcomes": 3, "tried": [
+        {"action_key": "fix:regen_migrations", "won": 3, "lost": 0, "n": 3, "p": 0.8}]}
+    rec = act.recommend(swept, agent_id="a", candidate_actions=cands, lessons=worked)
+    assert rec["mode"] == "explore" and rec.get("sweep")
+    text = act.render_priors(swept, rec, candidate_actions=cands, lessons=worked)
+    assert "Try fix:fix_code first, then " in text and text.count("fix:fix_code") == 1, text
+
+
 def test_the_server_reorders_the_plan_by_the_lessons_about_this_task(client, server_mem) -> None:
     """The record over the neighbourhood has resolve:a winning and resolve:b
     with one win, so the plan is a then b then the untried c. A lesson filed

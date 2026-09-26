@@ -1748,7 +1748,6 @@ def render_priors(
     # choice anywhere in the text: the record may not hold that attempt
     # (another agent's memory, a scan cap), but the lesson does.
     barred = _lesson_barred(lessons)
-    untried_set = set(untried)
     # Every untried candidate, in the sweep's order (:func:`sweep_order`:
     # most-won elsewhere first, then the rotation) — not the plan's cut of
     # them. The plan is capped at ``PLAN_MAX``; a footer that named only the
@@ -1768,7 +1767,10 @@ def render_priors(
     # note: an explore's head can also hold an action tried here, whose
     # record is the "Tried" line above.
     note = _elsewhere_notes(priors, open_untried) if mode == "explore" else {}
-    head = [a for a in plan if a in backed and a not in hedged_keys and a not in untried_set]
+    # The head keeps every backed action, untried on this record or not: a
+    # lesson's or a contrast's endorsement of a never-tried action is
+    # evidence, and it goes before the sweep's order over the rest.
+    head = [a for a in plan if a in backed and a not in hedged_keys]
     if sweep:
         # The agent's judgement has failed on this exact situation; the
         # order over the untried is the plan, not a hint — and all of them,
