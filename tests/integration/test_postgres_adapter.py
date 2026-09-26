@@ -1399,6 +1399,93 @@ def test_a_branch_reads_the_parent_live_not_as_of_the_branch_point(adapter) -> N
     assert adapter.read("acme/pricing", "rate-limit").value == {"rpm": 30}
 
 
+def test_the_engine_can_rewrite_an_inherited_key_on_a_fresh_branch(adapter) -> None:
+    """The engine numbers a write from what ``read`` returns — on a fresh
+    branch, the parent's live row — and the adapter must accept that number.
+    Until it did, the first write of a key main already held raised
+    ``VersionConflictError(expected n+1, found 0)`` on every repair branch,
+    and the repair loop fell back to writing on main at Ship."""
+    from datetime import UTC, datetime
+
+    from amfs_core.engine import CausalTagger, CoWEngine
+    from amfs_core.models import Branch
+
+    engine = CoWEngine(adapter, CausalTagger(agent_id="repair-agent"))
+    engine.write("acme/pricing", "plans", {"tiers": ["starter"]})
+    engine.write("acme/pricing", "plans", {"tiers": ["starter", "team"]})
+    assert adapter.read("acme/pricing", "plans").version == 2
+    adapter.create_branch(Branch(
+        namespace="test", name="repair/y", parent_branch="main",
+        branched_at=datetime.now(UTC), created_by="repair-agent",
+    ))
+
+    first = engine.write("acme/pricing", "plans", {"tiers": ["starter", "team", "pro"]},
+                         branch="repair/y")
+    second = engine.write("acme/pricing", "plans", {"tiers": ["starter", "pro"]},
+                          branch="repair/y")
+
+    # The branch continues main's numbering, and its second write supersedes
+    # only its own first — main's live row is untouched.
+    assert (first.version, first.branch) == (3, "repair/y")
+    assert (second.version, second.branch) == (4, "repair/y")
+    assert adapter.read("acme/pricing", "plans", branch="repair/y").value == {"tiers": ["starter", "pro"]}
+    on_main = adapter.read("acme/pricing", "plans")
+    assert (on_main.version, on_main.value) == (2, {"tiers": ["starter", "team"]})
+    live_on_branch = [
+        e for e in adapter.list("acme/pricing", include_superseded=True, branch="repair/y")
+        if e.key == "plans" and e.branch == "repair/y"
+    ]
+    assert sorted(e.version for e in live_on_branch) == [3, 4]
+
+
+def test_the_async_adapter_numbers_a_branch_write_from_the_parents_live_row(adapter) -> None:
+    """The HTTP hot path builds the entry from what the async ``read`` returned
+    — the parent's live row on a fresh branch — and writes it through the async
+    adapter, so that adapter must accept the same continuation the sync one does."""
+    from datetime import UTC, datetime
+
+    from amfs_core.models import Branch, MemoryEntry, Provenance
+
+    branch = _branch_world(adapter)  # main: plans@1, rate-limit@1; branch: rate-limit, risk-stale-limit
+    adapter.create_branch(Branch(
+        namespace="test", name="repair/z", parent_branch="main",
+        branched_at=datetime.now(UTC), created_by="repair-agent",
+    ))
+
+    def entry(version, branch):
+        return MemoryEntry(
+            entity_path="acme/pricing", key="plans", value={"tiers": ["starter", "team", "pro"]},
+            version=version, branch=branch, confidence=0.9,
+            provenance=Provenance(agent_id="a", session_id="s", written_at=datetime.now(UTC)),
+        )
+
+    async def go():
+        a = await _async_adapter()
+        try:
+            written = await a.write(entry(2, "repair/z"))  # what read(branch) + 1 says
+            again = await a.write(entry(3, "repair/z"))
+            on_branch = await a.read("acme/pricing", "plans", branch="repair/z")
+            on_main = await a.read("acme/pricing", "plans")
+            return written.version, again.version, on_branch.version, on_main.version
+        finally:
+            await a.close()
+
+    assert _run(go()) == (2, 3, 3, 1)
+    # A stale number is still a conflict: the branch is at 3 now, not 1.
+    from amfs_core.exceptions import VersionConflictError
+
+    async def stale():
+        a = await _async_adapter()
+        try:
+            await a.write(entry(2, "repair/z"))
+        finally:
+            await a.close()
+
+    with pytest.raises(VersionConflictError):
+        _run(stale())
+    assert adapter.read("acme/pricing", "plans", branch=branch).version == 1  # the other branch is unaffected
+
+
 def test_a_branch_the_adapter_never_recorded_reads_only_itself(adapter) -> None:
     """No branch row means no parent to overlay; nothing is invented."""
     from amfs_core.models import SearchQuery
@@ -1411,15 +1498,17 @@ def test_a_branch_the_adapter_never_recorded_reads_only_itself(adapter) -> None:
 
 # ---------------------------------------------------------------------------
 def test_a_branch_can_write_a_key_main_already_has_within_one_account(adapter) -> None:
-    """Versions are numbered per branch, so ``(entity, key, 1)`` exists on main
-    and again on every branch that writes the key. ``uq_entry_version`` has to
-    include ``branch`` for that to be legal. It did not, and the hosted store
-    — where every row carries an ``account_id`` — raised ``UniqueViolation`` on
-    the first branch write of any key main already had; the repair loop's
-    branch open failed and every fix fell back to writing main on Ship. The
-    existing branch tests never saw it because this adapter leaves
-    ``account_id`` NULL and NULLs are distinct under UNIQUE — so this test gives
-    the column a default, the way the hosted store fills it."""
+    """A branch's first version of a key main already holds continues main's
+    numbering (main at 2, the branch writes 3), and every branch that rewrites
+    the key does the same — so ``(entity, key, 3)`` exists on two branches at
+    once and ``uq_entry_version`` has to include ``branch`` for that to be
+    legal. It did not, and the hosted store — where every row carries an
+    ``account_id`` — raised ``UniqueViolation`` on the first branch write of
+    any key main already had; the repair loop's branch open failed and every
+    fix fell back to writing main on Ship. The existing branch tests never saw
+    it because this adapter leaves ``account_id`` NULL and NULLs are distinct
+    under UNIQUE — so this test gives the column a default, the way the hosted
+    store fills it."""
     import uuid as _uuid
     from datetime import UTC, datetime
 
@@ -1446,8 +1535,8 @@ def test_a_branch_can_write_a_key_main_already_has_within_one_account(adapter) -
             branched_at=datetime.now(UTC), created_by="repair-agent",
         ))
         on_branch = adapter.write(entry("procedure-ci-fix", {"steps": ["fix:regen"]}, branch="repair/one"))
-        assert on_branch.version == 1, "a branch numbers its own versions"
-        # A second branch, the same key: another version 1 in the same account.
+        assert on_branch.version == 3, "a branch versions on from the parent's live row"
+        # A second branch, the same key: another version 3 in the same account.
         adapter.create_branch(Branch(
             namespace="test", name="repair/two", parent_branch="main",
             branched_at=datetime.now(UTC), created_by="repair-agent",
@@ -1457,7 +1546,9 @@ def test_a_branch_can_write_a_key_main_already_has_within_one_account(adapter) -
             "SELECT branch, version FROM amfs_memory_entries WHERE key = 'procedure-ci-fix' "
             "AND account_id = %s::uuid ORDER BY branch, version", (account,),
         ).fetchall()
-        assert rows == [("main", 1), ("main", 2), ("repair/one", 1), ("repair/two", 1)]
+        assert rows == [("main", 1), ("main", 2), ("repair/one", 3), ("repair/two", 3)]
+        # Main's live row was not superseded by either branch write.
+        assert adapter.read("agents/ci-agent-a", "procedure-ci-fix").version == 2
         # Main still versions on from its own newest, not from the branches'.
         assert adapter.write(entry("procedure-ci-fix", {"steps": ["fix:x"]})).version == 3
     finally:
