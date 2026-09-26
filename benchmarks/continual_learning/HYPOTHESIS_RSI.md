@@ -492,3 +492,41 @@ counted in any reported table.
 - **Session-level `canary` / `memory_branch` notes** are absent from a row when no canary is
   live (the SaaS sends `X-AMFS-Canary` / `X-AMFS-Memory-Branch` only under a running
   canary); absence is the control state, not a recording failure.
+
+### 2026-09-26 (d) — the two-change protocol (E2), and a second harness defect
+
+Written during pilot 2, before any E1/E2 cell.
+
+- **What "changes at 50 and 130" means.** At `change_at` the cell's primary change set comes
+  into force; at `change_at2` the *other* set comes into force **on top of it** (the classes
+  the first change moved stay moved; a disjoint set of classes moves as well). Implemented as
+  `--change-at2` (`Scenario.change_at2`, cell id and scope suffix `-cc<ep>`): `variants(ep)`
+  is `""` → `"A"` → `"AB"`, `active_changes(ep)` the union of the sets in force, and every
+  task carries `change_active` (has this task's class moved by this episode), `change_stage`
+  (1 or 2) and `post_change2`. Sets A and B move disjoint classes by construction (amendment
+  (c)); the one interaction — `order-ops` price match on an equivalent SKU 8–14 days out,
+  right only under both sets — is tagged `change_stage = None` and is excluded from the
+  changed-class endpoints. A repair for stage 1 therefore stays correct after stage 2, so E2
+  measures whether the loop repairs a second time *without undoing the first* (oscillation,
+  regression) — the "sustained multi-step trend across two changes" E5 asks for. The
+  oracle-fix arm writes one batch per change (`lag` episodes after each).
+- **Consequence for the run order.** The second change uses set B, so **E2 with both changes
+  is run after `analysis-freeze-rsi`, together with E1-B**. The E2 analysis code is developed
+  on a reduced single-change E2 run (`support`, `ci-fix`, GPT-5.5, 1 seed, fleet 10, 200
+  episodes, change at 50 only), which is reported as a development run and not in any table.
+- **Byte-identical single-change cells.** The protocol machinery replaced each family's
+  `changes` property with `change_set(variant)`; prompts, seed entries and truths for every
+  family × seed {11, 23} × `change_at` {0, 20} × variant {A, B} × 60 episodes are unchanged
+  (checked with a snapshot before and after, `/tmp/scen_snapshot.py`, not part of the
+  release). The `scenarios/` hash is now
+  `531ee460a10c66c5bb76d6362eee7a27653cf965b4e145e365cf29449630ed4e` at `5b5915e0`; the
+  change-set *definitions* are those hashed in (c).
+- **Second harness defect (pilot 2, first attempt, discarded).** The runner's per-cell suffix
+  was `int(time.time()) % 1e6`: two cells started by parallel workers in the same second
+  shared it, and with it the hosted agent identity (`support-agent-390362` for both seeds) —
+  a shared judge, repair settings, fix list and canary tally for `senselab-rsi`, and a shared
+  agent brief for every SenseLab arm. Memory scopes carry the seed and were never shared.
+  Fixed at `741fa668` (nine random digits, unique within the process). v7 rows are affected
+  only where the first `--workers` cells of a run started in the same second; v7's endpoints
+  are scope-based and do not depend on per-agent platform state, but the paper's
+  reproducibility package notes it.
