@@ -137,7 +137,11 @@ class Scenario:
     # A family defines its change sets as ``change_set(variant)`` (class -> what changes).
     # ``changes`` is the union of every set the cell will apply (for tags, focus sampling
     # and oracle entries); ``active_changes(ep)`` is what is in force at episode ``ep``.
-    OTHER_VARIANT = {"A": "B", "B": "A"}
+    # "C" (HYPOTHESIS_RSI.md, amendment (l)) moves A's classes *conditionally*: the new fix
+    # depends on an attribute of the instance the tools show, so the old fix keeps working
+    # on a kept half and fails on a moved half. Disjoint from B, so a second change after C
+    # is B.
+    OTHER_VARIANT = {"A": "B", "B": "A", "C": "B"}
 
     def change_set(self, variant: str) -> dict[Any, Any]:
         """The classes ``variant`` moves and what they move to. Families override; the base

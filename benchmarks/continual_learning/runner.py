@@ -390,9 +390,10 @@ def main() -> None:
     p.add_argument("--change-at2", type=int, default=0,
                    help="second regime change: the other change set comes into force on top of the first at this "
                         "episode (HYPOTHESIS_RSI.md, E2); adds -cc<ep> to the cell id and scope")
-    p.add_argument("--change-variant", default="A", choices=["A", "B"],
+    p.add_argument("--change-variant", default="A", choices=["A", "B", "C"],
                    help="which regime change set applies at --change-at (see Scenario.change_variant); "
-                        "B adds -vB to the cell id and scope")
+                        "B / C add -vB / -vC to the cell id and scope. C moves A's classes conditionally "
+                        "on an instance attribute (HYPOTHESIS_RSI.md, amendment (l))")
     p.add_argument("--fleet-replicas", action="store_true",
                    help="fleet members share one hosted agent identity (HYPOTHESIS_RSI.md); adds -rep to fleet "
                         "cell ids. Always on for senselab-rsi* arms")

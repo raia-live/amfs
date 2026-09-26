@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .. import config
-from ..arms.base import EpisodeSession, MemoryArm, MemoryHit, Outcome, render_hits
+from ..arms.base import EpisodeSession, MemoryArm, MemoryHit, Outcome, entry_text, render_hits
 from ..scenarios.base import Scenario, StepResult, Task
 from .clients import LLM, Usage
 
@@ -398,7 +398,7 @@ def _hits_from_amfs(block: dict[str, Any]) -> list[MemoryHit]:
     for e in block.get("context") or []:
         if not isinstance(e, dict) or not e.get("key"):
             continue
-        hits.append(MemoryHit(key=str(e["key"]), text=str(e.get("value") or ""),
+        hits.append(MemoryHit(key=str(e["key"]), text=entry_text(e.get("value")),
                               confidence=float(e.get("confidence") or 0.0),
                               evidence_status=str(e.get("evidence_status") or "untested"),
                               success_count=int(e.get("success_count") or 0),
@@ -406,7 +406,7 @@ def _hits_from_amfs(block: dict[str, Any]) -> list[MemoryHit]:
     for a in block.get("avoid") or []:
         if not isinstance(a, dict) or not a.get("key"):
             continue
-        hits.append(MemoryHit(key=str(a["key"]), text=str(a.get("value") or ""), evidence_status="discredited",
+        hits.append(MemoryHit(key=str(a["key"]), text=entry_text(a.get("value")), evidence_status="discredited",
                               success_count=int(a.get("success_count") or 0),
                               failure_count=int(a.get("failure_count") or 0), avoid=True))
     return hits

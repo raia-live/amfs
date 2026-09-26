@@ -65,6 +65,39 @@ class MemoryHit:
         return d
 
 
+def entry_text(value: Any) -> str:
+    """An entry's value as the agent reads it. Plain values pass through; a ``procedure``
+    value (the platform's structured type: goal, steps, on_failure, verify — what the repair
+    loop writes when the lever is a procedure) is rendered as numbered steps rather than a
+    dict repr. Identical for every arm; only arms whose store holds procedures ever see one."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and isinstance(value.get("steps"), list):
+        lines: list[str] = []
+        if value.get("goal"):
+            lines.append(f"Procedure — goal: {value['goal']}")
+        for n, step in enumerate(value["steps"], 1):
+            if isinstance(step, dict):
+                action = step.get("action") or step.get("do") or step.get("step") or step.get("text") or ""
+                cond = step.get("when") or step.get("if") or step.get("condition")
+                lines.append(f"  {n}. {action}" + (f" (when: {cond})" if cond else ""))
+            else:
+                lines.append(f"  {n}. {step}")
+        if value.get("on_failure"):
+            lines.append(f"  on failure: {value['on_failure']}")
+        if value.get("verify"):
+            lines.append(f"  verify: {value['verify']}")
+        return "\n".join(lines)
+    try:
+        import json
+
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def render_hits(hits: list[MemoryHit]) -> str:
     """What the agent reads back from ``memory_search``. Identical formatting for every arm;
     arms without evidence simply have nothing in the parentheses beyond confidence."""

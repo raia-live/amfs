@@ -28,6 +28,9 @@ def make_arm(name: str) -> MemoryArm:
     if name == "senselab-nofeedback":
         from .senselab_arm import SenseLabNoFeedbackArm
         return SenseLabNoFeedbackArm()
+    if name == "senselab-unlabeled":
+        from .senselab_arm import SenseLabUnlabeledArm
+        return SenseLabUnlabeledArm()
     if name == "senselab-episode":
         from .senselab_arm import SenseLabEpisodeArm
         return SenseLabEpisodeArm()

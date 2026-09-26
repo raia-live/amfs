@@ -1180,3 +1180,194 @@ will start grading from this revision — the K3 "before" number is the arm stat
 before the cut, not a later re-read. Stale ngrok tunnels for the team-grows hubs
 (8788/8789, no listeners) were removed before launch so the reserved domain routes every
 Tier 2 webhook to the single live hub on 8787.
+
+### 2026-09-26 (l) — SenseLab is the engine; the repair loop is measured where exhaustion cannot recover
+
+**Why.** Six pilots and a mechanism reading (HEADROOM_RSI.md, "What the tiers can and
+cannot do on set A") say the same thing: on set A the `senselab-rsi` arm is at parity with
+`senselab` (5f 93.3 / 92.5 / 85.0 vs 5h 92.5 / 90.0 / 80.0 and 5j 93.3 / 91.2 / 82.5 on
+support; 95.0 / 92.5 / 85.0 vs 95.0 and 94.2 on ci-fix), zero fixes have shipped in any
+cell, and both sit at the computed ceiling for a 60-episode fleet-1 cell (93–94 %: first
+exposures are a 5 % floor, second exposures the only headroom). Four properties of set A
+make this a result about the *benchmark*, not about the repair loop: (1) every task is a
+choice among ten enumerated actions and a change moves one of them, so the correct answer is
+recoverable by exhaustion — action priors and `explore` mode are the right algorithm and
+they converge in ≤ 2 exposures; (2) a wrong action returns "Still happening" — a failed
+trace carries no information about the new answer, so a repair agent drafting from it knows
+what the agent knows; (3) the environment's verdict is verified, binary and immediate, so
+the judge can only agree with a label the outcome loop already has; (4) the regime
+predicate wants ≥ 3 validations (`REGIME_MIN_SUCCESSES`) and the canary 8 outcomes per arm
+after a 4–16-episode detection lag, while a class recurs every ~8 episodes — a perfect fix
+ships after the second exposure, when the outcome loop has already recovered. E1's primary
+endpoint (first-attempt success on changed classes, episodes 40–59) therefore cannot
+separate the tiers on set A, and the study as preregistered would report the repair loop
+as a null without having tested what it is for.
+
+**What the paper says.** SenseLab is one self-improving memory engine and is presented as
+one system, in three tiers that the ablations isolate:
+
+- *Tier 1 — the outcome loop.* Entity-scoped versioned memory with semantic retrieval; the
+  Cortex briefing with `validated` / `discredited` / `regime_shift` sections and an
+  `evidence_status` on every hit; per-situation action priors and the `act` / `explore` /
+  `escalate` recommendation with per-agent exploration assignment; attempt boundaries with
+  credit assignment and `lesson-contrast-*` entries; confidence decay by memory type;
+  cross-agent inheritance (a joiner reads the fleet's record); decision traces with
+  `task_input` / `response_text`. The memory improves itself from outcomes, no human in the
+  loop.
+- *Tier 2 — the repair loop.* Continuous trace judges with a customer rubric; verdicts
+  clustered into behaviours and incidents; auto-proposed fixes drafted by a repair agent
+  with `search_traces` / `compare_traces` / `find_similar_traces` / `read_procedures` over
+  the account's record, with a first-class `procedure` memory type (goal, steps,
+  on_failure, verify); corrective entries on `repair/<id>` branches; Tier 1 memory test on
+  a case set, Tier 2 customer replay, Tier 3 canary routing with stamped arms; `decide()`,
+  ship, recheck, rollback; review policy. The engine rewrites and validates its own
+  knowledge and procedures before anyone acts on them.
+- *Tier 3 — the recursion.* `lesson-fix-*` / `decision-fix-*` entries from the loop's own
+  history into briefings and the next draft's evidence (`prior_fixes`, amendment (j)); the
+  repairer's prompt store with candidate A/B and `repairer_stats`; the Managed Models
+  distilled from the repair record (E7). The loop improves the loop.
+
+Arm names in the paper map to harness arms as follows; the harness names do not change.
+
+| paper | harness | what it is |
+|---|---|---|
+| **SenseLab** | `senselab-rsi` | the full engine: Tiers 1–3, `auto_after_canary` |
+| SenseLab − repair loop | `senselab` | Tier 1 only |
+| SenseLab − canary | `senselab-rsi-nocanary` | ships on a passed replay |
+| SenseLab − replay | `senselab-rsi-noreplay` | canary is the only test |
+| SenseLab (review) | `senselab-rsi-review` | nothing ships; review load |
+| SenseLab − protocol | `senselab-rsi-minimal` | retrieve + commit only |
+| SenseLab (self-report) / (judges only) | `senselab-rsi-selfreport` / `-judges` | E3 verdict sources |
+| SenseLab − repair loop − labels | `senselab-unlabeled` (new) | Tier 1 with no failure signal |
+| maintainer oracle, lag *k* | `senselab-oracle-fix-k` | a human told about the change |
+
+The headline tables (E1, E2, E4) compare **SenseLab** — the full engine — against
+frontier-alone and the retrieval baselines. **Attribution rule:** a gain is credited to a
+tier only where the ablation that isolates that tier shows a paired difference. On set A the
+gains over every baseline are credited to Tier 1, and the paper says so in the sentence that
+reports them; the paper does not contain the claim that the repair loop produced the set-A
+result. The repair loop's contribution is measured where exhaustion cannot recover — the
+regimes below — and reported with the same rule, including a null if that is what is found.
+
+**Feature → evidence map.** Every feature the paper describes has one place where it is
+measured; a feature without a row is described as unmeasured.
+
+| feature | tier | isolated by | endpoint | where |
+|---|---|---|---|---|
+| evidence gating, briefing sections | 1 | `senselab` vs `pgvector-diy+outcomes`, `raw-traces` | changed-class recovery, late-phase success | E1 |
+| action priors, recommendation, situations | 1 | `-nopriors`, `-nosituation`, `-nocontract` | exposures-to-recover, first-attempt success | E1 secondary |
+| attempt boundaries, lesson-contrast | 1 | `-episode`, `-attempts`, `-minimal` | recovery within a task, stale-pick rate | E1 secondary |
+| cross-agent inheritance | 1 | team-grows probe (i) — done: 1.00 vs 0.31–0.40 first-exposure, poisoned 0 vs 0.60–0.69 | joiner first exposure, poisoned follow | probe (i) |
+| judges | 2 | `senselab-unlabeled` vs `senselab-rsi-judges` | recovery without labels; judge P/R vs oracle | E3 (primary, below) |
+| behaviours, incidents | 2 | `senselab-rsi` verdict record | cluster-to-taxonomy match, incident latency | E3 |
+| repair-agent synthesis, procedures | 2 | set C, `senselab-rsi-nocanary` and `senselab-rsi` vs `senselab` | first-attempt success on the moved half after the first ship; procedures shipped | E1-C (below) |
+| Tier 1 / Tier 2 replay | 2 | `-noreplay`; probe (b) | gate confusion matrix, false-ship, adversarial rejection | E2, probe (b) |
+| canary | 2 | `-nocanary`; probe (a) | regressions caught after a Tier 1 pass, A/A false-pass | E2, probe (a) |
+| ship, recheck, rollback, blast radius | 2 | probes (c), (e) | unlearn-own-repair episodes, reward-hacking flags, entries restored | probes, E6 |
+| lesson-fix / decision-fix, prior_fixes | 3 | (j) G1–G4; T1 below | second-draft pass rate after a failed first draft | E2 |
+| repairer prompt A/B | 3 | E5 | proven-fix rate by prompt version, re-measured on other families | E5 |
+| distilled students | 3 | E7 | post-change first-attempt success, pinned-case reproduction | E7 |
+| cost, latency, auditability | all | E6 | USD per solved task, ms, verifiable-chain share | E6 |
+
+**What changes in the study.**
+
+1. **Set C — inference-required changes.** A third change set in which the new correct
+   action depends on an attribute of the instance that the tools show, so the class's old
+   fix keeps working on a *kept* half and fails on a *moved* half (50/50 per instance,
+   drawn deterministically from seed, episode and salt; `truth["cond"]` and the episode tag
+   `change_cond` mark the moved half). A single-action sweep cannot represent the rule; the
+   record shows the stale entry *contested*, not discredited; a repair agent that compares
+   failing and succeeding runs can write the rule as a `procedure`. Defined for the
+   development pair here; written for the remaining eight families by the same construction
+   and registered by hash before E1, the four held-out families blind.
+   - *support* (attribute in the ticket header or `lookup_account`, which now also shows
+     the app version and the card's issuer country): `android-notifications` — app major
+     ≥ 9 → `reinstall_app` (v9 moved to a new notification channel; a reinstall migrates
+     it), older → `advise_settings_change` unchanged; `export-timeout` — plan `team` →
+     `advise_settings_change` (asynchronous export with notifications shipped to the team
+     plan), `free` / `pro` → `advise_workaround` unchanged; `card-declined` — domestic
+     issuer → `resend_email` (the new provider's one-time re-verification mail), foreign
+     issuer → `escalate_tier2` unchanged (the allow-list).
+   - *ci-fix* (attribute in `get_pr_files`): `flaky-integration` — the PR touches
+     `tests/integration/cassettes/` → `edit_generated_file` (regenerate the recorded
+     cassette), otherwise `rerun_job` unchanged; `audit-pinned` — the PR touches
+     `legacy_sdk/` → `add_audit_exception` unchanged, otherwise `bump_dependency` (the
+     modules off the legacy SDK are unpinned).
+   - C moves A's classes, disjoint from B, so `OTHER_VARIANT["C"] = "B"` and the
+     two-change protocol is C then B. Oracle entries state the rule as a maintainer would.
+   - **C protocol**, fleet 1: 100 episodes, change at 30, `change_focus = 0.5`. Thirty
+     pre-change episodes give each of eight classes ≥ 3 validations (the regime predicate);
+     70 post-change episodes at focus 0.5 give ~12 draws per changed class, ~6 on the moved
+     half; a proposal plus Tier 2 plus 8 outcomes per arm at 50 % routing is ~25 sessions,
+     so a canary-gated ship lands around episode 65 and `-nocanary` within minutes of its
+     replay. A wrong *unconditional* fix regresses the kept half, so the design carries its
+     own false-ship detector.
+2. **E3 becomes a primary comparison.** New arm `senselab-unlabeled`: Tier 1 with the
+   verdict the agent would report (`success` unless it escalated), no `verified_by`, no
+   attempt boundaries — the mirror of `senselab-rsi-judges`. The weak-label comparison is
+   `senselab-unlabeled` vs `senselab-rsi-judges` on sets A and C, with the labelled pair as
+   reference; probe (d) (feedback delayed three episodes, so the sealed trace is neutral and
+   the judge must infer failure from behaviour) is the hard case and is reported next to it.
+3. **`senselab-rsi-nocanary` is co-primary at fleet 1** (sets A and C): by the arithmetic
+   in 1 it is the only policy that can ship before the second exposure at this cell length.
+   The canary-gated arm stays primary at fleet ≥ 6 and in E2, where the arms fill in
+   minutes, and is reported at fleet 1 with K1–K4.
+4. **Endpoints for the RSI claim.** First-attempt success on changed classes (E1 primary,
+   unchanged) *and*: exploration cost — failed attempts weighted by severity (`refund` is a
+   critical failure the outcome loop pays for on a live customer) and tokens per solved
+   task; time-to-repair; false-ship and regression rate; joiner zero-discovery; detection
+   latency under weak labels. Tier 3, observational, with data only where fixes exist
+   (E2, set C): (T1) among fixes whose first draft failed Tier 2, the share whose second
+   draft passed, and whether the first draft's `lesson-fix` was in its evidence; (T2)
+   repairer prompt versions and proven-fix rate per version (E5); (T3) `lesson-fix` /
+   `decision-fix` entries surfaced in later briefings and drafts.
+5. **Oracle bound on the development seeds.** `senselab-oracle-fix-5` on set A, support and
+   ci-fix, seeds 11 / 23, run now: a maintainer who writes the correct entry five episodes
+   after the change is the upper bound on any repair of set A. It tests the ceiling claim
+   directly (P4).
+6. **Control separation.** `AMFS_EVAL_AUTO_PROPOSE` is a process-wide switch, so control
+   agents receive proposals (on branches; nothing shipped; zero reads — documented in
+   HEADROOM). A per-agent `auto_propose` in the repair settings is an amfs-internal PR
+   candidate needing approval; until it lands the exposure is reported, not assumed away.
+7. **Harness.** `--change-variant C`; `change_cond` tag; `lookup_account` shows app version
+   and issuer country in every variant (irrelevant to A and B, whose dev cells ran without
+   the two fields; noted); `procedure` values rendered legibly to every arm's agent (goal,
+   steps, on_failure, verify) instead of a dict repr.
+
+**What does not change.** Sets A and B; the judge rubric; canary knobs; the seeds and the
+dev / confirmatory split; the freeze rule; E2, E4, E7 as specified; the (k) endpoints and
+`rsi-pilot-5k`, which runs to completion on the pre-(l) harness and is read as planned.
+
+**Predictions (development seeds; C protocol on support + ci-fix unless stated).**
+(P1) *Tier 1 on C:* `senselab` first-attempt success on the moved half, episodes 30–99,
+between 40 and 75 % — the record is contested and the agent may write its own conditional
+note — with episode success ≥ 85 % from in-task retries; `none` and the pgvector arms
+≤ 55 % on the moved half. (P2) *Tier 2 on C:* `senselab-rsi-nocanary` ships ≥ 1 corrective
+or procedure by episode 60 in ≥ 3 of 4 cells; after a cell's first ship, first-attempt
+success on the moved half ≥ 85 % and ≥ 15 points above `senselab` paired on the same
+episodes; the kept half and unchanged classes within 5 points of `senselab` (no
+regression). (P3) *Canary-gated on C:* ships by episode 80 in ≥ 2 of 4 cells; the same
+direction in the post-ship tail; K1–K4 reported. (P4) *Oracle bound on A:*
+`senselab-oracle-fix-5` within 3 points of `senselab` (support 93.3, ci-fix 95.0) — the
+ceiling is real. (P5) *Weak labels on A:* `senselab-unlabeled` late-phase support success at
+or below `pgvector+rerank` (70.0) — the loop validates the stale pick — while
+`senselab-rsi-judges` stays within 5 points of labelled `senselab-rsi`. **What falsifies
+the claim:** if P2 fails *with fixes shipped*, the repair loop's synthesis adds nothing over
+a capable agent with priors even where exhaustion cannot recover, and the paper reports the
+repair loop as a validation and safety layer, not an intelligence layer; if P4 fails
+(oracle ≥ 5 points above `senselab`), the ceiling argument is withdrawn and set-A parity is
+reported as a repair-loop shortfall; if P5's judges arm falls with the unlabeled one, the
+judges do not turn this benchmark's traces into usable verdicts.
+
+**Scope note.** Development phase; no confirmatory seed has run on any arm. Harness and
+scenario changes are committed with this amendment; the engine change (6) is a PR candidate
+and is not assumed. Bruno approved the reframing and the redesign on 2026-09-27 JST
+(2026-09-26 UTC) and asked for the recommendation to be re-checked against three
+requirements — SenseLab in the strongest defensible position, the reader understanding
+that SenseLab *is* the engine and what its features do, and the tests exercising Tiers 2
+and 3 — which is what the framing, the attribution rule, the feature map and items 1–5
+respond to. Two things were considered and not taken: a platform-served "SOP slot" the
+agent always reads (an affordance the baselines lack; procedures are surfaced by the same
+retrieval every arm gets, only rendered legibly), and loosening the frozen judge rubric so
+a recovered attempt counts as a failure (the regime path already charges attempt failures
+since #783/#785, so set C reaches the loop without touching the rubric).

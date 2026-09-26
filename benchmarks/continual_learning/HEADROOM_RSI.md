@@ -606,6 +606,58 @@ lands by about episode 40 — reported, not amended; E1 fleet-6 and E2 carry the
 ship-rate readout. Treated run `rsi-pilot-5k` (5h protocol) once #785 is live; 5j is the
 baseline.
 
+### What the tiers can and cannot do on set A — and amendment (l)
+
+Asked whether `senselab-rsi` shows value over `senselab`, the answer from six pilots is
+parity (HYPOTHESIS_RSI.md (l) has the numbers), and the reason is the benchmark, not the
+loop. Reading the two arms against the scenario code:
+
+- `senselab` is Tier 1 — the outcome loop. It cannot write a corrected entry; it can
+  discredit a stale one, steer the sweep with action priors, and record a recovery as a
+  `lesson-contrast`. `senselab-rsi` adds Tier 2 — judge, behaviours, repair agent, replay,
+  canary, ship — whose output is a *corrected* entry or procedure, validated before agents
+  read it. That is the whole difference.
+- Set A gives Tier 2 nothing to add. The task is a choice among ten enumerated actions and
+  the change moves one; the sweep recovers it in ≤ 2 exposures (`realworld.py`
+  `SUPPORT_CHANGES`, `CI_CHANGES`). A wrong action returns "Customer replied 24h later:
+  'Still happening.'" — nothing in a failed trace names the new answer, so a drafted
+  correction knows what the agent knows. Outcomes are verified and immediate, so the judge
+  can only agree. The regime predicate wants ≥ 3 validations and the canary 8 outcomes per
+  arm; a class recurs every ~8 episodes; a perfect fix lands after the second exposure.
+  The ceiling (93–94 %) is computed above and both arms sit on it.
+- What Tier 2 is *for* is absent from set A: a rule that cannot be found by exhaustion, a
+  failure nobody labelled, exploration too expensive to do on a live customer. The repair
+  agent's tools say so — `search_traces`, `compare_traces`, `find_similar_traces`,
+  `read_procedures`, a structured `procedure` type — none of which a single-action flip
+  needs.
+
+Two things were checked before recommending the reframing. First, that presenting the full
+engine as "SenseLab" in the headline is not a claim the ablation contradicts: it is not, as
+long as the set-A gain is credited to Tier 1 in the sentence that reports it (the
+attribution rule in (l)), and the maintainer-oracle bound (`rsi-oracle-5A`, running) tests
+that no repair could have done better on A. Second, that the new regimes are a fair fight
+rather than a rigged one: under set C the `senselab` agent sees the same attribute in the
+same tool output and is told by the `situation` parameter to split labels when "the
+deciding detail differs", so it *can* learn the rule by labelling — P1's 40–75 % range is
+that possibility, and P2 is the claim that the repair loop gets there faster and more
+reliably by comparing runs. If P2 fails with fixes shipped, the paper says so.
+
+Two candidate tweaks were rejected. A platform-served "SOP slot" the agent always reads
+would give SenseLab an affordance the baselines lack; procedures reach the agent through
+the same retrieval every arm gets (rendered legibly by `arms.base.entry_text`, which is
+the only harness change on the read path). Loosening the frozen rubric so a recovered
+attempt counts as a failure is unnecessary: since #783/#785 the regime path charges attempt
+failures, so set C reaches the loop through outcomes alone, and the judge path fires on the
+tasks whose retries run out.
+
+Engine-side, one thing stays open: `AMFS_EVAL_AUTO_PROPOSE` is read from the process
+environment (`amfs_eval/fixes.py` `auto_propose_enabled`), so every agent on the API gets
+proposals — control arms included. Nothing shipped and corrective entries live on branches,
+so the control arms can have read nothing from the loop (the fix ledger shows 0 shipped
+across every cell to date), but the separation is by circumstance. A per-agent
+`auto_propose` in the repair settings row (`fix_store.py` already keeps `repair_policy`,
+`canary_pct`, `canary_min_outcomes` per agent) is the PR candidate; it needs approval.
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families

@@ -37,6 +37,11 @@ Variants:
                            attempt's reads. Isolates what per-attempt credit assignment adds.
   ``senselab-nofeedback``  steps 1-4 only; step 6 never happens. The ablation that separates
                            "good retrieval" from "learning from outcomes".
+  ``senselab-unlabeled``   step 6 carries the verdict the agent would report — ``success``
+                           unless it escalated — with no ``verified_by`` and no attempt
+                           boundaries: the outcome loop with no external failure signal. The
+                           mirror of ``senselab-rsi-judges`` (HYPOTHESIS_RSI.md, amendment (l),
+                           E3): what Tier 1 does when nobody labels the runs.
   ``senselab-attempts``    legacy: per-attempt failures committed as separate outcomes (one
                            HTTP round trip each). Kept so the grid-v1 rows stay interpretable.
   ``senselab-nopriors``    the full protocol without action priors / recommendation / compact
@@ -70,7 +75,7 @@ from amfs_core.actions import render_priors
 from amfs_core.models import MemoryType, OutcomeType, RecallConfig
 
 from .. import config
-from .base import ArmAccounting, EpisodeSession, MemoryArm, MemoryHit, Outcome
+from .base import ArmAccounting, EpisodeSession, MemoryArm, MemoryHit, Outcome, entry_text
 
 #: Key of the entity's induced decision rules (``SenseLabInduceArm``). One key, versioned.
 INDUCED_RULES_KEY = "decision-rules"
@@ -284,7 +289,7 @@ def _render_briefing(digests: list[Any], *, hot_context: bool = True) -> str | N
                     if isinstance(it, dict):
                         key = it.get("key") or it.get("entity_path") or ""
                         val_ = it.get("value") or it.get("summary") or it.get("text") or ""
-                        lines.append(f"- [{key}]{_ev(it)}: {str(val_)[:300]}")
+                        lines.append(f"- [{key}]{_ev(it)}: {entry_text(val_)[:300]}")
                     else:
                         lines.append(f"- {str(it)[:300]}")
         text = summary.get("narrative") or summary.get("text") or summary.get("overview")
@@ -483,7 +488,7 @@ class _SenseLabSession(EpisodeSession):
         for r in rows:
             e = r.entry
             avoid = bool((r.breakdown or {}).get("_avoid"))
-            text = str(e.value)
+            text = entry_text(e.value)
             if avoid and e.key in self._briefed_discredited:
                 text = "(discredited — see briefing above)"
             hits.append(MemoryHit(
@@ -854,6 +859,21 @@ class SenseLabNoFeedbackArm(SenseLabArm):
     name = "senselab-nofeedback"
     learns_from_outcomes = False
     attempt_boundaries = False
+
+
+class SenseLabUnlabeledArm(SenseLabArm):
+    """The outcome loop with no external failure signal (amendment (l), E3 primary): every
+    task is committed as the agent would report it — ``success`` unless it gave up and
+    escalated — unverified, with no attempt boundaries (a recorded failed attempt is a label
+    the environment supplied). What memory learns is whatever the agent believed; the
+    ``senselab-rsi-judges`` arm adds the judges to exactly this condition."""
+
+    name = "senselab-unlabeled"
+    attempt_boundaries = False
+    verified_by = None
+
+    def outcome_for_commit(self, outcome: Outcome, session: "_SenseLabSession") -> tuple[str, dict[str, Any]]:
+        return ("failure" if outcome.escalated else "success"), {}
 
 
 class SenseLabAttemptsArm(SenseLabArm):

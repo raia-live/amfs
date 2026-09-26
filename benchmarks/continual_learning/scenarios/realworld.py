@@ -100,7 +100,38 @@ SUPPORT_CHANGES_B: dict[str, dict[str, str]] = {
                        "why": "self-service 2FA recovery now runs inside the password-reset flow (email plus ID check); "
                               "tier 1 sends the reset, escalations bounce back"},
 }
-SUPPORT_CHANGE_SETS = {"A": SUPPORT_CHANGES, "B": SUPPORT_CHANGES_B}
+# Change set "C" (HYPOTHESIS_RSI.md, amendment (l)): A's classes move *conditionally*. The new
+# fix depends on an attribute of the instance that the ticket header or ``lookup_account``
+# shows — the app version, the plan, the card's issuer country — so the old fix keeps working
+# on the kept half of the class and fails on the moved half. A single-action sweep cannot
+# represent the rule and the outcome record shows the stale entry contested, not discredited;
+# what recovers the moved half is a rule an agent (or the repair loop, comparing failing and
+# succeeding runs) writes down. ``cond`` reads the instance; ``rule`` is how a maintainer
+# would state it (``oracle_fix_entries``).
+SUPPORT_CHANGES_C: dict[str, dict[str, Any]] = {
+    "android-notifications": {
+        "attr": "app version (lookup_account)", "cond": lambda i: i["app_major"] >= 9,
+        "fix": "reinstall_app",
+        "rule": "on app 9.x and later reinstall_app; on older versions advise_settings_change as before",
+        "why": "app v9 moved notifications to a new channel that a reinstall migrates; older builds are still "
+               "killed by battery optimisation, where the settings advice is right"},
+    "export-timeout": {
+        "attr": "plan (ticket header)", "cond": lambda i: i["plan"] in ("pro", "team"),
+        "fix": "advise_settings_change",
+        "rule": "on paid plans (pro, team) advise_settings_change — enable export notifications, the file is "
+                "emailed asynchronously; on the free plan advise_workaround as before",
+        "why": "asynchronous export with notifications shipped to paid plans only; free-plan exports still time out "
+               "over 90 days and splitting the range is the only fix there"},
+    "card-declined": {
+        "attr": "card issuer country (lookup_account)", "cond": lambda i: i["issuer"] == "US",
+        "fix": "resend_email",
+        "rule": "for cards from a domestic (US) issuer resend_email — the new payment provider's one-time "
+                "re-verification mail unblocks the card; for foreign issuers escalate_tier2 as before",
+        "why": "payments moved to a provider that requires a one-time card re-verification for domestic cards; "
+               "foreign issuers are still blocked by the fraud rules and need the tier-2 allow-list"},
+}
+SUPPORT_CHANGE_SETS = {"A": SUPPORT_CHANGES, "B": SUPPORT_CHANGES_B, "C": SUPPORT_CHANGES_C}
+FOREIGN_ISSUERS = ["DE", "BR", "JP", "IN", "GB", "MX"]
 
 
 class SupportScenario(Scenario):
@@ -120,9 +151,16 @@ class SupportScenario(Scenario):
         return SUPPORT_CHANGE_SETS[variant]
 
     def oracle_fix_entries(self, variant: str | None = None) -> list[tuple[str, str, float]]:
-        return [(f"update-{iid}", f"Playbook update — {iid.replace('-', ' ')} tickets: the correct resolution is now "
-                                  f"{c['fix']} (it used to be {SUPPORT_ISSUES[iid]['fix']}). Reason: {c['why']}.", 1.0)
-                for iid, c in self.change_set(variant or self.change_variant).items()]
+        out: list[tuple[str, str, float]] = []
+        for iid, c in self.change_set(variant or self.change_variant).items():
+            head = f"Playbook update — {iid.replace('-', ' ')} tickets: "
+            if "cond" in c:   # set C: the rule, as a maintainer would write it
+                out.append((f"update-{iid}", head + f"the resolution now depends on the {c['attr']}: {c['rule']}. "
+                                                    f"Reason: {c['why']}.", 1.0))
+            else:
+                out.append((f"update-{iid}", head + f"the correct resolution is now {c['fix']} (it used to be "
+                                                    f"{SUPPORT_ISSUES[iid]['fix']}). Reason: {c['why']}.", 1.0))
+        return out
 
     def build(self) -> None:
         rng = self.rng
@@ -134,18 +172,32 @@ class SupportScenario(Scenario):
     def _instance(self, ep: int, iid: str, salt: int) -> dict[str, Any]:
         irng = random.Random(f"sup-{self.seed}-{ep}" + (f"-{salt}" if salt else ""))
         iss = SUPPORT_ISSUES[iid]
-        fix, why, old = iss["fix"], iss["why"], None
+        inst: dict[str, Any] = {
+            "issue": iid, "msg": irng.choice(iss["msgs"]),
+            # See Scenario.opaque_ids: a counted ticket number is the episode index.
+            "ticket": irng.randint(10000, 99999) if self.opaque_ids else 4400 + ep,
+            "email": f"user{irng.randint(1000, 9999)}@example.com",
+            "plan": irng.choice(["free", "pro", "team"]),
+            "platform": "iOS" if "ios" in iid else "Android" if "android" in iid else irng.choice(["web", "iOS", "Android"]),
+        }
+        # Account attributes ``lookup_account`` shows (drawn after the fields above so A/B
+        # instances are unchanged). Irrelevant to A and B; set C's rules read them.
+        inst["app_major"] = irng.choice([8, 9])
+        inst["app_minor"] = irng.randint(0, 6)
+        inst["issuer"] = "US" if irng.random() < 0.5 else irng.choice(FOREIGN_ISSUERS)
+        fix, why, old, cond = iss["fix"], iss["why"], None, None
         active = self.active_changes(ep)
         if iid in active:
-            old, fix, why = fix, active[iid]["fix"], active[iid]["why"]
-        return {"issue": iid, "msg": irng.choice(iss["msgs"]),
-                # See Scenario.opaque_ids: a counted ticket number is the episode index.
-                "ticket": irng.randint(10000, 99999) if self.opaque_ids else 4400 + ep,
-                "email": f"user{irng.randint(1000, 9999)}@example.com",
-                "plan": irng.choice(["free", "pro", "team"]),
-                "platform": "iOS" if "ios" in iid else "Android" if "android" in iid else irng.choice(["web", "iOS", "Android"]),
-                "fix": fix, "generic": iss["generic"], "why": why, "old_fix": old,
-                "change_class": iid in self.changes}
+            change = active[iid]
+            if "cond" in change:
+                cond = bool(change["cond"](inst))
+                if cond:
+                    old, fix, why = fix, change["fix"], change["why"]
+            else:
+                old, fix, why = fix, change["fix"], change["why"]
+        inst.update({"fix": fix, "generic": iss["generic"], "why": why, "old_fix": old, "cond": cond,
+                     "change_class": iid in self.changes})
+        return inst
 
     def regenerate(self, ep: int, salt: int) -> None:
         iid = random.Random(f"sup-focus-{self.seed}-{ep}-{salt}").choice(self.focus_classes(ep))
@@ -164,16 +216,19 @@ class SupportScenario(Scenario):
         prompt = (f"Ticket SUP-{i['ticket']} from {i['email']} ({i['plan']} plan, {i['platform']}):\n\"{i['msg']}\"")
         return Task(ep, prompt, dict(i), self.agent_for(ep),
                     {"issue": i["issue"], "quirk": i["fix"] != i["generic"],
-                     **change_tags(self, ep, i["change_class"], cls=i["issue"])})
+                     **change_tags(self, ep, i["change_class"], cls=i["issue"], cond=i.get("cond"))})
 
     def step(self, task: Task, name: str, args: dict[str, Any]) -> StepResult:
         t = task.truth
         if name == "lookup_account":
-            # Realistic but non-diagnostic: the account view does not explain the issue.
+            # Realistic and, under A and B, non-diagnostic: the account view does not explain
+            # the issue. Set C's rules read the app version and the card's issuer country.
             irng = random.Random(t["email"])
-            return StepResult(f"Account {t['email']}: plan {t['plan']}, platform {t['platform']}, member since "
+            app = "web app" if t["platform"] == "web" else f"app {t.get('app_major', 8)}.{t.get('app_minor', 0)}"
+            return StepResult(f"Account {t['email']}: plan {t['plan']}, platform {t['platform']} ({app}), member since "
                               f"2025-{irng.randint(1, 12):02d}, last login {irng.randint(1, 30)}h ago, "
-                              f"{irng.randint(0, 3)} prior tickets, payment method on file: card ending {irng.randint(1000, 9999)}.")
+                              f"{irng.randint(0, 3)} prior tickets, payment method on file: card ending "
+                              f"{irng.randint(1000, 9999)} (issuer {t.get('issuer', 'US')}).")
         if name != "resolve":
             return StepResult(f"Unknown tool {name}")
         act = str(args.get("action", ""))
@@ -189,18 +244,23 @@ class SupportScenario(Scenario):
                           flags={"generic_pick": act == t["generic"], "unwarranted_refund": act == "refund", **stale}, answer=act)
 
 
-def change_tags(sc: Scenario, ep: int, in_change_class: bool, cls: Any = None) -> dict[str, Any]:
+def change_tags(sc: Scenario, ep: int, in_change_class: bool, cls: Any = None,
+                cond: bool | None = None) -> dict[str, Any]:
     """Tags for the regime-change analysis: is this task in a class whose truth changes
     (``change_class``: any set the cell applies), and are we before or after the first change.
     With ``cls`` given: ``change_active`` (has *this* class's truth moved by ``ep``),
     ``change_stage`` (1: moves at ``change_at``; 2: at ``change_at2``) and, under a second
-    change, ``post_change2``."""
+    change, ``post_change2``. Under a conditional change set (C), ``change_cond`` says whether
+    *this instance* is on the moved half (True), the kept half (False), or the class is not
+    conditional (absent)."""
     if not sc.change_at:
         return {}
     tags: dict[str, Any] = {"change_class": in_change_class, "post_change": sc.changed(ep)}
     if cls is not None:
         tags["change_active"] = sc.class_changed(cls, ep)
         tags["change_stage"] = sc.change_stage(cls)
+    if cond is not None:
+        tags["change_cond"] = bool(cond)
     if sc.change_at2:
         tags["post_change2"] = ep >= sc.change_at2
     return tags
@@ -755,7 +815,28 @@ CI_CHANGES: dict[str, str] = {"flaky-integration": "edit_generated_file", "audit
 # breaks it; the audit exception process applies — textbook to quirk, a new quirk appearing
 # where the generic answer used to be right). Neither (class, fix) pair occurs under "A".
 CI_CHANGES_B: dict[str, str] = {"snapshot-ui": "fix_code", "audit-free": "add_audit_exception"}
-CI_CHANGE_SETS = {"A": CI_CHANGES, "B": CI_CHANGES_B}
+# Change set "C" (HYPOTHESIS_RSI.md, amendment (l)): A's classes move *conditionally* on the
+# PR's files (``get_pr_files``). The integration suite replays recorded cassettes: a PR that
+# touches a cassette under tests/integration/cassettes/ has a stale recording (regenerate it),
+# any other timeout is still the known flakiness (rerun). The legacy SDK is being retired module
+# by module: a PR that touches legacy_sdk/ still needs the pin (audit exception), everything
+# else is off the SDK and gets the bump. ``cond_file`` is appended to the PR's files on the
+# moved half of the class.
+CI_CHANGES_C: dict[str, dict[str, str]] = {
+    "flaky-integration": {"fix": "edit_generated_file", "cond_file": "tests/integration/cassettes/billing_webhook.yaml",
+                          "attr": "files changed by the PR",
+                          "rule": "when the PR touches a recorded cassette under tests/integration/cassettes/, the "
+                                  "TimeoutError is a stale recording: edit_generated_file (regenerate it); otherwise "
+                                  "rerun_job as before"},
+    "audit-pinned": {"fix": "bump_dependency", "cond_file": "src/reports/export.py",
+                     "attr": "files changed by the PR",
+                     "rule": "when the PR touches legacy_sdk/, the requests pin stays and add_audit_exception applies "
+                             "as before; a PR that does not touch legacy_sdk/ is off the SDK: bump_dependency"},
+}
+# On the moved half ``cond_file`` is appended; on the kept half the class's *kept* marker is,
+# where the rule needs one (audit-pinned: the kept half is the PR that touches the legacy SDK).
+CI_KEPT_FILE: dict[str, str] = {"audit-pinned": "legacy_sdk/client.py"}
+CI_CHANGE_SETS = {"A": CI_CHANGES, "B": CI_CHANGES_B, "C": CI_CHANGES_C}
 # The reasons behind each change, as a maintainer would write them (``oracle_fix_entries``).
 CI_CHANGE_WHY: dict[tuple[str, str], str] = {
     ("A", "flaky-integration"): "The integration suite replays recorded fixtures; a TimeoutError means the cassette under "
@@ -791,10 +872,17 @@ class CiFixScenario(Scenario):
 
     def oracle_fix_entries(self, variant: str | None = None) -> list[tuple[str, str, float]]:
         v = variant or self.change_variant
-        return [(f"update-{fid}", f"CI convention update — {fid.replace('-', ' ')} failures ({CI_FAILURES[fid]['log'][:90]}): "
-                                  f"the right fix is now {fix} (it used to be {CI_FAILURES[fid]['fix']}). "
-                                  f"{CI_CHANGE_WHY.get((v, fid), '')}".strip(), 1.0)
-                for fid, fix in self.change_set(v).items()]
+        out: list[tuple[str, str, float]] = []
+        for fid, change in self.change_set(v).items():
+            head = f"CI convention update — {fid.replace('-', ' ')} failures ({CI_FAILURES[fid]['log'][:90]}): "
+            if isinstance(change, dict):   # set C: the rule, as a maintainer would write it
+                out.append((f"update-{fid}", head + f"the right fix now depends on the {change['attr']}: "
+                                                    f"{change['rule']}.", 1.0))
+            else:
+                why = CI_CHANGE_WHY.get((v, fid), "")
+                out.append((f"update-{fid}", (head + f"the right fix is now {change} (it used to be "
+                                                     f"{CI_FAILURES[fid]['fix']}). {why}").strip(), 1.0))
+        return out
 
     def regenerate(self, ep: int, salt: int) -> None:
         self.sched[ep] = random.Random(f"ci-focus-{self.seed}-{ep}-{salt}").choice(self.focus_classes(ep))
@@ -811,13 +899,29 @@ class CiFixScenario(Scenario):
         pr = (random.Random(f"ci-pr-{self.seed}-{ep}").randint(1000, 9999) if self.opaque_ids
               else 3000 + ep * 7 + self.seed)
         prompt = f"CI is red on PR #{pr} (\"{fid.replace('-', ' ')} related change\"). Investigate and fix it."
-        truth = {"pr": pr, "fid": fid, **f, "old_fix": None}
+        truth = {"pr": pr, "fid": fid, **f, "files": list(f["files"]), "old_fix": None, "cond": None}
+        # Under set C the two conditional classes carry their attribute from episode 0 — the
+        # PR touches the cassette / stays off the legacy SDK on a random half — and the truth
+        # follows the attribute only once the change is in force.
+        if "C" in self.protocol_variants and fid in CI_CHANGES_C:
+            cond = random.Random(f"ci-cond-{self.seed}-{ep}").random() < 0.5
+            if cond:
+                truth["files"].append(CI_CHANGES_C[fid]["cond_file"])
+            elif fid in CI_KEPT_FILE:
+                truth["files"].append(CI_KEPT_FILE[fid])
+            truth["cond"] = cond
         active = self.active_changes(ep)
         if fid in active:
-            truth["old_fix"], truth["fix"] = f["fix"], active[fid]
+            change = active[fid]
+            if isinstance(change, dict):
+                if truth["cond"]:
+                    truth["old_fix"], truth["fix"] = f["fix"], change["fix"]
+            else:
+                truth["old_fix"], truth["fix"] = f["fix"], change
         return Task(ep, prompt, truth, self.agent_for(ep),
                     {"failure": fid, "quirk": truth["fix"] != f["generic"],
-                     **change_tags(self, ep, fid in self.changes, cls=fid)})
+                     **change_tags(self, ep, fid in self.changes, cls=fid,
+                                   cond=truth["cond"] if fid in active else None)})
 
     def step(self, task: Task, name: str, args: dict[str, Any]) -> StepResult:
         t = task.truth
