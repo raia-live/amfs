@@ -424,3 +424,71 @@ present; `GET /agents/{id}/canary/assignment` answers `main` with no canary runn
 - Oracle-fix entries (`Scenario.oracle_fix_entries`) exist for `support`, `ci-fix`,
   `dispatch`, `diagnose`, `policy-qa`; `retention` and `order-ops` receive theirs with
   their set B.
+
+### 2026-09-26 (c) — change sets for all ten families, pilot 1 findings, repair agent
+
+Written after pilot cell 1 (`rsi-pilot-1`: `support` × `senselab-rsi` × GPT-5.5 × seed 11,
+60 episodes on the SaaS) and before pilot 2. Pilot 1 is a **development** run: it is not
+counted in any reported table.
+
+- **Change sets.** Every family now carries set A and set B, in each family's own module
+  (`scenarios/*.py`, keyed by `change_variant`) rather than a separate `change_sets_b.py`;
+  the registered artefact is therefore the whole directory. Committed at `a534a917`
+  (`paper/rsi-engine`); `shasum -a 256 scenarios/*.py | shasum -a 256` =
+  `7d887e0c6d6ec7949887c2f72bbeeeaea658112c7660b5deccc9ec28d489f946`.
+  - New **A** sets (families that had no change in v7): `analytics` — revenue is *booked*
+    (complete or pending), AOV excludes orders under $50, refund rate is refunds over booked
+    orders; `concierge` — a dinner and lunch dietary rule and a flight-carrier rule.
+  - **B** sets: `support`, `ci-fix` (v7's); `diagnose` — `capacity → scale_out`, `cache →
+    restart_pods`; `dispatch` — `dependency-upgrade → code-agent`, `dashboard-change →
+    code-agent`, `incident-postmortem → support-agent`; `policy-qa` — SLA credit 25 %, trial
+    45 days, annual-cancellation notice 90 days, SSO on all plans; `accounts` — four
+    accounts change on `format`, `cadence`, `owner`, `followup`, disjoint from the A set and
+    the wrong-list; `retention` — ≥ 4 tickets in 30 days → `assign_csm`, declining team
+    without integrations → `offer_discount`; `order-ops` — packed orders may still change
+    address / upgrade shipping, final-sale returns authorised within 14 days, price-match
+    accepted on same-SKU; `analytics` — order count includes cancelled, customers are
+    distinct over every order; `concierge` — alcohol allowed, no electronics gifts, hotel
+    gym requirement dropped, hotel budget $250.
+  - Rule for B: it moves classes A leaves alone, to (class, fix) pairs that were never the
+    correct answer under A, so an entry learned under A is wrong under B and vice versa.
+    Validated (`/tmp/scen_validate_b.py`, not part of the release): ≥ 17 changed-class
+    post-change episodes per 60-episode cell in every family and variant; the smallest
+    numeric shift in `analytics` is 15.7 % (A, refund rate) so the ±1 % stale-pick band
+    never straddles both truths; legacy `change_at = 0` runs are unchanged.
+  - Oracle-fix entries now exist for all ten families and both variants (2–4 per family);
+    `retention`/`order-ops`/`accounts`/`analytics`/`concierge` gained theirs here.
+  - **Opaque ids** (`--opaque-ids`) now cover `diagnose` (`INC-`), `dispatch` (`DSP-`),
+    `policy-qa` (`POL-`) and `analytics` (`FIN-`) as well as the families that had them.
+- **Two harness defects found by pilot 1, fixed before pilot 2.**
+  - *Agent-id isolation.* The runner suffixes each cell's `agent_base` (`support-agent-388584`)
+    so cells never share a platform agent; the arm's `saas_agent_id` stripped any trailing
+    `-<digits>` and so registered the judge, settings and fixes under `support-agent`, shared
+    across cells. Now only `<agent_base>-<replica>` is folded, relative to the scenario's
+    suffixed base. Cross-cell contamination in pilot 1 was limited to that one cell (nothing
+    else ran on the account); pilot 1 is discarded regardless.
+  - *The judge could not see memory.* The rubric asked only for the tool result or summary
+    line the verdict rests on, so every failing verdict cited a `tool` span; the platform's
+    lever classifier (`amfs_eval/fixes.py classify_lever`) counts a cited error/tool span as
+    code evidence, and both pilot-1 proposals came out `lever = code`, `source = template`,
+    with no memory branch — nothing to replay or canary. The rubric now requires a
+    `followed-memory` criterion on every verdict whose `evidence_quote` is the verbatim text
+    of the memory entry that recommended the failing action (or the agent's own reasoning
+    when none did); a verbatim entry quote resolves to an `entry` evidence ref, which the
+    classifier counts as knowledge. This is a **harness** change to the judge rubric only;
+    the classifier is untouched and its share of `code` / `knowledge` / `unknown` levers per
+    arm is reported as a measured quantity (a reviewer should read it as "how often the
+    engine looked in the right place", not as a tuned constant).
+- **Repair agent.** The prereg's `senselab-rsi` definition includes a repair agent that
+  drafts the corrective entry; on the production API this is an opt-in
+  (`AMFS_EVAL_REPAIR_AGENT`), process-wide, and was **off** during pilot 1 (proposals were
+  templates). It was enabled on the production `amfs-api` service at 2026-09-26
+  (revision `amfs-api-01929-qph`) for the duration of the study. The paper states this and
+  the `senselab-rsi-minimal` ablation is the arm that measures the engine without it.
+- **Pacing.** Pilot 1: 60 episodes, 52 successes, agent-side USD 0.02–0.07 per episode;
+  incidents and proposals trailed the failing episode by one to two episodes, as (b)
+  predicted. The pacing floor is set after pilot 2, once a fix has been observed to reach
+  `test_passed → canary → shipped`.
+- **Session-level `canary` / `memory_branch` notes** are absent from a row when no canary is
+  live (the SaaS sends `X-AMFS-Canary` / `X-AMFS-Memory-Branch` only under a running
+  canary); absence is the control state, not a recording failure.
