@@ -474,6 +474,57 @@ eval package:
 Readout of 5h itself (rates, `rsi_dev`) follows when it completes; what it can already
 answer is the 5g question — the loop is reached, the agent drafts, and Tier 1 grades.
 
+### Pilot 5h complete, the RSI team-grows halves complete, #784 live — and the third seam
+
+5h finished 57/60, 54/60 (support) and 57/60, 57/60 (ci-fix) on the #451 engine for its
+second half; the two `senselab-rsi` team-grows halves (relaunched 14:05Z, 400 episodes
+each) finished support 98/96 (pioneer) and 96/95 (newcomer), ci-fix 98/100 and 97/97.
+`analysis/team_grows.py` over all 24 cells (`results/rsi-teamgrows-dev-report/`):
+
+- **Joiners on the RSI arm are indistinguishable from joiners on `senselab`.** First
+  exposures after the join, first-attempt success 1.00 on both arms and both protocols
+  (changed classes 1.00 on 36 / 10), 0 poisoned, parity 20/20 and 4/4 at a median 5
+  episodes, disagreement with the veterans 0.00 vs 0.02 / 0.00; `pgvector+rerank` 0.68 /
+  0.75 (changed 0.31 / 0.40, poisoned 0.69 / 0.60 on changed classes). Tokens per joiner
+  episode 4.3k / 4.2k vs 4.4k / 4.1k vs 5.6k / 5.2k. Amendment (i) P1 met; P2's poisoned
+  clause met; **P2/P3's `senselab-rsi` vs `senselab` clause is inconclusive as
+  pre-specified**: the veterans' loop shipped nothing before any join (proposed 0–2 per
+  cell, 4 of 8 cells with ≥ 1 draft, all `repair_agent`, 0 shipped), so platform-authored
+  hits in joiner contexts were 0.00 on both SenseLab arms. The joiners' advantage over the
+  baseline is the outcome loop's — validated and discredited labels on entries written by
+  veterans they never met — and the paper says so.
+- **#451 holds in production.** Every fix created after 14:03Z has a branch (12/12);
+  before it, regime fixes had none.
+- **#784 is live (15:00Z) and has had nothing to record yet.** Since then 8 fixes were
+  proposed; their statuses are `canary` (4), `test_passed` (2), `test_inconclusive` (1),
+  `proposed` (1) — none has failed a test, replay or canary, regressed or shipped, so no
+  `lesson-fix-*` / `decision-fix-*` entry exists and no event carries `recorded` yet.
+  Consistent with the mechanism; the first one appears with the first failed or shipped
+  fix on the new revision.
+
+**Seam 3 — the ship gate runs on production time, the cells on benchmark time.** All day,
+zero fixes shipped. Of 21 fixes since 13:05Z, 9 are in `canary` and none has decided.
+Their arm counts explain it: 6 of 9 have 0 graded outcomes in *both* arms after 2–6
+evaluations, one has 1 vs 9, one 17 vs 13 (1 recurrence). Two cadences are at work.
+Canaries capped at 10 % (the inconclusive-test ladder) start on the hourly `canary_sweep`
+(three sweeps ran today: 13:20, 14:20, 15:20) — a fix proposed at 13:36 started its
+canary at 15:20, after its 60-episode cell had ended, so the arms never filled. Canaries
+at 50 % start within minutes of the test but are *evaluated* only by the same hourly
+sweep, and `canary.decide` waits for `canary_min_outcomes` in each arm before it will
+call anything; a 60-episode cell with one identity produces ~30 sessions after the
+canary starts, half of them routed to the branch, judged asynchronously, and the cell is
+over before the second sweep. The sweep is idempotent per UTC hour by design, so calling
+it more often is a no-op. The loop is not silent for want of drafts any more — it is
+silent because its ship gate was built for a customer with hours of traffic, and a pilot
+cell has one. Three options, none taken without an amendment: (a) the harness calls
+`POST /fixes/{id}/canary/evaluate` (a customer route, account API key) on running
+canaries at each episode boundary, so a canary decides as soon as the arms suffice; (b)
+cells long enough for two sweeps after the change (≥ 150 episodes, or fleet-6 replicas
+so the arms fill in a tenth of the time — E2 already has both); (c) `auto_after_replay`
+for the primary arm, with the canary-gated arm as the safety ablation. (a) changes
+nothing about what ships or on what evidence, only *when the loop looks*; it is the one
+that keeps the canary as the primary gate and is the recommendation for (k).
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families
