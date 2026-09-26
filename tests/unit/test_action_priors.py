@@ -2074,3 +2074,72 @@ def test_a_sweep_puts_the_never_tried_above_what_only_lost_elsewhere() -> None:
     # A winner elsewhere still leads the never-tried.
     pr["elsewhere"]["tried"].append({"action_key": "resolve:c", "won": 3, "lost": 0, "n": 3, "p": 0.8})
     assert act.sweep_order(pr, pr["untried"], "x") == ["resolve:c", "resolve:b", "resolve:d"]
+
+
+def test_a_mixed_record_abstains_out_loud_when_asked() -> None:
+    """CL harness (2026-09-26): 15% of retries came back with no
+    recommendation at all, each on a situation whose record had split between
+    two actions with no winner and not every one lost. With ``abstain`` the
+    record says it is mixed; without it, silent as before. A single thin
+    prior is thin, not mixed, and stays silent either way."""
+    mixed = {
+        "tried": [
+            {"action_key": "fix:a", "won": 1, "lost": 1, "p": 0.5, "n": 2, "agents": 1},
+            {"action_key": "fix:b", "won": 1, "lost": 1, "p": 0.5, "n": 2, "agents": 1},
+        ],
+        "untried": ["fix:c", "fix:d"],
+        "situation_record": {"situation": "audit failure", "outcomes": 4},
+    }
+    rec = act.recommend(mixed, top_hit_status="untested", abstain=True,
+                        candidate_actions=["fix:a", "fix:b", "fix:c", "fix:d"])
+    assert rec["mode"] == "abstain" and rec["suggested_action"] is None and rec.get("mixed") is True
+    assert "mixed and names no winner" in rec["why"] and "on this situation" in rec["why"]
+    assert "fix:a 1/2" in rec["why"] and "untried" in rec["why"]
+    assert act.recommend(mixed, top_hit_status="untested") is None
+    pooled_free = dict(mixed)
+    pooled_free.pop("situation_record")
+    assert "on similar tasks here" in act.recommend(pooled_free, top_hit_status="untested", abstain=True)["why"]
+    thin = {"tried": [{"action_key": "fix:b", "won": 1, "lost": 0, "p": 0.67, "n": 1, "agents": 1}], "untried": []}
+    assert act.recommend(thin, top_hit_status="untested", abstain=True) is None
+    all_lost = {"tried": [{"action_key": "fix:a", "won": 0, "lost": 2, "p": 0.2, "n": 2, "agents": 1},
+                          {"action_key": "fix:b", "won": 0, "lost": 1, "p": 0.33, "n": 1, "agents": 1}],
+                "untried": ["fix:c"]}
+    assert act.recommend(all_lost, top_hit_status="untested", abstain=True,
+                         candidate_actions=["fix:a", "fix:b", "fix:c"])["mode"] == "explore"
+
+
+def test_pooled_classes_name_the_declared_label_as_what_pooled_them() -> None:
+    """CL ci-fix harness (2026-09-26): two audit classes with opposite fixes
+    were both declared ``audit failure``; the record alternated for the rest
+    of the run and the agent was told it disagreed, not that the label was
+    why. With a declared situation the reason asks for a finer label; the
+    rendered block says the same."""
+    pooled = {"actions": ["fix:add_audit_exception", "fix:bump_dependency"],
+              "sequence": ["fix:add_audit_exception", "fix:bump_dependency", "fix:add_audit_exception"],
+              "reversals": 2, "outcome_refs": ["o1", "o2", "o3"]}
+    why = act._pooled_why(pooled, situation="audit failure")
+    assert "share the situation label \u201caudit failure\u201d" in why
+    assert "more specific label" in why
+    assert "share this description" in act._pooled_why(pooled)
+    contrasts = [
+        {"failed": ["fix:bump_dependency"], "resolved_with": "fix:add_audit_exception", "weight": 0.9,
+         "outcome_ref": "o1", "committed_at": "2026-09-26T01:00:00+00:00"},
+        {"failed": ["fix:add_audit_exception"], "resolved_with": "fix:bump_dependency", "weight": 0.9,
+         "outcome_ref": "o2", "committed_at": "2026-09-26T02:00:00+00:00"},
+        {"failed": ["fix:bump_dependency"], "resolved_with": "fix:add_audit_exception", "weight": 0.9,
+         "outcome_ref": "o3", "committed_at": "2026-09-26T03:00:00+00:00"},
+    ]
+    priors = {
+        "tried": [{"action_key": "fix:add_audit_exception", "won": 2, "lost": 1, "p": 0.6, "n": 3, "agents": 1},
+                  {"action_key": "fix:bump_dependency", "won": 1, "lost": 2, "p": 0.4, "n": 3, "agents": 1}],
+        "untried": ["fix:rerun_job"], "contrasts": contrasts, "source": "similar_outcomes",
+        "situation_record": {"situation": "audit failure", "outcomes": 6},
+    }
+    if act.pooled_classes(contrasts) is not None:
+        rec = act.recommend(priors, top_hit_status="untested", abstain=True,
+                            candidate_actions=["fix:add_audit_exception", "fix:bump_dependency", "fix:rerun_job"])
+        assert rec["mode"] == "abstain" and "situation label \u201caudit failure\u201d" in rec["why"]
+        text = act.render_priors(priors, rec, candidate_actions=["fix:add_audit_exception", "fix:bump_dependency", "fix:rerun_job"])
+        assert "situation label \u201caudit failure\u201d" in text
+        assert act.render_priors(priors, None)  # the renderer's own pooled line
+        assert "situation label" in act.render_priors(priors, None)

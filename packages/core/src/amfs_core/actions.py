@@ -774,7 +774,7 @@ def _recommend_mode(
                 "mode": "abstain",
                 "suggested_action": None,
                 "pooled": pooled,
-                "why": _pooled_why(pooled),
+                "why": _pooled_why(pooled, situation=_declared_situation(priors)),
             }
         from_contrast = _act_from_contrast(
             contrasts,
@@ -906,6 +906,31 @@ def _recommend_mode(
                 "why": f"no action has been tried on similar tasks here and no hit is validated "
                        f"({described}); treat what follows as hints, not guidance",
             }
+    mixed = (
+        len(tried) >= 2
+        and any(int(t.get("won", 0)) for t in tried)
+        and any(int(t.get("lost", 0)) for t in tried)
+    )
+    if abstain and mixed:
+        # Two or more actions tried, wins and losses among them, no winner
+        # and not every one lost: mixed. The caller asked to be told when
+        # the record cannot say, and this is that case as much as an empty
+        # one — left as None, the CL harness (2026-09-26) saw 15% of its
+        # retries come back with no recommendation at all, every one on a
+        # situation whose record had split between two actions. A single
+        # thin prior (1/1) stays silent as before: it is thin, not mixed.
+        where = "on this situation" if _declared_situation(priors) else "on similar tasks here"
+        shown = ", ".join(f"{t['action_key']} {t['won']}/{t['n']}" for t in tried[:5])
+        return {
+            "mode": "abstain",
+            "suggested_action": None,
+            "mixed": True,
+            "why": (
+                f"the record {where} is mixed and names no winner ({shown}); nothing has won "
+                "often enough to act on — weigh the task's own details, and prefer what is "
+                "untried here over repeating what lost"
+            ),
+        }
     return None
 
 
@@ -1422,15 +1447,36 @@ def priors_local(priors: Mapping[str, Any] | None) -> bool:
     return (priors or {}).get("source") != "action_stats"
 
 
-def _pooled_why(pooled: Mapping[str, Any]) -> str:
+def _pooled_why(pooled: Mapping[str, Any], *, situation: str | None = None) -> str:
+    """*situation*, when the caller declared one, is the label the two kinds
+    of task share: the fix is then a finer label, and the reason says so. CL
+    ci-fix harness (2026-09-26): two audit classes with opposite fixes were
+    both declared ``audit failure`` and the record alternated for the rest of
+    the run; the agent was told the record disagreed but not that its label
+    was what pooled it."""
     a, b = pooled["actions"]
     seq = list(pooled.get("sequence") or [])
+    shared = (
+        f"two kinds of task share the situation label \u201c{str(situation)[:80]}\u201d; declare a "
+        "more specific label that names what distinguishes this task, and decide from that, "
+        "not from the action record"
+        if situation else
+        "two kinds of task share this description; decide from what distinguishes this one, "
+        "not from the action record"
+    )
     return (
         f"outcomes on near-identical tasks here disagree: {a} resolved what {b} failed and "
         f"{b} resolved what {a} failed, alternating over time "
-        f"({seq.count(a)}x {a}, {seq.count(b)}x {b}) — two kinds of task share this "
-        "description; decide from what distinguishes this one, not from the action record"
+        f"({seq.count(a)}x {a}, {seq.count(b)}x {b}) — {shared}"
     )
+
+
+def _declared_situation(priors: Mapping[str, Any] | None) -> str | None:
+    """The label the caller declared, when the record is partitioned by it."""
+    record = (priors or {}).get("situation_record")
+    if isinstance(record, Mapping) and record.get("situation"):
+        return str(record["situation"])
+    return None
 
 
 def _act_from_contrast(
@@ -1598,7 +1644,8 @@ def render_priors(
         # Two "near-identical" lines that contradict each other read as a
         # coin toss; one line that names the contradiction reads as a warning.
         # (When the recommendation is the abstain that says the same, it says it.)
-        lines.append(_pooled_why(pooled)[0].upper() + _pooled_why(pooled)[1:] + ".")
+        why = _pooled_why(pooled, situation=_declared_situation(priors))
+        lines.append(why[0].upper() + why[1:] + ".")
     for c in ([] if pooled is not None else contrasts[:2]):
         failed = ", ".join(str(a) for a in (c.get("failed") or [])[:3])
         if failed and c.get("resolved_with"):
