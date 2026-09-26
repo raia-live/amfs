@@ -530,3 +530,85 @@ Written during pilot 2, before any E1/E2 cell.
   only where the first `--workers` cells of a run started in the same second; v7's endpoints
   are scope-based and do not depend on per-agent platform state, but the paper's
   reproducibility package notes it.
+
+### 2026-09-26 (e) — pilots 2 and 3: the loop did not close; three engine defects and a capacity limit
+
+Written after pilot cells 2 and 3 (`rsi-pilot-2`: `support` × `senselab-rsi` × GPT-5.5 ×
+seeds 11, 23, rubric of (b); `rsi-pilot-3`: the same with the `followed-memory` rubric of
+(c)), before any E1/E2 `senselab-rsi` cell. Both pilots are **development** runs and are not
+counted in any reported table; they are kept as the "engine before" record for the
+before/after comparison below.
+
+**What happened.** 240 sessions, 28 fail verdicts, 6 behaviour incidents (`Escalation
+ping-pong`, `Repeated unresolved ticket`, `Issue recurs after closure`, `Unnecessary
+escalation loops`), 8 proposals. Six proposals were `lever = code`, `source = template`, no
+branch. Two (`50738ba1`, `c98b5d12`) were `lever = procedure`, drafted by the repair agent on
+a `repair/<id8>` branch, and both ended `test_failed` ("3 of 3 replayed run(s) still fail").
+No fix reached a canary. The `followed-memory` criterion of (c) did what it was asked —
+the judge quoted the entry verbatim with `span_id` null — and it still did not produce an
+`entry` evidence ref.
+
+**Three engine defects, each a reading inconsistent with the module's own documented
+semantics.** Fixed in `amfs-internal` (branch `eval/worker-slot-filling`, one PR), deployed
+to production before the first counted RSI cell. The pilot verdicts, fixes and tests remain
+in the account as the record of the engine before the fix.
+
+1. *Evidence resolution.* `amfs_eval/runner.py _resolve_evidence` matched a quote against
+   sources in `collect_sources` order — spans, tool calls, then the entries read. The platform
+   derives a `memory_read` span for every entry read whose output is the entry's value, so a
+   verbatim quote of an entry always resolved to that span (`kind = span`) and never to the
+   entry. Entry sources are now checked first (stable sort); a span quote that no entry
+   contains resolves as before.
+2. *Lever classifier.* `amfs_eval/fixes.py classify_lever` counted every cited span of kind
+   `tool` as code evidence whatever its status, while a cited `tool_call` that *succeeded*
+   was already read as "the sequence, not the tool". And the benchmark's terminal action is
+   recorded with `record_action(success=False)` when the environment's verdict is negative —
+   the SDK's documented won/lost semantics, which the action priors count — from which the
+   platform derives a tool span with `status = error`; both the call and the derived span
+   were read as broken tooling (`knowledge 0.3` from the entry overlap vs `code 0.6`). Now: a
+   derived tool span is read as the call it stands for; an `ok` tool span is sequence
+   evidence; a failed call carrying an `action_key` (a credited decision) is "the choice, not
+   the tool" (`procedure + 0.2`, no code); a failed call without an `action_key` stays code.
+3. *Tier 1 stand-in replay.* `amfs_eval/repair/replay.py ToolReplay.answer` fell back to
+   matching on tool name alone, so when the repaired stand-in chose a *different* `resolve`
+   it was handed the recorded output of the failed one and graded as still failing. The
+   fallback now applies only to recorded steps that succeeded; a stand-in whose next step has
+   no recorded answer and that never reached a final gets a case verdict `unreplayable`
+   (ungraded), and the test is `inconclusive` — the verdict `verdict()` already defined for
+   "could not be replayed". An inconclusive fix under `auto_after_canary` goes to the agent's
+   own replay (Tier 2) where a webhook is set, and otherwise to a canary capped at
+   `INCONCLUSIVE_CANARY_PCT_CAP = 10` percent.
+
+**Consequence for the design.** Tier 1 cannot vouch for a fix that changes the terminal
+action of a one-shot decision task — the record holds the outcome of the action the agent
+took, not of the one the fix recommends. On this benchmark the loop therefore closes either
+through the 10 % canary (needing about 80 post-change sessions for `min_outcomes = 8`, i.e.
+fleet ≥ 6 in E1 and always in E2) or through Tier 2 (the harness serving the OSS
+`ReplayReceiver`, E2b). The share of tests ending `passed` / `failed` / `inconclusive` per
+family is a reported quantity; E2b is promoted from a side condition to the mechanism the
+flagship analysis reports alongside the inconclusive-canary path.
+
+**Capacity, not the algorithm.** The production eval worker graded in rounds of five, each
+round lasting as long as its slowest job; a fail verdict escalates to the strong model
+(`gpt-5`, avg 63 s, p90 111 s) so every round outlived the 45 s tick budget and throughput
+was five verdicts a minute regardless of `AMFS_EVAL_WORKER_CONCURRENCY`. At pilot pace the
+queue reached ~100 judge jobs and proposals trailed incidents by more than ten minutes.
+Changes, all recorded as actions in AMFS: `AMFS_EVAL_WORKER_CONCURRENCY` 3 → 8 (revision
+`amfs-api-01930-mf4`), `AMFS_EVAL_WORKER_BUDGET_SECONDS` 45 → 180, and in the same PR the
+worker keeps its slots full (claims a job whenever one frees) and, opt-in
+(`AMFS_EVAL_KICK_ON_SEAL=1`), starts a grading loop on whichever instance a seal lands on.
+`deploy.yml` now sets concurrency 6 / budget 180 / kick-on-seal on for the study. None of
+this touches what is graded or how.
+
+**Pacing floor (fixes (b)/(c)).** The RSI arms take `CL_RSI_VERDICT_WAIT` (seconds): after
+each seal the cell waits until the platform has graded that session, or the wait expires,
+before the next episode. The wait converts grading lag into wall-clock — reported per
+session as `verdict_wait_ms` / `verdict_lag_s` — so time-to-repair *in episodes* is a
+property of the loop, not of the queue. Set to **240 s** for all counted RSI cells (pilot
+judge latency: pass 6 s, fail 63 s avg, 231 s max). Cells without judges do not wait.
+
+**Before/after.** Pilot 4 re-runs pilot 3's two cells against the fixed engine (fleet 6 so
+the 10 % canary can reach its floor within 60 episodes). The prereg predicts: ≥ 1 proposal
+per cell with `lever ∈ {knowledge, procedure}`, `source = repair_agent`, a branch, a test
+ending `inconclusive` or `passed`, and a canary started. If no canary starts in pilot 4 the
+E1 RSI arms are run with Tier 2 configured from the start rather than as E2b only.
