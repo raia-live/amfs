@@ -713,7 +713,8 @@ class SenseLabArm(MemoryArm):
     def situation_labels(self) -> list[str]:
         labels = getattr(self, "_situations", None) or {}
         pooled = getattr(self, "_pooled_situations", None) or set()
-        return [k for k, _ in sorted(labels.items(), key=lambda kv: (-kv[1], kv[0])) if k not in pooled]
+        ordered = sorted(labels.items(), key=lambda kv: (-kv[1], kv[0]))
+        return [k for k, _ in ordered if k not in pooled]
 
     def pooled_situation_labels(self) -> list[str]:
         return sorted(getattr(self, "_pooled_situations", None) or set())
