@@ -36,6 +36,7 @@ class SenseLabOracleFixArm(SenseLabArm):
         self._written = False
 
     def configure(self, scenario) -> None:
+        super().configure(scenario)
         self._entries = list(scenario.oracle_fix_entries() or [])
         change_at = int(getattr(scenario, "change_at", 0) or 0)
         self._due = change_at + self.lag if change_at and self._entries else None

@@ -67,11 +67,23 @@ JUDGE_PROMPT = (
     "unresolved task, a rejected or rolled-back action, an escalation the task did not need, "
     "or an exhausted retry budget; a run that failed one or more attempts before succeeding "
     "is a PASS with the failed attempts noted. Use only what the trace shows: the task as "
-    "posed, the tool calls and their results, the decision summary and the outcome. Quote the "
-    "tool result or summary line your verdict rests on. Do not grade tone or verbosity.\n\n"
+    "posed, the tool calls and their results, the memory entries the agent read, the decision "
+    "summary and the outcome. Quote the tool result or summary line your verdict rests on.\n\n"
+    "When the run failed, say where the wrong action came from. Compare the failing action "
+    "with the memory entries under memory_read: if an entry recommends, records or endorses "
+    "the action the agent took (or the class of action, for this kind of task), add a "
+    "criterion named 'followed-memory' with passed=false whose evidence_quote is the exact "
+    "text of that entry's value (copy it verbatim, up to one sentence). If no entry read "
+    "supports the action, add 'followed-memory' with passed=true and quote the agent's own "
+    "reasoning or the tool call instead. Do not grade tone or verbosity.\n\n"
     "Scenario notes: {rubric}\n\nTRACE:\n{{{{trace}}}}"
 )
 # ``JUDGE_PROMPT.format(rubric=...)`` yields the literal ``{{trace}}`` the judge store requires.
+# The 'followed-memory' criterion is what lets the platform's lever classifier see the memory:
+# a verbatim quote of an entry resolves to an ``entry`` evidence ref (amfs_eval/runner.py
+# ``_resolve_evidence``), which ``classify_lever`` counts as knowledge. Without it every
+# failing run cites only the tool span that carried the bad action and the classifier reads
+# the failure as ``code`` (pilot 1, 2026-09-26: two template fixes, no branch, nothing to canary).
 
 OPEN_STATUSES = ("proposed", "testing", "test_passed", "test_failed", "test_inconclusive", "canary")
 SHIPPED_STATUSES = ("memory_shipped", "verified", "regressed")
@@ -174,6 +186,7 @@ class SenseLabRsiArm(SenseLabArm):
         self._agent: str | None = None
 
     def configure(self, scenario) -> None:
+        super().configure(scenario)
         self._rubric = getattr(scenario, "judge_rubric", "") or "none"
         self._scenario_name = getattr(scenario, "name", "")
         # The cell's shared agent identity: every replica maps onto it.

@@ -231,6 +231,25 @@ POLICY_CHANGES: dict[str, dict[str, Any]] = {
                       "why": "the Q1 pricing refresh raised the Team plan seat cap to 40; the pricing guide was not "
                              "updated"},
 }
+# Change set "B" (see Scenario.change_variant): four topics "A" leaves alone. Each new value is
+# distinct from the topic's current, old and generic values and matches none of their tokens,
+# so the scoring below stays exact; no (topic, value) pair here is a truth under "A".
+POLICY_CHANGES_B: dict[str, dict[str, Any]] = {
+    "sla-credit": {"value": _v("25%", _num("25") + r"|\btwenty-five percent\b"),
+                   "why": "the 2026 enterprise renewals negotiated a 25% credit tier and legal made it the standard "
+                          "service credit on every plan; the SLA document was not re-issued"},
+    "trial-length": {"value": _v("45 days", _DAYS45),
+                     "why": "growth extended the self-serve trial to 45 days after the conversion experiment; the "
+                            "onboarding playbook still says 21"},
+    "annual-cancellation-notice": {"value": _v("90 days", _num("90") + r"|\bninety\b|\bthree months\b|\b3 months\b"),
+                                   "why": "legal aligned the notice period with the new enterprise MSA at 90 days; "
+                                          "the Terms of Service were not re-issued"},
+    "sso-plan": {"value": _v("all plans", r"\ball (plans|tiers)\b|\bevery (plan|tier)\b|\bany (plan|tier)\b|"
+                                          r"\bno (minimum|specific) (plan|tier)\b|\bnot (plan|tier)[- ]gated\b"),
+                 "why": "after the security push SAML/OIDC single sign-on left the paid-tier gate and is available on "
+                        "every plan including self-serve; the features matrix was not re-issued"},
+}
+POLICY_CHANGE_SETS = {"A": POLICY_CHANGES, "B": POLICY_CHANGES_B}
 
 CORPUS_VERSIONED, CORPUS_CURRENT, CORPUS_LAGS = "versioned", "current-only", "doc-lags-practice"
 CORPUS_MIX = [CORPUS_VERSIONED] * 5 + [CORPUS_CURRENT] * 4 + [CORPUS_LAGS] * 3
@@ -296,9 +315,9 @@ class PolicyQaScenario(Scenario):
         irng = random.Random(f"pol-{self.seed}-{ep}" + (f"-{salt}" if salt else ""))
         tp = POLICY_TOPICS[tid]
         fix, old_fix, why = tp["current"]["value"], None, None
-        in_change = tid in POLICY_CHANGES
+        in_change = tid in self.changes
         if self.changed(ep) and in_change:
-            old_fix, fix, why = fix, POLICY_CHANGES[tid]["value"]["value"], POLICY_CHANGES[tid]["why"]
+            old_fix, fix, why = fix, self.changes[tid]["value"]["value"], self.changes[tid]["why"]
         first, last = irng.choice(FIRST_NAMES), irng.choice(LAST_NAMES)
         company, plan, country = irng.choice(COMPANIES), irng.choice(ACCOUNT_PLANS), irng.choice(COUNTRIES)
         customer = f"{first} {last}"
@@ -310,8 +329,12 @@ class PolicyQaScenario(Scenario):
                 "fix": fix, "old": tp["old"]["value"], "generic": tp["generic"]["value"], "old_fix": old_fix,
                 "why": why, "change_class": in_change}
 
+    @property
+    def changes(self) -> dict[str, dict[str, Any]]:
+        return POLICY_CHANGE_SETS[self.change_variant]
+
     def regenerate(self, ep: int, salt: int) -> None:
-        tid = random.Random(f"pol-focus-{self.seed}-{ep}-{salt}").choice(list(POLICY_CHANGES))
+        tid = random.Random(f"pol-focus-{self.seed}-{ep}-{salt}").choice(list(self.changes))
         self.sched[ep] = tid
         self.instances[ep] = self._instance(ep, tid, salt)
 
@@ -319,7 +342,7 @@ class PolicyQaScenario(Scenario):
         return [(f"update-policy-{tid}", f"Policy update — {tid.replace('-', ' ')}: the current value is "
                                          f"{c['value']['value']}; the {POLICY_TOPICS[tid]['doc']} document still shows "
                                          f"{POLICY_TOPICS[tid]['current']['value']} and is out of date. Reason: {c['why']}.", 1.0)
-                for tid, c in POLICY_CHANGES.items()]
+                for tid, c in self.changes.items()]
 
     def seed_entries(self) -> list[tuple[str, str, float]]:
         docs: list[tuple[str, str, float]] = []
@@ -339,7 +362,9 @@ class PolicyQaScenario(Scenario):
 
     def task(self, ep: int) -> Task:
         i = self.instances[ep]
-        prompt = (f"Question POL-{4400 + ep} from {i['asker']} in #ask-policy:\n\"{i['question']}\"\n"
+        # See Scenario.opaque_ids: a counted question number is the episode index.
+        pol = random.Random(f"pol-id-{self.seed}-{ep}").randint(10000, 99999) if self.opaque_ids else 4400 + ep
+        prompt = (f"Question POL-{pol} from {i['asker']} in #ask-policy:\n\"{i['question']}\"\n"
                   f"Account context: {i['customer']} <{i['email']}>, {i['company']} ({i['plan']} plan, {i['country']}).")
         return Task(ep, prompt, dict(i), self.agent_for(ep),
                     {"topic": i["topic"], "class": i["topic"], "corpus": i["corpus"],
@@ -370,7 +395,7 @@ class PolicyQaScenario(Scenario):
         tp = POLICY_TOPICS[t["topic"]]
         ans = str(args.get("answer", "")).strip()
         src = str(args.get("source", "") or "")
-        truth_spec = POLICY_CHANGES[t["topic"]]["value"] if t.get("old_fix") else tp["current"]
+        truth_spec = self.changes[t["topic"]]["value"] if t.get("old_fix") else tp["current"]
         hit_truth = _match(truth_spec, ans)
         hit_old_doc = _match(tp["old"], ans)
         hit_generic = _match(tp["generic"], ans)

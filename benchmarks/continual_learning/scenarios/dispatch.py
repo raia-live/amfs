@@ -130,6 +130,24 @@ DISPATCH_CHANGES: dict[str, dict[str, str]] = {
                           "repo access and the prod tenant logs, is now the only specialist that can reproduce a "
                           "customer-specific bug (code-agent still cannot reproduce on main)"},
 }
+# Change set "B" (see Scenario.change_variant): three classes "A" leaves alone, moved to
+# specialists no "A" episode ever pairs them with. Same shape as "A": one change to the
+# name-based routing (dependency upgrades go back to code-agent — the pure unlearning case)
+# and two to a new quirk (dashboards became dashboards-as-code, so a dashboard change is a PR;
+# postmortems ship through the status-page workflow the support specialist owns).
+DISPATCH_CHANGES_B: dict[str, dict[str, str]] = {
+    "dependency-upgrade": {"fix": "code-agent",
+                           "why": "the lockfile and CI build cache are now maintained by the repo bot on every PR, so a "
+                                  "code-agent upgrade lands in sync; the ops-agent detour is no longer needed"},
+    "dashboard-change": {"fix": "code-agent",
+                         "why": "dashboards moved to dashboards-as-code under acme/data-pipelines; a dashboard change is a "
+                                "reviewed PR, and data-agent has no write access to the repo (the BI tool is read-only)"},
+    "incident-postmortem": {"fix": "support-agent",
+                            "why": "postmortems now ship through the customer-facing status-page workflow, whose template "
+                                   "and customer-impact figures live in the case system; support-agent writes from "
+                                   "there, while writer-agent's narrative drafts lack the impact data QA requires"},
+}
+DISPATCH_CHANGE_SETS = {"A": DISPATCH_CHANGES, "B": DISPATCH_CHANGES_B}
 
 # What the platform says when the wrong specialist gets a task. Keyed (class, specialist);
 # realistic, and never names the specialist that would have worked. Missing pairs fall back
@@ -146,6 +164,10 @@ FAILURES: dict[tuple[str, str], str] = {
     ("bug-triage", "support-agent"): "support-agent returned: 'repository access denied (403) pulling the reproduction branch'. Task bounced back.",
     ("data-backfill", "data-agent"): "data-agent returned: 'write access to prod tables denied'. Task bounced back.",
     ("data-backfill", "code-agent"): "code-agent ran the backfill script against prod without a dry run; 40k rows double-written. Rollback required.",
+    # Pairs that are correct under change set "A" and wrong under "B"; never reached under "A".
+    ("dependency-upgrade", "ops-agent"): "ops-agent returned: 'lockfile is bot-managed now; nothing for infra to do here'. Task bounced back after 5h in its queue.",
+    ("dashboard-change", "data-agent"): "data-agent returned: 'dashboard definitions are version-controlled; direct edits in the BI tool are locked'. Task bounced back.",
+    ("incident-postmortem", "writer-agent"): "QA rejected the draft: 'not in the status-page format; no customer-impact figures.'",
 }
 # Destructive outcomes: the specialist did something that has to be undone.
 CRITICAL_PAIRS = {("data-backfill", "code-agent"), ("sql-report", "ops-agent")}
@@ -189,25 +211,29 @@ class DispatchScenario(Scenario):
         irng = random.Random(f"dsp-{self.seed}-{ep}" + (f"-{salt}" if salt else ""))
         cls = DISPATCH_CLASSES[cid]
         fix, why, old = cls["fix"], cls["why"], None
-        if self.changed(ep) and cid in DISPATCH_CHANGES:
-            old, fix, why = fix, DISPATCH_CHANGES[cid]["fix"], DISPATCH_CHANGES[cid]["why"]
+        if self.changed(ep) and cid in self.changes:
+            old, fix, why = fix, self.changes[cid]["fix"], self.changes[cid]["why"]
         fillers = {k: irng.choice(v) for k, v in FILLERS.items()}
         fillers["date"] = f"2026-{irng.randint(7, 11):02d}-{irng.randint(1, 28):02d}"
         fillers["month"] = irng.choice(["July", "August", "September", "October", "November"])
         return {"task_class": cid, "msg": irng.choice(cls["msgs"]).format(**fillers), "fillers": fillers,
                 "priority": irng.choice(["P2", "P2", "P3", "P1"]),
                 "fix": fix, "generic": cls["obvious"], "why": why, "old_fix": old,
-                "change_class": cid in DISPATCH_CHANGES}
+                "change_class": cid in self.changes}
+
+    @property
+    def changes(self) -> dict[str, dict[str, str]]:
+        return DISPATCH_CHANGE_SETS[self.change_variant]
 
     def regenerate(self, ep: int, salt: int) -> None:
-        cid = random.Random(f"dsp-focus-{self.seed}-{ep}-{salt}").choice(list(DISPATCH_CHANGES))
+        cid = random.Random(f"dsp-focus-{self.seed}-{ep}-{salt}").choice(list(self.changes))
         self.sched[ep] = cid
         self.instances[ep] = self._instance(ep, cid, salt)
 
     def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
         return [(f"update-routing-{cid}", f"Routing update — {cid.replace('-', ' ')} tasks now go to {c['fix']} "
                                           f"(previously {DISPATCH_CLASSES[cid]['fix']}). Reason: {c['why']}.", 1.0)
-                for cid, c in DISPATCH_CHANGES.items()]
+                for cid, c in self.changes.items()]
 
     def seed_entries(self) -> list[tuple[str, str, float]]:
         # The onboarding routing guide maps every class to the specialist its name suggests:
@@ -227,7 +253,9 @@ class DispatchScenario(Scenario):
     def task(self, ep: int) -> Task:
         i = self.instances[ep]
         f = i["fillers"]
-        prompt = (f"Task DSP-{5200 + ep} ({i['priority']}) from {f['requester']} in {f['team']}:\n\"{i['msg']}\"\n"
+        # See Scenario.opaque_ids: a counted task number is the episode index.
+        dsp = random.Random(f"dsp-id-{self.seed}-{ep}").randint(10000, 99999) if self.opaque_ids else 5200 + ep
+        prompt = (f"Task DSP-{dsp} ({i['priority']}) from {f['requester']} in {f['team']}:\n\"{i['msg']}\"\n"
                   f"Route it to one specialist.")
         return Task(ep, prompt, dict(i), self.agent_for(ep),
                     {"task_class": i["task_class"], "class": i["task_class"], "quirk": i["fix"] != i["generic"],

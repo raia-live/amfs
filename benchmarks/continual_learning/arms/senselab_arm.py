@@ -559,13 +559,24 @@ class SenseLabArm(MemoryArm):
         super().open(scope)
         self._briefed_at: dict[str, Any] = {}
 
+    def configure(self, scenario) -> None:
+        # The cell's agent base (the runner has already suffixed it per cell attempt, e.g.
+        # ``support-agent-388584``); fleet members are ``<base>-<n>``.
+        self._agent_base = getattr(scenario, "agent_base", "")
+
     def saas_agent_id(self, member_id: str) -> str:
         """The identity a fleet member acts as on the SaaS: its own, or — with fleet replicas —
-        the cell's shared one (the member id without its ``-<n>`` suffix)."""
+        the cell's shared one (the scenario's ``agent_base``). Only the fleet member suffix is
+        stripped, relative to the base: the runner's per-cell suffix is numeric too, and
+        stripping any trailing ``-<digits>`` collapsed every cell of a family onto one hosted
+        agent (shared behaviours, incident baseline, fixes and canary slot). Found in the RSI
+        pilot, 2026-09-26."""
         if not self.fleet_replicas:
             return member_id
-        base, sep, tail = member_id.rpartition("-")
-        return base if sep and tail.isdigit() and base else member_id
+        base = getattr(self, "_agent_base", "") or ""
+        if base and member_id.startswith(base + "-") and member_id[len(base) + 1:].isdigit():
+            return base
+        return member_id
 
     def outcome_for_commit(self, outcome: Outcome, session: "_SenseLabSession") -> tuple[str, dict[str, Any]]:
         """What ``commit_outcome`` sends: the severity and the extra keyword arguments. The
@@ -767,6 +778,7 @@ class SenseLabRepairArm(SenseLabArm):
         self.repairs: list[dict[str, Any]] = []
 
     def configure(self, scenario) -> None:
+        super().configure(scenario)
         self._rubric = getattr(scenario, "judge_rubric", "") or "none"
         if getattr(scenario, "procedural", False) and self.lever_override is None:
             self.lever_override = "procedure"

@@ -147,6 +147,8 @@ class AccountsScenario(Scenario):
                      "new": rng.choice([5, 10, 15])},
             s_term: {"field": "term", "dim": "term", "why": "finance standardised on annual terms", "new": "annual"},
         }
+        if self.change_variant == "B":
+            self.changes = self._changes_b(set(self.changes) | set(self.wrong))
         # Seeded profile facts: PROFILE_FACTS per contact, always including the one that is wrong or
         # will change (so the stale phrase is in the store and ``_mentions_stale`` can see it served).
         self.profile: dict[int, dict[str, Any]] = {}
@@ -178,6 +180,29 @@ class AccountsScenario(Scenario):
             r += 1
         self.sched = self.sched[:self.episodes]
         self.instances = [self._instance(ep, ci, kind, 0) for ep, (ci, kind) in enumerate(self.sched)]
+
+    # Change set "B" (see Scenario.change_variant): four contacts "A" leaves alone (and whose CRM
+    # profile is right) change one preference each on dimensions "A" never moves — report format,
+    # reporting cadence, escalation owner and follow-up timing — so no (contact, dimension) pair
+    # here changes under "A". Drawn from a separate rng after every "A" draw, so the contacts,
+    # profiles and schedule of the "A" world are consumed identically.
+    B_DIMS: dict[str, tuple[str, str]] = {
+        "format": ("format", "switched BI tools; wants the report in another format now"),
+        "cadence": ("cadence", "leadership review moved; wants a different reporting cadence"),
+        "owner": ("owner", "reorg on the customer side; escalations go to a different owner"),
+        "followup": ("followup", "after last quarter's outage they expect follow-up on a different clock"),
+    }
+
+    def _changes_b(self, taken: set[int]) -> dict[int, dict[str, Any]]:
+        rng = random.Random(f"acc-changes-b-{self.seed}")
+        pool = [ci for ci in range(self.N) if ci not in taken]
+        picks = rng.sample(pool, len(self.B_DIMS))
+        out: dict[int, dict[str, Any]] = {}
+        for ci, (field, (dim, why)) in zip(picks, self.B_DIMS.items()):
+            cur = self.contacts[ci][field]
+            options = {"format": FORMATS, "cadence": CADENCES, "owner": OWNERS, "followup": FOLLOWUPS}[field]
+            out[ci] = {"field": field, "dim": dim, "why": why, "new": rng.choice([v for v in options if v != cur])}
+        return out
 
     def _make_contacts(self, rng: random.Random) -> list[dict[str, Any]]:
         twin = rng.choice(TWIN_NAMES)
@@ -429,6 +454,16 @@ class AccountsScenario(Scenario):
         tw = self.contacts[0]["name"]
         out.append((f"crm-note-{tw.lower()}-meetings", f"{tw} prefers CET mornings for calls; book 09:00-12:00 CET.", 0.7))
         return out + self.distractor_entries()
+
+    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+        out = []
+        for ci, ch in self.changes.items():
+            base = self.contacts[ci]
+            new = {**base, ch["field"]: ch["new"]}
+            out.append((f"crm-update-{base['slug']}", f"CRM update — {base['name']} ({base['company']}): now "
+                                                      f"{self._fact(ch['dim'], new)}; previously {self._fact(ch['dim'], base)}. "
+                                                      f"Reason: {ch['why']}.", 1.0))
+        return out
 
     def task(self, ep: int) -> Task:
         i = self.instances[ep]

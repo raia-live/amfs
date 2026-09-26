@@ -204,11 +204,28 @@ GIFTS = ["whisky set", "noise-cancelling headphones", "cookbook", "wine subscrip
 HOTELS = ["boutique downtown (no gym)", "business hotel with gym", "resort with spa and gym", "hostel", "airport hotel (gym)"]
 
 
+# Regime change for ``concierge`` (when ``change_at`` is set): Dana's life changes and she tells
+# nobody. Set "A": she goes vegetarian (the steakhouse stops being an option — this is the v7
+# preference drift, moved from episode 12 to ``change_at``) and she swaps airlines (SkyJet fixed
+# its lounge problem; Northwind lost her bag twice, so Northwind is out and SkyJet is fine).
+# Set "B" (see Scenario.change_variant) moves the two classes "A" leaves alone: gifts (her
+# clients' compliance rules now bar electronics; a good bottle is fine again) and hotels (a knee
+# injury means no gym for a while, and the travel budget was cut to $250). Nothing in "B"
+# touches meals or flights. ``CONCIERGE_CHANGES`` maps class -> (old_fix phrase, why).
+CONCIERGE_CHANGES: dict[str, dict[str, tuple[str, str]]] = {
+    "A": {"dinner": ("steakhouse", "Dana went vegetarian; steakhouses are out"),
+          "lunch": ("steakhouse", "Dana went vegetarian; steakhouses are out"),
+          "flight": ("SkyJet", "Dana now avoids Northwind (lost her bag twice); SkyJet fixed its lounge problem and is fine again")},
+    "B": {"gift": ("alcohol", "Dana's clients' compliance rules now bar electronics gifts; alcohol gifts are fine again"),
+          "hotel": ("gym", "Dana's knee injury means no gym for a while; the travel budget was cut to $250 a night")},
+}
+
+
 class ConciergeScenario(Scenario):
     name = "concierge"
     agent_base = "concierge-agent"
     role = "You are a personal concierge agent for one executive, Dana. Pick the single best option for each request."
-    drift_at = 12
+    drift_at = 12   # legacy (no ``change_at``): the vegetarian drift happens here
 
     tools = [
         ToolSpec("propose", "Propose exactly one option to Dana.",
@@ -219,23 +236,56 @@ class ConciergeScenario(Scenario):
     # hidden preferences
     PREFS = {"no_seafood": True, "dinner_budget_pp": 90, "lunch_budget_pp": 40, "dinner_not_before": 19,
              "no_alcohol_gifts": True, "hotel_needs_gym": True, "avoid_airline": "SkyJet"}
+    KINDS = ["dinner", "lunch", "gift", "hotel", "flight"]
+
+    @property
+    def changes(self) -> dict[str, tuple[str, str]]:
+        return CONCIERGE_CHANGES[self.change_variant] if self.change_at else {}
+
+    def rules(self, ep: int) -> dict[str, Any]:
+        """Dana's preferences as they stand at episode ``ep``."""
+        r = {"veg": False, "avoid_airline": self.PREFS["avoid_airline"], "no_alcohol": True, "no_electronics": False,
+             "needs_gym": True, "hotel_budget": 320}
+        if not self.change_at:
+            r["veg"] = ep >= self.drift_at
+        elif self.changed(ep) and self.change_variant == "A":
+            r.update(veg=True, avoid_airline="Northwind")
+        elif self.changed(ep) and self.change_variant == "B":
+            r.update(no_alcohol=False, no_electronics=True, needs_gym=False, hotel_budget=250)
+        return r
 
     def build(self) -> None:
-        self.reqs = []
-        kinds = ["dinner", "lunch", "gift", "hotel", "flight"]
-        for ep in range(self.episodes):
-            irng = random.Random(f"con-{self.seed}-{ep}")
-            kind = kinds[(ep + self.seed) % len(kinds)]
-            veg = ep >= self.drift_at
-            options, good = self._gen(kind, irng, veg)
-            self.reqs.append({"kind": kind, "options": options, "good": good, "veg": veg})
+        self.reqs = [self._request(ep, self.KINDS[(ep + self.seed) % len(self.KINDS)], 0) for ep in range(self.episodes)]
 
-    def _violations(self, kind: str, o: dict[str, Any], veg: bool) -> list[str]:
+    def _request(self, ep: int, kind: str, salt: int) -> dict[str, Any]:
+        irng = random.Random(f"con-{self.seed}-{ep}" + (f"-{salt}" if salt else ""))
+        rules = self.rules(ep)
+        options, good = self._gen(kind, irng, rules)
+        return {"kind": kind, "options": options, "good": good, "veg": rules["veg"], "rules": rules,
+                "change_class": kind in self.changes}
+
+    def regenerate(self, ep: int, salt: int) -> None:
+        kind = random.Random(f"con-focus-{self.seed}-{ep}-{salt}").choice(list(self.changes))
+        self.reqs[ep] = self._request(ep, kind, salt)
+
+    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+        seen: set[str] = set()
+        out = []
+        for kind, (_, why) in self.changes.items():
+            if why in seen:
+                continue
+            seen.add(why)
+            out.append((f"profile-update-{kind}", f"Profile update for Dana — {kind} requests: {why}. Earlier notes on this are out of date.", 1.0))
+        return out
+
+    def _violations(self, kind: str, o: dict[str, Any], rules: dict[str, Any] | bool) -> list[str]:
+        if isinstance(rules, bool):   # legacy signature: ``veg`` flag only
+            rules = {**self.rules(0), "veg": rules}
         v = []
         if kind in ("dinner", "lunch"):
             if "seafood" in o["cuisine"] or "sushi" in o["cuisine"]:
                 v.append("Dana does not eat seafood")
-            if veg and o["cuisine"] in ("steakhouse",):
+            if rules["veg"] and o["cuisine"] in ("steakhouse",):
                 v.append("Dana went vegetarian recently")
             cap = self.PREFS["dinner_budget_pp"] if kind == "dinner" else self.PREFS["lunch_budget_pp"]
             if o["price_pp"] > cap:
@@ -243,23 +293,25 @@ class ConciergeScenario(Scenario):
             if kind == "dinner" and o["time"] < self.PREFS["dinner_not_before"]:
                 v.append("too early for dinner")
         elif kind == "gift":
-            if o["alcohol"]:
+            if rules["no_alcohol"] and o["alcohol"]:
                 v.append("no alcohol gifts")
+            if rules["no_electronics"] and o["item"] in ("noise-cancelling headphones", "running watch"):
+                v.append("no electronics gifts, Dana's clients' compliance rules")
             if o["price"] > 150:
                 v.append("over the gift budget")
         elif kind == "hotel":
-            if not o["gym"]:
+            if rules["needs_gym"] and not o["gym"]:
                 v.append("needs a gym")
-            if o["price"] > 320:
+            if o["price"] > rules["hotel_budget"]:
                 v.append("over the hotel budget")
         elif kind == "flight":
-            if o["airline"] == self.PREFS["avoid_airline"]:
-                v.append("never SkyJet again")
+            if o["airline"] == rules["avoid_airline"]:
+                v.append(f"never {rules['avoid_airline']} again")
             if o["depart"] < 7:
                 v.append("no departures before 7am")
         return v
 
-    def _gen(self, kind: str, rng: random.Random, veg: bool) -> tuple[list[dict[str, Any]], str]:
+    def _gen(self, kind: str, rng: random.Random, rules: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
         while True:
             opts = []
             for i in range(4):
@@ -277,7 +329,7 @@ class ConciergeScenario(Scenario):
                          "price": rng.choice([320, 450, 600])}
                 o["id"] = "ABCD"[i]
                 opts.append(o)
-            ok = [o["id"] for o in opts if not self._violations(kind, o, veg)]
+            ok = [o["id"] for o in opts if not self._violations(kind, o, rules)]
             if len(ok) == 1:
                 return opts, ok[0]
 
@@ -295,21 +347,28 @@ class ConciergeScenario(Scenario):
             desc = ", ".join(f"{k}={v}" for k, v in o.items() if k != "id")
             lines.append(f"  {o['id']}: {desc}")
         prompt = f"Dana asks: please book a {r['kind']} for me. Options:\n" + "\n".join(lines) + "\nPropose one."
-        return Task(ep, prompt, dict(r), self.agent_for(ep), {"kind": r["kind"], "post_drift": r["veg"]})
+        affected = r["change_class"] and self.changed(ep)
+        truth = {**r, "old_fix": self.changes[r["kind"]][0] if affected else None,
+                 "why": self.changes[r["kind"]][1] if affected else None}
+        return Task(ep, prompt, truth, self.agent_for(ep),
+                    {"kind": r["kind"], "class": r["kind"], "post_drift": r["veg"], **change_tags(self, ep, r["change_class"])})
 
     def step(self, task: Task, name: str, args: dict[str, Any]) -> StepResult:
         if name != "propose":
             return StepResult(f"Unknown tool {name}")
         t = task.truth
         pick = str(args.get("option", "")).strip().upper()[:1]
-        if pick == t["good"]:
-            return StepResult("Dana: 'Perfect, book it.'", terminal=True, success=True, answer=pick)
         o = next((x for x in t["options"] if x["id"] == pick), None)
+        # stale: the option Dana would have accepted before the change (only defined after one)
+        stale = ({"stale_pick": o is not None and not self._violations(t["kind"], o, self.rules(0))}
+                 if t.get("old_fix") else {})
+        if pick == t["good"]:
+            return StepResult("Dana: 'Perfect, book it.'", terminal=True, success=True, flags=stale, answer=pick)
         if o is None:
             return StepResult("Dana: 'That's not one of the options.'", terminal=True, success=False, severity="failure", answer=pick)
-        why = self._violations(t["kind"], o, t["veg"])
+        why = self._violations(t["kind"], o, t["rules"])
         return StepResult(f"Dana: 'No — {why[0]}.'", terminal=True, success=False, severity="minor_failure",
-                          flags={"violation": why[0]}, answer=pick)
+                          flags={"violation": why[0], **stale}, answer=pick)
 
 
 # ───────────────────────────────────────────────────────────────── retention ──
@@ -330,24 +389,50 @@ class RetentionScenario(Scenario):
     ]
 
     @staticmethod
-    def truth_for(c: dict[str, Any], changed: bool = False) -> tuple[str, str]:
+    def truth_for(c: dict[str, Any], changed: bool = False, variant: str = "A") -> tuple[str, str]:
         """(action that retains without waste, explanation). ``changed``: after the regime
-        change the CSM team was folded into Customer Success (assign_csm no longer exists as
-        an outcome; a success call is what retains enterprise) and a pricing change made
-        discounts ineffective for pro accounts (feature_unlock retains them)."""
+        change. Set "A": the CSM team was folded into Customer Success (assign_csm no longer
+        exists as an outcome; a success call is what retains enterprise) and a pricing change
+        made discounts ineffective for pro accounts (feature_unlock retains them). Set "B"
+        (see Scenario.change_variant) moves the two segments "A" leaves alone: high-ticket
+        accounts now get a named CSM under the support-to-success handoff (a one-off call no
+        longer retains them), and the team tier bundles integrations by default, so a team
+        account without them sits on the legacy price and a discount to the new list price is
+        what retains it. Neither (segment, action) pair is a truth under "A"."""
+        a, b = changed and variant == "A", changed and variant == "B"
         if c["plan"] == "enterprise":
-            if changed:
+            if a:
                 return "schedule_success_call", "after the CS reorg there are no dedicated CSMs; a success call is what retains enterprise"
             return "assign_csm", "enterprise accounts churn on lack of ownership; discounts do not move them"
         if c["tickets_30d"] >= 4:
+            if b:
+                return "assign_csm", "under the support-to-success handoff high-ticket accounts get a named CSM; a one-off success call no longer retains them"
             return "schedule_success_call", "high ticket volume signals a product blocker, not a price problem"
         if c["usage_trend"] == "declining" and c["plan"] == "pro":
-            if changed:
+            if a:
                 return "feature_unlock", "since the pricing change pro discounts no longer retain; unlocking features does"
             return "offer_discount", "price-sensitive pro accounts with declining usage respond to a discount"
         if c["usage_trend"] == "declining" and c["plan"] == "team" and not c["uses_integrations"]:
+            if b:
+                return "offer_discount", "the team tier now bundles integrations, so an account without them is on the legacy price above the new list; a discount to list price retains it"
             return "feature_unlock", "team accounts without integrations churn from low value, not price"
         return "no_action", "this account would stay anyway; any offer is wasted spend"
+
+    RETENTION_SEGMENTS = {"A": ["enterprise accounts", "pro accounts with declining usage"],
+                          "B": ["accounts with 4+ support tickets in 30 days", "team accounts with declining usage and no integrations"]}
+
+    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+        probes = {"A": [{"plan": "enterprise", "tickets_30d": 0, "usage_trend": "stable", "uses_integrations": True},
+                        {"plan": "pro", "tickets_30d": 0, "usage_trend": "declining", "uses_integrations": True}],
+                  "B": [{"plan": "team", "tickets_30d": 4, "usage_trend": "stable", "uses_integrations": True},
+                        {"plan": "team", "tickets_30d": 0, "usage_trend": "declining", "uses_integrations": False}]}
+        out = []
+        for seg, probe in zip(self.RETENTION_SEGMENTS[self.change_variant], probes[self.change_variant]):
+            new, why = self.truth_for(probe, True, self.change_variant)
+            old, _ = self.truth_for(probe, False, self.change_variant)
+            out.append((f"update-retention-{seg.split()[0]}-{new}", f"Retention playbook update — {seg}: the action that "
+                                                                    f"retains is now {new} (it used to be {old}). Reason: {why}.", 1.0))
+        return out
 
     def build(self) -> None:
         self.accounts = [self._account(ep, 0) for ep in range(self.episodes)]
@@ -371,9 +456,9 @@ class RetentionScenario(Scenario):
 
     def task(self, ep: int) -> Task:
         c = self.accounts[ep]
-        act, why = self.truth_for(c, self.changed(ep))
-        old, _ = self.truth_for(c, False)
-        in_class = old != self.truth_for(c, True)[0]
+        act, why = self.truth_for(c, self.changed(ep), self.change_variant)
+        old, _ = self.truth_for(c, False, self.change_variant)
+        in_class = old != self.truth_for(c, True, self.change_variant)[0]
         prompt = (f"Churn-risk alert for {c['id']}: plan={c['plan']}, MRR=${c['mrr']}, tenure={c['tenure_months']}mo, "
                   f"usage_trend={c['usage_trend']}, support tickets (30d)={c['tickets_30d']}, "
                   f"integrations={'yes' if c['uses_integrations'] else 'no'}, NPS={c['nps']}. Choose one action.")
@@ -429,35 +514,65 @@ class OrderOpsScenario(Scenario):
     ]
 
     @staticmethod
-    def truth_for(o: dict[str, Any], changed: bool = False) -> str:
-        """``changed``: after the regime change Acme's new WMS allows cancelling packed orders,
-        and the UPS contract lost in-transit changes (FedEx gained them)."""
+    def truth_for(o: dict[str, Any], changed: bool = False, variant: str = "A") -> str:
+        """``changed``: after the regime change. Set "A": Acme's new WMS allows cancelling packed
+        orders, the UPS contract lost in-transit changes (FedEx gained them), electronics get the
+        common 30-day return window and the price-match window grew from 7 to 14 days. Set "B"
+        (see Scenario.change_variant) moves the rules "A" leaves alone: packed orders can be
+        re-addressed (label reprint at the pack station) and expedited (upgrade until the carrier
+        scan), final-sale items became returnable within 14 days of delivery, and price match
+        covers equivalent SKUs (colour and size variants), not only the identical one. Every
+        (situation, action) pair "B" makes right is a denial under "A" in both regimes."""
+        a, b = changed and variant == "A", changed and variant == "B"
         req, st, car = o["request"], o["status"], o["carrier"]
-        redirect_ok = (car == "FedEx") if changed else (car == "UPS")
+        redirect_ok = (car == "FedEx") if a else (car == "UPS")
         if req == "cancel":
-            if st == "placed" or (st == "packed" and changed):
+            if st == "placed" or (st == "packed" and a):
                 return "cancel_order"
             if st == "shipped":
                 return "intercept_shipment" if redirect_ok else "deny_explain"
             return "deny_explain"  # packed cannot be cancelled at Acme (WMS lock); delivered -> return flow
         if req == "change_address":
-            if st == "placed":
+            if st == "placed" or (st == "packed" and b):
                 return "update_address"
             if st == "shipped":
                 return "carrier_redirect" if redirect_ok else "deny_explain"
             return "deny_explain"
         if req == "return":
-            # after the change: one 30-day window for every category (electronics no longer 14)
-            window = 30 if changed else (14 if o["category"] == "electronics" else 30)
+            # "A": one 30-day window for every category (electronics no longer 14)
+            window = 30 if a else (14 if o["category"] == "electronics" else 30)
             if o["final_sale"]:
-                return "deny_explain"
+                # "B": final-sale items are returnable within 14 days of delivery
+                return "authorize_return" if b and st == "delivered" and o["days_since_delivery"] <= 14 else "deny_explain"
             return "authorize_return" if st == "delivered" and o["days_since_delivery"] <= window else "deny_explain"
         if req == "price_match":
-            # after the change: price-match window extended from 7 to 14 days
-            return "issue_price_adjustment" if o["days_since_order"] <= (14 if changed else 7) and o["same_sku"] else "deny_explain"
+            # "A": price-match window extended from 7 to 14 days; "B": equivalent SKUs qualify
+            return "issue_price_adjustment" if o["days_since_order"] <= (14 if a else 7) and (o["same_sku"] or b) else "deny_explain"
         if req == "expedite":
-            return "upgrade_shipping" if st == "placed" else "deny_explain"
+            return "upgrade_shipping" if st == "placed" or (st == "packed" and b) else "deny_explain"
         return "deny_explain"
+
+    # What a maintainer who has been told about the change writes (``oracle_fix_entries``).
+    OPS_CHANGE_NOTES = {
+        "A": [("cancel-packed", "cancel requests: packed orders can now be cancelled (cancel_order) — the new WMS releases "
+                                "the pick before the carrier scan. Previously packed meant deny_explain."),
+              ("carrier-flip", "shipped orders: in-transit changes (intercept_shipment, carrier_redirect) now work for FedEx "
+                               "shipments only; the UPS contract lost them, so UPS shipments are deny_explain. It used to be the reverse."),
+              ("return-electronics", "return requests: electronics now get the common 30-day window (authorize_return up to 30 "
+                                     "days after delivery); it used to be 14 days for electronics."),
+              ("price-match-14", "price-match requests: the window is now 14 days from the order (issue_price_adjustment), not 7.")],
+        "B": [("readdress-packed", "change-of-address requests: packed orders can now be re-addressed (update_address) — the pack "
+                                   "station reprints the label before the carrier scan. Previously packed meant deny_explain."),
+              ("expedite-packed", "expedite requests: shipping can be upgraded until the carrier scan, so packed orders now get "
+                                  "upgrade_shipping instead of deny_explain."),
+              ("return-final-sale", "return requests: final-sale items are now returnable within 14 days of delivery "
+                                    "(authorize_return); they used to be deny_explain always."),
+              ("price-match-equivalent", "price-match requests: equivalent SKUs (colour and size variants) now qualify for "
+                                         "issue_price_adjustment within the 7-day window; it used to require the identical SKU.")],
+    }
+
+    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+        return [(f"update-ops-{key}", f"Order policy update — {text}", 1.0) for key, text in self.OPS_CHANGE_NOTES[self.change_variant]]
 
     def build(self) -> None:
         self.orders = [self._order(ep, 0) for ep in range(self.episodes)]
@@ -495,8 +610,8 @@ class OrderOpsScenario(Scenario):
                 "return": "I'd like to return this.", "price_match": "This just went on sale elsewhere; can you match the price?",
                 "expedite": "Can you make this arrive faster? I'll pay."}[o["request"]]
         prompt = f"Customer message about order {o['id']}: \"{text}\" Use get_order, then apply one action."
-        exp = self.truth_for(o, self.changed(ep))
-        old, new = self.truth_for(o, False), self.truth_for(o, True)
+        exp = self.truth_for(o, self.changed(ep), self.change_variant)
+        old, new = self.truth_for(o, False, self.change_variant), self.truth_for(o, True, self.change_variant)
         return Task(ep, prompt, {"order": o, "expected": exp, "old_fix": old if (self.changed(ep) and old != new) else None},
                     self.agent_for(ep), {"request": o["request"], "expected": exp, **change_tags(self, ep, old != new)})
 
@@ -654,6 +769,25 @@ REGIONS = ["NA", "EU", "APAC"]
 MONTHS = ["2026-05", "2026-06", "2026-07", "2026-08"]
 
 
+# Regime change (when ``change_at`` is set): finance redefines a metric and tells nobody; the
+# warehouse is unchanged, so the only signal is "does not reconcile". Set "A": finance moves
+# to *booked* figures — revenue, AOV and the refund-rate denominator are computed over orders
+# with status complete or pending (test and soft-deleted rows still excluded). Set "B" (see
+# Scenario.change_variant) moves the two kinds "A" leaves alone: order and customer counts
+# become gross order volume and reach, i.e. every status including cancelled. Each redefinition
+# moves the true number by well over the 1% reconciliation tolerance (pending is ~1/5 of orders,
+# cancelled another ~1/5), so the old answer never passes by accident. ``old_fix`` is None for
+# this family — the stale answer is a number, not an action; the ``stale_pick`` flag is set when
+# the reported value reconciles with the pre-change definition.
+ANALYTICS_CHANGES: dict[str, dict[str, str]] = {
+    "A": {"revenue": "revenue is reported as booked revenue: amounts of orders with status complete OR pending (test and soft-deleted rows still excluded), not completed orders only",
+          "aov": "average order value excludes add-on orders under $50 (amount_cents < 5000): the average is over completed orders of $50 or more",
+          "refund_rate": "the refund rate is refunds as a percentage of booked orders (status complete or pending), not of completed orders"},
+    "B": {"orders": "order counts are gross order volume: every status including cancelled and pending (test and soft-deleted rows still excluded)",
+          "customers": "distinct customers are counted over every order regardless of status (reach), not completed orders only"},
+}
+
+
 class AnalyticsScenario(Scenario):
     """Text-to-SQL style reporting. The warehouse has quirks: amounts are in cents, the
     completed status is spelled 'complete', test accounts and soft-deleted rows must be
@@ -663,6 +797,15 @@ class AnalyticsScenario(Scenario):
     name = "analytics"
     agent_base = "analytics-agent"
     role = "You are the analytics agent answering finance's questions from the orders warehouse."
+
+    @property
+    def changes(self) -> dict[str, str]:
+        return ANALYTICS_CHANGES[self.change_variant]
+
+    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+        return [(f"update-metric-{kind}", f"Finance definition update — {kind.replace('_', ' ')}: {why}. "
+                                          f"Reports computed the old way no longer reconcile with the books.", 1.0)
+                for kind, why in self.changes.items()]
 
     tools = [
         ToolSpec("describe_table", "Describe a table's columns.", {"type": "object", "properties": {"table": {"type": "string"}}, "required": ["table"]}),
@@ -696,23 +839,39 @@ class AnalyticsScenario(Scenario):
             self.questions.append({"kind": kinds[(ep + self.seed) % len(kinds)], "month": irng.choice(MONTHS),
                                    "region": irng.choice(REGIONS + [None])})
 
+    def regenerate(self, ep: int, salt: int) -> None:
+        irng = random.Random(f"q-focus-{self.seed}-{ep}-{salt}")
+        self.questions[ep] = {"kind": irng.choice(list(self.changes)), "month": irng.choice(MONTHS),
+                              "region": irng.choice(REGIONS + [None])}
+
     # -- truth -------------------------------------------------------------------
-    def _clean(self, month: str, region: str | None) -> list[dict[str, Any]]:
-        return [o for o in self.orders if o["status"] == "complete" and not o["is_test"] and o["deleted_at"] is None
+    def _clean(self, month: str, region: str | None, statuses: tuple[str, ...] = ("complete",)) -> list[dict[str, Any]]:
+        return [o for o in self.orders if o["status"] in statuses and not o["is_test"] and o["deleted_at"] is None
                 and o["month"] == month and (region is None or o["region"] == region)]
 
-    def truth(self, q: dict[str, Any]) -> tuple[float, str]:
+    def truth(self, q: dict[str, Any], changed: bool = False) -> tuple[float, str]:
+        """The number finance's books show for question ``q``; ``changed``: under the regime
+        change's redefinition (set A or B per ``change_variant``), see ANALYTICS_CHANGES."""
+        redefined = changed and q["kind"] in self.changes
+        a, b = redefined and self.change_variant == "A", redefined and self.change_variant == "B"
         rows = self._clean(q["month"], q["region"])
-        if q["kind"] == "revenue":
-            return sum(o["amount_cents"] for o in rows) / 100, "usd"
-        if q["kind"] == "orders":
-            return float(len(rows)), "count"
-        if q["kind"] == "aov":
-            return (sum(o["amount_cents"] for o in rows) / 100) / max(len(rows), 1), "usd"
-        if q["kind"] == "customers":
-            return float(len({o["customer_id"] for o in rows})), "count"
         ref = [r for r in self.refunds if not r["is_test"] and r["month"] == q["month"] and (q["region"] is None or r["region"] == q["region"])]
-        return 100.0 * len(ref) / max(len(rows), 1), "count"  # percent
+        # "A": booked = complete or pending; "B": gross = every status
+        base = self._clean(q["month"], q["region"], ("complete", "pending")) if a else \
+            self._clean(q["month"], q["region"], ("complete", "pending", "cancelled")) if b else rows
+        revenue = sum(o["amount_cents"] for o in base) / 100
+        if q["kind"] == "revenue":
+            return revenue, "usd"
+        if q["kind"] == "orders":
+            return float(len(base)), "count"
+        if q["kind"] == "aov":
+            # "A": add-on orders under $50 leave the average (a booked-orders average would barely
+            # move: pending orders are drawn from the same amount distribution)
+            big = [o for o in rows if o["amount_cents"] >= 5000] if a else rows
+            return (sum(o["amount_cents"] for o in big) / 100) / max(len(big), 1), "usd"
+        if q["kind"] == "customers":
+            return float(len({o["customer_id"] for o in base})), "count"
+        return 100.0 * len(ref) / max(len(base), 1), "count"  # percent
 
     # -- literal query engine -----------------------------------------------------
     def _filter(self, rows: list[dict[str, Any]], filters: list[str]) -> list[dict[str, Any]] | str:
@@ -769,9 +928,15 @@ class AnalyticsScenario(Scenario):
                 "aov": f"What was the average order value (USD) for {q['month']}{where}?",
                 "customers": f"How many distinct customers placed a completed order in {q['month']}{where}?",
                 "refund_rate": f"What was the refund rate (% of completed orders refunded) for {q['month']}{where}?"}[q["kind"]]
-        val, unit = self.truth(q)
-        prompt = f"Finance asks (FIN-{800 + ep}): {text} Use run_query, then report."
-        return Task(ep, prompt, {"q": q, "expected": val, "unit": unit}, self.agent_for(ep), {"kind": q["kind"]})
+        in_class = q["kind"] in self.changes
+        val, unit = self.truth(q, self.changed(ep))
+        old_val = self.truth(q, False)[0] if (self.changed(ep) and in_class) else None
+        # See Scenario.opaque_ids: a counted request number is the episode index.
+        fin = random.Random(f"fin-{self.seed}-{ep}").randint(1000, 9999) if self.opaque_ids else 800 + ep
+        prompt = f"Finance asks (FIN-{fin}): {text} Use run_query, then report."
+        return Task(ep, prompt, {"q": q, "expected": val, "unit": unit, "old_expected": old_val, "old_fix": None,
+                                 "why": self.changes.get(q["kind"]) if in_class else None},
+                    self.agent_for(ep), {"kind": q["kind"], "class": q["kind"], **change_tags(self, ep, in_class)})
 
     def step(self, task: Task, name: str, args: dict[str, Any]) -> StepResult:
         t = task.truth
@@ -806,10 +971,13 @@ class AnalyticsScenario(Scenario):
             return StepResult("Finance: that is not a number.", terminal=True, success=False, severity="failure", answer=str(args))
         exp = t["expected"]
         rel = abs(v - exp) / max(abs(exp), 1e-9)
+        # stale: the number reconciles with the pre-change definition (only defined after a change)
+        old = t.get("old_expected")
+        stale = {"stale_pick": abs(v - old) / max(abs(old), 1e-9) <= 0.01} if old is not None else {}
         if rel <= 0.01:
             return StepResult("Finance: matches our books. Thanks.", terminal=True, success=True,
-                              flags={"rel_error": round(rel, 4)}, answer=f"{v:.2f}")
+                              flags={"rel_error": round(rel, 4), **stale}, answer=f"{v:.2f}")
         hint = "orders of magnitude off" if rel > 5 else "a few percent off" if rel < 0.15 else "materially off"
         return StepResult(f"Finance: that does not reconcile with our books ({hint}). Please re-check your query.",
-                          terminal=True, success=False, severity="failure", flags={"rel_error": round(rel, 4)},
+                          terminal=True, success=False, severity="failure", flags={"rel_error": round(rel, 4), **stale},
                           answer=f"{v:.2f}")

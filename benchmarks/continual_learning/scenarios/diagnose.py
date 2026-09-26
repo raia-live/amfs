@@ -81,6 +81,21 @@ RULE_CHANGES: dict[str, dict[str, str]] = {
                                           "fixed volume budget, an over-subscribed pod fills its disk and only spreading the "
                                           "load across more pods clears it — rotation and restarts buy minutes"},
 }
+# Change set "B" (see Scenario.change_variant): two rules "A" leaves alone. The workers moved
+# to an async DB driver, so CPU saturation is genuine compute load and adding replicas is the
+# fix — the textbook answer, the pure unlearning case (growing the pool now does nothing). And
+# the cache library moved to an off-heap arena whose TTL setting the current version ignores,
+# so only a pod restart releases the memory until the library upgrade ships — a new quirk
+# where the textbook answer used to be right. Neither (rule, fix) pair is correct under "A".
+RULE_CHANGES_B: dict[str, dict[str, str]] = {
+    "capacity": {"fix": "scale_out", "cause": "CPU saturation is genuine compute load: since the workers moved to an async "
+                                              "DB driver they no longer busy-wait for connections, so adding replicas is "
+                                              "the fix and growing the pool changes nothing"},
+    "cache": {"fix": "restart_pods", "cause": "unbounded cache growth in the new off-heap arena, whose TTL setting the "
+                                              "current library version ignores; only a pod restart releases the memory "
+                                              "until the library upgrade ships"},
+}
+RULE_CHANGE_SETS = {"A": RULE_CHANGES, "B": RULE_CHANGES_B}
 
 SERVICES = ["quote", "ledger", "search", "mailer", "catalog", "reports", "auth", "gateway", "wallet", "feed"]
 DEPS = ["tax-service", "geo-lookup", "fraud-score", "fx-rates"]
@@ -127,15 +142,19 @@ class DiagnoseScenario(Scenario):
         self.sched = sched
         self.instances = [self._instance(ep, sched[ep], 0) for ep in range(self.episodes)]
 
+    @property
+    def changes(self) -> dict[str, dict[str, str]]:
+        return RULE_CHANGE_SETS[self.change_variant]
+
     def regenerate(self, ep: int, salt: int) -> None:
-        rid = random.Random(f"diag-focus-{self.seed}-{ep}-{salt}").choice(list(RULE_CHANGES))
+        rid = random.Random(f"diag-focus-{self.seed}-{ep}-{salt}").choice(list(self.changes))
         self.sched[ep] = rid
         self.instances[ep] = self._instance(ep, rid, salt)
 
     def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
         return [(f"update-runbook-{rid}", f"Runbook update — incidents matching the {rid} signature: the fix is now "
                                           f"{c['fix']} (it used to be {RULES[rid]['fix']}). Root cause: {c['cause']}.", 1.0)
-                for rid, c in RULE_CHANGES.items()]
+                for rid, c in self.changes.items()]
 
     def _instance(self, ep: int, rid: str, salt: int) -> dict[str, Any]:
         if True:
@@ -152,12 +171,12 @@ class DiagnoseScenario(Scenario):
             if ep >= self.shift_at:
                 metrics = {RENAME.get(k, k): v for k, v in metrics.items()}
             fix, cause, old, wrong = r["fix"], r["cause"], None, list(r["wrong"])
-            if self.changed(ep) and rid in RULE_CHANGES:
-                old, fix, cause = fix, RULE_CHANGES[rid]["fix"], RULE_CHANGES[rid]["cause"]
+            if self.changed(ep) and rid in self.changes:
+                old, fix, cause = fix, self.changes[rid]["fix"], self.changes[rid]["cause"]
                 wrong = [w for w in wrong if w != fix] + [old]
             return {"rule": rid, "service": svc_name, "metrics": metrics, "logs": logs,
                     "changes": changes, "cause": cause, "fix": fix, "wrong": wrong, "old_fix": old,
-                    "change_class": rid in RULE_CHANGES}
+                    "change_class": rid in self.changes}
 
     def seed_entries(self) -> list[tuple[str, str, float]]:
         # Generic, non-answer knowledge only: the fix catalogue and one misleading folk rule.
@@ -169,7 +188,9 @@ class DiagnoseScenario(Scenario):
 
     def task(self, ep: int) -> Task:
         inst = self.instances[ep]
-        prompt = (f"PagerDuty alert INC-{6100 + ep}: {inst['service']} is unhealthy (SLO burn rate 14x). "
+        # See Scenario.opaque_ids: a counted incident number is the episode index.
+        inc = random.Random(f"inc-{self.seed}-{ep}").randint(10000, 99999) if self.opaque_ids else 6100 + ep
+        prompt = (f"PagerDuty alert INC-{inc}: {inst['service']} is unhealthy (SLO burn rate 14x). "
                   f"Investigate with the diagnostic tools and apply exactly one fix.")
         tags = {"rule": inst["rule"], "shifted": ep >= self.shift_at}
         if self.change_at:
