@@ -20,6 +20,12 @@ Environment:
                           local ngrok API.
 ``CL_REPLAY_SECRET``      the webhook secret; a random one per process when unset. The secret
                           is registered with the platform and never written to results.
+``CL_REPLAY_SIBLINGS``    other local hub ports to hand a request to when this hub cannot
+                          verify it or does not run its agent (default ``8787-8795``). A free
+                          ngrok account gives every tunnel the same reserved domain and pools
+                          them, so a webhook meant for the runner on :8788 lands on :8787 one
+                          time in three; the hub that gets it forwards it, once, to the one
+                          whose secret signed it.
 """
 
 from __future__ import annotations
@@ -35,6 +41,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from amfs.replay import EVENT_PING, ReplayError, ReplayRequest, parse_replay_request
@@ -43,6 +50,22 @@ log = logging.getLogger(__name__)
 
 PATH = "/amfs/replay"
 SEEN = 4096
+FORWARDED_HEADER = "X-CL-Replay-Forwarded"
+
+
+def sibling_ports(own: int, spec: str | None = None) -> list[int]:
+    """The other local hub ports a request may be handed to: ``CL_REPLAY_SIBLINGS`` as a
+    comma list of ports and ``a-b`` ranges, default ``8787-8795``, without *own*."""
+    spec = (spec if spec is not None else os.environ.get("CL_REPLAY_SIBLINGS", "8787-8795")).strip()
+    out: list[int] = []
+    for part in filter(None, (p.strip() for p in spec.split(","))):
+        lo, _, hi = part.partition("-")
+        try:
+            a, b = int(lo), int(hi or lo)
+        except ValueError:
+            continue
+        out.extend(p for p in range(min(a, b), max(a, b) + 1) if p != own and p not in out)
+    return out
 
 
 def tier2_enabled() -> bool:
@@ -78,7 +101,7 @@ class ReplayHub:
         self._server: ThreadingHTTPServer | None = None
         self._ngrok: subprocess.Popen[bytes] | None = None
         self.stats: dict[str, int] = {"received": 0, "pings": 0, "accepted": 0, "duplicates": 0,
-                                      "refused": 0, "unknown_agent": 0, "past_deadline": 0}
+                                      "refused": 0, "unknown_agent": 0, "past_deadline": 0, "forwarded": 0}
 
     # -- lifecycle --------------------------------------------------------------------
     def start(self) -> None:
@@ -203,9 +226,16 @@ class ReplayHub:
     # -- the endpoint -----------------------------------------------------------------
     def handle(self, headers: Any, body: bytes) -> tuple[int, dict[str, Any]]:
         self.stats["received"] += 1
+        forwarded = bool(headers.get(FORWARDED_HEADER))
         try:
             request = parse_replay_request(headers, body, secret=self.secret)
         except ReplayError as exc:
+            if exc.code == "bad_signature" and not forwarded:
+                # Signed with another runner's secret: the pooled tunnel handed us a
+                # sibling's webhook. Only the hub whose secret signed it can verify it.
+                handed = self._forward(headers, body)
+                if handed is not None:
+                    return handed
             self.stats["refused"] += 1
             return exc.status, {"ok": False, "error": str(exc), "code": exc.code}
         if request.event == EVENT_PING:
@@ -217,11 +247,20 @@ class ReplayHub:
                 self.stats["duplicates"] += 1
                 return 200, {**prior, "duplicate": True}
             arm = self._arms.get(request.agent_id)
-            if arm is None:
-                # The cell is over (or never ran here): nothing can replay this case. A 4xx
-                # other than 429 tells the sender not to retry.
-                self.stats["unknown_agent"] += 1
-                return 404, {"ok": False, "code": "unknown_agent", "agent_id": request.agent_id}
+        if arm is None:
+            if not forwarded:
+                handed = self._forward(headers, body)
+                if handed is not None:
+                    return handed
+            # The cell is over (or never ran here): nothing can replay this case. A 4xx
+            # other than 429 tells the sender not to retry.
+            self.stats["unknown_agent"] += 1
+            return 404, {"ok": False, "code": "unknown_agent", "agent_id": request.agent_id}
+        with self._lock:
+            prior = self._seen.get(request.delivery_id)
+            if prior is not None:
+                self.stats["duplicates"] += 1
+                return 200, {**prior, "duplicate": True}
             if request.past_deadline():
                 self.stats["past_deadline"] += 1
                 return 410, {"ok": False, "code": "past_deadline", "case_id": request.case_id}
@@ -233,6 +272,32 @@ class ReplayHub:
             self.stats["accepted"] += 1
         self._pool.submit(self._run, arm, request)
         return 202, answer
+
+    def _forward(self, headers: Any, body: bytes) -> tuple[int, dict[str, Any]] | None:
+        """Hand the raw request, signature and all, to each sibling hub in turn; the first
+        that does not refuse it answers for it. ``None`` when no sibling takes it."""
+        passthrough = {k: v for k, v in headers.items()
+                       if k.lower() not in ("host", "content-length", "connection")}
+        passthrough[FORWARDED_HEADER] = str(self.port)
+        for port in sibling_ports(self.port):
+            req = Request(f"http://127.0.0.1:{port}{PATH}", data=body, headers=passthrough, method="POST")
+            try:
+                with urlopen(req, timeout=15) as r:  # noqa: S310
+                    status, payload = r.status, json.load(r)
+            except HTTPError as exc:
+                status = exc.code
+                try:
+                    payload = json.load(exc)
+                except ValueError:
+                    payload = {"ok": False}
+            except (URLError, OSError, ValueError):
+                continue  # nothing listening there
+            if status in (401, 404) and payload.get("code") in ("bad_signature", "unknown_agent"):
+                continue
+            self.stats["forwarded"] += 1
+            log.info("replay webhook handed from :%d to :%d (%s)", self.port, port, status)
+            return status, {**payload, "forwarded_to": port}
+        return None
 
     def _run(self, arm: Any, request: ReplayRequest) -> None:
         try:
@@ -251,4 +316,4 @@ class ReplayHub:
                 "agents": len(self._arms), **self.stats}
 
 
-__all__ = ["PATH", "ReplayHub", "tier2_enabled"]
+__all__ = ["FORWARDED_HEADER", "PATH", "ReplayHub", "sibling_ports", "tier2_enabled"]
