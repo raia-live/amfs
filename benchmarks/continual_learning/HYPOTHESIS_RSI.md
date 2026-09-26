@@ -1429,3 +1429,29 @@ agent always reads (an affordance the baselines lack; procedures are surfaced by
 retrieval every arm gets, only rendered legibly), and loosening the frozen judge rubric so
 a recovered attempt counts as a failure (the regime path already charges attempt failures
 since #783/#785, so set C reaches the loop without touching the rubric).
+
+**Cut time, item 6 (recorded 2026-09-27).** amfs-internal #786 (migration 107,
+`RepairSettings.auto_propose`; the gate sits in `enqueue_fix_propose` after the process
+switch and the plan gate, so the incident and regime producers both honour it; manual
+proposals unaffected) merged to `main` at 23:34:18Z as `1d0f5102`; deploy run 36279860901
+green (deploy, Room lifecycle smoke, Notify SRE dispatch). Verified live at ~23:52Z: `GET
+/agents/{id}/repair-settings` carries `auto_propose`. Harness commit `bf589c41` holds it on
+every Tier-1-only arm from the identity's first session and records the result per
+identity as `arm_notes.auto_propose`; repair-loop arms set it `true` explicitly. Cells
+already running from older harness code (`rsi-c1-tier1` control cells, `rsi-oracle-5A`)
+had the hold applied out of band at ~23:53Z and as their remaining identities appear
+(`results/<run>/auto_propose_hold.jsonl`, one row per identity with the platform's answer).
+Every control cell that ran before this cut is separated by the fix ledger (0 shipped,
+corrective entries on branches), not by construction; every one after it is separated by
+construction. Confirmatory runs start after this cut.
+
+**Engine corrections from the 5k readout (PRs for approval, recorded 2026-09-27).**
+amfs-internal #787 — canary rule 1b, `ungraded`: arms with `UNGRADED_MULTIPLE ×
+min_outcomes` outcomes between them (the floor each), none graded, older than 15 min, end
+inconclusive with a note naming what grading needed. amfs-internal #788 — the situation
+guard on the regime path: where the sealed run declared a situation, an entry is a
+candidate only if an earlier success of the same agent in that situation read it; set-aside
+entries are reported as `first_exposure`. Neither changes what is measured; both change
+whether the loop's one canary slot can be blocked by a fix to an entry nobody reads.
+`rsi-c1-rsi` (the P2/P3 run: `senselab-rsi-nocanary` + `senselab-rsi`, set C) is held until
+both are deployed; their cut times will be recorded here.
