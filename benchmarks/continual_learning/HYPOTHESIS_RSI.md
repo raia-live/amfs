@@ -808,3 +808,45 @@ the stalls cost wall-clock, and in 5b they delayed the repair loop's proposals; 
 idle transaction was terminated twice by production's 5-minute
 `idle_in_transaction_session_timeout` during 5b (07:08, 07:09 UTC), losing those repair
 runs mid-flight.
+
+**Pilot 5b result (2026-09-26 08:13 UTC).** `senselab-rsi`, 240 episodes. Support 92.5 %,
+late 90.0 %, changed-class post-change 80.0 %, recovery 6/6; ci-fix 95.8 % / 93.8 % /
+87.5 %, recovery 3/4. Indistinguishable from 5a's `senselab` — the repair loop no longer
+costs the arm anything (pilot 4 had it at 85.0 % on support). Prediction (vi) **not met**:
+every proposal came from the `template` source (0 % `repair_agent`; ≥ 80 % predicted),
+first-proposal lag 13 / 5 / 3 episodes and none at all on ci-fix s11 (≤ 3 predicted), lever
+`knowledge` throughout, nothing shipped (statuses `proposed`, `canary`, `test_failed`,
+`test_inconclusive`). The repair agent's runs were the ones the seal-stall transaction
+terminated and the ones #780's wall-clock budget is for, so (vi) is re-tested after the
+deploy rather than counted against the arm here.
+
+**Pilot 5c result (2026-09-26 08:30 UTC).** Support 91.7 %, late 88.8 %, changed-class
+post-change 77.5 %; ci-fix 95.0 % / 92.5 % / 85.0 %. Prediction **not met** (late 0.888 <
+0.92; changed-post 77.5 % < 85 %; android recovered in 2 class-episodes on s11 and 0 on
+s23). Against 5a the brackets moved nothing the noise cannot explain (differences of 1–3
+episodes per cell), and the failure analysis says why they could not: pooled over 5a/5b/5c,
+the 23 changed-class post-change failures on support are 16 of 18 **first exposures** of a
+class after the change (the record still says `act` on the old fix, nothing could know
+otherwise, and the two in-episode retries recovered 2 of 18), 7 of 18 **second exposures**,
+and 1 of 78 third-or-later (a fragmented label). On the second exposures the plan was
+ordered by the record elsewhere and truncated to five, and the new fix was outside it or
+fifth in 6 of 7; the bracket `reinstall_app (0/2 elsewhere)` — its wrong guesses on other
+classes — read as a verdict. Reproducing the live footer for the worst ci-fix cell (s11,
+`flaky integration failure`, seven actions tried) found a second defect: the footer's
+`tried[:6]` and `failed[:5]` cut a posterior-sorted record, hiding `fix_code 0/4` and
+`rerun_job 0/3` — the two actions the agent took a fifth and fourth time. Both are engine
+fixes in amfs#450: losses elsewhere no longer order the sweep, the sweep names every untried
+candidate, the footer never hides the most-failed action, brackets on winners elsewhere
+only. The ceiling paragraph is now quantitative: with fleet 1 the first exposure of each
+changed class costs one episode whatever the engine (6 of 120 on a support run = 5 %), so
+a support cell is bounded near 93–94 % on the change-set-A schedule; the second-exposure
+loss (2–4 per run) is what #450 is for.
+
+**Pilots 5d/5e (planned, after the deploys of amfs#449, amfs-internal#780/#781).** 5d:
+`senselab` on the deployed engine with #450's core client-side (manifest `client_core`),
+same cells; 5e: `senselab-rsi`, same cells, for (vi). Predictions, dev seeds: 5d support
+changed-class post-change ≥ 85 % with second-exposure failures ≤ 2 per run, late window
+≥ 0.92, ci-fix `flaky-integration` recovered on s11 (no class at 4/4/4); 5e RSI metrics
+first proposal ≤ 3 episodes after the change, `repair_agent` share ≥ 80 %, at least one fix
+reaching `canary` per support cell; no `IDLETX` ≥ 60 s or `LOCKWAIT` in the sampler during
+the runs.

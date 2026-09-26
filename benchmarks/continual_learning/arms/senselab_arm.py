@@ -86,6 +86,16 @@ def fold_situation(value: Any) -> str:
     return " ".join(words[:8])
 
 
+def _render_footer(priors: Any, rec: Any, cands: list[str] | None, agent_id: str) -> str:
+    """``render_priors`` with the agent's id where the client core accepts it (amfs-core >=
+    0.3.43 orders the untried by the same rotation the server drew the plan from); older
+    cores take no ``agent_id`` and keep the plan's order."""
+    try:
+        return render_priors(priors, rec, candidate_actions=cands, agent_id=agent_id)
+    except TypeError:
+        return render_priors(priors, rec, candidate_actions=cands)
+
+
 #: The standing instruction every SenseLab arm with priors gives the model: how to use the
 #: recommendation and the plan the search footer carries. It is the product's documented
 #: integration contract (``amfs.Run``: act on ``act``, work the plan on a retry, label the kind
@@ -440,7 +450,9 @@ class _SenseLabSession(EpisodeSession):
             priors = meta.get("priors")
             # The order may only name what the caller can still take: a retry must not be
             # told to try the action that just failed because the record has it as a winner.
-            self._footer = render_priors(priors, rec, candidate_actions=cands) or None
+            # ``agent_id``: the rotation over the untried is the one the server drew the
+            # plan from (a core that accepts it; older cores keep the plan's order).
+            self._footer = _render_footer(priors, rec, cands, self.agent_id) or None
             if isinstance(rec, dict) and rec.get("mode"):
                 self.last_recommendation = {"mode": rec.get("mode"), "suggested_action": rec.get("suggested_action"),
                                             "regime_shift": bool(meta.get("regime_shift"))}

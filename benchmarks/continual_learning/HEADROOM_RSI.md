@@ -278,6 +278,56 @@ fingerprint marker, under `lock_timeout`). The same idle transaction is what pro
 07:09 UTC, `FATAL: terminating connection due to idle-in-transaction timeout`), losing those
 repair runs mid-flight; #780's non-transactional checkout removes that failure mode too.
 
+### Pilots 5b and 5c, complete — and what the failures are made of
+
+| cell (gpt-5.5, s11+s23) | 5a `senselab` | 5b `senselab-rsi` | 5c `senselab` + brackets |
+|---|---|---|---|
+| support success / late | 92.5 / 91.2 | 92.5 / 90.0 | 91.7 / 88.8 |
+| support changed-class post-change | 82.5 | 80.0 | 77.5 |
+| ci-fix success / late | 95.8 / 95.0 | 95.8 / 93.8 | 95.0 / 92.5 |
+| ci-fix changed-class post-change | 90.0 | 87.5 | 85.0 |
+
+5b says the repair loop is free (pilot 4 had it costing 7 points on support) but produced
+nothing yet: template-source proposals only, first lag 3–13 episodes, nothing shipped — the
+runs the seal stall terminated; re-tested as 5e after #780 deploys. 5c says brackets on
+every candidate do not help, and the per-episode analysis says why. Pooled over 5a/5b/5c,
+the 23 changed-class post-change failures on support split by **exposure of the class
+since the change**:
+
+| exposure | episodes | failed | what the record said |
+|---|---|---|---|
+| 1st | 18 | 16 | `act` on the old fix — nothing could know; in-episode retries recovered 2 |
+| 2nd | 18 | 7 | `explore`/sweep; the new fix outside the five-slot plan or fifth in 6 of 7 |
+| 3rd | 18 | 0 | |
+| 4th+ | 60 | 1 | a fragmented label (`ios data export error` vs `csv export timeout`) |
+
+So the **first exposure is a floor**: 3 classes × 2 seeds = 6 of 120 episodes (5 %) per
+support run, whatever the engine does at fleet 1. The second exposure is the headroom, and
+reproducing the live footer against production for the worst ci-fix cell (s11, `flaky
+integration failure`, seven actions tried, 4/4/4) showed the engine losing it twice over:
+
+1. **The sweep buried the textbook fix.** `sweep_order` ranked `(-won, -p, i)`, so an
+   action with losses on *other* situations sat below every never-tried one. Losses
+   elsewhere are the times an action was the wrong guess for another class — the textbook
+   answers are guessed most — and both quirk-to-textbook changes (`reinstall_app` 0/2
+   elsewhere, `edit_generated_file` 0/4 elsewhere) were outside the plan on all nine
+   post-change exposures.
+2. **The footer hid the most-failed actions.** `tried[:6]` and `failed[:5]` cut a
+   posterior-sorted record from the top, so the Tried line showed five 0/1s and not
+   `fix_code 0/4`, and "Do not spend an attempt on" showed neither `fix_code` nor
+   `rerun_job 0/3` — the two actions the agent took a fifth and fourth time.
+
+Both fixed in amfs#450 (core 0.3.43): `(-won, i)`; every untried candidate named in the
+sweep's order; the footer shows all tried up to ten, most-lost first in the avoid list;
+brackets only on winners elsewhere. Label fragmentation (the agent's own situation strings)
+costs ~1–2 blank records per cell (~0.5 %) and is left as a known residual: a server-side
+match by task-text neighbourhood is the candidate remedy, not attempted before the freeze.
+
+Revised ceiling, support at fleet 1 on set A: 100 % − 5 % (first exposures) − ~1.5 %
+(pre-change first encounters) ≈ **93–94 %** if second exposures are solved; 5a/5b sit at
+92.5 % with 2–4 second-exposure losses per run. Ci-fix has one first exposure per changed
+class (2 classes) and sits at 95–96 %.
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families
