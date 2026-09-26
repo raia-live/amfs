@@ -981,3 +981,72 @@ the record (lowest disagreement where veterans' late success ≥ 0.8; no cell ha
 < 0.5). The mechanism the record shows is not the joiner being smarter: it is reading a
 scope where the stale rule is labelled discredited and the replacement validated, both
 written by veterans it never met.
+
+### 2026-09-26 (j) — the loop's own history reaches memory and the next draft
+
+**Why.** The repair loop's record of what it tried — a fix's corrective entries, its Tier 1
+verdict and notes, the replay or canary that failed it, the sweep that called it
+regressed — lived only in the fix ledger (`amfs_eval_fixes`, `amfs_eval_fix_tests`).
+Nothing read that ledger on the paths this study measures: a briefing compiles memory
+entries, and the repair agent's evidence pack carried the failing runs, the implicated
+entries and a template, not the previous draft on the same entry. So the two places a
+failed repair could teach were both blind to it. The second draft on an entry was a fresh
+guess (`_fix_covering` lets a `test_failed` fix be followed by a new proposal, and on 5h
+the first drafts on `playbook-tier1` and `android-alerts` came back `test_failed` /
+`inconclusive`), and a joiner in probe (i) inherited "what failed" from the outcome loop's
+evidence labels but not "what the loop already tried and rejected". The agents in this
+study follow a rule the repairer did not: mark the attempt before trying another.
+
+**Mechanism (amfs-internal#784; `repair/record.py`).** (1) On `test_failed`,
+`replay_failed`, `canary_failed`, `regressed` and a rollback by hand, the loop writes a
+`lesson-fix-<key>` belief (0.7) on the entity of every entry the fix changed: fix id, the
+value it tried, the verdict and its notes, a one-line lesson not to reuse the change as it
+stands. One key per repaired entry, versioned per attempt. On ship it writes a
+`decision-fix-<key>` fact (0.8): what changed, from which version, why, on what evidence
+(canary / customer replay / offline replay / a person). Both are ordinary entries, so the
+briefing and search that already serve the agents surface them with no change to the
+retrieval path; the `lesson-contrast-repair-*` pointer that feeds `discredited[].
+replaced_by` is unchanged. (2) `FixService._prior_fixes` reads the ledger's `test_failed`
+/ `regressed` / `dismissed` fixes on the same behavior or entry and `build_evidence`
+carries them as `RepairEvidence.prior_fixes` (newest first, ≤ 5: what each changed, its
+rationale, how it was judged); the drafting message names them and instructs the agent
+not to propose the same change again and to state what it does differently. Both propose
+paths (judge, regime shift) pass them. Never fatal on either side.
+
+**What changes in the measured arms.** Only `senselab-rsi*` (the loop is off elsewhere).
+The outcome-loop arm `senselab` is unaffected, so the E1 contrast `senselab-rsi` vs
+`senselab` now includes this mechanism; the `senselab-rsi-review` ablation (proposals
+held at `review`, nothing ships on its own) still exercises (1) for failed drafts and (2),
+which is the point — a loop that cannot ship can still teach.
+
+**Endpoints (added to the fix lifecycle readout, `analysis/rsi.py`).** (G1) *Repeat
+drafts*: among second-or-later drafts on an entry whose previous draft failed, the share
+whose corrective value is a near-duplicate of a prior failed value (normalised Jaccard on
+tokens ≥ 0.9). (G2) *Second-draft pass rate*: Tier 1 pass rate of second drafts on an
+entry, against first drafts. (G3) *Time to first shipped fix per changed class*, in
+episodes, for classes whose first draft failed. (G4) Joiner-side, probe (i): share of
+joiner changed-class first exposures whose context held a `lesson-fix-*` or
+`decision-fix-*` entry (a platform-authored hit of this kind), and first-attempt success
+conditioned on it.
+
+**Predictions, dev seeds (5i and the `senselab-rsi` halves of probe (i) run before #784 is
+live are the pre-registered baseline; the first run after it is live is the treated
+readout).** (P1) G1 falls from whatever the pre-#784 run shows to ≤ 10 %. (P2) G2 rises by
+≥ 15 points for second drafts (a prior failed draft in the pack is informative, not
+noise). (P3) G3 falls on classes whose first draft failed; no change on classes whose
+first draft passed (the mechanism only fires on failure). (P4) In probe (i), `decision-
+fix-*` / `lesson-fix-*` hits appear in ≥ 50 % of `senselab-rsi` joiner changed-class
+first exposures where the veterans' loop drafted before the join, and P3 of amendment (i)
+is evaluated with these counted as platform-authored hits. **What falsifies the claim:**
+if G1 was already ≤ 10 % before #784 the repairer was not repeating itself and the paper
+says the mechanism is prophylactic, not measured; if G2 does not move, the failed draft's
+record is not usable evidence for the model and the paper says so; if joiners see the
+entries (P4) but their changed-class first-attempt success does not move relative to
+`senselab` joiners, the entries are read and not acted on, which the paper reports as a
+limit of memory-only transfer.
+
+**Scope note.** This is an engine change during the development phase, before
+`analysis-freeze-rsi`. It is preregistered here before the treated run, the untreated 5h/5i
+and probe-(i) RSI cells are kept as the pre-#784 baseline, and no confirmatory seed has
+been run on either side. Dev-seed readouts on both sides are reported; the confirmatory
+grid runs with #784 live.
