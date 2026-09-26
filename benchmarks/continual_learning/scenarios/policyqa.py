@@ -316,8 +316,9 @@ class PolicyQaScenario(Scenario):
         tp = POLICY_TOPICS[tid]
         fix, old_fix, why = tp["current"]["value"], None, None
         in_change = tid in self.changes
-        if self.changed(ep) and in_change:
-            old_fix, fix, why = fix, self.changes[tid]["value"]["value"], self.changes[tid]["why"]
+        active = self.active_changes(ep)
+        if tid in active:
+            old_fix, fix, why = fix, active[tid]["value"]["value"], active[tid]["why"]
         first, last = irng.choice(FIRST_NAMES), irng.choice(LAST_NAMES)
         company, plan, country = irng.choice(COMPANIES), irng.choice(ACCOUNT_PLANS), irng.choice(COUNTRIES)
         customer = f"{first} {last}"
@@ -329,20 +330,19 @@ class PolicyQaScenario(Scenario):
                 "fix": fix, "old": tp["old"]["value"], "generic": tp["generic"]["value"], "old_fix": old_fix,
                 "why": why, "change_class": in_change}
 
-    @property
-    def changes(self) -> dict[str, dict[str, Any]]:
-        return POLICY_CHANGE_SETS[self.change_variant]
+    def change_set(self, variant: str) -> dict[str, dict[str, Any]]:
+        return POLICY_CHANGE_SETS[variant]
 
     def regenerate(self, ep: int, salt: int) -> None:
-        tid = random.Random(f"pol-focus-{self.seed}-{ep}-{salt}").choice(list(self.changes))
+        tid = random.Random(f"pol-focus-{self.seed}-{ep}-{salt}").choice(self.focus_classes(ep))
         self.sched[ep] = tid
         self.instances[ep] = self._instance(ep, tid, salt)
 
-    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+    def oracle_fix_entries(self, variant: str | None = None) -> list[tuple[str, str, float]]:
         return [(f"update-policy-{tid}", f"Policy update — {tid.replace('-', ' ')}: the current value is "
                                          f"{c['value']['value']}; the {POLICY_TOPICS[tid]['doc']} document still shows "
                                          f"{POLICY_TOPICS[tid]['current']['value']} and is out of date. Reason: {c['why']}.", 1.0)
-                for tid, c in self.changes.items()]
+                for tid, c in self.change_set(variant or self.change_variant).items()]
 
     def seed_entries(self) -> list[tuple[str, str, float]]:
         docs: list[tuple[str, str, float]] = []
@@ -368,7 +368,7 @@ class PolicyQaScenario(Scenario):
                   f"Account context: {i['customer']} <{i['email']}>, {i['company']} ({i['plan']} plan, {i['country']}).")
         return Task(ep, prompt, dict(i), self.agent_for(ep),
                     {"topic": i["topic"], "class": i["topic"], "corpus": i["corpus"],
-                     "quirk": i["fix"] != i["generic"], **change_tags(self, ep, i["change_class"])})
+                     "quirk": i["fix"] != i["generic"], **change_tags(self, ep, i["change_class"], cls=i["topic"])})
 
     @staticmethod
     def _source_version(tp: dict[str, Any], src: str) -> str:
@@ -395,7 +395,7 @@ class PolicyQaScenario(Scenario):
         tp = POLICY_TOPICS[t["topic"]]
         ans = str(args.get("answer", "")).strip()
         src = str(args.get("source", "") or "")
-        truth_spec = self.changes[t["topic"]]["value"] if t.get("old_fix") else tp["current"]
+        truth_spec = self.changes[t["topic"]]["value"] if t.get("old_fix") else tp["current"]  # union: a topic is in one set
         hit_truth = _match(truth_spec, ans)
         hit_old_doc = _match(tp["old"], ans)
         hit_generic = _match(tp["generic"], ans)

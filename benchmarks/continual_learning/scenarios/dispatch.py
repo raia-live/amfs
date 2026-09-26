@@ -211,8 +211,9 @@ class DispatchScenario(Scenario):
         irng = random.Random(f"dsp-{self.seed}-{ep}" + (f"-{salt}" if salt else ""))
         cls = DISPATCH_CLASSES[cid]
         fix, why, old = cls["fix"], cls["why"], None
-        if self.changed(ep) and cid in self.changes:
-            old, fix, why = fix, self.changes[cid]["fix"], self.changes[cid]["why"]
+        active = self.active_changes(ep)
+        if cid in active:
+            old, fix, why = fix, active[cid]["fix"], active[cid]["why"]
         fillers = {k: irng.choice(v) for k, v in FILLERS.items()}
         fillers["date"] = f"2026-{irng.randint(7, 11):02d}-{irng.randint(1, 28):02d}"
         fillers["month"] = irng.choice(["July", "August", "September", "October", "November"])
@@ -221,19 +222,18 @@ class DispatchScenario(Scenario):
                 "fix": fix, "generic": cls["obvious"], "why": why, "old_fix": old,
                 "change_class": cid in self.changes}
 
-    @property
-    def changes(self) -> dict[str, dict[str, str]]:
-        return DISPATCH_CHANGE_SETS[self.change_variant]
+    def change_set(self, variant: str) -> dict[str, dict[str, str]]:
+        return DISPATCH_CHANGE_SETS[variant]
 
     def regenerate(self, ep: int, salt: int) -> None:
-        cid = random.Random(f"dsp-focus-{self.seed}-{ep}-{salt}").choice(list(self.changes))
+        cid = random.Random(f"dsp-focus-{self.seed}-{ep}-{salt}").choice(self.focus_classes(ep))
         self.sched[ep] = cid
         self.instances[ep] = self._instance(ep, cid, salt)
 
-    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+    def oracle_fix_entries(self, variant: str | None = None) -> list[tuple[str, str, float]]:
         return [(f"update-routing-{cid}", f"Routing update — {cid.replace('-', ' ')} tasks now go to {c['fix']} "
                                           f"(previously {DISPATCH_CLASSES[cid]['fix']}). Reason: {c['why']}.", 1.0)
-                for cid, c in self.changes.items()]
+                for cid, c in self.change_set(variant or self.change_variant).items()]
 
     def seed_entries(self) -> list[tuple[str, str, float]]:
         # The onboarding routing guide maps every class to the specialist its name suggests:
@@ -259,7 +259,7 @@ class DispatchScenario(Scenario):
                   f"Route it to one specialist.")
         return Task(ep, prompt, dict(i), self.agent_for(ep),
                     {"task_class": i["task_class"], "class": i["task_class"], "quirk": i["fix"] != i["generic"],
-                     **change_tags(self, ep, i["change_class"])})
+                     **change_tags(self, ep, i["change_class"], cls=i["task_class"])})
 
     def step(self, task: Task, name: str, args: dict[str, Any]) -> StepResult:
         t = task.truth

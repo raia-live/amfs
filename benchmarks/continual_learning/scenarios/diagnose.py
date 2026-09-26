@@ -14,6 +14,7 @@ import random
 from typing import Any
 
 from .base import Scenario, StepResult, Task, ToolSpec, finish_params
+from .realworld import change_tags
 
 FIXES = ["increase_pool_size", "rollback_deploy", "scale_out", "restart_pods", "set_cache_ttl",
          "enable_circuit_breaker", "rotate_logs", "rate_limit"]
@@ -142,19 +143,18 @@ class DiagnoseScenario(Scenario):
         self.sched = sched
         self.instances = [self._instance(ep, sched[ep], 0) for ep in range(self.episodes)]
 
-    @property
-    def changes(self) -> dict[str, dict[str, str]]:
-        return RULE_CHANGE_SETS[self.change_variant]
+    def change_set(self, variant: str) -> dict[str, dict[str, str]]:
+        return RULE_CHANGE_SETS[variant]
 
     def regenerate(self, ep: int, salt: int) -> None:
-        rid = random.Random(f"diag-focus-{self.seed}-{ep}-{salt}").choice(list(self.changes))
+        rid = random.Random(f"diag-focus-{self.seed}-{ep}-{salt}").choice(self.focus_classes(ep))
         self.sched[ep] = rid
         self.instances[ep] = self._instance(ep, rid, salt)
 
-    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+    def oracle_fix_entries(self, variant: str | None = None) -> list[tuple[str, str, float]]:
         return [(f"update-runbook-{rid}", f"Runbook update — incidents matching the {rid} signature: the fix is now "
                                           f"{c['fix']} (it used to be {RULES[rid]['fix']}). Root cause: {c['cause']}.", 1.0)
-                for rid, c in self.changes.items()]
+                for rid, c in self.change_set(variant or self.change_variant).items()]
 
     def _instance(self, ep: int, rid: str, salt: int) -> dict[str, Any]:
         if True:
@@ -171,8 +171,9 @@ class DiagnoseScenario(Scenario):
             if ep >= self.shift_at:
                 metrics = {RENAME.get(k, k): v for k, v in metrics.items()}
             fix, cause, old, wrong = r["fix"], r["cause"], None, list(r["wrong"])
-            if self.changed(ep) and rid in self.changes:
-                old, fix, cause = fix, self.changes[rid]["fix"], self.changes[rid]["cause"]
+            active = self.active_changes(ep)
+            if rid in active:
+                old, fix, cause = fix, active[rid]["fix"], active[rid]["cause"]
                 wrong = [w for w in wrong if w != fix] + [old]
             return {"rule": rid, "service": svc_name, "metrics": metrics, "logs": logs,
                     "changes": changes, "cause": cause, "fix": fix, "wrong": wrong, "old_fix": old,
@@ -194,7 +195,7 @@ class DiagnoseScenario(Scenario):
                   f"Investigate with the diagnostic tools and apply exactly one fix.")
         tags = {"rule": inst["rule"], "shifted": ep >= self.shift_at}
         if self.change_at:
-            tags.update({"change_class": inst["change_class"], "post_change": self.changed(ep)})
+            tags.update(change_tags(self, ep, inst["change_class"], cls=inst["rule"]))
         return Task(ep, prompt, dict(inst), self.agent_for(ep), tags)
 
     def step(self, task: Task, name: str, args: dict[str, Any]) -> StepResult:

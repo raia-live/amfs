@@ -73,10 +73,16 @@ class Scenario:
                  label_noise: float = 0.0, feedback_delay: int = 0, fleet: int = 0,
                  change_at: int = 0, change_focus: float = 0.0, fleet_mode: str = "rr",
                  join_at: int = 0, opaque_ids: bool = False, change_variant: str = "A",
-                 **_: Any) -> None:
+                 change_at2: int = 0, **_: Any) -> None:
         self.seed = seed
         self.episodes = episodes
         self.rng = random.Random(f"{self.name}-{seed}")
+        # A second regime change (HYPOTHESIS_RSI.md, E2): at ``change_at2`` the *other* change
+        # set comes into force on top of the first, so the world has moved twice — the classes
+        # the first change moved stay moved, and a disjoint set of classes moves as well. A
+        # repair that was right for the first change stays right; the loop has to notice and
+        # repair a second time without undoing the first. 0 = one change only.
+        self.change_at2 = change_at2 if (change_at and change_at2 > change_at) else 0
         # Which regime change happens at ``change_at``. "A" is the scenario's original change
         # set — the one every training trace in the distillation study contains. "B" changes
         # different classes to different fixes, none of which appears as a (class, fix) pair
@@ -127,12 +133,71 @@ class Scenario:
     def changed(self, ep: int) -> bool:
         return bool(self.change_at) and ep >= self.change_at
 
-    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+    # ---- change sets ---------------------------------------------------------
+    # A family defines its change sets as ``change_set(variant)`` (class -> what changes).
+    # ``changes`` is the union of every set the cell will apply (for tags, focus sampling
+    # and oracle entries); ``active_changes(ep)`` is what is in force at episode ``ep``.
+    OTHER_VARIANT = {"A": "B", "B": "A"}
+
+    def change_set(self, variant: str) -> dict[Any, Any]:
+        """The classes ``variant`` moves and what they move to. Families override; the base
+        has no change sets."""
+        return {}
+
+    @property
+    def protocol_variants(self) -> str:
+        """Every change set this cell applies, in order: ``"A"``, ``"B"``, or with a second
+        change ``"AB"`` / ``"BA"``."""
+        v = self.change_variant
+        return v + (self.OTHER_VARIANT[v] if self.change_at2 else "")
+
+    def variants(self, ep: int) -> str:
+        """The change sets in force at ``ep``: ``""`` before the change, the primary set
+        from ``change_at``, both from ``change_at2``."""
+        if not self.changed(ep):
+            return ""
+        v = self.change_variant
+        if self.change_at2 and ep >= self.change_at2:
+            v += self.OTHER_VARIANT[v]
+        return v
+
+    @property
+    def changes(self) -> dict[Any, Any]:
+        out: dict[Any, Any] = {}
+        for v in self.protocol_variants:
+            out.update(self.change_set(v))
+        return out
+
+    def active_changes(self, ep: int) -> dict[Any, Any]:
+        out: dict[Any, Any] = {}
+        for v in self.variants(ep):
+            out.update(self.change_set(v))
+        return out
+
+    def class_changed(self, cls: Any, ep: int) -> bool:
+        """Has ``cls``'s truth moved by episode ``ep``."""
+        return cls in self.active_changes(ep)
+
+    def change_stage(self, cls: Any) -> int | None:
+        """1 when ``cls`` moves at ``change_at``, 2 when it moves at ``change_at2``, else None."""
+        if cls in self.change_set(self.change_variant):
+            return 1
+        if self.change_at2 and cls in self.change_set(self.OTHER_VARIANT[self.change_variant]):
+            return 2
+        return None
+
+    def focus_classes(self, ep: int) -> list[Any]:
+        """Classes ``change_focus`` may redraw episode ``ep`` into: those whose truth has
+        moved by ``ep`` (the union when nothing is active, so callers never draw from empty)."""
+        return list(self.active_changes(ep) or self.changes)
+
+    def oracle_fix_entries(self, variant: str | None = None) -> list[tuple[str, str, float]]:
         """What a maintainer who has been told about the regime change writes to the store: one
         corrective entry per changed class, in the scenario's own action vocabulary, at
         confidence 1.0. The ``senselab-oracle-fix-<lag>`` arm writes these ``lag`` episodes
-        after ``change_at`` — the human-in-the-loop upper bound the repair loop is measured
-        against (HYPOTHESIS_RSI.md, H6). Empty for scenarios without a regime change."""
+        after ``change_at`` (and the other set's after ``change_at2``) — the human-in-the-loop
+        upper bound the repair loop is measured against (HYPOTHESIS_RSI.md, H6). ``variant``
+        defaults to the primary set. Empty for scenarios without a regime change."""
         return []
 
     def agent_for(self, ep: int) -> str:
@@ -164,7 +229,15 @@ class Scenario:
         if not post:
             return
         target = round(len(post) * self.change_focus)
-        in_class = {ep for ep in post if self.task(ep).tags.get("change_class")}
+
+        def _focused(ep: int) -> bool:
+            # A class whose truth has moved *by this episode*: with a second change, a
+            # stage-2 class counts only from ``change_at2`` (``change_active``); families
+            # that tag membership only fall back to the union (``change_class``).
+            tags = self.task(ep).tags
+            return bool(tags.get("change_active", tags.get("change_class")))
+
+        in_class = {ep for ep in post if _focused(ep)}
         need = target - len(in_class)
         rng = random.Random(f"focus-{self.name}-{self.seed}")
         candidates = [ep for ep in post if ep not in in_class]
@@ -174,7 +247,7 @@ class Scenario:
                 break
             for salt in range(1, 64):
                 self.regenerate(ep, salt)
-                if self.task(ep).tags.get("change_class"):
+                if _focused(ep):
                     need -= 1
                     break
 

@@ -138,7 +138,7 @@ class AccountsScenario(Scenario):
         if self.contacts[s_term]["term"] == "annual":
             self.contacts[s_term]["term"] = rng.choice(["monthly", "multi-year"])
         old_tz = self.contacts[s_tz]["tz"]
-        self.changes: dict[int, dict[str, Any]] = {
+        changes_a: dict[int, dict[str, Any]] = {
             1: {"field": "channel", "dim": "channel", "why": "new role, moved off the old channel",
                 "new": rng.choice([c for c in CHANNELS if c not in (c1["channel"], c2["channel"])])},
             s_tz: {"field": "tz", "dim": "window", "why": "relocated to another office",
@@ -147,8 +147,9 @@ class AccountsScenario(Scenario):
                      "new": rng.choice([5, 10, 15])},
             s_term: {"field": "term", "dim": "term", "why": "finance standardised on annual terms", "new": "annual"},
         }
-        if self.change_variant == "B":
-            self.changes = self._changes_b(set(self.changes) | set(self.wrong))
+        # Both sets are built whatever the protocol (B from its own rng, so A's draws are unchanged);
+        # ``changes`` (base) is the union of the sets the cell applies, ``active_changes(ep)`` what is in force.
+        self._change_sets = {"A": changes_a, "B": self._changes_b(set(changes_a) | set(self.wrong))}
         # Seeded profile facts: PROFILE_FACTS per contact, always including the one that is wrong or
         # will change (so the stale phrase is in the store and ``_mentions_stale`` can see it served).
         self.profile: dict[int, dict[str, Any]] = {}
@@ -254,10 +255,13 @@ class AccountsScenario(Scenario):
     def _current(self, ci: int, ep: int) -> dict[str, Any]:
         """The contact's preferences as they are at episode ``ep`` (regime change applied)."""
         c = self.contacts[ci]
-        ch = self.changes.get(ci)
-        if ch and self.changed(ep):
+        ch = self.active_changes(ep).get(ci)
+        if ch:
             c = {**c, ch["field"]: ch["new"]}
         return c
+
+    def change_set(self, variant: str) -> dict[int, dict[str, Any]]:
+        return self._change_sets[variant]
 
     # ---- preferences -------------------------------------------------------------------
     # How the previous assistant phrased each preference in the CRM profile (also the stale phrase).
@@ -422,20 +426,22 @@ class AccountsScenario(Scenario):
         base, cur = self.contacts[ci], self._current(ci, ep)
         ch = self.changes.get(ci)
         # the task is in the changed class only when the request kind exercises the changed preference
-        affected = bool(ch) and self.changed(ep) and ch["dim"] in KIND_DIMS[kind]
+        exercises = bool(ch) and ch["dim"] in KIND_DIMS[kind]
+        affected = exercises and self.class_changed(ci, ep)
         twin = self.twin_of.get(ci)
         opts, good, stale, decoy = self._gen(rng, kind, cur, base if affected else None,
                                              self._current(twin, ep) if twin is not None else None)
         return {"ci": ci, "contact": base["slug"], "name": base["name"], "company": base["company"], "kind": kind,
                 "ask": rng.choice(ASKS[kind]), "options": opts, "good": good, "stale": stale, "twin_decoy": decoy,
                 "old_fix": self._fact(ch["dim"], base) if affected else None, "change_class": affected,
+                "change_cls": ci if exercises else None,
                 "changed_contact": ci in self.changes, "confusable": twin is not None,
                 "twin": self.contacts[twin]["slug"] if twin is not None else None,
                 "wrong_dim": self.wrong[ci][0] if ci in self.wrong else None}
 
     def regenerate(self, ep: int, salt: int) -> None:
         kind = self.sched[ep][1]
-        cands = [ci for ci, ch in self.changes.items() if ch["dim"] in KIND_DIMS[kind]]
+        cands = [ci for ci, ch in (self.active_changes(ep) or self.changes).items() if ch["dim"] in KIND_DIMS[kind]]
         if not cands:   # no change touches this request kind; leave the episode alone
             return
         ci = random.Random(f"acc-focus-{self.seed}-{ep}-{salt}").choice(cands)
@@ -455,9 +461,9 @@ class AccountsScenario(Scenario):
         out.append((f"crm-note-{tw.lower()}-meetings", f"{tw} prefers CET mornings for calls; book 09:00-12:00 CET.", 0.7))
         return out + self.distractor_entries()
 
-    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+    def oracle_fix_entries(self, variant: str | None = None) -> list[tuple[str, str, float]]:
         out = []
-        for ci, ch in self.changes.items():
+        for ci, ch in self.change_set(variant or self.change_variant).items():
             base = self.contacts[ci]
             new = {**base, ch["field"]: ch["new"]}
             out.append((f"crm-update-{base['slug']}", f"CRM update — {base['name']} ({base['company']}): now "
@@ -474,7 +480,8 @@ class AccountsScenario(Scenario):
         return Task(ep, prompt, dict(i), self.agent_for(ep),
                     {"contact": i["contact"], "kind": i["kind"], "class": f"{i['contact']}:{i['kind']}",
                      "confusable": i["confusable"], "quirk": implied != [i["good"]],
-                     "changed_contact": i["changed_contact"], **change_tags(self, ep, i["change_class"])})
+                     "changed_contact": i["changed_contact"],
+                     **change_tags(self, ep, i["change_class"], cls=i["change_cls"])})
 
     def _crm(self, q: str, ep: int) -> str:
         ql = q.lower()

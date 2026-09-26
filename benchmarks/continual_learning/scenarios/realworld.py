@@ -116,14 +116,13 @@ class SupportScenario(Scenario):
                                 "reply": {"type": "string"}}, ["action", "reply"]), terminal=True),
     ]
 
-    @property
-    def changes(self) -> dict[str, dict[str, str]]:
-        return SUPPORT_CHANGE_SETS[self.change_variant]
+    def change_set(self, variant: str) -> dict[str, dict[str, str]]:
+        return SUPPORT_CHANGE_SETS[variant]
 
-    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+    def oracle_fix_entries(self, variant: str | None = None) -> list[tuple[str, str, float]]:
         return [(f"update-{iid}", f"Playbook update — {iid.replace('-', ' ')} tickets: the correct resolution is now "
                                   f"{c['fix']} (it used to be {SUPPORT_ISSUES[iid]['fix']}). Reason: {c['why']}.", 1.0)
-                for iid, c in self.changes.items()]
+                for iid, c in self.change_set(variant or self.change_variant).items()]
 
     def build(self) -> None:
         rng = self.rng
@@ -136,8 +135,9 @@ class SupportScenario(Scenario):
         irng = random.Random(f"sup-{self.seed}-{ep}" + (f"-{salt}" if salt else ""))
         iss = SUPPORT_ISSUES[iid]
         fix, why, old = iss["fix"], iss["why"], None
-        if self.changed(ep) and iid in self.changes:
-            old, fix, why = fix, self.changes[iid]["fix"], self.changes[iid]["why"]
+        active = self.active_changes(ep)
+        if iid in active:
+            old, fix, why = fix, active[iid]["fix"], active[iid]["why"]
         return {"issue": iid, "msg": irng.choice(iss["msgs"]),
                 # See Scenario.opaque_ids: a counted ticket number is the episode index.
                 "ticket": irng.randint(10000, 99999) if self.opaque_ids else 4400 + ep,
@@ -148,7 +148,7 @@ class SupportScenario(Scenario):
                 "change_class": iid in self.changes}
 
     def regenerate(self, ep: int, salt: int) -> None:
-        iid = random.Random(f"sup-focus-{self.seed}-{ep}-{salt}").choice(list(self.changes))
+        iid = random.Random(f"sup-focus-{self.seed}-{ep}-{salt}").choice(self.focus_classes(ep))
         self.sched[ep] = iid
         self.instances[ep] = self._instance(ep, iid, salt)
 
@@ -164,7 +164,7 @@ class SupportScenario(Scenario):
         prompt = (f"Ticket SUP-{i['ticket']} from {i['email']} ({i['plan']} plan, {i['platform']}):\n\"{i['msg']}\"")
         return Task(ep, prompt, dict(i), self.agent_for(ep),
                     {"issue": i["issue"], "quirk": i["fix"] != i["generic"],
-                     **change_tags(self, ep, i["change_class"])})
+                     **change_tags(self, ep, i["change_class"], cls=i["issue"])})
 
     def step(self, task: Task, name: str, args: dict[str, Any]) -> StepResult:
         t = task.truth
@@ -189,12 +189,21 @@ class SupportScenario(Scenario):
                           flags={"generic_pick": act == t["generic"], "unwarranted_refund": act == "refund", **stale}, answer=act)
 
 
-def change_tags(sc: Scenario, ep: int, in_change_class: bool) -> dict[str, Any]:
-    """Tags for the regime-change analysis: is this task in a class whose truth changes, and
-    are we before or after the change."""
+def change_tags(sc: Scenario, ep: int, in_change_class: bool, cls: Any = None) -> dict[str, Any]:
+    """Tags for the regime-change analysis: is this task in a class whose truth changes
+    (``change_class``: any set the cell applies), and are we before or after the first change.
+    With ``cls`` given: ``change_active`` (has *this* class's truth moved by ``ep``),
+    ``change_stage`` (1: moves at ``change_at``; 2: at ``change_at2``) and, under a second
+    change, ``post_change2``."""
     if not sc.change_at:
         return {}
-    return {"change_class": in_change_class, "post_change": sc.changed(ep)}
+    tags: dict[str, Any] = {"change_class": in_change_class, "post_change": sc.changed(ep)}
+    if cls is not None:
+        tags["change_active"] = sc.class_changed(cls, ep)
+        tags["change_stage"] = sc.change_stage(cls)
+    if sc.change_at2:
+        tags["post_change2"] = ep >= sc.change_at2
+    return tags
 
 
 # ───────────────────────────────────────────────────────────────── concierge ──
@@ -238,19 +247,21 @@ class ConciergeScenario(Scenario):
              "no_alcohol_gifts": True, "hotel_needs_gym": True, "avoid_airline": "SkyJet"}
     KINDS = ["dinner", "lunch", "gift", "hotel", "flight"]
 
-    @property
-    def changes(self) -> dict[str, tuple[str, str]]:
-        return CONCIERGE_CHANGES[self.change_variant] if self.change_at else {}
+    def change_set(self, variant: str) -> dict[str, tuple[str, str]]:
+        return CONCIERGE_CHANGES[variant] if self.change_at else {}
 
     def rules(self, ep: int) -> dict[str, Any]:
-        """Dana's preferences as they stand at episode ``ep``."""
+        """Dana's preferences as they stand at episode ``ep``. The two change sets touch
+        disjoint preferences, so both may be in force at once (a second change)."""
         r = {"veg": False, "avoid_airline": self.PREFS["avoid_airline"], "no_alcohol": True, "no_electronics": False,
              "needs_gym": True, "hotel_budget": 320}
         if not self.change_at:
             r["veg"] = ep >= self.drift_at
-        elif self.changed(ep) and self.change_variant == "A":
+            return r
+        active = self.variants(ep)
+        if "A" in active:
             r.update(veg=True, avoid_airline="Northwind")
-        elif self.changed(ep) and self.change_variant == "B":
+        if "B" in active:
             r.update(no_alcohol=False, no_electronics=True, needs_gym=False, hotel_budget=250)
         return r
 
@@ -265,13 +276,13 @@ class ConciergeScenario(Scenario):
                 "change_class": kind in self.changes}
 
     def regenerate(self, ep: int, salt: int) -> None:
-        kind = random.Random(f"con-focus-{self.seed}-{ep}-{salt}").choice(list(self.changes))
+        kind = random.Random(f"con-focus-{self.seed}-{ep}-{salt}").choice(self.focus_classes(ep))
         self.reqs[ep] = self._request(ep, kind, salt)
 
-    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+    def oracle_fix_entries(self, variant: str | None = None) -> list[tuple[str, str, float]]:
         seen: set[str] = set()
         out = []
-        for kind, (_, why) in self.changes.items():
+        for kind, (_, why) in self.change_set(variant or self.change_variant).items():
             if why in seen:
                 continue
             seen.add(why)
@@ -347,11 +358,13 @@ class ConciergeScenario(Scenario):
             desc = ", ".join(f"{k}={v}" for k, v in o.items() if k != "id")
             lines.append(f"  {o['id']}: {desc}")
         prompt = f"Dana asks: please book a {r['kind']} for me. Options:\n" + "\n".join(lines) + "\nPropose one."
-        affected = r["change_class"] and self.changed(ep)
-        truth = {**r, "old_fix": self.changes[r["kind"]][0] if affected else None,
-                 "why": self.changes[r["kind"]][1] if affected else None}
+        active = self.active_changes(ep)
+        affected = r["kind"] in active
+        truth = {**r, "old_fix": active[r["kind"]][0] if affected else None,
+                 "why": active[r["kind"]][1] if affected else None}
         return Task(ep, prompt, truth, self.agent_for(ep),
-                    {"kind": r["kind"], "class": r["kind"], "post_drift": r["veg"], **change_tags(self, ep, r["change_class"])})
+                    {"kind": r["kind"], "class": r["kind"], "post_drift": r["veg"],
+                     **change_tags(self, ep, r["change_class"], cls=r["kind"])})
 
     def step(self, task: Task, name: str, args: dict[str, Any]) -> StepResult:
         if name != "propose":
@@ -398,8 +411,9 @@ class RetentionScenario(Scenario):
         accounts now get a named CSM under the support-to-success handoff (a one-off call no
         longer retains them), and the team tier bundles integrations by default, so a team
         account without them sits on the legacy price and a discount to the new list price is
-        what retains it. Neither (segment, action) pair is a truth under "A"."""
-        a, b = changed and variant == "A", changed and variant == "B"
+        what retains it. Neither (segment, action) pair is a truth under "A". ``variant`` may
+        name both sets (``"AB"``) when a second change has put both in force."""
+        a, b = changed and "A" in variant, changed and "B" in variant
         if c["plan"] == "enterprise":
             if a:
                 return "schedule_success_call", "after the CS reorg there are no dedicated CSMs; a success call is what retains enterprise"
@@ -420,16 +434,34 @@ class RetentionScenario(Scenario):
 
     RETENTION_SEGMENTS = {"A": ["enterprise accounts", "pro accounts with declining usage"],
                           "B": ["accounts with 4+ support tickets in 30 days", "team accounts with declining usage and no integrations"]}
+    # One representative account per changed segment (the segment's rule, and nothing else, fires).
+    RETENTION_PROBES = {"A": [{"plan": "enterprise", "tickets_30d": 0, "usage_trend": "stable", "uses_integrations": True},
+                              {"plan": "pro", "tickets_30d": 0, "usage_trend": "declining", "uses_integrations": True}],
+                        "B": [{"plan": "team", "tickets_30d": 4, "usage_trend": "stable", "uses_integrations": True},
+                              {"plan": "team", "tickets_30d": 0, "usage_trend": "declining", "uses_integrations": False}]}
 
-    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
-        probes = {"A": [{"plan": "enterprise", "tickets_30d": 0, "usage_trend": "stable", "uses_integrations": True},
-                        {"plan": "pro", "tickets_30d": 0, "usage_trend": "declining", "uses_integrations": True}],
-                  "B": [{"plan": "team", "tickets_30d": 4, "usage_trend": "stable", "uses_integrations": True},
-                        {"plan": "team", "tickets_30d": 0, "usage_trend": "declining", "uses_integrations": False}]}
+    def change_set(self, variant: str) -> dict[str, dict[str, Any]]:
+        return dict(zip(self.RETENTION_SEGMENTS[variant], self.RETENTION_PROBES[variant]))
+
+    @classmethod
+    def segment_of(cls, c: dict[str, Any]) -> str | None:
+        """The segment whose rule decides ``c`` in ``truth_for`` (same order), or None."""
+        if c["plan"] == "enterprise":
+            return "enterprise accounts"
+        if c["tickets_30d"] >= 4:
+            return "accounts with 4+ support tickets in 30 days"
+        if c["usage_trend"] == "declining" and c["plan"] == "pro":
+            return "pro accounts with declining usage"
+        if c["usage_trend"] == "declining" and c["plan"] == "team" and not c["uses_integrations"]:
+            return "team accounts with declining usage and no integrations"
+        return None
+
+    def oracle_fix_entries(self, variant: str | None = None) -> list[tuple[str, str, float]]:
+        v = variant or self.change_variant
         out = []
-        for seg, probe in zip(self.RETENTION_SEGMENTS[self.change_variant], probes[self.change_variant]):
-            new, why = self.truth_for(probe, True, self.change_variant)
-            old, _ = self.truth_for(probe, False, self.change_variant)
+        for seg, probe in self.change_set(v).items():
+            new, why = self.truth_for(probe, True, v)
+            old, _ = self.truth_for(probe, False, v)
             out.append((f"update-retention-{seg.split()[0]}-{new}", f"Retention playbook update — {seg}: the action that "
                                                                     f"retains is now {new} (it used to be {old}). Reason: {why}.", 1.0))
         return out
@@ -456,15 +488,18 @@ class RetentionScenario(Scenario):
 
     def task(self, ep: int) -> Task:
         c = self.accounts[ep]
-        act, why = self.truth_for(c, self.changed(ep), self.change_variant)
-        old, _ = self.truth_for(c, False, self.change_variant)
-        in_class = old != self.truth_for(c, True, self.change_variant)[0]
+        active = self.variants(ep)
+        act, why = self.truth_for(c, bool(active), active or "A")
+        old, _ = self.truth_for(c, False)
+        seg = self.segment_of(c)
+        in_class = seg in self.changes                       # any set the cell applies
+        moved = bool(active) and seg in self.active_changes(ep)  # this account's truth has moved
         prompt = (f"Churn-risk alert for {c['id']}: plan={c['plan']}, MRR=${c['mrr']}, tenure={c['tenure_months']}mo, "
                   f"usage_trend={c['usage_trend']}, support tickets (30d)={c['tickets_30d']}, "
                   f"integrations={'yes' if c['uses_integrations'] else 'no'}, NPS={c['nps']}. Choose one action.")
         return Task(ep, prompt, {"account": c, "expected": act, "why": why,
-                                 "old_fix": old if (self.changed(ep) and in_class) else None}, self.agent_for(ep),
-                    {"expected": act, "would_stay": act == "no_action", **change_tags(self, ep, in_class)})
+                                 "old_fix": old if moved else None}, self.agent_for(ep),
+                    {"expected": act, "would_stay": act == "no_action", **change_tags(self, ep, in_class, cls=seg)})
 
     def step(self, task: Task, name: str, args: dict[str, Any]) -> StepResult:
         if name != "act":
@@ -522,8 +557,9 @@ class OrderOpsScenario(Scenario):
         re-addressed (label reprint at the pack station) and expedited (upgrade until the carrier
         scan), final-sale items became returnable within 14 days of delivery, and price match
         covers equivalent SKUs (colour and size variants), not only the identical one. Every
-        (situation, action) pair "B" makes right is a denial under "A" in both regimes."""
-        a, b = changed and variant == "A", changed and variant == "B"
+        (situation, action) pair "B" makes right is a denial under "A" in both regimes.
+        ``variant`` may name both sets (``"AB"``) when a second change has put both in force."""
+        a, b = changed and "A" in variant, changed and "B" in variant
         req, st, car = o["request"], o["status"], o["carrier"]
         redirect_ok = (car == "FedEx") if a else (car == "UPS")
         if req == "cancel":
@@ -571,8 +607,42 @@ class OrderOpsScenario(Scenario):
                                          "issue_price_adjustment within the 7-day window; it used to require the identical SKU.")],
     }
 
-    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
-        return [(f"update-ops-{key}", f"Order policy update — {text}", 1.0) for key, text in self.OPS_CHANGE_NOTES[self.change_variant]]
+    def change_set(self, variant: str) -> dict[str, str]:
+        return dict(self.OPS_CHANGE_NOTES[variant])
+
+    @staticmethod
+    def rule_of(o: dict[str, Any]) -> str | None:
+        """The changed rule (a key of ``OPS_CHANGE_NOTES``) that decides ``o`` differently after
+        its change set is in force, or None when no set moves this order's truth."""
+        req, st = o["request"], o["status"]
+        if req == "cancel" and st == "packed":
+            return "cancel-packed"
+        if req in ("cancel", "change_address") and st == "shipped":
+            return "carrier-flip"
+        if req == "change_address" and st == "packed":
+            return "readdress-packed"
+        if req == "expedite" and st == "packed":
+            return "expedite-packed"
+        if req == "return" and st == "delivered":
+            if o["final_sale"]:
+                return "return-final-sale" if o["days_since_delivery"] <= 14 else None
+            if o["category"] == "electronics" and 14 < o["days_since_delivery"] <= 30:
+                return "return-electronics"
+            return None
+        if req == "price_match":
+            if o["same_sku"] and 7 < o["days_since_order"] <= 14:
+                return "price-match-14"
+            if not o["same_sku"] and o["days_since_order"] <= 7:
+                return "price-match-equivalent"
+            if not o["same_sku"] and 7 < o["days_since_order"] <= 14:
+                # qualifies only when both sets are in force (A's 14-day window and B's
+                # equivalent SKUs): an interaction of the two changes, in neither set alone
+                return "price-match-interaction"
+        return None
+
+    def oracle_fix_entries(self, variant: str | None = None) -> list[tuple[str, str, float]]:
+        return [(f"update-ops-{key}", f"Order policy update — {text}", 1.0)
+                for key, text in self.change_set(variant or self.change_variant).items()]
 
     def build(self) -> None:
         self.orders = [self._order(ep, 0) for ep in range(self.episodes)]
@@ -610,10 +680,15 @@ class OrderOpsScenario(Scenario):
                 "return": "I'd like to return this.", "price_match": "This just went on sale elsewhere; can you match the price?",
                 "expedite": "Can you make this arrive faster? I'll pay."}[o["request"]]
         prompt = f"Customer message about order {o['id']}: \"{text}\" Use get_order, then apply one action."
-        exp = self.truth_for(o, self.changed(ep), self.change_variant)
-        old, new = self.truth_for(o, False, self.change_variant), self.truth_for(o, True, self.change_variant)
-        return Task(ep, prompt, {"order": o, "expected": exp, "old_fix": old if (self.changed(ep) and old != new) else None},
-                    self.agent_for(ep), {"request": o["request"], "expected": exp, **change_tags(self, ep, old != new)})
+        active = self.variants(ep)
+        exp = self.truth_for(o, bool(active), active or "A")
+        old = self.truth_for(o, False)
+        # in a changed class: some set the cell applies moves this order's truth (the union)
+        in_class = old != self.truth_for(o, True, self.protocol_variants)
+        cls = self.rule_of(o) if in_class else None
+        return Task(ep, prompt, {"order": o, "expected": exp, "old_fix": old if exp != old else None},
+                    self.agent_for(ep), {"request": o["request"], "expected": exp,
+                                         **change_tags(self, ep, in_class, cls=cls)})
 
     def step(self, task: Task, name: str, args: dict[str, Any]) -> StepResult:
         t = task.truth
@@ -711,18 +786,18 @@ class CiFixScenario(Scenario):
         # step 5 is coprime with len(ids)=8, so the first 16 episodes cover every failure type twice
         self.sched = [ids[(ep * 5 + self.seed) % len(ids)] if ep < 2 * len(ids) else rng.choice(ids) for ep in range(self.episodes)]
 
-    @property
-    def changes(self) -> dict[str, str]:
-        return CI_CHANGE_SETS[self.change_variant]
+    def change_set(self, variant: str) -> dict[str, str]:
+        return CI_CHANGE_SETS[variant]
 
-    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+    def oracle_fix_entries(self, variant: str | None = None) -> list[tuple[str, str, float]]:
+        v = variant or self.change_variant
         return [(f"update-{fid}", f"CI convention update — {fid.replace('-', ' ')} failures ({CI_FAILURES[fid]['log'][:90]}): "
                                   f"the right fix is now {fix} (it used to be {CI_FAILURES[fid]['fix']}). "
-                                  f"{CI_CHANGE_WHY.get((self.change_variant, fid), '')}".strip(), 1.0)
-                for fid, fix in self.changes.items()]
+                                  f"{CI_CHANGE_WHY.get((v, fid), '')}".strip(), 1.0)
+                for fid, fix in self.change_set(v).items()]
 
     def regenerate(self, ep: int, salt: int) -> None:
-        self.sched[ep] = random.Random(f"ci-focus-{self.seed}-{ep}-{salt}").choice(list(self.changes))
+        self.sched[ep] = random.Random(f"ci-focus-{self.seed}-{ep}-{salt}").choice(self.focus_classes(ep))
 
     def seed_entries(self) -> list[tuple[str, str, float]]:
         out = [("repo-readme-ci", "CI: black, mypy, jest, alembic check, pip-audit run on every PR. Fix failures in the PR branch.", 0.8),
@@ -737,10 +812,12 @@ class CiFixScenario(Scenario):
               else 3000 + ep * 7 + self.seed)
         prompt = f"CI is red on PR #{pr} (\"{fid.replace('-', ' ')} related change\"). Investigate and fix it."
         truth = {"pr": pr, "fid": fid, **f, "old_fix": None}
-        if self.changed(ep) and fid in self.changes:
-            truth["old_fix"], truth["fix"] = f["fix"], self.changes[fid]
+        active = self.active_changes(ep)
+        if fid in active:
+            truth["old_fix"], truth["fix"] = f["fix"], active[fid]
         return Task(ep, prompt, truth, self.agent_for(ep),
-                    {"failure": fid, "quirk": truth["fix"] != f["generic"], **change_tags(self, ep, fid in self.changes)})
+                    {"failure": fid, "quirk": truth["fix"] != f["generic"],
+                     **change_tags(self, ep, fid in self.changes, cls=fid)})
 
     def step(self, task: Task, name: str, args: dict[str, Any]) -> StepResult:
         t = task.truth
@@ -798,14 +875,13 @@ class AnalyticsScenario(Scenario):
     agent_base = "analytics-agent"
     role = "You are the analytics agent answering finance's questions from the orders warehouse."
 
-    @property
-    def changes(self) -> dict[str, str]:
-        return ANALYTICS_CHANGES[self.change_variant]
+    def change_set(self, variant: str) -> dict[str, str]:
+        return ANALYTICS_CHANGES[variant]
 
-    def oracle_fix_entries(self) -> list[tuple[str, str, float]]:
+    def oracle_fix_entries(self, variant: str | None = None) -> list[tuple[str, str, float]]:
         return [(f"update-metric-{kind}", f"Finance definition update — {kind.replace('_', ' ')}: {why}. "
                                           f"Reports computed the old way no longer reconcile with the books.", 1.0)
-                for kind, why in self.changes.items()]
+                for kind, why in self.change_set(variant or self.change_variant).items()]
 
     tools = [
         ToolSpec("describe_table", "Describe a table's columns.", {"type": "object", "properties": {"table": {"type": "string"}}, "required": ["table"]}),
@@ -841,7 +917,7 @@ class AnalyticsScenario(Scenario):
 
     def regenerate(self, ep: int, salt: int) -> None:
         irng = random.Random(f"q-focus-{self.seed}-{ep}-{salt}")
-        self.questions[ep] = {"kind": irng.choice(list(self.changes)), "month": irng.choice(MONTHS),
+        self.questions[ep] = {"kind": irng.choice(self.focus_classes(ep)), "month": irng.choice(MONTHS),
                               "region": irng.choice(REGIONS + [None])}
 
     # -- truth -------------------------------------------------------------------
@@ -849,11 +925,13 @@ class AnalyticsScenario(Scenario):
         return [o for o in self.orders if o["status"] in statuses and not o["is_test"] and o["deleted_at"] is None
                 and o["month"] == month and (region is None or o["region"] == region)]
 
-    def truth(self, q: dict[str, Any], changed: bool = False) -> tuple[float, str]:
-        """The number finance's books show for question ``q``; ``changed``: under the regime
-        change's redefinition (set A or B per ``change_variant``), see ANALYTICS_CHANGES."""
-        redefined = changed and q["kind"] in self.changes
-        a, b = redefined and self.change_variant == "A", redefined and self.change_variant == "B"
+    def truth(self, q: dict[str, Any], changed: bool | str = False) -> tuple[float, str]:
+        """The number finance's books show for question ``q``. ``changed``: the change sets in
+        force — ``False`` none, ``True`` every set the cell applies, or the sets by name
+        (``"A"``, ``"B"``, ``"AB"``), see ANALYTICS_CHANGES. Each kind belongs to one set."""
+        active = self.protocol_variants if changed is True else (changed or "")
+        a = "A" in active and q["kind"] in ANALYTICS_CHANGES["A"]
+        b = "B" in active and q["kind"] in ANALYTICS_CHANGES["B"]
         rows = self._clean(q["month"], q["region"])
         ref = [r for r in self.refunds if not r["is_test"] and r["month"] == q["month"] and (q["region"] is None or r["region"] == q["region"])]
         # "A": booked = complete or pending; "B": gross = every status
@@ -929,14 +1007,16 @@ class AnalyticsScenario(Scenario):
                 "customers": f"How many distinct customers placed a completed order in {q['month']}{where}?",
                 "refund_rate": f"What was the refund rate (% of completed orders refunded) for {q['month']}{where}?"}[q["kind"]]
         in_class = q["kind"] in self.changes
-        val, unit = self.truth(q, self.changed(ep))
-        old_val = self.truth(q, False)[0] if (self.changed(ep) and in_class) else None
+        moved = self.class_changed(q["kind"], ep)
+        val, unit = self.truth(q, self.variants(ep))
+        old_val = self.truth(q, False)[0] if moved else None
         # See Scenario.opaque_ids: a counted request number is the episode index.
         fin = random.Random(f"fin-{self.seed}-{ep}").randint(1000, 9999) if self.opaque_ids else 800 + ep
         prompt = f"Finance asks (FIN-{fin}): {text} Use run_query, then report."
         return Task(ep, prompt, {"q": q, "expected": val, "unit": unit, "old_expected": old_val, "old_fix": None,
-                                 "why": self.changes.get(q["kind"]) if in_class else None},
-                    self.agent_for(ep), {"kind": q["kind"], "class": q["kind"], **change_tags(self, ep, in_class)})
+                                 "why": self.changes.get(q["kind"]) if moved else None},
+                    self.agent_for(ep), {"kind": q["kind"], "class": q["kind"],
+                                         **change_tags(self, ep, in_class, cls=q["kind"])})
 
     def step(self, task: Task, name: str, args: dict[str, Any]) -> StepResult:
         t = task.truth

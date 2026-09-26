@@ -93,6 +93,10 @@ class Cell:
     # the original and adds nothing to ids; any other value is part of the cell id and scope
     # (``-vB``) so a novel-change evaluation never mixes with the change the students trained on.
     change_variant: str = "A"
+    # A second regime change (HYPOTHESIS_RSI.md, E2): at ``change_at2`` the other change set
+    # comes into force on top of the first (see Scenario.change_at2). Part of the cell id and
+    # scope (``-cc<ep>``). 0 = one change only.
+    change_at2: int = 0
     # Fleet members act as replicas of ONE hosted agent identity (HYPOTHESIS_RSI.md): the
     # repair loop's fixes, judges, incidents and canary slot are scoped per agent, so a fleet
     # that shares one loop must share one identity. Part of the cell id (``-rep``) so fleet
@@ -121,6 +125,8 @@ class Cell:
         sweep = f"-d{self.distractors}-n{self.label_noise}-f{self.feedback_delay}-a{self.fleet}{self._transfer}"
         if self.change_at:
             sweep += f"-c{self.change_at}"
+            if self.change_at2:
+                sweep += f"-cc{self.change_at2}"
             if self.change_focus:
                 sweep += f"-x{self.change_focus}"
         if self.opaque_ids:
@@ -133,6 +139,7 @@ class Cell:
         raw = (f"{self.scenario}-{self.arm}-{self.model}-s{self.seed}-d{self.distractors}"
                f"-n{int(self.label_noise * 100)}-f{self.feedback_delay}-a{self.fleet}{self._transfer}"
                + (f"-c{self.change_at}" if self.change_at else "")
+               + (f"-cc{self.change_at2}" if self.change_at and self.change_at2 else "")
                + (f"-x{int(self.change_focus * 100)}" if self.change_at and self.change_focus else "")
                + ("-oid" if self.opaque_ids else "") + self._variant + self._replicas)
         slug = re.sub(r"[^a-z0-9-]", "-", raw.lower())
@@ -169,7 +176,7 @@ def run_cell(cell: Cell, out_path: Path, *, keep_transcript: bool, retry_budget:
                              label_noise=cell.label_noise, feedback_delay=cell.feedback_delay, fleet=cell.fleet,
                              change_at=cell.change_at, change_focus=cell.change_focus,
                              fleet_mode=cell.fleet_mode, join_at=cell.join_at, opaque_ids=cell.opaque_ids,
-                             change_variant=cell.change_variant)
+                             change_variant=cell.change_variant, change_at2=cell.change_at2)
     arm = make_arm(cell.arm)
     llm_main = get_llm(cell.model)
     if hasattr(arm, "attach"):   # skillfile: validation replays need same-shaped instances of another seed
@@ -178,7 +185,7 @@ def run_cell(cell: Cell, out_path: Path, *, keep_transcript: bool, retry_budget:
                                                      fleet=cell.fleet, change_at=cell.change_at,
                                                      change_focus=cell.change_focus, fleet_mode=cell.fleet_mode,
                                                      join_at=cell.join_at, opaque_ids=cell.opaque_ids,
-                                                     change_variant=cell.change_variant),
+                                                     change_variant=cell.change_variant, change_at2=cell.change_at2),
                    llm_main, retry_budget=retry_budget)
     llm_new = get_llm(cell.newcomer_model) if cell.newcomer_model else llm_main
     n_ok = 0
@@ -222,7 +229,7 @@ def run_cell(cell: Cell, out_path: Path, *, keep_transcript: bool, retry_budget:
                           "fleet": cell.fleet, "change_at": cell.change_at, "change_focus": cell.change_focus,
                           "fleet_mode": scenario.fleet_mode, "join_at": cell.join_at,
                           "newcomer_model": cell.newcomer_model, "opaque_ids": cell.opaque_ids,
-                          "change_variant": cell.change_variant,
+                          "change_variant": cell.change_variant, "change_at2": cell.change_at2,
                           "fleet_replicas": bool(getattr(arm, "fleet_replicas", False)) if cell.fleet > 1 else False,
                           "harness_version": config.HARNESS_VERSION,
                           "ts": time.time()})
@@ -320,7 +327,8 @@ def build_cells(args) -> list[Cell]:
                                                           newcomer_model if mode == "newcomer" else "",
                                                           bool(getattr(args, "opaque_ids", False)),
                                                           getattr(args, "change_variant", "A"),
-                                                          replicas and a > 1))
+                                                          change_at2=(getattr(args, "change_at2", 0) or 0) if ch else 0,
+                                                          fleet_replicas=replicas and a > 1))
     # interleave arms so slow hosted arms never monopolise the worker pool
     by_arm: dict[str, list[Cell]] = {}
     for c in cells:
@@ -357,6 +365,9 @@ def main() -> None:
     p.add_argument("--opaque-ids", action="store_true",
                    help="ticket/PR numbers from the instance rng, not the episode index (see Scenario.opaque_ids); "
                         "adds -oid to the cell id and scope")
+    p.add_argument("--change-at2", type=int, default=0,
+                   help="second regime change: the other change set comes into force on top of the first at this "
+                        "episode (HYPOTHESIS_RSI.md, E2); adds -cc<ep> to the cell id and scope")
     p.add_argument("--change-variant", default="A", choices=["A", "B"],
                    help="which regime change set applies at --change-at (see Scenario.change_variant); "
                         "B adds -vB to the cell id and scope")

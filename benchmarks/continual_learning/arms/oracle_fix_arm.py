@@ -31,31 +31,45 @@ class SenseLabOracleFixArm(SenseLabArm):
 
     def open(self, scope: str) -> None:
         super().open(scope)
-        self._entries: list[tuple[str, str, float]] = []
-        self._due: int | None = None
-        self._written = False
+        # One batch per regime change: (readable-from episode, variant, entries), in order.
+        self._batches: list[dict[str, Any]] = []
 
     def configure(self, scenario) -> None:
         super().configure(scenario)
-        self._entries = list(scenario.oracle_fix_entries() or [])
+        self._batches = []
         change_at = int(getattr(scenario, "change_at", 0) or 0)
-        self._due = change_at + self.lag if change_at and self._entries else None
+        if change_at:
+            primary = getattr(scenario, "change_variant", "A")
+            entries = list(scenario.oracle_fix_entries(primary) or [])
+            if entries:
+                self._batches.append({"due": change_at + self.lag, "variant": primary, "entries": entries, "written": False})
+            change_at2 = int(getattr(scenario, "change_at2", 0) or 0)
+            if change_at2:
+                other = scenario.OTHER_VARIANT[primary]
+                entries2 = list(scenario.oracle_fix_entries(other) or [])
+                if entries2:
+                    self._batches.append({"due": change_at2 + self.lag, "variant": other, "entries": entries2, "written": False})
         self._maintainer = f"{scenario.agent_base}-maintainer"
 
     def after_episode(self, episode: int, llm) -> ArmAccounting | None:
-        # ``after_episode(ep)`` runs after episode ``ep``; the entries are readable from
-        # episode ``change_at + lag`` on, so they are written after episode ``due - 1``.
-        if self._written or self._due is None or episode + 1 < self._due:
+        # ``after_episode(ep)`` runs after episode ``ep``; a batch is readable from episode
+        # ``change_at + lag`` on, so it is written after episode ``due - 1``.
+        due = [b for b in self._batches if not b["written"] and episode + 1 >= b["due"]]
+        if not due:
             return None
         acct = ArmAccounting()
         t0 = time.perf_counter()
         s = _SenseLabSession(self, self._maintainer, episode)
+        notes: list[dict[str, Any]] = []
         try:
-            for key, text, conf in self._entries:
-                s.write(key, text, confidence=conf, kind="fact")
-                acct.ops += 1
-            self._written = True
-            acct.notes = {"oracle_fix": {"lag": self.lag, "readable_from": self._due, "keys": [k for k, _, _ in self._entries]}}
+            for b in due:
+                for key, text, conf in b["entries"]:
+                    s.write(key, text, confidence=conf, kind="fact")
+                    acct.ops += 1
+                b["written"] = True
+                notes.append({"lag": self.lag, "variant": b["variant"], "readable_from": b["due"],
+                              "keys": [k for k, _, _ in b["entries"]]})
+            acct.notes = {"oracle_fix": notes[0] if len(notes) == 1 else notes}
         except Exception as e:  # noqa: BLE001
             acct.notes = {"oracle_fix_error": f"{type(e).__name__}: {e}"[:200]}
         finally:
@@ -64,7 +78,8 @@ class SenseLabOracleFixArm(SenseLabArm):
         return acct
 
     def report(self) -> dict[str, Any] | None:
-        if self._due is None:
+        if not self._batches:
             return None
-        return {"oracle_fix": {"lag": self.lag, "readable_from": self._due, "written": self._written,
-                               "entries": [k for k, _, _ in self._entries]}}
+        return {"oracle_fix": {"lag": self.lag, "batches": [
+            {"variant": b["variant"], "readable_from": b["due"], "written": b["written"],
+             "entries": [k for k, _, _ in b["entries"]]} for b in self._batches]}}
