@@ -953,3 +953,31 @@ loop, and the paper says so; if the veterans' loop shipped nothing by episode 60
 cells, the probe is reported as inconclusive on P2/P3 and the join is moved later in the
 confirmatory version, not the prediction. Cell counts are small (24 cells, 2 seeds); this
 is a development readout to set the confirmatory design, not a confirmatory statistic.
+
+**Readout, 2026-09-26 — `pgvector+rerank` and `senselab` halves (16 cells, 1,600
+episodes; `senselab-rsi` held until amfs-internal#783 is live).** Report:
+`results/rsi-teamgrows-dev-report/TEAM_GROWS.md`. Joiner first exposures after the join
+(pioneer n=90 / newcomer n=32), first-attempt success: `senselab` 1.00 / 1.00 (changed
+classes 1.00 on 36 and 10); `pgvector+rerank` 0.68 / 0.75 (changed 0.31 / 0.40). Every
+SenseLab joiner episode after the join succeeded on the first attempt (pioneer 136/136,
+newcomer 160/160); `pgvector+rerank` 0.62 / 0.62. Inheritance: on 100 % of SenseLab
+joiner first exposures the context held a validated hit *and* a discredited one shown as
+such (2.6 validated / 3.0 avoid hits per episode; 0 poisoned, 122/122 guided); on 100 %
+of `pgvector+rerank` first exposures it held only untested peer notes (7.3 per episode,
+0.96 stale), poisoned 0.32 / 0.25 overall and 0.69 / 0.60 on changed classes.
+Onboarding: `senselab` parity 20/20 and 4/4 joiners within a median 5 episodes, cold-start
+1.00 on each of the first five episodes; `pgvector+rerank` 16/20 (20 % never within the
+window) and 4/4 at a median 11.5, cold-start 0.25–1.00. Disagreement with the veterans'
+late answer: 0.02 / 0.00 vs 0.06 / 0.05. Cost per solved joiner task: 4.4k / 4.1k tokens
+vs 7.6k / 6.8k. **P1 met** for `senselab` (100 % within 5) and for the baseline (80 %
+pioneer, but newcomer 100 % at a median 11.5 — the ≤ 60 % clause fails on the newcomer
+half; the speed gap shows in the median, not the eventual-parity share). **P2's poisoned
+clause met** (0 % vs 69 % / 60 % on changed classes; ≤ 5 % vs ≥ 40 %); the `senselab-rsi`
+vs `senselab` clause is untestable on this half and, with `senselab` at 1.00, has no room
+on dev seeds — the confirmatory version must make the changed-class first exposure harder
+(join earlier relative to the change, or a second change after the join) for P2/P3 to
+discriminate the two SenseLab arms. **P3** pending the RSI half. **P4** consistent with
+the record (lowest disagreement where veterans' late success ≥ 0.8; no cell had veterans
+< 0.5). The mechanism the record shows is not the joiner being smarter: it is reading a
+scope where the stale rule is labelled discredited and the replacement validated, both
+written by veterans it never met.
