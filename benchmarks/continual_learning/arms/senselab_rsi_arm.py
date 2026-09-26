@@ -411,11 +411,13 @@ class SenseLabRsiArm(SenseLabArm):
             self._sessions_at_look = self.sessions_sealed
             acct.ops += self._advance(fixes, episode)
         acct.memory_ms = (time.perf_counter() - t0) * 1000
-        acct.notes = {
+        # ``update``, not assignment: ``_await_verdict`` wrote the pacing-floor notes
+        # (``verdict_wait_ms`` / ``verdict_graded`` / ``verdict_lag_s``) into this dict first.
+        acct.notes.update({
             "look": bool(due), "sessions_sealed": self.sessions_sealed,
             "fixes": {s: sum(1 for r in snapshot if r["status"] == s) for s in sorted({r["status"] for r in snapshot})},
             "changed": changed[:8],
-        }
+        })
         active = next((r for r in snapshot if r["status"] == "canary"), None)
         if active:
             acct.notes["canary_active"] = {"id": active["id"], **(active.get("canary") or {})}
