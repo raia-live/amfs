@@ -142,6 +142,7 @@ class _RsiSession(_SenseLabSession):
         trace_id = getattr(trace, "id", None) if trace is not None else None
         self.arm.sessions_sealed += 1
         self.arm.ledger.append({"episode": self.episode, "replica": self.replica, "trace_id": str(trace_id) if trace_id else None,
+                                "sealed_at": time.time(),
                                 "success": outcome.success, "severity": outcome.severity,
                                 "canary": self.acct.notes.get("canary"), "memory_branch": self.acct.notes.get("memory_branch")})
 
@@ -168,6 +169,10 @@ class SenseLabRsiArm(SenseLabArm):
     canary_min_outcomes = _int_env("CL_RSI_CANARY_MIN", 8)
     canary_timeout_sessions = _int_env("CL_RSI_CANARY_TIMEOUT", 60)
     look_every = _int_env("CL_RSI_LOOK_EVERY", 5)
+    # Pacing floor: seconds to hold the cell after each seal until the trace is graded
+    # (0 = no wait). Set from pilot 3 (HYPOTHESIS_RSI.md, amendment (e)).
+    verdict_wait_s = _int_env("CL_RSI_VERDICT_WAIT", 0)
+    verdict_poll_s = _int_env("CL_RSI_VERDICT_POLL", 5)
 
     # -- lifecycle ------------------------------------------------------------------
     def open(self, scope: str) -> None:
@@ -246,6 +251,43 @@ class SenseLabRsiArm(SenseLabArm):
             raise
         self._agents_ready.add(agent_id)
 
+    # -- pacing floor ---------------------------------------------------------------------
+    def _await_verdict(self, acct: ArmAccounting) -> None:
+        """Hold the cell until the platform has graded the session just sealed (or
+        ``verdict_wait_s`` has passed). The shared eval worker grades a trace 60–90 s after
+        the seal at a customer's pace; a benchmark that seals faster than that measures the
+        queue, not the loop. The wait converts grading lag into wall-clock, which is
+        reported (``verdict_wait_ms``, ``verdict_lag_s``), and keeps time-to-repair in
+        episodes a property of the loop (HYPOTHESIS_RSI.md, amendment (b) pacing floor)."""
+        if not self.ledger or not self.ledger[-1].get("trace_id"):
+            return
+        trace_id = self.ledger[-1]["trace_id"]
+        t0 = time.perf_counter()
+        deadline = t0 + self.verdict_wait_s
+        found = None
+        while True:
+            try:
+                v = self.pro.verdicts(self._agent, limit=5, trace_id=trace_id)
+                acct.ops += 1
+                items = v.get("items") or v.get("verdicts") or []
+                if items:
+                    found = items[0]
+                    break
+            except Exception as e:  # noqa: BLE001
+                acct.notes["verdict_wait_error"] = f"{type(e).__name__}: {e}"[:200]
+                break
+            if time.perf_counter() >= deadline:
+                break
+            time.sleep(self.verdict_poll_s)
+        waited = time.perf_counter() - t0
+        acct.notes["verdict_wait_ms"] = round(waited * 1000, 1)
+        acct.notes["verdict_graded"] = found is not None
+        if found is not None:
+            acct.notes["verdict"] = found.get("verdict")
+            sealed_at = self.ledger[-1].get("sealed_at")
+            if sealed_at:
+                acct.notes["verdict_lag_s"] = round(time.time() - sealed_at, 1)
+
     # -- the look schedule -----------------------------------------------------------
     def after_episode(self, episode: int, llm) -> ArmAccounting | None:
         if self._agent is None:
@@ -253,6 +295,8 @@ class SenseLabRsiArm(SenseLabArm):
         acct = ArmAccounting()
         t0 = time.perf_counter()
         due = (self.sessions_sealed - self._sessions_at_look) >= self.look_every
+        if self.verdict_wait_s > 0:
+            self._await_verdict(acct)
         try:
             fixes = self.pro.list_fixes(self._agent)
             acct.ops += 1
