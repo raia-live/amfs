@@ -655,3 +655,55 @@ timeout dropped one smoke commit under the baseline run's load). Predicts, per c
 proposal with `lever ∈ {knowledge, procedure}`, `source = repair_agent`, a branch; a Tier 1
 test ending `inconclusive`; a Tier 2 replay requested and graded inside the cell; and a
 canary started. Development run, not counted.
+
+### 2026-09-26 (g) — headroom map, development seeds, and a declared target
+
+**Why.** Bruno asked for the opportunities that would take SenseLab to ≥ 92 % to be mapped
+so the product can be improved *while the study runs*. Improving the system under test
+mid-study is legitimate only if the tuning and the measurement are kept apart; this
+amendment writes down how.
+
+**The map.** `HEADROOM_RSI.md` (committed with this amendment) analyses 9,480 SenseLab
+episodes from the v7 grids and pilot 4. SenseLab is at 91.5 % (GPT-5.5) / 90.6 % (Claude)
+over the six v7 families; `analytics`, `concierge`, `order-ops` are saturated; the gap is
+`support` (82–84 %) and `ci-fix` (87–89 %), and within them it is entirely **post-change
+recovery of the changed classes** (unchanged classes: 99–100 %). The mechanisms, each with
+a measurement: the recommendation stays `act` on the turned action for two losses (`act`
+on 400 / 720 support and 603 / 700 ci-fix post-change first attempts); 39 % / 29 % of
+attempts re-try an action already failed since the change; 26 % of support episodes got
+no recommendation; ci-fix follows the recommendation 41 % of the time; a stale entry is in
+context for 40 % / 72 % of failures. Eight ranked changes with their predictions are
+listed there.
+
+**Development vs confirmatory.** Seeds **11 and 23** are development seeds: the pilots ran
+on them and every change from the map is developed and checked on them, on `support`,
+`ci-fix` and `retention` only. Seeds **37, 41, 59, 73** are confirmatory and are never run
+with a SenseLab arm before `analysis-freeze-rsi`. E1–E3 SenseLab arms start after the
+freeze. The primary analysis of every hypothesis uses the confirmatory seeds; 11 and 23 are
+reported alongside, labelled development-exposed. Set B and the four held-out families
+keep their roles from the prereg.
+
+**Changes are logged, not silent.** Each engine or harness-agent change made from the map
+is recorded here as its own dated amendment with (i) the mechanism, (ii) the pilot/dev
+evidence that motivated it, (iii) the prediction it makes on the development seeds. No
+change touches a baseline arm, a scenario, a change set, a rubric or a metric definition.
+
+**A declared target, not a tuned one.** Added as a secondary, one-sided hypothesis:
+
+- **H8 Late-window level.** On set A, confirmatory seeds, fleet 1, `senselab-rsi`
+  success over episodes 20–59 across the ten E1 families is ≥ 0.92 (95 % Wilson lower
+  bound ≥ 0.90). The engineering estimate in the map is ≈ 0.96 on the six v7 families if
+  items 1–5 land. Falsified if the point estimate is < 0.92; the paper then reports the
+  measured level and which of the map's predictions failed.
+
+**Pilot 4 status at this amendment.** 65 episodes. The loop has produced its first
+proposals under the fixed engine: two incidents ("3 runs today vs 0/day") → two fixes,
+8–10 episodes after the change; one lever `knowledge` on branch `repair/fbb7c4cb` in Tier 1
+testing, one lever `code`, no branch. Both `source = template`: the repair agent's 90 s
+budget expired on its first gpt-5 call (two 45 s time-outs) — the (f) prediction
+`source = repair_agent` is not met; the fix (`AMFS_EVAL_REPAIR_TIMEOUT_S`, default 300 s,
+per-call cap 120 s, and the reason a template was kept written into the fix's rationale)
+is a PR awaiting approval and is amendment-logged when it ships. Four `POST /traces` seals
+on production stalled 37–224 s and were released at the same instant (05:01:17 UTC) — two
+harness commits timed out client-side but the traces were sealed (no duplicates, one trace
+per episode); the cause is being isolated with a lock sampler on the database.
