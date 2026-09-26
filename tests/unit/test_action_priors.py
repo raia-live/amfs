@@ -2009,3 +2009,68 @@ def test_a_lesson_barred_action_is_not_offered_as_an_untried_choice() -> None:
     rec2 = act.recommend(pr2, agent_id="x", candidate_actions=cands, lessons=lessons)
     text2 = act.render_priors(pr2, rec2, candidate_actions=cands, lessons=lessons)
     assert not any(line.startswith("Untried") and "resolve:b" in line for line in text2.splitlines())
+
+
+def test_situation_labels_compare_as_word_sets_without_noise_words() -> None:
+    """CL support harness (2026-09-26): a model asked to label the kind of
+    ticket wrote one class as ``card declined``, ``Card-Declined`` and
+    ``declined card ticket`` across episodes. Compared as typed the record
+    split three ways and the one-loss turn never fired. Case, punctuation,
+    word order and words that say what a label is *of* fold away; the words
+    that separate classes (``ios`` / ``android``, ``ui`` / ``backend``) do not."""
+    from amfs_http.server import _fold_situation as fold
+
+    assert fold("card declined") == fold("Card-Declined") == fold("declined card ticket") == fold(" the card_declined issue ")
+    assert fold("ios login loop") != fold("android login loop")
+    assert fold("snapshot diff on ui pr") != fold("snapshot diff on backend pr")
+    assert fold("snapshot diff on ui pr") == fold("UI PR snapshot diff")
+    # A label of nothing but noise words is still a label, compared as typed.
+    assert fold("issue") == fold("Issue") and fold("issue") != fold("ticket")
+    assert fold(None) == "" and fold("   ") == ""
+
+
+def test_the_situations_record_folds_labels_the_same_way(client, server_mem) -> None:
+    """The equality that partitions the record uses the fold: three outcomes
+    labelled three ways for one class are one record of three, and the
+    label shown back is the one the caller declared."""
+    from amfs_http import server
+
+    cands = ["resolve:escalate_tier2", "resolve:resend_email", "resolve:refund"]
+    entity_record = [
+        _sit_row("card declined", [("resolve:escalate_tier2", True)]),
+        _sit_row("Card-Declined", [("resolve:escalate_tier2", True)], days_ago=1),
+        _sit_row("declined card ticket", [("resolve:escalate_tier2", False)], outcome="failure", days_ago=2),
+        _sit_row("ios login loop", [("resolve:refund", False)], outcome="failure", days_ago=2),
+    ]
+    server_mem._adapter.similar_outcomes = lambda entity_path, embedding, **kw: []  # type: ignore[attr-defined]
+    server_mem._adapter.action_stats = lambda entity_path, **kw: list(entity_record)  # type: ignore[attr-defined]
+    server._get_server_embedder = lambda: _StubEmbedder()
+    body = {"query": "my card was declined again", "entity_path": "acme/support", "include_priors": True,
+            "agent_id": "a9", "candidate_actions": cands, "abstain": True, "situation": "the declined card"}
+    pr = client.post("/api/v1/retrieve", json=body).json()[-1]["priors"]
+    assert pr["situation_record"] == {"situation": "the declined card", "outcomes": 3}
+    assert [(t["action_key"], t["won"], t["lost"]) for t in pr["tried"]] == [("resolve:escalate_tier2", 2, 1)]
+    assert pr["elsewhere"]["outcomes"] == 1
+
+
+def test_a_sweep_puts_the_never_tried_above_what_only_lost_elsewhere() -> None:
+    """CL support smoke on production (2026-09-26): with ``reset_password``
+    0/1 elsewhere and two candidates never tried anywhere, the sweep opened
+    with ``reset_password`` — an untried action's missing record was read as
+    ``p = 0``, under a known loser's 0.33. No record is the uniform prior."""
+    cands = ["resolve:a", "resolve:b", "resolve:c", "resolve:d"]
+    pr = act.aggregate_priors(
+        [_sit_row("card declined", [("resolve:a", False)], outcome="failure")],
+        candidate_actions=cands, situation_exact=True,
+    )
+    pr["situation_record"] = {"situation": "card declined", "outcomes": 1}
+    pr["elsewhere"] = {"outcomes": 3, "tried": [
+        {"action_key": "resolve:d", "won": 0, "lost": 1, "n": 1, "p": 0.333},
+        {"action_key": "resolve:a", "won": 2, "lost": 0, "n": 2, "p": 0.75},
+    ]}
+    order = act.sweep_order(pr, pr["untried"], "x")
+    assert order[-1] == "resolve:d", order
+    assert set(order[:2]) == {"resolve:b", "resolve:c"}
+    # A winner elsewhere still leads the never-tried.
+    pr["elsewhere"]["tried"].append({"action_key": "resolve:c", "won": 3, "lost": 0, "n": 3, "p": 0.8})
+    assert act.sweep_order(pr, pr["untried"], "x") == ["resolve:c", "resolve:b", "resolve:d"]

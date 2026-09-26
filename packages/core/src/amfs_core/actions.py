@@ -1052,7 +1052,12 @@ def sweep_order(
         i, a = i_a
         t = by_key.get(a)
         won = float(t.get("won", 0)) if t else 0.0
-        p = float(t.get("p", 0)) if t else 0.0
+        # An action never tried anywhere on the entity ranks at the uniform
+        # prior (0.5), above one that was tried elsewhere and only lost: a
+        # 0/1 elsewhere is evidence against, no record is not. Read as 0.0
+        # the untried came last and the sweep opened with the entity's known
+        # loser (CL support smoke, 2026-09-26).
+        p = float(t.get("p", 0.5)) if t else 0.5
         return (-won, -p, i)
 
     return [a for _, a in sorted(enumerate(rotated), key=rank)]
