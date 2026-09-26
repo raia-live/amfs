@@ -376,6 +376,66 @@ the most similar text. Pilots 5f/5g measure that once #782 is live; the harness 
 the rendered footer with every search in the episode record, so the next reading of
 "followed / ignored" is against the text the agent saw rather than a reconstruction.
 
+### Pilots 5f and 5g, complete — the loop was never reached, and why
+
+On the #782 engine (`client_core` ebf930e3), pooled over seeds 11/23, 120 episodes per
+family × arm:
+
+| run | family | arm | success | late (20+) | changed-post | RSI fixes |
+|---|---|---|---|---|---|---|
+| 5f | support | senselab | 93.3 | 92.5 | 85.0 | — |
+| 5f | ci-fix | senselab | 95.0 | 92.5 | 85.0 | — |
+| 5g | support | senselab-rsi | 90.8 | 88.8 | 77.5 | 0 |
+| 5g | ci-fix | senselab-rsi | 95.0 | 92.5 | 85.0 | 0 |
+
+5f met the 5d prediction (support late 92.5 vs 87.5 on 5d; changed-post 85.0 vs 75.0).
+5g is not a reading of the mechanism: **no 5g agent received a single `fix_propose`
+job**, so `senselab-rsi` ran as `senselab` plus verdict latency. The production record
+says why, and it is not what 5e's silence was.
+
+Of the 54 entries that took a failure across the four 5g cells, only six had been
+validated three or more times before failing — 60-episode cells with the change at
+episode 20 give each of ~9 changed-class entries about two pre-change validations, below
+`REGIME_MIN_SUCCESSES`. Of those six, the two that ended discredited
+(`repo-readme-ci` 4/3, `android-alerts-missing-settings-change` 3/2) both have
+`last_outcome = success`: the runs that discredited them recovered after a failed attempt
+(`record_attempt`), so the trace sealed as a success and `regime.on_trace_sealed`, which
+read only `outcome_type`, never asked. The detector fired correctly on 5e s23 (first-lag
+3–4 episodes) because those entries happened to fail terminally.
+
+Reading the loop end to end against the day's eight proposals (all cells) found the loop
+complete and three seams open — logged as amfs-internal#783, wiring rather than new
+machinery:
+
+1. `propose_from_regime_shift` built a template and called only `repair.stage`, never
+   `repair.draft` — every outcomes-path proposal was a 0.3 s job with `model: null` and no
+   `correction`. Now the judge path's draft-or-template block is one helper both paths
+   use; the regime job carries the failed trace, the agent gets it as the failing run and
+   the shifted entry as the implicated memory, and a drafted correction makes that run the
+   Tier 1 case.
+2. `on_trace_sealed` now also takes the failed attempts' `causal_entry_keys` (which are
+   not in `causal_entries` once an attempt boundary exists) — the 5g case above.
+3. A fix with nothing to replay skipped the Tier 1 test *and* the policy (`_apply_policy`
+   only ran off a test result; `canary_queue` only listed tested statuses), so every
+   regime-shift fix stayed `proposed` under `auto_after_canary` — 5e s23's two regime
+   fixes included. `stage()` now runs the inconclusive ladder for such a fix (capped
+   small canary under `auto_after_canary`, held with a reason otherwise) and the sweep
+   queues it.
+
+Prediction for the re-run of 5g once #783 is live: `fix_propose` jobs on every cell
+whose discredited entries include an attempt-charged one; ≥ 80 % of regime-shift fixes
+`source = repair_agent`; fixes reach `canary` on the `auto_after_canary` agents rather
+than resting at `proposed`. The threshold finding stands on its own: at 60 episodes the
+outcomes-only detector has little to detect, which is the argument for E2's 200-episode,
+fleet-10 protocol rather than for lowering `REGIME_MIN_SUCCESSES`.
+
+One more thing the record showed: `AMFS_EVAL_AUTO_PROPOSE` is account-wide, so plain
+`senselab` agents (5d, 5f, the team-grows cells) also received proposals. Corrective
+entries live only on `repair/<id>` branches until shipped, and nothing shipped, so the
+control arms read nothing from the loop — but the confirmatory runs should place the
+non-RSI SenseLab arms on an account (or agents) with auto-propose off, so the separation
+is by construction and not by the loop's silence.
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families
