@@ -10,6 +10,9 @@ def make_arm(name: str) -> MemoryArm:
     if name == "pgvector":
         from .pgvector_arm import PgVectorArm
         return PgVectorArm()
+    if name == "pgvector+rerank":
+        from .pgvector_arm import PgVectorRerankArm
+        return PgVectorRerankArm()
     if name == "pgvector-diy":
         from .pgvector_arm import PgVectorDiyArm
         return PgVectorDiyArm()

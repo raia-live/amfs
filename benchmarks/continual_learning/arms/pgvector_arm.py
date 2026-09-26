@@ -31,6 +31,7 @@ retrieval, not the embedder.
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 
@@ -54,6 +55,18 @@ def embedder():
 def embed(texts: list[str]) -> list[list[float]]:
     return [list(map(float, v)) for v in embedder().embed(texts)]
 
+
+# pgvector+rerank: the cosine pool the reranker orders is ``top_k * RERANK_POOL`` entries.
+RERANK_POOL = 4
+RERANK_PROMPT = """You rank memory notes by how useful each is for the task below. Return the numbers of the
+{k} most relevant notes, most relevant first, as a comma-separated list and nothing else.
+
+TASK:
+{query}
+
+NOTES:
+{body}
+"""
 
 DDL = """
 CREATE TABLE IF NOT EXISTS cl_entries (
@@ -123,10 +136,12 @@ class _PgSession(EpisodeSession):
                         FROM cl_entries WHERE scope = %s
                         ORDER BY embedding <=> %s::vector LIMIT %s
                         """,
-                        (qv, self.arm.scope, qv, top_k),
+                        (qv, self.arm.scope, qv, top_k * (RERANK_POOL if self.arm.rerank else 1)),
                     )
                     rows = cur.fetchall()
         hits = [MemoryHit(key=r[0], text=r[1], score=float(r[2])) for r in rows]
+        if self.arm.rerank and len(hits) > top_k:
+            hits = self._rerank(query, hits, top_k)
         if self.arm.track_outcomes:
             hits = self._with_outcomes(hits, top_k)
             self._footer = self._action_footer()
@@ -136,6 +151,42 @@ class _PgSession(EpisodeSession):
 
     def search_footer(self) -> str | None:
         return getattr(self, "_footer", None)
+
+    # -- LLM reranker (pgvector+rerank only) ----------------------------------------------
+    def _rerank(self, query: str, hits: list[MemoryHit], top_k: int) -> list[MemoryHit]:
+        """Second-stage ranking: a cheap model orders the cosine pool by relevance to the
+        task and the top ``top_k`` are served. The cosine order is the fallback when the
+        model's answer cannot be parsed. Charged to the arm (``extra_*``)."""
+        from ..agent import get_llm
+
+        llm = self.arm._reranker or self.arm.__class__._reranker_for(get_llm)
+        body = "\n".join(f"[{i + 1}] ({h.key}) {h.text[:400]}" for i, h in enumerate(hits))
+        prompt = RERANK_PROMPT.format(k=top_k, query=query[:1500], body=body)
+        try:
+            # gpt-5.x reasons before it answers even at ``low`` effort; a 60-token cap
+            # returns an empty message, so the budget covers the reasoning as well.
+            text, usage = llm.complete_text(prompt, max_tokens=1200)
+        except Exception:  # noqa: BLE001 — the pool order stands
+            return hits[:top_k]
+        self.acct.extra_prompt_tokens += usage.prompt_tokens
+        self.acct.extra_completion_tokens += usage.completion_tokens
+        self.acct.extra_cost_usd += usage.cost_usd
+        order: list[int] = []
+        for tok in re.findall(r"\d+", text):
+            i = int(tok) - 1
+            if 0 <= i < len(hits) and i not in order:
+                order.append(i)
+        if not order:
+            return hits[:top_k]
+        picked = [hits[i] for i in order[:top_k]]
+        for i, h in enumerate(hits):
+            if len(picked) >= top_k:
+                break
+            if i not in order:
+                picked.append(h)
+        for rank, h in enumerate(picked):   # the reranker's order is the served order
+            h.score = round(1.0 - rank * 0.01, 4)
+        return picked
 
     # -- DIY action counter (pgvector-diy+outcomes only) ----------------------------------
     def _action_footer(self) -> str | None:
@@ -256,6 +307,14 @@ class PgVectorArm(MemoryArm):
     recency_boost = False
     consolidate = False
     track_outcomes = False
+    rerank = False
+    _reranker = None
+
+    @classmethod
+    def _reranker_for(cls, get_llm):
+        if cls._reranker is None:
+            cls._reranker = get_llm(config.env("CL_RERANK_MODEL") or "gpt-5.4-mini")
+        return cls._reranker
 
     def __init__(self) -> None:
         import psycopg
@@ -285,6 +344,16 @@ class PgVectorArm(MemoryArm):
 
     def close(self) -> None:
         self.conn.close()
+
+
+class PgVectorRerankArm(PgVectorArm):
+    """``pgvector`` plus a second-stage LLM reranker (HYPOTHESIS_RSI.md, E1 ``pgvector+rerank``):
+    the strongest retrieval-only baseline — a cheap model (``CL_RERANK_MODEL``, default
+    gpt-5.4-mini) orders a 4x cosine pool by relevance to the task. Still no outcomes, no
+    evidence, no repair: what better ranking alone buys under a regime change."""
+
+    name = "pgvector+rerank"
+    rerank = True
 
 
 CONSOLIDATE_PROMPT = """You maintain the long-term notes of an operations agent.
