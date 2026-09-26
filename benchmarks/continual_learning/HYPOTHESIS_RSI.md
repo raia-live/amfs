@@ -1,0 +1,368 @@
+# Preregistration: an evidence-gated repair loop with canary release, against outcome learning alone, a vector store and a frontier model alone
+
+Written 2026-09-26, before any repair-loop arm code or data. Numbers quoted in the paper
+come from the metrics defined here; anything else is labelled exploratory. The commit that
+adds this file is tagged `prereg-rsi-v1`; the hash is quoted in the paper. Amendments are
+dated entries at the end and never edit the text above them.
+
+Companions, not repeated here: `HYPOTHESIS.md` (the fast loop: outcome learning vs pure
+memory, grids v4 and v5, paper v7) and `student/HYPOTHESIS_DISTILL.md` (the slow loop:
+Managed Models distilled from sealed traces). This study measures the third loop — the
+**repair loop** — and the behaviour-judging layer that feeds it, on the production SaaS,
+with the two earlier loops as controls.
+
+## Question
+
+When a deployed agent's world changes and its memory goes stale, does a loop that
+*proposes* a correction from the evidence, *tests* it offline against the runs it claims to
+repair, *canaries* it on a share of live sessions, *ships* it to the shared store and
+*verifies* it afterwards recover faster and further than (a) outcome learning alone, which
+can only demote what failed, (b) a vector store with reflection notes, and (c) the frontier
+model with no memory — and does it do so without shipping wrong fixes, without damaging
+what still worked, at a cost we can state, and in a way an operator can govern?
+
+## What we already know, and what this does not re-test
+
+- Outcome learning beats pure memory after a regime change (paper v7, `HYPOTHESIS.md` H1–H8;
+  headline +0.18 first-attempt success, loop on vs off, episodes 40–59). Not re-run at scale;
+  `senselab` and `pgvector` are re-run here as controls under the new protocol only.
+- Distilled students match or beat their teachers on the same tasks at a fraction of the
+  cost (`HYPOTHESIS_DISTILL.md`). Only the narrow question in E7 is new.
+- The repair loop, the canary and behaviour judging are shipped in the product and have
+  **no benchmark result**. That is the gap.
+
+## Mechanism taxonomy
+
+| Arm | What can change the store | Signal | Gate before a change reaches live traffic | Revert path |
+|---|---|---|---|---|
+| `none` | nothing (no store) | in-episode feedback | none | none |
+| `context-window` | nothing; prior notes and outcomes are in the prompt | the transcript | none | none |
+| `pgvector` (+`rerank`) | agent-written reflection notes | agent's own notes | none | none |
+| `pgvector-diy+outcomes` | notes, periodic LLM consolidation, win/loss counter | outcomes, marginal per entry | none | none |
+| `senselab` | outcome evidence on the exact read set; agent writes | `commit_outcome`, `record_attempt` | `min_confidence` gate, avoid list | confidence decay |
+| `senselab-rsi` | all of the above **plus** a repair agent that writes a corrective entry or procedure on a memory branch | attribution over verdicts and outcomes | Tier 1 stand-in replay, then a live canary with a significance test, then a policy | merge is reversible: `rollback` restores the pre-fix versions |
+| `senselab-oracle-fix` | a scripted maintainer writes the correct entry `lag` episodes after each change | the answer key | none (it is the upper bound) | none |
+
+The claim is not that the repair agent is clever. The claim is that **a correction is only
+allowed to change behaviour after it has been tested on the runs it claims to repair and
+has beaten the control arm on live traffic**, and that this discipline recovers faster
+than demotion alone while shipping fewer wrong fixes than an ungated repair would.
+
+## The engine under test (constants fixed before the run)
+
+Everything below is production code on the SaaS (`amfs-login.sense-lab.ai`, http-server
+version recorded in `manifest.json` at run time; 0.3.49 on the day of writing). No constant
+is tuned for this study; each is quoted from the deployed source and reported in the paper.
+
+- **Attribution** (`amfs_eval/attribution.py`): a memory entry is a candidate cause when its
+  lift on failing runs is ≥ 2.0 with support ≥ 3 runs.
+- **Lever** (`repair/agent.py`): `knowledge` (a fact is wrong), `procedure` (a conditional
+  rule with conditions, steps and a verify), `code` (the agent's software; handed off, never
+  auto-shipped), `unknown`. The lever classifier's choice is a measured quantity here
+  (below), because the benchmark knows the true cause of every change.
+- **Manifest** (`models_fix.RepairManifest`): every proposal predicts the runs it repairs
+  and the runs it must not break; `expected_prevention = 0.5` by default.
+- **Auto-propose**: on by default (`AMFS_EVAL_AUTO_PROPOSE` unset; only `off` disables). Two
+  producers: an incident opening on a behaviour, and a regime shift (an entry validated ≥ 3
+  times that now fails).
+- **Incidents** (`incidents.py`): open when a behaviour's failing verdicts today reach
+  `max(3, 2.0 × 14-day baseline mean)`; a fresh agent has an empty baseline, so the first
+  incident opens at the third failing verdict on one behaviour cluster.
+- **Behaviour discovery** (`discovery.py`): cosine ≥ 0.82 to an existing centroid; a
+  candidate cluster is promoted at 3 members.
+- **Judges**: production two-tier grading, `gpt-5-mini` prefilter → `gpt-5` on suspected
+  failures (`GET /api/v1/eval/readiness` is recorded in the manifest). Rubrics are frozen
+  before any run and published. Evidence must quote the trace.
+- **Tier 1 replay** (`repair/replay.py`): a stand-in model re-runs each predicted case with
+  the fix's branch as its memory, tool calls answered from the recorded run; `fidelity` =
+  share of steps answered from the record; a test with fidelity below the agent's
+  `replay_fidelity_floor` (0.5 default) does not count as a pass.
+- **Tier 2 replay** (`repair/webhook.py`): HMAC-SHA256 signed cases delivered to the
+  customer's agent; graded from the traces the agent seals on the fix's branch. Exercised in
+  E2b with the OSS `ReplayReceiver` as the customer.
+- **Canary** (`mcp_gateway/canary.py`, `repair/canary.py`): `bucket = int(sha256(f"{fix_id}:{session_key}")[:4], 16) % 100`,
+  in canary iff `bucket < pct`; reads come from branch `repair/<fix_id[:8]>`, writes always
+  go to `main`; the trace carries `attributes.memory_branch`. `decide()`: both arms must
+  reach `min_outcomes`; the canary's success rate must not be below the control's (success
+  guard); then a two-proportion z-test on the recurrence of the judged failure, `p < 0.05`
+  one-sided → `passed`; a significant result the wrong way → `failed`; timeout →
+  `inconclusive`. One canary per `(account, agent_id)` at a time.
+- **Policies** (`RepairPolicy`): `review` (a person ships), `auto_after_replay`,
+  `auto_after_canary`. The **feedback contract** (`repair/contract.py`) holds a passed fix
+  at `policy_held` unless ≥ 0.8 of recent traces carry `model` and `agent_version`
+  (`auto_after_replay`) and ≥ 0.8 of recent outcomes carry `verified_by` (`auto_after_canary`),
+  judged over ≥ 10 traces in 14 days.
+- **Verify** (`prevention.py`): prevention rate measured over a 7-day window after shipping;
+  `verified` if ≥ `expected_prevention` and significant, else `regressed` → auto-rollback
+  under automatic policies.
+- **Repair-prompt A/B** (`repair/prompts.py`): a candidate repair prompt is served to a
+  share of proposals; `repairer_stats` counts proven fixes per prompt. This is the
+  "improver improving itself" test (H11).
+
+## Environment and how the harness drives the loop
+
+- **Production SaaS**, dedicated Enterprise account `clbench-rsi` (created 2026-09-26; no
+  other agents write to it). Eval judge budget cap set to USD 3,000/month; Managed Models
+  platform fee waived (operator path) for E7. Every SaaS call is paced by `loadguard.py`;
+  rate-limit waits are reported as `rate_limit_wait_ms`, never folded into memory latency.
+- **Harness-side canary routing.** The production router runs inside the MCP gateway; the
+  harness talks to the HTTP API through the OSS `AgentMemory` + `HttpAdapter`, so it applies
+  the same assignment itself: it imports `canary_bucket` (parity test in CI), sets
+  `memory._branch` to the live canary's branch for the assigned share of sessions — exactly
+  what the gateway's `set_branch()` does — forces writes to `main`, and stamps
+  `memory_branch` on the sealed trace. One session per episode; assignment per session.
+- **Loop advancement** through the account's own API, on a **preregistered look schedule**:
+  after every episode the arm lists open fixes for its agent and, for each running canary,
+  calls `POST /fixes/{id}/canary/evaluate` once every `k = 5` graded sessions of that agent
+  (the hourly production sweep is the same code path; the schedule is faster and is what
+  the A/A probe measures). Tier 1 tests are queued by the product; the harness polls
+  `GET /fixes/{id}/tests`. Nothing that decides — propose, gate, `decide()`, ship,
+  rollback — runs in the harness.
+- **Provenance stamped on every session**: `model`, `agent_version` (harness git sha),
+  `runtime`, and `verified_by = "benchmark-oracle"` when the outcome is oracle-graded; in the
+  self-report condition (E3) `verified_by` is omitted on purpose.
+- **Fleet = replicas.** In RSI cells a fleet is `n` concurrent sessions of **one**
+  `agent_id`, because fixes, incidents, judges and the canary slot are scoped per agent.
+  The v7 fleet of distinct identities is kept as the `handoff` probe.
+- **Time.** Calendar-bound steps (incident resolution after 3 quiet days; prevention
+  verification after 7 days) are reported post hoc when they close during the multi-week
+  grid; the harness's own recurrence measure is primary.
+
+## Arms
+
+All arms: identical agent prompt, tool schema (`memory_search`, `memory_write`, domain tools,
+`finish`), models, seeds, task order, retry budget `R = 3`, post-episode reflection note,
+fresh scope per (arm, scenario, seed, model), 300 distractor entries, `opaque_ids = True`
+(ticket/order/incident identifiers are random, so nothing can be read off an id).
+
+- `none` — Claude Opus 5 or GPT-5.5 alone.
+- `context-window` — `none` plus every prior reflection note and outcome of the cell in the
+  prompt, most recent first, truncated at 24k tokens.
+- `pgvector` — bge-small-en-v1.5 cosine top-5 over notes; `pgvector+rerank` adds the same
+  cross-encoder SenseLab serves (`Xenova/ms-marco-MiniLM-L-6-v2`).
+- `pgvector-diy+outcomes` — notes, LLM consolidation every 5 episodes, per-entry win/loss
+  counter shown to the agent.
+- `senselab` — the documented contract (`briefing`, `retrieve`, `record_action`,
+  `record_attempt`, `commit_outcome`), repair loop **off** (policy `review`, proposals
+  never approved; their count is reported as review load).
+- `senselab-rsi` — `senselab` plus repair policy `auto_after_canary`.
+  - `senselab-rsi-nocanary` — `auto_after_replay`.
+  - `senselab-rsi-noreplay` — replay test skipped: canary starts on `proposed` (allowed by
+    the product for a person; here scripted), then ships.
+  - `senselab-rsi-review` — proposals held at `review`; measures what a human would read.
+  - `senselab-rsi-minimal` — the agent calls only `retrieve` and `commit_outcome`; no
+    `record_attempt`, no `record_action`. The protocol-compliance question.
+- `senselab-oracle-fix-{5,10,20}` — `senselab` plus a scripted maintainer that writes the
+  correct entry for each changed class `lag` episodes after the change, at confidence 1.0.
+
+Mem0 and Zep are not re-run (appendix: gridv4 data).
+
+## Scenarios and change sets
+
+Ten families from `config.Study.core_scenarios`: `support`, `ci-fix`, `analytics`,
+`concierge`, `retention`, `order-ops`, `diagnose`, `policy-qa`, `accounts`, `dispatch`.
+Six carried a regime change in v7; the change-set machinery (`Scenario.change_variant`) is
+extended so that **every** family has two change sets:
+
+- **Set A** (public): the v7 changes where they exist; new A sets for the families that had
+  none, written before any RSI-arm run. Used for the pilot, for developing the analysis
+  code, and for E1–E3 as reported.
+- **Set B** (private): different classes moved, defined for all ten families before the
+  pilot, kept in `scenarios/change_sets_b.py`; its SHA-256 is registered by a dated entry
+  in the Amendments section before the first pilot cell runs, and the file is published
+  with the paper. Run **once**, last, after the analysis code is tagged
+  `analysis-freeze-rsi`. E1-B is the headline held-out number.
+
+Held-out **families**: `diagnose`, `policy-qa`, `accounts`, `dispatch` are never used to
+develop or tune the repair prompt, the rubrics or the arm; they are run in E1 only.
+
+## Experiments
+
+Sizes use `config.Study`: 60 episodes, change at 20, `change_focus = 0.5`, seeds
+`(11, 23, 37, 41, 59, 73)`, models GPT-5.5 and Claude Opus 5 at `low` effort.
+
+- **E1 Head-to-head under regime change.** 10 families × 2 models × 6 seeds × fleet {1, 6}
+  × 60 episodes; arms `none`, `context-window`, `pgvector`, `pgvector+rerank`,
+  `pgvector-diy+outcomes`, `senselab`, `senselab-rsi`, `senselab-oracle-fix-10`. Change
+  set A, then B. Primary endpoint: first-attempt success on changed-class tasks in
+  episodes 40–59, paired on (family, seed, model, fleet). Secondary: episodes 20–39,
+  exposures-to-recover, stale-pick rate, escalations, critical failures, unchanged-class
+  success, cost.
+- **E2 Long-horizon fleet with canary (flagship).** 6 families (`support`, `ci-fix`,
+  `retention`, `order-ops`, `dispatch`, `policy-qa`) × 2 models × 3 seeds × fleet 10 ×
+  200 episodes, changes at 50 and 130 (set A). Arms: `none`, `context-window`, `pgvector`,
+  `senselab`, `senselab-rsi`, `-nocanary`, `-noreplay`, `-review`, `oracle-fix-{5,10,20}`.
+  Canary parameters `pct = 50`, `min_outcomes = 8`, `timeout = 60` episodes (mapped from
+  the production defaults 10 / 20 / 14 days: the same floor in sessions per arm within the
+  cell's horizon); a sensitivity row at `pct = 10`, `min_outcomes = 20` on `support`.
+  Endpoints: fix lifecycle counts by terminal state, time-to-repair (episodes from change
+  to first shipped fix that lowers recurrence), false-ship rate, regressions caught by the
+  canary after a Tier 1 pass, gate confusion matrix (Tier 1 verdict vs later live
+  outcome), prevention predicted vs realised, propagation (episodes from first discredit
+  to the last replica's non-stale pick), oscillation (ship/rollback cycles per key), store
+  growth and memory latency over 200 episodes.
+  - **E2b** — `support` and `ci-fix`, GPT-5.5, 3 seeds, `senselab-rsi` with the Tier 2
+    webhook configured and the harness serving the OSS `ReplayReceiver`.
+- **E3 Behaviour judging without an oracle.** 6 families × 2 models × 3 seeds × 60
+  episodes, `senselab-rsi` under three verdict sources: `oracle` (the environment's
+  verdict, `verified_by` stamped), `self-report` (the agent's own claimed outcome, no
+  `verified_by`), `judges` (no outcome sent by the harness; verdicts from the frozen rubric
+  pack become outcomes through `verdict_outcomes.py`). Cross-family judge as the default
+  (OpenAI judges grading a Claude agent and vice versa where the platform allows; otherwise
+  the platform pair is disclosed). Endpoints: judge precision/recall/F1 vs oracle by
+  severity, inter-judge agreement, "failures called success", cluster-to-taxonomy match
+  (discovered behaviours vs the scenario's failure classes), incident-open latency,
+  auto-propose precision, recovery under each source, and the share of fixes held by the
+  feedback contract under `self-report`.
+- **E4 Public track: τ²-bench.** `telecom` and `retail` (fallback `banking_knowledge`),
+  Claude Opus 5 primary, GPT-5.5 second; each domain's task set streamed over `k = 3`
+  interleaved passes with arms `none`, `pgvector`, `senselab`, `senselab-rsi`; a
+  **policy amendment** (one rule in the domain policy inverted, preregistered per domain
+  in `tau2/amendments.json`) applied at the start of pass 2. Endpoints: pass^1 and pass^k
+  before and after the amendment, learning curve across passes, simulator-error rate,
+  baseline pass^1 vs the published leaderboard as a contamination check. Not a leaderboard
+  submission.
+- **E5 Level-1 discipline.** Fixed repair budget per cell (≤ 12 proposals, product token
+  budgets as shipped: 50k per repair, 60k per stand-in run); public/private split;
+  held-out families; oracle-fix baselines at three lags; the four-condition table (fair
+  human baseline, sustained multi-step trend across two changes, generalisation beyond the
+  optimised measurement, fixed budget). Repair-prompt A/B: a candidate prompt promoted by
+  `repairer_stats` on `support` set A; its proven-fix rate re-measured on `ci-fix` and
+  `dispatch`.
+- **E6 Cost, latency, auditability.** Every arm-side LLM call charged to the arm: agent,
+  reflection, repair agent, stand-in replay, judges (from the account's eval budget
+  ledger), canary overhead. USD per solved task; cost per solved task with escalations
+  priced at USD 5, 20, 50; Pareto frontier (success vs spend) per arm; memory latency ms;
+  share of decisions with a verifiable chain (read set + actions + outcome + fix events);
+  review load per policy tier (proposals a person would read); rollbacks executed and
+  entries restored; blast radius of each shipped fix.
+- **E7 The slow loop on the repair record.** Exactly two Managed Models (`senselab-s1`):
+  one trained on `senselab-rsi` traces from E1 `support` (including `origin = repair`
+  trajectories and repair-bridge pinned cases), one on `senselab` traces from the same
+  cells; evaluated in decision mode on held-out seeds `(101, 113, 127)`. Endpoints: failure
+  reproduction on pinned cases, post-change first-attempt success, cost per solved task.
+- **Probes** (`support`, GPT-5.5, 3 seeds unless stated).
+  - (a) **A/A null canary**: a fix whose branch is byte-identical to `main`; 50 canaries
+    under the E2 look schedule → empirical false-pass rate vs nominal 0.05, and the same
+    with one look at the floor only.
+  - (b) **Adversarial**: a plausible wrong fix injected as a proposal, and a poisoned entry
+    written by a peer → does Tier 1 + canary reject it; how many sessions read it first.
+  - (c) **Drift and revert**: gradual change (classes flip one per 5 episodes) and a revert
+    at episode 40 → does the loop unlearn its own repair, and in how many episodes.
+  - (d) **Noise and delay**: 10 % outcome label noise; feedback delayed 3 episodes → wrong
+    fixes shipped, prevention realised.
+  - (e) **Reward-hacking check**: every shipped fix is tested for lowering recurrence while
+    raising escalations or unchanged-class failures; flagged fixes counted.
+  - (f) **Distractors**: 0 / 300 / 2,000 entries on `senselab-rsi`.
+  - (g) **Lever attribution**: for every proposal, the lever chosen vs the true cause of
+    the change (knowledge vs procedure, known to the benchmark) → confusion matrix.
+  - (h) **Manifest calibration**: predicted repaired/regressed runs vs realised, per fix →
+    Brier score of the repair agent's predictions.
+
+## Metric glossary
+
+- **changed class**: a task class whose correct action differs after the change.
+- **first-attempt success**: the first `finish` is adjudicated correct.
+- **stale pick**: the agent's first action is the pre-change correct action on a
+  changed-class task after the change.
+- **exposures-to-recover**: changed-class exposures after the change until 3 consecutive
+  first-attempt successes on that class.
+- **recurrence**: share of sessions in which the judged failure (or oracle failure class)
+  recurs; the canary's test statistic.
+- **time-to-repair**: episodes from the change to the first shipped fix whose class
+  recurrence in the following 10 exposures is below half its pre-fix rate.
+- **false ship**: a shipped fix whose realised prevention is ≤ 0, or which is later
+  `regressed` or rolled back.
+- **prevention rate**: 1 − (recurrence after ship / recurrence before ship), as
+  `prevention.py` measures it.
+- **propagation latency**: episodes from the first discredit of a stale entry to the last
+  replica's first non-stale pick on that class.
+- **review load**: proposals a person would have had to read under `review`.
+- **verifiable chain**: a decision whose trace has the read set, recorded actions, the
+  outcome, and — if a fix touched what it read — the fix events.
+
+## Hypotheses and what falsifies them
+
+- **H1 Repair beats demotion.** Post-change changed-class first-attempt success (40–59) is
+  higher for `senselab-rsi` than `senselab` by ≥ 0.10 (paired bootstrap 95 % CI excludes
+  0), and `senselab` > `pgvector` > `none` as in v7. Falsified if the CI includes 0 on set
+  B, or if the ordering fails on the held-out families.
+- **H2 No collateral damage.** Unchanged-class success for `senselab-rsi` is non-inferior
+  to `senselab`, margin 0.02 (one-sided 97.5 % CI). Falsified otherwise.
+- **H3 The replay gate earns its place.** `-noreplay` ships more fixes that later regress
+  or are rolled back than `senselab-rsi` (rate ratio > 1, CI excludes 1).
+- **H4 The canary earns its place.** `-nocanary` lets more regressions reach live sessions
+  (sessions exposed to a later-regressed fix) than `senselab-rsi`; A/A false-pass rate
+  under the look schedule ≤ 0.05, or the inflation is reported with the one-look rate.
+- **H5 The procedure lever.** On `retention` and `order-ops`, `senselab-rsi` recovers
+  post-change where `senselab` did not in v7 (`senselab-induce` flat): changed-class
+  success 40–59 ≥ 0.6, and the fixes that did it carry lever `procedure`.
+- **H6 Time-to-repair vs a human.** Median time-to-repair of `senselab-rsi` ≤ that of
+  `oracle-fix-10`, and its 40–59 changed-class success ≥ 0.8 × `oracle-fix-5`'s, at the
+  fixed budget.
+- **H7 Without an oracle.** Under `judges`, `senselab-rsi` recovers ≥ 0.7 of its `oracle`
+  recovery (difference vs `senselab`); under `self-report` the recovery is not
+  distinguishable from 0 and ≥ 0.8 of passed fixes are held by the feedback contract;
+  judge precision on critical classes ≥ 0.8.
+- **H8 Fleet inheritance.** In E2, first-exposure success on a changed class for replicas
+  that never saw the failure is higher for `senselab-rsi` than `senselab`; propagation
+  latency ≤ one canary cycle (`min_outcomes / (pct/100)` sessions) after ship.
+- **H9 Public benchmark.** On τ²-bench after the amendment, pass^1 ordering
+  `senselab-rsi` ≥ `senselab` > `pgvector` ≥ `none` in both domains; before the amendment
+  the arms are within 0.03 of each other (memory should not matter yet).
+- **H10 Cost.** Cost per solved task including escalations at USD 20 is lower for
+  `senselab-rsi` than `pgvector`; raw token cost per episode is reported either way (v7
+  found `senselab` more expensive per episode).
+- **H11 Ignition test.** The promoted repair prompt has a higher proven-fix rate than the
+  default on families it was not promoted on. Reported pass or fail; no Level-2 claim
+  either way.
+- **H12 Better training set.** The RSI-trained student reproduces fewer pinned failures
+  than the outcome-only student (paired on case) and is not worse on post-change
+  first-attempt success.
+- **H13 Lever and manifest are informative.** Lever agreement with the true cause ≥ 0.7
+  (probe g); manifest Brier score < 0.25 and better than the constant 0.5 predictor
+  (probe h).
+
+## Statistics
+
+Cell-level bootstrap (2,000 resamples) for every rate; paired deltas on (family, seed,
+model, fleet); mixed-effects logistic regression of first-attempt success on
+`episode × arm` with a random intercept per cell for the learning curves; non-inferiority
+test for H2; rate ratios with CIs for H3/H4; Holm correction across the secondary
+endpoints within each hypothesis; all preregistered hypotheses reported, including nulls;
+exploratory analyses labelled. Power: from gridv4's cross-cell variance of the 40–59
+changed-class rate (sd ≈ 0.16 per cell), 6 seeds × 2 models × 2 fleets per family give
+80 % power for a 0.10 paired difference at α = 0.05; E2's 3 seeds are powered for the
+lifecycle counts, not per-family rates, and E2 rates are reported pooled.
+
+Infra errors: the purge rule of `HYPOTHESIS.md` (amendment 2026-09-19) applies unchanged —
+a cell with any memory-API client failure is dropped and re-run in a fresh scope; LLM
+provider incidents stay and are excluded from rates.
+
+Blinding: the analysis code for E1–E3 is developed on change set A and tagged
+`analysis-freeze-rsi` before any set-B cell runs; set B is run once. Threshold constants of
+the engine are not changed after the pilot amendment.
+
+## Cost accounting
+
+Every LLM call made because an arm exists is charged to that arm: agent turns, reflection,
+consolidation (`diy`), repair agent, stand-in replay, judges (read from the account's eval
+budget ledger and attributed by agent), repair-prompt candidates. SaaS request costs are
+reported as requests per episode. Nothing is charged to `none` that it does not make.
+
+## What would make us claim less
+
+- If `senselab-rsi` ≈ `senselab` on set B, the loop is not repairing; the paper reports
+  the loop as a governance layer only.
+- If `-noreplay` or `-nocanary` match `senselab-rsi` on false ships and regressions, the
+  gates are not doing measurable work at this scale, and we say so.
+- If the A/A false-pass rate exceeds 0.10 under the look schedule, the canary's
+  significance test needs alpha spending; reported as a product defect, with the one-look
+  rate beside it.
+- If judges recover < 0.5 of oracle recovery, the engine depends on an oracle it will not
+  have in production; C6 is withdrawn.
+- If any Weco condition fails in E5's table, no Level-1-style claim is made.
+
+## Amendments
+
+(none yet; dated entries only, appended below this line)
