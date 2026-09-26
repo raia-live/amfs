@@ -184,6 +184,12 @@ class _RsiReplaySession(_RsiSession):
     def outcome_ref(self) -> str:
         return f"replay:{self.request.fix_id[:8]}:{self.request.case_id[:8]}"
 
+    def write(self, key: str, text: str, *, confidence: float = 0.7, kind: str = "experience") -> None:
+        # A replay tests the fix; its notes do not belong on the fix's branch (and the
+        # platform refuses the write: the account's keys read a repair branch, they do
+        # not write it). Counted, not written.
+        self.acct.notes["replay_writes_dropped"] = int(self.acct.notes.get("replay_writes_dropped", 0)) + 1
+
     def end(self, outcome: Outcome, *, task_input: str, response_text: str, cited_keys: list[str]) -> None:
         _SenseLabSession.end(self, outcome, task_input=task_input, response_text=response_text, cited_keys=cited_keys)
         trace = getattr(self.mem, "_last_trace", None)
