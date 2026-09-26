@@ -448,6 +448,10 @@ class _SenseLabSession(EpisodeSession):
         keys = list(cited_keys) or list(dict.fromkeys(self.read_keys[boundary:]))
         return [f"{self.arm.scope}/{k}" for k in keys] or None
 
+    def outcome_ref(self) -> str:
+        """The reference the session's terminal outcome is committed under."""
+        return f"{self.agent_id}-ep{self.episode}"
+
     def end(self, outcome: Outcome, *, task_input: str, response_text: str,
             cited_keys: list[str]) -> None:
         if not self.arm.learns_from_outcomes:
@@ -457,7 +461,7 @@ class _SenseLabSession(EpisodeSession):
         with self._timed():
             try:
                 affected = self.mem.commit_outcome(
-                    f"{self.agent_id}-ep{self.episode}", OutcomeType(severity),
+                    self.outcome_ref(), OutcomeType(severity),
                     causal_entry_keys=keys, task_input=task_input[:2000],
                     response_text=response_text[:2000], decision_summary=outcome.summary[:500],
                     **extra,

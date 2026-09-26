@@ -61,9 +61,12 @@ class ProClient:
 
     # -- plumbing -------------------------------------------------------------------
     def _call(self, method: str, path: str, *, json: Any = None, params: dict[str, Any] | None = None,
-              retries: int = 4) -> Any:
+              retries: int = 4, timeout: float | None = None) -> Any:
         for attempt in range(retries + 1):
-            resp = self._client.request(method, path, json=json, params=params)
+            kw: dict[str, Any] = {}
+            if timeout is not None:
+                kw["timeout"] = httpx.Timeout(timeout, connect=10.0)
+            resp = self._client.request(method, path, json=json, params=params, **kw)
             if resp.status_code in (429, 502, 503, 504) and attempt < retries:
                 wait = min(float(resp.headers.get("Retry-After", 1.0)) * (1.5 ** attempt), 20.0)
                 time.sleep(wait)
@@ -192,6 +195,22 @@ class ProClient:
     def evaluate_canary(self, fix_id: str) -> dict[str, Any]:
         """Re-count both arms and act on the decision, as the hourly sweep would."""
         return self._call("POST", f"/api/v1/eval/fixes/{fix_id}/canary/evaluate")
+
+    # -- customer replay (Tier 2) -----------------------------------------------------
+    def request_replay(self, fix_id: str, *, wait_hours: int | None = None) -> dict[str, Any]:
+        body = {"wait_hours": wait_hours} if wait_hours else {}
+        return self._call("POST", f"/api/v1/eval/fixes/{fix_id}/replay", json=body)
+
+    def grade_replay(self, fix_id: str) -> dict[str, Any]:
+        """Grade what the agent has replayed so far and move the fix if the replay decided
+        (what the hourly replay sweep does). Grading judges each replayed trace on demand,
+        so the call can take a minute for a suite of cases."""
+        return self._call("POST", f"/api/v1/eval/fixes/{fix_id}/replay/grade", timeout=280.0)
+
+    def test_replay_webhook(self, agent_id: str) -> dict[str, Any]:
+        """One signed ``ping`` to the agent's replay webhook; what came back."""
+        return self._call("POST", f"/api/v1/eval/agents/{agent_id}/repair-settings/replay-webhook/test",
+                          timeout=60.0)
 
     def feedback_contract(self, agent_id: str, policy: str | None = None) -> dict[str, Any]:
         params = {"policy": policy} if policy else None

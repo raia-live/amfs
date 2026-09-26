@@ -400,6 +400,8 @@ def main() -> None:
                 "anthropic_effort": config.ANTHROPIC_EFFORT, "retry_budget": args.retry_budget,
                 "harness_version": config.HARNESS_VERSION, "amfs_http_url": config.AMFS_HTTP_URL,
                 "fleet_replicas": bool(getattr(args, "fleet_replicas", False)),
+                # The repair-loop arms' knobs (canary, pacing floor, Tier 2), for provenance.
+                "rsi_env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("CL_RSI_")},
                 "study": config.STUDY.__dict__, "started": time.time()}
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
     print(f"{len(cells)} cells, {len(todo)} to run, {sum(c.episodes for c in todo)} episodes")

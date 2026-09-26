@@ -121,6 +121,10 @@ def _fix_row(f: dict[str, Any]) -> dict[str, Any]:
     if test:
         row["test"] = {k: test.get(k) for k in ("status", "passed", "repaired", "total", "regressed",
                                                 "anchors", "fidelity", "unreplayable", "model")}
+    replay = f.get("replay") if isinstance(f.get("replay"), dict) else None
+    if replay:
+        row["replay"] = {k: replay.get(k) for k in ("status", "total", "delivered", "repaired", "failed", "missing",
+                                                    "requested_at", "decided_at", "gradings", "note")}
     if canary:
         row["canary"] = {
             "status": canary.get("status"), "pct": canary.get("pct"), "min_outcomes": canary.get("min_outcomes"),
@@ -135,12 +139,21 @@ def _fix_row(f: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def _task_key(task_input: str) -> str:
+    """How the platform matches a replayed trace to its case when ``case_id`` is absent
+    (``md5(lower(btrim(task_input)))``); the same normalisation keys the episode index."""
+    return str(task_input or "")[:2000].strip().lower()
+
+
 class _RsiSession(_SenseLabSession):
     def end(self, outcome: Outcome, *, task_input: str, response_text: str, cited_keys: list[str]) -> None:
         super().end(outcome, task_input=task_input, response_text=response_text, cited_keys=cited_keys)
         trace = getattr(self.mem, "_last_trace", None)
         trace_id = getattr(trace, "id", None) if trace is not None else None
         self.arm.sessions_sealed += 1
+        # Which episode a task came from, for the Tier 2 replay: the platform sends the
+        # case's ``task_input`` (the prompt the trace was committed with), not the episode.
+        self.arm.episode_by_task.setdefault(_task_key(task_input), self.episode)
         self.arm.ledger.append({"episode": self.episode, "replica": self.replica, "trace_id": str(trace_id) if trace_id else None,
                                 "sealed_at": time.time(),
                                 "success": outcome.success, "severity": outcome.severity,
@@ -150,6 +163,52 @@ class _RsiSession(_SenseLabSession):
         if not self.arm.records_actions:
             return None
         return super().record_action(tool, arguments, result, success)
+
+
+class _RsiReplaySession(_RsiSession):
+    """A Tier 2 replay: the same session as an episode's, with memory checked out on the
+    fix's branch and the grader's keys on the trace (``case_id``, ``fix_id``,
+    ``replay_delivery_id``; the SDK stamps ``memory_branch`` for any branch but main). It is
+    not a benchmark session: it is counted and ledgered apart, never as ``sessions_sealed``."""
+
+    def __init__(self, arm: "SenseLabRsiArm", agent_id: str, episode: int, request: Any) -> None:
+        super().__init__(arm, agent_id, episode)
+        self.request = request
+        self.mem.checkout(request.branch)
+        try:
+            self.mem.set_session_attributes({"case_id": request.case_id, "fix_id": request.fix_id,
+                                             "replay_delivery_id": request.delivery_id, "replay": "tier2"})
+        except Exception as e:  # noqa: BLE001
+            self.acct.notes["session_attributes_error"] = str(e)[:120]
+
+    def outcome_ref(self) -> str:
+        return f"replay:{self.request.fix_id[:8]}:{self.request.case_id[:8]}"
+
+    def end(self, outcome: Outcome, *, task_input: str, response_text: str, cited_keys: list[str]) -> None:
+        _SenseLabSession.end(self, outcome, task_input=task_input, response_text=response_text, cited_keys=cited_keys)
+        trace = getattr(self.mem, "_last_trace", None)
+        trace_id = getattr(trace, "id", None) if trace is not None else None
+        self.arm.replay_ledger.append({
+            "fix_id": self.request.fix_id, "case_id": self.request.case_id, "delivery_id": self.request.delivery_id,
+            "branch": self.request.branch, "episode": self.episode, "trace_id": str(trace_id) if trace_id else None,
+            "sealed_at": time.time(), "success": outcome.success, "severity": outcome.severity,
+            "commit_error": self.acct.notes.get("commit_error"),
+        })
+
+
+class _ReplayArmView:
+    """What ``run_episode`` sees when it replays a case: the cell's arm, except that the
+    session it opens reads the fix's branch and carries the case's keys."""
+
+    def __init__(self, arm: "SenseLabRsiArm", request: Any) -> None:
+        self._arm = arm
+        self._request = request
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._arm, name)
+
+    def session(self, agent_id: str, episode: int) -> EpisodeSession:
+        return _RsiReplaySession(self._arm, agent_id, episode, self._request)
 
 
 class SenseLabRsiArm(SenseLabArm):
@@ -173,6 +232,11 @@ class SenseLabRsiArm(SenseLabArm):
     # (0 = no wait). Set from pilot 3 (HYPOTHESIS_RSI.md, amendment (e)).
     verdict_wait_s = _int_env("CL_RSI_VERDICT_WAIT", 0)
     verdict_poll_s = _int_env("CL_RSI_VERDICT_POLL", 5)
+    # Tier 2: serve the agent's replay endpoint from the harness (replay_hub.py) and register
+    # it on the cell's agent, so a fix the Tier 1 stand-in cannot vouch for is tested by
+    # re-running its failing cases here, with memory on the fix's branch.
+    tier2 = os.environ.get("CL_RSI_TIER2", "0").strip().lower() in ("1", "true", "yes")
+    replay_wait_hours = _int_env("CL_RSI_REPLAY_WAIT_HOURS", 1)
 
     # -- lifecycle ------------------------------------------------------------------
     def open(self, scope: str) -> None:
@@ -194,11 +258,23 @@ class SenseLabRsiArm(SenseLabArm):
         self._rubric = ""
         self._scenario_name = ""
         self._agent: str | None = None
+        # Tier 2 state: the cell's scenario (the environment the replay runs against), the
+        # model the cell runs on, which episode each committed task came from, and the record
+        # of every replay run here.
+        self._scenario = None
+        self._llm = None
+        self.episode_by_task: dict[str, int] = {}
+        self.replay_ledger: list[dict[str, Any]] = []
+        self._hub = None
 
     def configure(self, scenario) -> None:
         super().configure(scenario)
         self._rubric = getattr(scenario, "judge_rubric", "") or "none"
         self._scenario_name = getattr(scenario, "name", "")
+        # Kept for Tier 2 only: a replay re-runs ``scenario.task(ep)`` through the same
+        # ``scenario.step`` the episode used. The agent sees the prompt, as it did then; the
+        # truth stays inside the environment.
+        self._scenario = scenario
         # The cell's shared agent identity: every replica maps onto it.
         self._agent = self.saas_agent_id(scenario.agent_for(0))
         self._ready(self._agent)
@@ -231,19 +307,36 @@ class SenseLabRsiArm(SenseLabArm):
             if self.judges_on:
                 self.pro.ensure_judge(JUDGE_ID, agent_id, "Task failure (benchmark, frozen rubric)",
                                       JUDGE_PROMPT.format(rubric=self._rubric[:1500]), mode="continuous")
-            settings = self.pro.set_repair_settings(
-                agent_id, repair_policy=self.repair_policy, canary_pct=self.canary_pct,
-                canary_min_outcomes=self.canary_min_outcomes, canary_timeout_days=1,
-            )
+            fields: dict[str, Any] = dict(repair_policy=self.repair_policy, canary_pct=self.canary_pct,
+                                          canary_min_outcomes=self.canary_min_outcomes, canary_timeout_days=1)
+            if self.tier2:
+                from ..replay_hub import ReplayHub
+
+                self._hub = ReplayHub.get()
+                self._hub.register(agent_id, self)
+                fields.update(replay_webhook_url=self._hub.url, replay_webhook_secret=self._hub.secret,
+                              replay_wait_hours=self.replay_wait_hours)
+            else:
+                # An agent id is fresh per cell, but be explicit: no endpoint, Tier 1 and the
+                # canary are the only tests.
+                fields["replay_webhook_url"] = ""
+            settings = self.pro.set_repair_settings(agent_id, **fields)
             contract = None
             try:
                 contract = self.pro.feedback_contract(agent_id)
             except ProApiError:
                 pass
+            ping = None
+            if self.tier2:
+                try:
+                    ping = self.pro.test_replay_webhook(agent_id)
+                except ProApiError as e:
+                    ping = {"ok": False, "error": f"{e.status}: {str(e.detail)[:200]}"}
             self.events.append({"t": time.time(), "sessions": self.sessions_sealed, "kind": "agent_ready",
                                 "agent_id": agent_id, "settings": {k: settings.get(k) for k in (
                                     "repair_policy", "canary_pct", "canary_min_outcomes", "canary_timeout_days",
-                                    "replay_fidelity_floor")}, "contract": contract,
+                                    "replay_fidelity_floor", "replay_webhook_url", "replay_wait_hours")},
+                                "contract": contract, "replay_webhook_ping": ping,
                                 "ms": round((time.perf_counter() - t0) * 1000, 1)})
         except ProApiError as e:
             self.events.append({"t": time.time(), "kind": "agent_ready_error", "agent_id": agent_id,
@@ -292,6 +385,7 @@ class SenseLabRsiArm(SenseLabArm):
     def after_episode(self, episode: int, llm) -> ArmAccounting | None:
         if self._agent is None:
             return None
+        self._llm = llm   # the cell's model; a Tier 2 replay runs on it
         acct = ArmAccounting()
         t0 = time.perf_counter()
         due = (self.sessions_sealed - self._sessions_at_look) >= self.look_every
@@ -327,6 +421,47 @@ class SenseLabRsiArm(SenseLabArm):
             acct.notes["canary_active"] = {"id": active["id"], **(active.get("canary") or {})}
         return acct
 
+    # -- Tier 2: the agent's own replay ------------------------------------------------
+    def replay(self, request: Any) -> dict[str, Any]:
+        """Answer one replay request from the platform (replay_hub.py): re-run the episode the
+        case came from — same task, same environment, same model — with memory on the fix's
+        branch, and commit the outcome under the case's keys so the platform grades it. Runs
+        on the hub's thread while the cell goes on; the replay is not a benchmark session.
+        Returns a summary for the hub's delivery record."""
+        from ..agent.loop import run_episode
+
+        t0 = time.perf_counter()
+        ep = self.episode_by_task.get(_task_key(request.task_input))
+        if ep is None:
+            # A case whose prompt this cell never committed (another replica's identity would
+            # be the same agent, so this is a truncated or foreign task_input). Nothing to run;
+            # the case stays ``missing`` and the replay expires on the platform's clock.
+            self.events.append({"t": time.time(), "sessions": self.sessions_sealed, "kind": "replay_unmatched",
+                                "fix_id": request.fix_id, "case_id": request.case_id,
+                                "task_input": str(request.task_input)[:160]})
+            return {"ok": False, "code": "unmatched_task"}
+        if self._scenario is None or self._llm is None:
+            self.events.append({"t": time.time(), "kind": "replay_not_ready", "fix_id": request.fix_id,
+                                "case_id": request.case_id, "episode": ep})
+            return {"ok": False, "code": "cell_not_ready"}
+        task = self._scenario.task(ep)
+        self.events.append({"t": time.time(), "sessions": self.sessions_sealed, "kind": "replay_start",
+                            "fix_id": request.fix_id, "case_id": request.case_id, "branch": request.branch,
+                            "episode": ep, "delivery_id": request.delivery_id})
+        rec = run_episode(self._scenario, _ReplayArmView(self, request), self._llm, task,
+                          seed=self._scenario.seed, retry_budget=config.STUDY.retry_budget)
+        row = self.replay_ledger[-1] if self.replay_ledger and self.replay_ledger[-1].get("case_id") == request.case_id else None
+        summary = {"ok": True, "episode": ep, "success": rec.success, "severity": rec.severity,
+                   "attempts": rec.attempts, "escalated": rec.escalated, "answer": str(rec.final_answer)[:80],
+                   "trace_id": row.get("trace_id") if row else None, "ms": round((time.perf_counter() - t0) * 1000, 1),
+                   "error": rec.error}
+        if row is not None:
+            row.update({"attempts": rec.attempts, "escalated": rec.escalated, "answer": str(rec.final_answer)[:80],
+                        "usage": rec.usage, "ms": summary["ms"], "error": rec.error})
+        self.events.append({"t": time.time(), "sessions": self.sessions_sealed, "kind": "replay_done",
+                            "fix_id": request.fix_id, "case_id": request.case_id, **{k: v for k, v in summary.items() if k != "ok"}})
+        return summary
+
     def _advance(self, fixes: list[dict[str, Any]], episode: int) -> int:
         """One agent's share of the hourly sweep, through the account's endpoints. Returns
         the number of calls made. Never raises."""
@@ -337,6 +472,29 @@ class SenseLabRsiArm(SenseLabArm):
         def log(kind: str, fix_id: str, **data: Any) -> None:
             self.events.append({"t": time.time(), "sessions": self.sessions_sealed, "episode": episode,
                                 "kind": kind, "fix_id": fix_id, **data})
+
+        # Tier 2: grade what the agent has replayed so far, as the hourly replay sweep would.
+        # A pass makes the fix ``test_passed`` and applies the policy (the canary starts if the
+        # slot is free); a fail makes it ``test_failed``; cases not back yet keep it awaited.
+        for f in fixes:
+            rep = f.get("replay") if isinstance(f.get("replay"), dict) else None
+            if not rep or rep.get("status") != "requested":
+                continue
+            fid = str(f["id"])
+            try:
+                after = self.pro.grade_replay(fid)
+                calls += 1
+                r2 = after.get("replay") if isinstance(after.get("replay"), dict) else {}
+                log("replay_grade", fid, status=after.get("status"), replay_status=r2.get("status"),
+                    repaired=r2.get("repaired"), failed=r2.get("failed"), missing=r2.get("missing"),
+                    total=r2.get("total"), note=str(r2.get("note") or "")[:200])
+                if after.get("status") != f.get("status"):
+                    f.update(after)   # the canary logic below sees the fix as it is now
+            except ProApiError as e:
+                calls += 1
+                log("replay_grade_error", fid, error=f"{e.status}: {str(e.detail)[:200]}")
+            except Exception as e:  # noqa: BLE001
+                log("replay_grade_error", fid, error=f"{type(e).__name__}: {e}"[:200])
 
         running = [f for f in fixes if f.get("status") == "canary"]
         slot_busy = bool(running)
@@ -418,6 +576,9 @@ class SenseLabRsiArm(SenseLabArm):
                                "canary": {"pct": self.canary_pct, "min_outcomes": self.canary_min_outcomes,
                                           "timeout_sessions": self.canary_timeout_sessions, "look_every": self.look_every},
                                "pacing": {"verdict_wait_s": self.verdict_wait_s, "verdict_poll_s": self.verdict_poll_s},
+                               "tier2": {"enabled": self.tier2, "replay_wait_hours": self.replay_wait_hours,
+                                         "hub": self._hub.report() if self._hub is not None else None,
+                                         "replays": self.replay_ledger},
                                "sessions_sealed": self.sessions_sealed, "ledger": self.ledger, "events": self.events}
         try:
             fixes = self.pro.list_fixes(self._agent)
@@ -453,6 +614,10 @@ class SenseLabRsiArm(SenseLabArm):
         return out
 
     def close(self) -> None:
+        if self._hub is not None and self._agent:
+            # A replay request for this cell after its end has nowhere to run: the hub answers
+            # 404 and the platform's case stays missing until the replay expires.
+            self._hub.unregister(self._agent)
         try:
             self.pro.close()
         except Exception:  # noqa: BLE001
