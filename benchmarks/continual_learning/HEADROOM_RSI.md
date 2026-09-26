@@ -564,6 +564,48 @@ same one from a different angle:
   load; it is not a benchmark blocker and stays a separate PR candidate against
   amfs-internal. Sampler stopped 16:14Z; `/tmp/lockwatch.log` kept for that PR.
 
+### Seam 3, re-read against the traffic — a correction, an engine bug, and amendment (k)
+
+The seam 3 paragraph above is wrong on one point and this note corrects it rather than
+edits it. The canaries were **not** "evaluated only by the hourly sweep": the arm's
+pre-registered look schedule calls `POST /fixes/{id}/canary/evaluate` every 5 sessions,
+which is where the 5–16 evaluations per canary came from, and the benchmark agents run at
+`canary_min_outcomes` 8 (E2 mapping), not the product default 20. Reading every canary's
+arms against the sealed traces behind it (`amfs_immutable_traces`, `attributes.canary_arm`)
+gives the real picture for the 11 canaries of the day:
+
+- **7 saw no traffic at all** after they started. Four are 10 %-capped canaries of
+  `test_inconclusive` fixes, started by the *platform's* hourly sweep at 15:20 / 15:52 /
+  16:21 for fixes proposed 13:36–15:24 — the harness filled a freed slot only with
+  `test_passed` fixes, so these waited for the sweep, which fired after the cell. Three are
+  50 % canaries that started within minutes of their test and found the cell already over.
+- **1 is an engine bug.** `7a7a164b` (5j `ci-fix` s11, `repo-readme-ci` rewrite): 53 runs
+  after start, 27 stamped canary / 26 control, all 53 carrying a judge verdict — arms 0/0
+  after 16 evaluations. A regime-shift fix has neither `judge_id` nor `behavior_id`, and
+  `canary_arm_counts` graded such a fix with `SELECT NULL AS verdict`. **No outcomes-only
+  canary could ever decide, on any account, at any traffic.** `7963790e` is the same case.
+  amfs-internal#785 grades these fixes on the signal that proposed them — a run that
+  reported an outcome and read the entry the fix is about is graded, and has recurred when
+  the outcome was not a success (`canary.implicated_entries`; the regime path now pins the
+  shifted key in an agent-drafted risk entry's `pattern_refs` so the link survives the
+  draft). Unit + Postgres tests; PR opened for Bruno's approval.
+- **3 filled and behaved.** `58f433d4` 17/13 over a floor of 8: "no significant
+  difference yet, 6 % vs 0 %" — one recurrence in the canary arm, none in control, a
+  legitimate running canary. `a4daf346` 8/6, two control runs short when the cell ended.
+  `26b1444d` 1/9 — a 50 % canary whose sticky session hash put 1 of 10 sessions in the
+  canary arm; one case, noted, not chased.
+
+**Amendment (k)** (`HYPOTHESIS_RSI.md`): (1) #785; (2) the look schedule fills a freed slot
+from the same queue the platform's sweep reads — passed, inconclusive, or `proposed` with
+nothing to replay, no replay awaited, oldest by `tested_at` — at the product's 10 % cap
+for a fix no offline test vouched for (`_canary_ready` / `_replay_awaited` in
+`arms/senselab_rsi_arm.py`; `canary_start` events now carry `pct` and `from_status`; the
+report carries `canary_undecided_at_end`). (3) Cell length is the limit that stays: a
+fleet-1 60-episode cell cannot fill a 10 % canary and fills a 50 % one only if the fix
+lands by about episode 40 — reported, not amended; E1 fleet-6 and E2 carry the measured
+ship-rate readout. Treated run `rsi-pilot-5k` (5h protocol) once #785 is live; 5j is the
+baseline.
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families

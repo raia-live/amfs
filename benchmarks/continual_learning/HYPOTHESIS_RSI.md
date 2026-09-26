@@ -1084,3 +1084,82 @@ defers the measured readout to E2 (200 episodes, fleet-10, two changes), where t
 agent drafts repeatedly, and to amendment (k) if adopted, which raises the number of fixes
 that reach a ship or a failed canary at all. Nothing about the mechanism is changed by
 this readout.
+
+### 2026-09-26 (k) — the canary gate inside a cell: two defects, corrected before the run
+
+**Why.** Across every `senselab-rsi` cell to date (5h, 5i, 5j, both probe-(i) RSI halves)
+the loop drafted fixes and shipped none: 11 fixes sat in `canary` at the end of the day.
+The pre-registered look schedule (E2 mapping: `canary_pct` 50, `canary_min_outcomes` 8,
+`POST /fixes/{id}/canary/evaluate` every 5 sessions, harness timeout 60 sessions) *was*
+running — the canaries carry 5–16 evaluations each — so the earlier reading in
+`HEADROOM_RSI.md` ("evaluated only by the hourly sweep") was wrong and is corrected there.
+Reading every canary's arms against the traffic behind it found two defects and one
+limit, none of which the look schedule reaches:
+
+1. **An outcomes-only canary could never be graded** (engine, amfs-internal#785). A
+   regime-shift fix has neither `judge_id` nor `behavior_id`; `FixStore.canary_arm_counts`
+   graded such a fix's arms with `SELECT NULL AS verdict`, so `graded` was 0 whatever the
+   traffic. Fix `7a7a164b` (5j `ci-fix` s11, a rewrite of `repo-readme-ci`, 50 %) had 27
+   canary / 26 control stamped runs after start, all 53 with a judge verdict, and arms 0/0
+   after 16 evaluations. #785 grades an outcomes-only fix on the signal that proposed it:
+   a run is graded when it reported an outcome *and* read the entry the fix is about (the
+   rewritten key, or what the risk entry's `pattern_refs` name — `canary.implicated_entries`),
+   and has recurred when that outcome was not a success; a run that never read the entry
+   stays in the arm for the guard but is not graded, so a canary on a rarely-read entry
+   waits rather than deciding on runs the fix never touched. Judge- and behavior-scoped
+   grading is unchanged.
+2. **Inconclusive fixes waited for the platform's hourly sweep** (harness). Under
+   `auto_after_canary` the harness filled a freed slot only with `test_passed` fixes; a
+   `test_inconclusive` fix (Tier 1 could not replay the case — the common verdict on this
+   benchmark, fidelity 0.5–0.75) was queued by the platform for the small canary and
+   started by its hourly `canary_sweep` — at 15:20, 15:52, 16:21 for fixes proposed at
+   13:36–15:24, every one after its cell had ended (4 of the 11). The look schedule now
+   fills a freed slot from the same queue the sweep reads (`FixStore.canary_queue`: passed,
+   inconclusive, or `proposed` with nothing to replay; no replay awaited; oldest by
+   `tested_at`), at the product's `INCONCLUSIVE_CANARY_PCT_CAP` of 10 % for a fix no
+   offline test vouched for — exactly `_canary_overrides`. Nothing about *what* the gate
+   requires changes; only *when* the loop looks, which is what the look schedule already
+   was for.
+3. **The limit that stays: cell length.** Three 50 % canaries started within minutes of
+   their test and saw no traffic because the cell was over; the best-filled judge-scoped
+   canary (`58f433d4`, 17/13) cleared the floor of 8 and is a legitimate "no significant
+   difference yet" (1 recurrence in the canary arm, 0 in control); `a4daf346` (8/6) needed
+   two more control runs when its cell ended. A fleet-1 60-episode cell cannot fill a 10 %
+   canary (8 graded canary runs need ~80 sessions after start) and fills a 50 % one only
+   if the fix lands by about episode 40. Not amended: fleet-1 cells report the canary as it
+   stood at cell end (`canary_undecided_at_end`), and the measured ship-rate readout is
+   E1's fleet-6 cells and E2 (fleet-10, 200 episodes), where the arms fill in minutes.
+
+**What changes in the measured arms.** `senselab-rsi` and its `-review` / `-selfreport` /
+`-judges` variants (all `auto_after_canary` or `review`); `-nocanary` (ships on Tier 1) and
+`-noreplay` (starts every fix's canary already) are untouched by (2) and reached by (1)
+only where a regime fix's canary is read. Baseline arms, scenarios, change sets, rubric
+and metrics unchanged.
+
+**Endpoints (fix lifecycle readout).** (K1) Share of canaries that *decide* (pass, fail or
+inconclusive-by-rule) before cell end, by fix path (judge / regime) and Tier 1 verdict
+(passed / inconclusive). (K2) Median sessions from proposal to canary start, by Tier 1
+verdict. (K3) Graded runs per arm at cell end for regime-path canaries (0/0 before #785 by
+construction). (K4) Fixes shipped per cell, and the changed-class success after the first
+ship (the RSI-specific outcome the paper is about).
+
+**Predictions, dev seeds (5j is the baseline; the first 5h-protocol run with #785 live and
+this harness is the treated run, `rsi-pilot-5k`).** (P1) K3: every regime-path canary with
+≥ 1 stamped run in each arm has graded > 0 in both (0 of 2 before). (P2) K2 for
+inconclusive fixes falls from "after cell end" to ≤ 10 sessions. (P3) K1 rises above 0 for
+50 % canaries whose fix landed by episode 40; it stays near 0 for 10 % canaries in fleet-1
+cells (the limit in 3, reported as such). (P4) K4 > 0 on at least one dev cell — the first
+ship of the study — and no `regressed` within the cell. **What falsifies the claim:** if
+K3 stays 0/0 with stamped runs present, #785's grading does not read this traffic and the
+canary is not the right gate for outcomes-only fixes on this benchmark; if K1 stays 0 with
+arms filled, the fixes are not moving the outcome and the paper says the loop drafts but
+does not repair at this scale; if a shipped fix regresses within its cell, the gate is
+letting through changes the outcome record then rejects, which the paper reports as a
+false-ship rate rather than hides.
+
+**Scope note.** Engine change (#785) opened as a PR for approval, benchmark change
+(harness look schedule) committed here, both before the treated run; 5j and the earlier
+RSI cells are the pre-(k) baseline; no confirmatory seed has been run on either side.
+Bruno approved (1) and option (a) on 2026-09-26; the corrected reading of what (a) is —
+the look schedule already existed; the change is what the look schedule *starts* — is
+recorded here rather than silently substituted.

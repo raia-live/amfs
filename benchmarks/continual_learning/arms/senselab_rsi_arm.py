@@ -17,9 +17,11 @@ What the arm adds to ``senselab``:
 * **Between episodes (the look schedule)**: what the hourly ``canary_sweep`` would do for this
   one agent, through the account's own endpoints, every ``look_every`` sessions —
   ``POST /fixes/{id}/canary/evaluate`` for the running canary, ``POST /fixes/{id}/canary`` for
-  the oldest tested fix waiting on a freed slot, ``POST /fixes/{id}/recheck`` for shipped fixes
-  — plus a snapshot of the agent's fixes so the episode row carries the lifecycle.
-  Nothing that decides (propose, gate, ``decide()``, ship, roll back) runs here.
+  the oldest fix in the sweep's queue waiting on a freed slot (passed, inconclusive, or never
+  tested for want of a replayable case; the latter two at the product's 10 % cap — amendment
+  (k)), ``POST /fixes/{id}/recheck`` for shipped fixes — plus a snapshot of the agent's fixes
+  so the episode row carries the lifecycle. Nothing that decides (propose, gate, ``decide()``,
+  ship, roll back) runs here.
 
 Variants:
 
@@ -92,6 +94,9 @@ JUDGE_PROMPT = (
 
 OPEN_STATUSES = ("proposed", "testing", "test_passed", "test_failed", "test_inconclusive", "canary")
 SHIPPED_STATUSES = ("memory_shipped", "verified", "regressed")
+#: The product's cap on a canary no offline test vouched for (``amfs_eval.repair.loop
+#: .INCONCLUSIVE_CANARY_PCT_CAP``); the look schedule applies it as ``_canary_overrides`` does.
+INCONCLUSIVE_CANARY_PCT_CAP = 10
 
 
 def _int_env(name: str, default: int) -> int:
@@ -99,6 +104,30 @@ def _int_env(name: str, default: int) -> int:
         return int(os.environ.get(name, "") or default)
     except ValueError:
         return default
+
+
+def _canary_ready(f: dict[str, Any]) -> bool:
+    """``FixStore.canary_queue``'s readiness, on the fix record as the API returns it: tested
+    (passed or inconclusive), or ``proposed`` with a test behind it or with nothing to replay
+    at all (no case set, no predicted fixes or regressions — an outcomes-only proposal whose
+    canary is its only test)."""
+    status = f.get("status")
+    if status in ("test_passed", "test_inconclusive"):
+        return True
+    if status != "proposed":
+        return False
+    if f.get("tested_at"):
+        return True
+    manifest = f.get("manifest") if isinstance(f.get("manifest"), dict) else {}
+    return (not f.get("case_set_id") and not manifest.get("predicted_fixes")
+            and not manifest.get("predicted_regressions"))
+
+
+def _replay_awaited(f: dict[str, Any]) -> bool:
+    """Tier 2 comes before Tier 3: a fix whose customer replay is still requested is not
+    ready for a canary (the canary would cancel the replay unread)."""
+    rep = f.get("replay") if isinstance(f.get("replay"), dict) else None
+    return bool(rep and rep.get("status") == "requested")
 
 
 def _fix_row(f: dict[str, Any]) -> dict[str, Any]:
@@ -554,25 +583,34 @@ class SenseLabRsiArm(SenseLabArm):
             except Exception as e:  # noqa: BLE001
                 log("canary_error", fid, error=f"{type(e).__name__}: {e}"[:200])
 
-        # A freed slot: start the oldest tested fix waiting on it (what ``_start_next_canary``
-        # does in the sweep). Under ``-noreplay`` any open fix with a branch qualifies.
+        # A freed slot: start the oldest fix in the sweep's queue (what ``_start_next_canary``
+        # does hourly, through ``FixStore.canary_queue``). Amendment (k): the queue, not only
+        # the passed fixes — an inconclusive fix, or one never tested because nothing was
+        # replayable, runs the small canary *as* its test, at the product's cap for a change
+        # no offline test vouched for (``_canary_overrides``). Before (k) the harness started
+        # only ``test_passed`` fixes and the others waited for the platform's hourly sweep,
+        # which on the pilots fired after the cell had ended. Under ``-noreplay`` any open
+        # fix with a branch qualifies.
         if not slot_busy and self.repair_policy != "auto_after_replay":
             if self.canary_regardless_of_test:
                 waiting = [f for f in fixes if f.get("status") in ("proposed", "test_passed", "test_failed", "test_inconclusive")
                            and f.get("branch") and not f.get("canary")]
             elif self.repair_policy == "auto_after_canary":
-                waiting = [f for f in fixes if f.get("status") == "test_passed" and f.get("branch") and not f.get("canary")]
+                waiting = [f for f in fixes if _canary_ready(f) and f.get("branch") and not f.get("canary")
+                           and not _replay_awaited(f)]
             else:
                 waiting = []
-            waiting.sort(key=lambda f: str(f.get("created_at") or ""))
+            waiting.sort(key=lambda f: (str(f.get("tested_at") or "9"), str(f.get("created_at") or "")))
             for f in waiting[:1]:
                 fid = str(f["id"])
+                pct = self.canary_pct if f.get("status") == "test_passed" else min(self.canary_pct, INCONCLUSIVE_CANARY_PCT_CAP)
                 try:
-                    after = self.pro.start_canary(fid, pct=self.canary_pct, min_outcomes=self.canary_min_outcomes,
+                    after = self.pro.start_canary(fid, pct=pct, min_outcomes=self.canary_min_outcomes,
                                                   timeout_days=1)
                     calls += 1
                     self._canary_started_at[fid] = self.sessions_sealed
-                    log("canary_start", fid, by="harness-sweep", status=after.get("status"),
+                    log("canary_start", fid, by="harness-sweep", status=after.get("status"), pct=pct,
+                        from_status=f.get("status"),
                         test_status=(f.get("test") or {}).get("status") if isinstance(f.get("test"), dict) else f.get("status"))
                 except ProApiError as e:
                     calls += 1
@@ -602,7 +640,8 @@ class SenseLabRsiArm(SenseLabArm):
                                "scenario": self._scenario_name, "policy": self.repair_policy,
                                "verdict_source": self.verdict_source, "judges_on": self.judges_on,
                                "canary": {"pct": self.canary_pct, "min_outcomes": self.canary_min_outcomes,
-                                          "timeout_sessions": self.canary_timeout_sessions, "look_every": self.look_every},
+                                          "timeout_sessions": self.canary_timeout_sessions, "look_every": self.look_every,
+                                          "inconclusive_pct_cap": INCONCLUSIVE_CANARY_PCT_CAP, "look_fills_queue": "k"},
                                "pacing": {"verdict_wait_s": self.verdict_wait_s, "verdict_poll_s": self.verdict_poll_s},
                                "tier2": {"enabled": self.tier2, "replay_wait_hours": self.replay_wait_hours,
                                          "hub": self._hub.report() if self._hub is not None else None,
@@ -628,6 +667,17 @@ class SenseLabRsiArm(SenseLabArm):
                         pass
                 full.append(row)
             out["fixes"] = full
+            # Amendment (k) K1/K3: the canaries still running when the cell ended, with their
+            # arms as the last evaluation left them — a fleet-1 cell's expected reading for
+            # a 10 % canary, reported rather than hidden.
+            out["canary_undecided_at_end"] = [
+                {"id": str(f["id"]), "source": f.get("source"), "scoped": bool(f.get("judge_id") or f.get("behavior_id")),
+                 "from_status": (f.get("test") or {}).get("status") if isinstance(f.get("test"), dict) else None,
+                 **{k: (f.get("canary") or {}).get(k) for k in ("pct", "min_outcomes", "evaluations", "note")},
+                 "canary_graded": ((f.get("canary") or {}).get("canary") or {}).get("graded"),
+                 "control_graded": ((f.get("canary") or {}).get("control") or {}).get("graded")}
+                for f in fixes if f.get("status") == "canary" and isinstance(f.get("canary"), dict)
+            ]
         except Exception as e:  # noqa: BLE001
             out["fixes_error"] = f"{type(e).__name__}: {e}"[:200]
         def per_agent(agent: str) -> dict[str, Any]:
