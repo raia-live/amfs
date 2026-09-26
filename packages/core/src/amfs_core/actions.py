@@ -1735,10 +1735,23 @@ def render_priors(
         u for u in untried
         if u in in_plan and u not in backed and u not in hedged_keys and u not in barred
     ]
+    # What each untried candidate did on the entity's other situations, when
+    # there is such a record: the sweep's order is drawn from it, and a plan
+    # whose order the agent can see the reason for is one it can weigh
+    # against the task instead of following blind. The CL support pilot
+    # (2026-09-26) had a class whose fix changed to the textbook answer — an
+    # action that had never won anywhere, so the record put it last; the
+    # agent walked five winners-elsewhere first because nothing told it the
+    # sixth was merely untested rather than known to fail.
+    note = _elsewhere_notes(priors, [*head, *tail]) if (mode == "explore") else {}
+
+    def _shown(a: str) -> str:
+        return f"{a} ({note[a]})" if a in note else a
+
     if head:
-        line = f"Try {head[0]} first"
+        line = f"Try {_shown(head[0])} first"
         if head[1:]:
-            line += ", then " + " -> ".join(head[1:])
+            line += ", then " + " -> ".join(_shown(a) for a in head[1:])
         lines.append(line + ". Do not repeat an action that failed on this task.")
     for a in hedge[:1]:
         h = next(t for t in hedged if str(t.get("action_key")) == a)
@@ -1748,11 +1761,40 @@ def render_priors(
             "task nothing solved — the fix may have changed, and one attempt on it is cheap if it did not."
         )
     if tail:
-        lines.append(
-            f"Untried {here}: " + ", ".join(tail[:8])
-            + " — the record cannot order these; choose among them by your own judgement of the task."
-        )
+        if any(a in note for a in tail[:8]):
+            lines.append(
+                f"Untried {here}: " + ", ".join(_shown(a) for a in tail[:8])
+                + " — the record for this situation has nothing on them; the brackets are what "
+                "each did on this queue's other situations. Weigh that against the task's own "
+                "details: untested anywhere means unknown, not ruled out."
+            )
+        else:
+            lines.append(
+                f"Untried {here}: " + ", ".join(tail[:8])
+                + " — the record cannot order these; choose among them by your own judgement of the task."
+            )
     return "\n".join(lines)
+
+
+def _elsewhere_notes(priors: Mapping[str, Any] | None, actions: Sequence[str]) -> dict[str, str]:
+    """A short record-elsewhere note per action in *actions*, when the entity
+    has a record elsewhere at all: ``9/10 elsewhere`` for one tried on other
+    situations, ``untested anywhere`` for one with no record on the entity.
+    Empty when there is no record elsewhere — then every candidate would
+    read ``untested anywhere`` and the line would say nothing."""
+    rec = (priors or {}).get("elsewhere")
+    tried = list(rec.get("tried") or []) if isinstance(rec, Mapping) else []
+    if not tried:
+        return {}
+    by_key = {str(t.get("action_key")): t for t in tried}
+    out: dict[str, str] = {}
+    for a in actions:
+        t = by_key.get(a)
+        if t is None:
+            out[a] = "untested anywhere"
+        else:
+            out[a] = f"{int(t.get('won', 0))}/{int(t.get('n', 0))} elsewhere"
+    return out
 
 
 def _evidence_backed(

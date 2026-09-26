@@ -1743,7 +1743,12 @@ def test_a_sweep_is_ordered_by_the_entitys_record_elsewhere() -> None:
     rec = act.recommend(pr, agent_id="x", candidate_actions=cands)
     assert rec["sweep"] is True and rec["suggested_action"] == "resolve:e"
     assert rec["plan"][:3] == ["resolve:e", "resolve:c", "resolve:d"]
-    assert "Try resolve:e first, then resolve:c -> resolve:d." in act.render_priors(pr, rec, candidate_actions=cands)
+    # Each candidate carries its record elsewhere, so the agent can see why
+    # the order is what it is — and that the last one is unknown, not a loser.
+    assert (
+        "Try resolve:e (9/10 elsewhere) first, then resolve:c (2/2 elsewhere) -> "
+        "resolve:d (untested anywhere)."
+    ) in act.render_priors(pr, rec, candidate_actions=cands)
     # The order is the record's, and the record knows nothing about which never-tried
     # action fits this task: the agent is told to put one the task points to first.
     assert "if the task's own details point to one of them, take it first" in rec["why"]
@@ -2167,3 +2172,37 @@ def test_a_record_that_still_holds_a_winner_is_not_called_mixed() -> None:
                         regime_shift_at=datetime(2026, 9, 25, tzinfo=UTC),
                         candidate_actions=["fix:a", "fix:b"])
     assert rec is None or rec.get("mixed") is not True
+
+
+def test_the_untried_carry_their_record_elsewhere_so_the_agent_can_weigh_them() -> None:
+    """CL support pilot 5a (2026-09-26): after the change, android's fix moved
+    to the textbook answer — an action that had never won anywhere on the
+    queue, so the elsewhere order put it last and the agent walked five
+    winners-elsewhere first. Nothing in the text said the sixth was merely
+    untested. Each untried candidate now shows its record on the queue's
+    other situations — ``9/10 elsewhere``, ``0/3 elsewhere``, ``untested
+    anywhere`` — on the sweep's plan and on the unordered untried line, and
+    the untried line says what the brackets mean. Without a record elsewhere
+    the text is unchanged: every bracket would say the same thing."""
+    cands = ["resolve:a", "resolve:b", "resolve:c", "resolve:d"]
+    pr = {"tried": [_prior("resolve:a", 0, 2, ["lost", "lost"])],
+          "untried": ["resolve:b", "resolve:c", "resolve:d"],
+          "elsewhere": {"outcomes": 13, "tried": [
+              {"action_key": "resolve:b", "won": 9, "lost": 1, "n": 10, "p": 0.83},
+              {"action_key": "resolve:c", "won": 0, "lost": 3, "n": 3, "p": 0.2},
+          ]}}
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "explore" and not rec.get("sweep")
+    text = act.render_priors(pr, rec, candidate_actions=cands)
+    assert (
+        "Untried on tasks like this: resolve:b (9/10 elsewhere), resolve:c (0/3 elsewhere), "
+        "resolve:d (untested anywhere) — the record for this situation has nothing on them"
+    ) in text
+    assert "untested anywhere means unknown, not ruled out" in text
+    assert "the record cannot order these" not in text
+    # An act's head line is the record here, not elsewhere: no brackets.
+    pr_act = {"tried": [_prior("resolve:a", 4, 4, ["won"] * 4)], "untried": ["resolve:b"],
+              "elsewhere": pr["elsewhere"]}
+    rec_act = act.recommend(pr_act, agent_id="a", candidate_actions=cands)
+    assert rec_act["mode"] == "act"
+    assert "(9/10 elsewhere)" not in act.render_priors(pr_act, rec_act, candidate_actions=cands)
