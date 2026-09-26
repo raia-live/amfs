@@ -334,6 +334,11 @@ class _SenseLabSession(EpisodeSession):
             self.mem.set_session_attributes(attrs)
         except Exception as e:  # noqa: BLE001
             self.acct.notes["session_attributes_error"] = str(e)[:120]
+        # The arm's say on automatic fix proposals for this identity, applied on its first
+        # session here and recorded on that episode.
+        state = arm.hold_auto_propose(saas_agent)
+        if state is not None:
+            self.acct.notes["auto_propose"] = state
 
         self._attempts_marked = 0
         self._tried_this_task: set[str] = set()
@@ -692,12 +697,66 @@ class SenseLabArm(MemoryArm):
     # environment's, not the agent's, and the repair loop's canary promotion requires
     # outcomes verified from outside the agent. ``None`` = omitted (the self-report condition).
     verified_by: str | None = "benchmark-oracle"
+    # Whether the platform may propose fixes for this arm's agents on its own
+    # (``RepairSettings.auto_propose``, amfs-internal #786). The control arms are the engine
+    # without its repair loop, so they hold it: separated by construction, not by reading the
+    # fix ledger afterwards (HYPOTHESIS_RSI.md, amendment (l) item 6). The repair-loop arms
+    # set it on explicitly in ``_ready_agent``. ``None`` = leave the platform's default alone.
+    # ``CL_CONTROL_AUTO_PROPOSE=skip`` leaves the setting untouched (the pre-#786 condition).
+    auto_propose: bool | None = False
     # Set by the runner before ``open``: the agent model of the cell, stamped on traces.
     cell_model: str = ""
 
     def open(self, scope: str) -> None:
         super().open(scope)
         self._briefed_at: dict[str, Any] = {}
+        # hosted agent id -> how the auto-propose hold went ("held", "unsupported", "skipped",
+        # "error:<status>"); stamped on the first episode of each identity as ``arm_notes``.
+        self.auto_propose_state: dict[str, str] = {}
+        self._auto_propose_lock = threading.Lock()
+        self._settings_client = None
+
+    def hold_auto_propose(self, agent_id: str) -> str | None:
+        """Apply the arm's ``auto_propose`` to a hosted identity, once. Returns the state on
+        the call that applied it, ``None`` afterwards. Never fails the cell: an account whose
+        plan lacks the repair loop, or a platform predating the setting, is recorded, not
+        raised — the ledger check on ``fixes`` stays the fallback the paper reports."""
+        if self.auto_propose is None or agent_id in self.auto_propose_state:
+            return None
+        with self._auto_propose_lock:
+            if agent_id in self.auto_propose_state:
+                return None
+            if os.environ.get("CL_CONTROL_AUTO_PROPOSE", "").strip().lower() == "skip":
+                state = "skipped"
+            else:
+                state = self._put_auto_propose(agent_id)
+            self.auto_propose_state[agent_id] = state
+            return state
+
+    def _put_auto_propose(self, agent_id: str) -> str:
+        from ..pro_client import ProApiError, ProClient
+
+        try:
+            if self._settings_client is None:
+                self._settings_client = ProClient()
+            got = self._settings_client.set_repair_settings(agent_id, auto_propose=self.auto_propose)
+        except ProApiError as e:
+            return f"error:{e.status}"
+        except Exception as e:  # noqa: BLE001
+            return f"error:{type(e).__name__}"
+        if "auto_propose" not in got:
+            return "unsupported"      # the platform ignored the field: predates #786
+        return "held" if got.get("auto_propose") is False else "on"
+
+    def close(self) -> None:
+        client = getattr(self, "_settings_client", None)
+        if client is not None:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._settings_client = None
+        super().close()
         # label -> episodes that declared it, this cell. Shown to the agent on the search
         # tool so the labels converge; the server keeps the record, this is the taxonomy.
         self._situations: dict[str, int] = {}
@@ -986,6 +1045,7 @@ class SenseLabRepairArm(SenseLabArm):
     lever_override: str | None = None       # let the classifier choose the lever
     repair_policy = "auto_after_replay"
     compose = False
+    auto_propose = True                     # a repair-loop arm: the platform may propose
 
     def open(self, scope: str) -> None:
         super().open(scope)
@@ -1012,7 +1072,9 @@ class SenseLabRepairArm(SenseLabArm):
             return
         self.pro.ensure_judge(REPAIR_JUDGE_ID, agent_id, "Task outcome (benchmark)",
                               REPAIR_JUDGE_PROMPT.format(rubric=self._rubric[:1500]))
-        self.pro.set_repair_settings(agent_id, repair_policy=self.repair_policy)
+        got = self.pro.set_repair_settings(agent_id, repair_policy=self.repair_policy,
+                                           auto_propose=self.auto_propose)
+        self.auto_propose_state[agent_id] = "on" if got.get("auto_propose") is True else "unsupported"
         if self.compose:
             active = self.pro.get_repair_prompt(agent_id)
             base = (active.get("active") or {}).get("prompt") if isinstance(active.get("active"), dict) else None

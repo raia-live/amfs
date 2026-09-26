@@ -248,6 +248,7 @@ class _ReplayArmView:
 
 class SenseLabRsiArm(SenseLabArm):
     name = "senselab-rsi"
+    auto_propose = True                   # the repair loop is the treatment: proposals on, explicitly
     fleet_replicas = True                 # one repair loop per cell: fleet members are replicas
     repair_policy = "auto_after_canary"   # auto_after_replay | auto_after_canary | review
     judges_on = True
@@ -361,7 +362,8 @@ class SenseLabRsiArm(SenseLabArm):
                 self.pro.ensure_judge(JUDGE_ID, agent_id, "Task failure (benchmark, frozen rubric)",
                                       JUDGE_PROMPT.format(rubric=self._rubric[:1500]), mode="continuous")
             fields: dict[str, Any] = dict(repair_policy=self.repair_policy, canary_pct=self.canary_pct,
-                                          canary_min_outcomes=self.canary_min_outcomes, canary_timeout_days=1)
+                                          canary_min_outcomes=self.canary_min_outcomes, canary_timeout_days=1,
+                                          auto_propose=self.auto_propose)
             if self.tier2:
                 from ..replay_hub import ReplayHub
 
@@ -374,6 +376,9 @@ class SenseLabRsiArm(SenseLabArm):
                 # canary are the only tests.
                 fields["replay_webhook_url"] = ""
             settings = self.pro.set_repair_settings(agent_id, **fields)
+            # Recorded here so the session's hold does not PUT a second time for this identity.
+            self.auto_propose_state[agent_id] = ("on" if settings.get("auto_propose") is True
+                                                 else "unsupported")
             contract = None
             try:
                 contract = self.pro.feedback_contract(agent_id)
@@ -387,8 +392,9 @@ class SenseLabRsiArm(SenseLabArm):
                     ping = {"ok": False, "error": f"{e.status}: {str(e.detail)[:200]}"}
             self.events.append({"t": time.time(), "sessions": self.sessions_sealed, "kind": "agent_ready",
                                 "agent_id": agent_id, "settings": {k: settings.get(k) for k in (
-                                    "repair_policy", "canary_pct", "canary_min_outcomes", "canary_timeout_days",
-                                    "replay_fidelity_floor", "replay_webhook_url", "replay_wait_hours")},
+                                    "auto_propose", "repair_policy", "canary_pct", "canary_min_outcomes",
+                                    "canary_timeout_days", "replay_fidelity_floor", "replay_webhook_url",
+                                    "replay_wait_hours")},
                                 "contract": contract, "replay_webhook_ping": ping,
                                 "ms": round((time.perf_counter() - t0) * 1000, 1)})
         except ProApiError as e:
