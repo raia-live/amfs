@@ -73,9 +73,11 @@ JUDGE_PROMPT = (
     "with the memory entries under memory_read: if an entry recommends, records or endorses "
     "the action the agent took (or the class of action, for this kind of task), add a "
     "criterion named 'followed-memory' with passed=false whose evidence_quote is the exact "
-    "text of that entry's value (copy it verbatim, up to one sentence). If no entry read "
-    "supports the action, add 'followed-memory' with passed=true and quote the agent's own "
-    "reasoning or the tool call instead. Do not grade tone or verbosity.\n\n"
+    "text of that entry's value (copy it verbatim, up to one sentence) and whose span_id is "
+    "null — the evidence is the memory entry, not a span; a span_id on this criterion is "
+    "wrong. If no entry read supports the action, add 'followed-memory' with passed=true and "
+    "quote the agent's own reasoning or the tool call instead. Do not grade tone or "
+    "verbosity.\n\n"
     "Scenario notes: {rubric}\n\nTRACE:\n{{{{trace}}}}"
 )
 # ``JUDGE_PROMPT.format(rubric=...)`` yields the literal ``{{trace}}`` the judge store requires.
@@ -84,6 +86,9 @@ JUDGE_PROMPT = (
 # ``_resolve_evidence``), which ``classify_lever`` counts as knowledge. Without it every
 # failing run cites only the tool span that carried the bad action and the classifier reads
 # the failure as ``code`` (pilot 1, 2026-09-26: two template fixes, no branch, nothing to canary).
+# ``span_id`` must be null on that criterion: ``locate()`` honours a span hint before it
+# looks at the quote, so a verbatim entry quote with a span_id still resolves to the span
+# (pilot 2: three followed-memory criteria, all resolved to tool spans, zero entry refs).
 
 OPEN_STATUSES = ("proposed", "testing", "test_passed", "test_failed", "test_inconclusive", "canary")
 SHIPPED_STATUSES = ("memory_shipped", "verified", "regressed")
