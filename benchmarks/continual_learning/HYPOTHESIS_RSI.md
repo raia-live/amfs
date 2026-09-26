@@ -1046,7 +1046,17 @@ entries (P4) but their changed-class first-attempt success does not move relativ
 limit of memory-only transfer.
 
 **Scope note.** This is an engine change during the development phase, before
-`analysis-freeze-rsi`. It is preregistered here before the treated run, the untreated 5h/5i
+`analysis-freeze-rsi`. It is preregistered here before the treated run, the untreated 5h
 and probe-(i) RSI cells are kept as the pre-#784 baseline, and no confirmatory seed has
 been run on either side. Dev-seed readouts on both sides are reported; the confirmatory
 grid runs with #784 live.
+
+**Cut time (recorded 2026-09-26).** #784 merged at 14:49Z; `amfs-api-02003-hcb` took
+100 % of traffic between 14:59:44Z (revision created) and 15:00:46Z (first observation at
+100 %). Pre-#784 baseline: pilot 5h (complete, 240 episodes) and the 29 episodes of 5i
+that ran before the merge (`results/rsi-pilot-5i-aborted-pre784`, stopped at 14:50Z so
+the treated run would not straddle the deploy). The `senselab-rsi` halves of probe (i)
+were left running: their `support` cells (join at 60; joiner first exposures at episodes
+60–70, all sealed before 14:50Z) are pre-#784, their `ci-fix` cells post-#784 — a
+scenario × treatment confound that the (i)/(j) readout reports rather than pools. Treated
+run of the 5h protocol: `rsi-pilot-5j`, launched 15:05Z on the new revision.
