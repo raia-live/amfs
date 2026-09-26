@@ -2206,3 +2206,15 @@ def test_the_untried_carry_their_record_elsewhere_so_the_agent_can_weigh_them() 
     rec_act = act.recommend(pr_act, agent_id="a", candidate_actions=cands)
     assert rec_act["mode"] == "act"
     assert "(9/10 elsewhere)" not in act.render_priors(pr_act, rec_act, candidate_actions=cands)
+    # An explore whose plan still names an action tried *here* (a 1/3 that has
+    # not stopped working) shows that action bare: its record is the "Tried"
+    # line, and "untested anywhere" would contradict it.
+    pr_mixed = {"tried": [_prior("resolve:a", 1, 3, ["won", "lost", "lost"])],
+                "untried": ["resolve:b", "resolve:d"],
+                "elsewhere": {"outcomes": 10, "tried": [
+                    {"action_key": "resolve:b", "won": 9, "lost": 1, "n": 10, "p": 0.83}]}}
+    rec_mixed = act.recommend(pr_mixed, agent_id="a", candidate_actions=cands)
+    assert rec_mixed["mode"] == "explore"
+    text_mixed = act.render_priors(pr_mixed, rec_mixed, candidate_actions=cands)
+    assert "resolve:a (" not in text_mixed
+    assert "resolve:b (9/10 elsewhere)" in text_mixed and "resolve:d (untested anywhere)" in text_mixed

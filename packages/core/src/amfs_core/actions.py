@@ -1743,7 +1743,14 @@ def render_priors(
     # action that had never won anywhere, so the record put it last; the
     # agent walked five winners-elsewhere first because nothing told it the
     # sixth was merely untested rather than known to fail.
-    note = _elsewhere_notes(priors, [*head, *tail]) if (mode == "explore") else {}
+    # Only the untried get a note: an explore's head can also hold an action
+    # tried here (a loser with a win that has not stopped working), whose
+    # record is the "Tried" line above, not a blank slate elsewhere.
+    untried_set = set(untried)
+    note = (
+        _elsewhere_notes(priors, [a for a in [*head, *tail] if a in untried_set])
+        if mode == "explore" else {}
+    )
 
     def _shown(a: str) -> str:
         return f"{a} ({note[a]})" if a in note else a
