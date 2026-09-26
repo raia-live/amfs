@@ -101,7 +101,9 @@ PRIORS_CONTRACT = (
     "untried ones when it says to use your judgement. On a retry, take the next action in the "
     "footer's order that you have not tried on this task; never repeat an action that already "
     "failed on this task. Give every memory_search a `situation` label for the kind of task, "
-    "reusing the labels already in use."
+    "reusing the labels already in use. If the footer says two kinds of task share your label, "
+    "search once more with a finer label that names what distinguishes this task, and decide "
+    "from the task's own details."
 )
 
 _KIND = {"fact": MemoryType.FACT, "belief": MemoryType.BELIEF, "experience": MemoryType.EXPERIENCE}
@@ -325,6 +327,9 @@ class _SenseLabSession(EpisodeSession):
         # stamped on the trace, so the situation's own outcome record is what the priors
         # read and what the repair loop groups failing runs by.
         self.situation: str | None = None
+        # Set when the server's recommendation said the declared label pools two kinds of
+        # task; lets a finer label replace it (see ``_declare_situation``).
+        self._situation_pooled = False
         # Entries the briefing already named as discredited. A retrieve's avoid list names
         # them again; those rows are rendered as a reference to the briefing rather than
         # carried twice in every call of the episode.
@@ -449,6 +454,15 @@ class _SenseLabSession(EpisodeSession):
                     self.last_recommendation["situation_outcomes"] = int(record.get("outcomes") or 0)
                 if self.situation:
                     self.last_recommendation["situation"] = self.situation
+                if rec.get("pooled") and self.situation:
+                    # The server read two kinds of task under this label. Remembered on the
+                    # arm so the label is no longer offered for reuse, and on the session so
+                    # a finer label may replace it (``_declare_situation``).
+                    self.last_recommendation["pooled"] = True
+                    self._situation_pooled = True
+                    self.arm.note_pooled(self.situation)
+                if rec.get("mixed"):
+                    self.last_recommendation["mixed"] = True
                 self.acct.notes[f"rec_{rec['mode']}"] = self.acct.notes.get(f"rec_{rec['mode']}", 0) + 1
             elif extra:
                 self.acct.notes["rec_none"] = self.acct.notes.get("rec_none", 0) + 1
@@ -478,12 +492,20 @@ class _SenseLabSession(EpisodeSession):
         the SDK's ``Run.begin`` puts it (``attributes.situation``), once."""
         if not self.arm.declares_situation:
             return None
-        if self.situation:
-            return self.situation
         label = fold_situation(situation)
+        if self.situation:
+            # Sticky — except when the server has said this episode's label pools two kinds
+            # of task (``recommendation.pooled``) and the agent now offers a different one:
+            # the finer label is the fix the server asked for, and the outcome must land on
+            # it, not on the label that pooled. Pilot 5a (2026-09-26): both ci-fix audit
+            # classes were declared ``audit failure`` and the record alternated all run.
+            if not (self._situation_pooled and label and label != self.situation):
+                return self.situation
+            self.acct.notes["situation_refined"] = self.acct.notes.get("situation_refined", 0) + 1
         if not label:
             return None
         self.situation = label
+        self._situation_pooled = False
         self.arm.note_situation(label)
         try:
             self.mem.set_session_attributes({SITUATION_ATTRIBUTE: label[:200]})
@@ -662,6 +684,7 @@ class SenseLabArm(MemoryArm):
         # tool so the labels converge; the server keeps the record, this is the taxonomy.
         self._situations: dict[str, int] = {}
         self._situations_lock = threading.Lock()
+        self._pooled_situations: set[str] = set()
 
     def configure(self, scenario) -> None:
         # The cell's agent base (the runner has already suffixed it per cell attempt, e.g.
@@ -679,9 +702,21 @@ class SenseLabArm(MemoryArm):
             if labels is not None:
                 labels[label] = labels.get(label, 0) + 1
 
+    def note_pooled(self, label: str) -> None:
+        """The server said *label* pools two kinds of task with different fixes. It is no
+        longer offered for reuse; the tool description names it as too coarse instead."""
+        with getattr(self, "_situations_lock", threading.Lock()):
+            pooled = getattr(self, "_pooled_situations", None)
+            if pooled is not None:
+                pooled.add(label)
+
     def situation_labels(self) -> list[str]:
         labels = getattr(self, "_situations", None) or {}
-        return [k for k, _ in sorted(labels.items(), key=lambda kv: (-kv[1], kv[0]))]
+        pooled = getattr(self, "_pooled_situations", None) or set()
+        return [k for k, _ in sorted(labels.items(), key=lambda kv: (-kv[1], kv[0])) if k not in pooled]
+
+    def pooled_situation_labels(self) -> list[str]:
+        return sorted(getattr(self, "_pooled_situations", None) or set())
 
     def prompt_addendum(self, agent_id: str) -> str | None:
         return PRIORS_CONTRACT if (self.priors and self.contract) else None

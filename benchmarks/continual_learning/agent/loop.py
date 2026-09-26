@@ -45,8 +45,10 @@ SITUATION_PARAM_DESCRIPTION = (
     "A short, stable label for the KIND of task — two to four lowercase words naming what "
     "decides the right action (the issue, the failing check, the request type), never the "
     "customer's wording, ids or numbers. Use the exact same label for every task of the same "
-    "kind, and a different label when the deciding detail differs (e.g. 'snapshot diff on ui pr' "
-    "vs 'snapshot diff on backend pr')."
+    "kind, and a different label when the deciding detail differs: two tasks that would need "
+    "different fixes must get different labels, so include the detail from the task that "
+    "separates them (which check, which kind of change or account), e.g. 'snapshot diff on ui pr' "
+    "vs 'snapshot diff on backend pr', not 'snapshot diff' for both."
 )
 SITUATION_LABELS_SHOWN = 16
 
@@ -63,6 +65,10 @@ def memory_tools(arm: MemoryArm) -> list[dict[str, Any]]:
     known = list(arm.situation_labels() or [])[:SITUATION_LABELS_SHOWN]
     if known:
         desc += " Labels already in use here (reuse one when it fits): " + "; ".join(known) + "."
+    coarse = list(getattr(arm, "pooled_situation_labels", list)() or [])[:6]
+    if coarse:
+        desc += (" Labels found too coarse — two kinds of task with different fixes shared them; "
+                 "do not reuse, add the detail that separates them: " + "; ".join(coarse) + ".")
     search["parameters"]["properties"]["situation"] = {"type": "string", "description": desc}
     search["parameters"]["required"] = ["query", "situation"]
     return [search] + MEMORY_TOOLS[1:]

@@ -204,6 +204,11 @@ class MemoryArm:
         a taxonomy forms instead of a new wording per task. Empty for arms without one."""
         return []
 
+    def pooled_situation_labels(self) -> list[str]:
+        """Labels the memory system reported as pooling two kinds of task with different
+        fixes — shown to the agent as too coarse, so the next label says what differs."""
+        return []
+
     def open(self, scope: str) -> None:
         """Prepare an isolated namespace for one (scenario, seed)."""
         self.scope = scope
