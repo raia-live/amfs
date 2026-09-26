@@ -1181,6 +1181,64 @@ before the cut, not a later re-read. Stale ngrok tunnels for the team-grows hubs
 (8788/8789, no listeners) were removed before launch so the reserved domain routes every
 Tier 2 webhook to the single live hub on 8787.
 
+**Readout (recorded 2026-09-27, `rsi-pilot-5k` complete, 240/240).** Success pooled over
+the two dev seeds: ci-fix 95.8 % (5j 94.2), support 93.3 % (5j 93.3); changed-class
+post-change success 90.0 / 82.5 % (5j 82.5 / 82.5) — flat, as expected with nothing
+shipped. Fix lifecycle: three fixes, all `repair_agent`-drafted, all knowledge lever, all
+outcomes-only (regime path; no judge or behaviour on the fix), all in `canary` at cell end;
+0 shipped, 0 `test_inconclusive`. Routing worked in every canary (the `X-AMFS-Canary`
+header on the session, the stamp on the sealed trace): ci-fix s11 drew 32 canary / 17
+control sessions from session 10, ci-fix s23 19 / 19 from session 20, support s23 (10 %
+canary, Tier 1 inconclusive) 1 / 17 from session 40. Against the predictions:
+
+* **P1 (K3 > 0 in both arms with stamped runs) — falsified, 3 of 3.** Every arm had
+  outcomes on every run (32 / 17, 19 / 19, 1 / 17) and `graded = 0` on both sides for the
+  whole window. The predicate is not at fault; the population is. #785 grades an
+  outcomes-only fix on *runs that read the entry the fix is about*. For both ci-fix fixes
+  that entry is `repo-readme-ci` — the seeded README — and no run in either arm read it:
+  the agent read it in episodes 1–4 only, before it had notes of its own, and from
+  episode 5 its retrievals return its own situation-keyed notes. The support fix's
+  implicated entry is one of the agent's notes (`…tier1-after-settings-fail`) that no run
+  in its 20-session window read. A fix to an entry the traffic has stopped reading cannot
+  be graded on reads of it — and it cannot repair anything either.
+* **How the README came to be "a validated entry that stopped working".** Episodes 1–4
+  read it and succeeded (4 successes: validated). Episodes 5–6 were first exposures to a
+  new class (`pip-audit`); each failed attempt had read only the README, so under #783
+  the attempt failures were charged to it (`successes 4, failures 2` on the job payload,
+  proposed on the episode-7 seal). The README was not wrong — the class was new. On a
+  benchmark where every class is a first exposure once, any broadly read entry becomes a
+  regime candidate after its first three successes. **A first-exposure failure is not a
+  regime shift**, and the detector cannot tell them apart from the entry's aggregate
+  record alone.
+* **P2 (K2 ≤ 10 sessions for inconclusive fixes) — met.** Support s23: proposed at 38,
+  Tier 1 inconclusive, canary at 40 (2 sessions, the 10 % cap). Passed fixes: 2–3 and 6
+  sessions.
+* **P3 (K1 > 0 for 50 % canaries landed by episode 40) — not met, for the P1 reason.** Both
+  50 % canaries filled both arms well inside the window (17 and 19 outcomes on the smaller
+  side against a floor of 8) and could not decide because `graded` never left 0. The slot was held for 50 and 40 sessions by
+  canaries that could not be read, and would have been held until the 1-day timeout.
+* **P4 (K4 > 0, a first ship, no regression) — not met.** 0 shipped.
+
+**What this means for the loop, and two engine corrections proposed (PRs for approval).**
+(1) *Canary futility on ungraded arms.* `decide()` already frees the slot when both arms
+are graded and show no effect (rule 6); it has no rule for arms full of outcomes and
+empty of grades. Proposed rule 1b: with `FUTILITY_MULTIPLE × min_outcomes` outcomes in
+both arms and no graded run in either, the canary is **inconclusive ("ungraded")**, the
+note naming what grading needed (the fix's judge, its behaviour, or reads of the entries
+it is about). On this cell that frees the slot at ~24 sessions instead of a day. (2) *A
+first-exposure failure is not a regime shift.* Proposed guard in `regime.on_trace_sealed`:
+when the sealed trace carries a situation label, an entry is a regime candidate only if
+some earlier successful run of the same agent **in the same situation** read it — "this
+used to work *here*". The README had no success in the `pip-audit` situation, so no
+proposal; a set A/C change (the same situation, the same note, now failing) still
+proposes. Traces without a situation label are unchanged. Both are engine changes and go
+to Bruno as PRs; **`rsi-c1-rsi` is held until they are deployed**, because a
+false-positive README canary would otherwise occupy the cell's one canary slot before
+the set C change at episode 30 produces the fix the run is meant to measure (exactly the
+5k sequence), and under `-nocanary` a README rewrite that passed Tier 1 would ship as a
+false-positive K4. The paper reports the false-positive proposal rate as a cost of the
+loop either way (pre-fix cells: 2 of 3 proposals).
+
 ### 2026-09-26 (l) — SenseLab is the engine; the repair loop is measured where exhaustion cannot recover
 
 **Why.** Six pilots and a mechanism reading (HEADROOM_RSI.md, "What the tiers can and

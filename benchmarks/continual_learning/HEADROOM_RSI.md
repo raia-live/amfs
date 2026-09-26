@@ -657,6 +657,39 @@ so the control arms can have read nothing from the loop (the fix ledger shows 0 
 across every cell to date), but the separation is by circumstance. A per-agent
 `auto_propose` in the repair settings row (`fix_store.py` already keeps `repair_policy`,
 `canary_pct`, `canary_min_outcomes` per agent) is the PR candidate; it needs approval.
+*Resolved 2026-09-27:* amfs-internal #786 (migration 107, `RepairSettings.auto_propose`,
+gate in `enqueue_fix_propose` after the process switch and the plan gate) merged at
+23:34:18Z. Harness commit `bf589c41`: every Tier-1-only arm PUTs `auto_propose=false` on
+each hosted identity's first session and records the result as `arm_notes.auto_propose`
+(`held` / `unsupported` before the deploy / `skipped` under `CL_CONTROL_AUTO_PROPOSE=skip`
+/ `error:<status>`); the repair-loop arms set it `true` explicitly in `agent_ready`.
+
+### 5k complete — the canary reads nothing, and why: a first-exposure failure is not a regime shift
+
+`rsi-pilot-5k` (the #785 treated run) finished 240/240 with success flat against 5j and
+three canaries that never decided. The (k) readout in HYPOTHESIS_RSI.md has the numbers;
+the mechanism is worth stating here because it is the third seam of the same kind — the
+loop's gates were designed for a customer's traffic and this benchmark's traffic has a
+shape they had not met.
+
+Routing was fine (32/17, 19/19 and 1/17 stamped sessions per arm). `graded` was 0 in every
+arm because the fixes rewrote entries the traffic no longer reads. The two ci-fix fixes
+rewrote `repo-readme-ci`, the seeded README, which the agent read in episodes 1–4 and
+never again once it had notes of its own. The README became a regime candidate because
+episodes 5–6 were first exposures to a new class whose failed attempts had read nothing
+else, so #783 charged the failures to it: four successes, then two failures, "a validated
+entry that stopped working". It had not stopped working; the class was new. A canary on
+that fix then held the cell's one slot for 50 sessions with nothing to read, and would have
+held it for a day.
+
+Two engine corrections follow, opened as PRs for approval: a canary futility rule for arms
+with outcomes and no grades (`decide()` rule 1b, "ungraded", freeing the slot at
+`FUTILITY_MULTIPLE × min_outcomes` outcomes), and a regime guard — an entry is a candidate
+only if an earlier successful run of the same agent in the same situation read it, so a
+first exposure cannot indict what it happened to read. `rsi-c1-rsi` waits for both to
+deploy: on set C the real regime fix lands after episode 30, and a README canary started at
+episode 10 would hold the slot through the whole measurement window; under `-nocanary` the
+README rewrite (Tier 1 passed on s11) would ship as a false-positive K4.
 
 ## Discipline
 
