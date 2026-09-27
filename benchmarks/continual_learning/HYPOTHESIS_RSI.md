@@ -1768,3 +1768,78 @@ canary tally.
 **What does not change.** Nothing mid-run: `rsi-c2` continues on the same engine and harness
 so its eight cells share one covariate; the ci-fix cells will show the same loss wherever a
 canary starts. No arm, scenario, change set, rubric or metric is added or altered.
+
+### 2026-09-27 (q) — seams 7 and 6 as one engine PR; seam 5b's offline check; P9
+
+**Approved shape (Bruno, 2026-09-27: one PR, one deploy).** Seams 7 and 6 go in one
+amfs-internal PR (`eval/replay-canary-caseset`), so `rsi-c3` runs on one cut. Bruno approves
+and merges; nothing here is merged by the agent.
+
+**Seam 7, as built (commit `17cc5438`).** Not the router or the SDK. The fix is on the
+grader's and the tally's side, in `amfs_eval` only, so the deploy is one image: (i) the
+Tier 2 grader accepts, for a case, a trace that *declares* the replayed fix
+(`attributes.fix_id` = the fix, `attributes.case_id` = the case — the SDK's receiver stamps
+both) whatever `memory_branch` the router re-stamped on it
+(`FixStore.newest_trace_for_case(branch=…, fix_id=…)`, `CustomerReplayService.grade`);
+(ii) a trace carrying `replay_delivery_id` is served traffic to no canary — excluded from
+`canary_arm_counts`, `trace_mix`, `recent_exposure` and the feedback-contract count, as Tier 1
+`origin` traces already were. The router's merge (`_merge_routed_attributes` in OSS
+`amfs_http`) still overwrites the client's branch; that root cause is a **separate OSS PR
+candidate, later** — it would be a second deploy. P8 stands as written in (p); its two
+falsifiers are the ones the grader-side fix must satisfy.
+
+**Seam 6, as built (commit `2df43ade`).** *Evidence (rsi-c2, post-#793):* once the
+manifest's run counted, every regime fix that shipped or reached canary had passed a
+**one-case** Tier 2 replay — `5d317c0a` (support) shipped the stale answer in better words;
+`71b44f84` (ci-fix) reached canary having flipped the rule unconditionally, wrong for the half
+of the situation that had not moved; `abee5262`, `6e3dcf9b` were sequential hedges. A regime
+shift is a conditional (the rule changed for the moved half and held for the kept half); one
+run cannot test a conditional. *Change:* for a fix with no judge, no behaviour and a
+situation, `FixService.evidence_trace_ids` adds `FixStore.situation_proof_traces` — the
+agent's newest served runs in the canonical situation sealed before the fix, up to **3 that
+failed** (the shift: the fix must turn them into successes) and **3 that passed** (the kept
+half: the fix must not turn them into failures); no-outcome runs, Tier 1 and Tier 2 replays
+excluded; each case `expected_outcome: success`. Tier 1 is unchanged (it replays the
+manifest's run); the wider set is the customer's Tier 2 replay, graded against the live
+scenario. The case set therefore grows from 1 to up to 7, and the Tier 2 replay costs the
+customer up to 7 episodes per fix instead of 1 — the harness already replays every delivered
+case.
+
+**Prediction (P9, dev seeds, set C, `rsi-c3`, SenseLab arm).** (a) Every regime fix that
+reaches Tier 2 after the cut has a case set of ≥ 2 cases whenever the agent has ≥ 1 further
+sealed run in the situation before the fix (the ledger shows the run; the set shows the
+case). (b) Among regime fixes that **pass** Tier 2, the share whose shipped/canaried
+correction does not encode the conditional — a restatement of the pre-change answer, an
+unconditional flip, or a sequential hedge that names both answers without the condition
+(the reading applied to `5d317c0a`, `71b44f84`, `abee5262`, `6e3dcf9b`, recorded per fix in
+the readout before its Tier 2 outcome is looked at) — falls from 4/4 in `rsi-c2` to ≤ 1/4:
+the failing and kept runs replayed together are what a one-case set could not test. A hedge
+can still pass (it succeeds on both halves at the cost of an attempt), so (b) is expected to
+move mostly through restatements and flips failing. (c) Tier 2 **failures** rise: at least one regime
+fix fails Tier 2 on a kept case (`repaired > 0` and `failed > 0` in the replay record) in the
+eight cells — the mechanism visibly doing its job. *What falsifies:* (a) a regime fix
+reaching Tier 2 with one case while the situation has ≥ 1 earlier sealed run on that agent;
+(b) the non-conditional share among passed fixes still ≥ 2/4 (≥ 50 % if the count differs);
+(c) no Tier 2 failure on a kept case across the eight cells while ≥ 4 regime fixes reach
+Tier 2. P2/P3 are not re-predicted: the intended effect on solved-after-change is via fewer
+wrong ships, and (b) is the direct measure.
+
+**Seam 5b, offline check (not built; decision pending).** Bruno's condition was an offline
+recall/purity at P7's bar (≥ 80 % / ≥ 90 %) before any code. Replayed on the `rsi-c2` support
+export (399 traces, 200 distinct spellings, 4 agents; ground truth = the harness `issue` tag
+via the arm-report ledgers): the deployed seam 5 rule gives **recall 0.784, purity 1.000**;
+IDF-weighted token similarity at any threshold gives **0.639–0.792, no gain** — the misses
+are synonyms with no shared token (`duplicate billing` / `double charge`, `notifications` /
+`alerts`, `csv export timeout` / `data export error`, `2fa lockout` / `authenticator login`),
+which no token weighting joins. The in-image production embedder (`BAAI/bge-small-en-v1.5`,
+local, ~0.3 s per 122 labels) as a second stage — tokens as deployed, then cosine on the
+label when tokens fail — gives recall/purity **0.822/1.000 at ≥ 0.85, 0.835/1.000 at ≥ 0.80,
+0.892/1.000 at ≥ 0.75, 0.935/0.987 at ≥ 0.70, 0.942/0.897 at ≥ 0.65, 0.920/0.707 at ≥ 0.60**.
+So the IDF mechanism that was proposed fails the bar and is dropped; an embedding second
+stage passes it at 0.70–0.85. That is a different mechanism from the one approved, so it is
+**not in the PR** unless Bruno says so. If approved, P7 is re-predicted for `rsi-c3` at the
+chosen threshold (0.75: recall ≥ 0.85, purity ≥ 0.95 on the support cells) before the code
+is written — with the caveat, stated here in advance, that the threshold was chosen on the
+seed 11 and 23 export, so `rsi-c3` on those seeds is an in-sample check of it; the
+out-of-sample test is the confirmatory seeds. The offline scripts are outside the
+repository (`/tmp/sit_eval.py`, `/tmp/sit_eval_emb.py`).
