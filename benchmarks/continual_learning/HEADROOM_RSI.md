@@ -691,6 +691,21 @@ deploy: on set C the real regime fix lands after episode 30, and a README canary
 episode 10 would hold the slot through the whole measurement window; under `-nocanary` the
 README rewrite (Tier 1 passed on s11) would ship as a false-positive K4.
 
+### P4 readout — the maintainer oracle on set A (`rsi-oracle-5A`, 240/240)
+
+`senselab-oracle-fix-5` (the `senselab` protocol plus the correct rule text written to
+memory five episodes after the change, readable from episode 25): support 95.8 %, ci-fix
+99.2 %; changed-class post-change success 90.0 / 97.5 %. Against the (l) reference for
+`senselab` (93.3 / 95.0) that is +2.5 on support — inside the 3-point prediction — and +4.2
+on ci-fix, between the prediction and the 5-point falsifier. Against `senselab-rsi` on the
+same protocol (5k: 93.3 / 95.8; changed classes 82.5 / 90.0) the oracle is +7.5 on the
+changed classes in both families. Reading: the set A ceiling is real for the unchanged
+classes and the first exposures (the oracle cannot help there and does not), and the
+headroom exhaustion leaves on the changed classes is about 7.5 points per family at 60
+episodes — the number a shipped fix would have to recover to match a maintainer who knew
+the rule. The ceiling argument in (l) stands; the paper states the bound as measured rather
+than as "within 3 points". Dev seeds only; the confirmatory oracle cells run with E1.
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families
