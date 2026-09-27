@@ -1861,3 +1861,40 @@ s11) is a **pre-change** regime proposal (episode 7, situation `unknown ci failu
 shipped at episode 10 — 5k's first-exposure false positive, now able to ship because Tier 2
 passes a one-case set; counted as a false ship in the readout, and (like seam 6) a
 proof-set question rather than a trigger one.
+
+### 2026-09-27 (r) — seam 5b approved as a second PR: an embedding second stage in situation identity; P7 re-predicted
+
+**Approval (Bruno, 21:49 JST: "open a new pr for add 5b").** #795 was merged at 12:38:49Z
+before the 5b question was read; 5b goes as its own amfs-internal PR and deploy. `rsi-c3`
+runs on the later cut, so its eight cells share one engine.
+
+**What (before code).** `situations.nearest` keeps the token rule as deployed and adds a
+second stage that runs only when the token rule finds no canonical: the folded label and each
+of the agent's canonicals are embedded with the process's default embedder (the image's
+`BAAI/bge-small-en-v1.5`, local, 384-dim — the same model the memory search uses), and the
+label joins the canonical with the highest cosine at or above **0.75**
+(`EMBED_SIMILARITY_FLOOR`; env `AMFS_EVAL_SITUATION_EMBED_FLOOR`), else becomes a new
+canonical as before. Vectors are cached per process; the stage is skipped entirely when the
+default embedder is the hash fallback (its cosines are not semantic) or when
+`AMFS_EVAL_SITUATION_EMBED=0`, and any embedder error falls open to the token result. No
+schema change; alias rows are written as before, so traces stay untouched and every situation
+query is unchanged. Threshold 0.75 is the offline choice in (q): 0.892 / 1.000 on the
+`rsi-c2` support export, with 0.80 and 0.70 on either side at 0.835 / 1.000 and
+0.935 / 0.987.
+
+**Prediction (P7′, dev seeds, set C, `rsi-c3`, both arms).** For every situated canary,
+recall (post-start served runs in the fix's class whose canonical situation equals the fix's)
+≥ 0.80 and purity ≥ 0.90, and pooled over canaries ≥ 0.85 / ≥ 0.95. Baseline from `rsi-c2`
+(token rule alone): per canary 0.50 / 1.00 / 0.45 / 0.88 and 1.00 / 1.00 / 0.71 / 1.00; pooled
+0.71 / 0.92. The first-seen-canonical effect noted in the readout (a later spelling compared
+against the agent's first spelling, not the fix's) is *not* addressed by this change and is
+expected to remain the main source of misses; the ci-fix `audit-free` merge on `71b44f84` was
+the agent's own label and no similarity rule separates it, so purity on that class is not
+predicted to reach 1.00. *What falsifies:* pooled recall < 0.80, or any canary under 0.50; or
+pooled purity < 0.90 — the embedding stage merging classes the token rule kept apart. *Caveat
+stated in advance:* the threshold was chosen on the seed 11 / 23 export; `rsi-c3` on those
+seeds is an in-sample check, and the confirmatory seeds are the test.
+
+**What does not change.** No arm, scenario, change set, rubric or metric. `rsi-c3` waits for
+this PR's deploy; if Bruno prefers, it can run on the #795 cut alone (then 5b gets its own
+run).
