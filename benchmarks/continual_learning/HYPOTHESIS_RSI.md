@@ -1684,7 +1684,11 @@ graded runs are in that class (purity). This is the acceptance check of the engi
 computed from tags the runner already writes — not a benchmark endpoint. The (n) prediction is
 re-stated on resolved situations: a regime fix in a recurring situation reaches a canary
 verdict within the cell. *What falsifies:* recall < 50 % (the rule does not capture the
-drift) or purity < 70 % (the rule merges classes). Cut time recorded here when #794 deploys.
+drift) or purity < 70 % (the rule merges classes). **Cut:** #794 merged 08:13:58Z (`3f17a669`);
+"Deploy to Google Cloud" run 36305548639, `deploy` job done 08:26:01Z (Cloud Run
+`amfs-api-02067-k2q` ready 08:24:41Z, `pro-api-00782-7qd`), run green 08:27:24Z. **The cut is
+08:27:24Z.** Migration 109 verified in production at 08:29Z (table present, RLS forced, tenant
+policy). No `senselab-rsi` cell was running across the cut; `rsi-c2` starts after it.
 
 **Run plan.** `rsi-c2` after the #794 cut: `senselab-rsi` and `senselab-rsi-nocanary`, set C,
 support + ci-fix, seeds 11 / 23, 100 episodes, change at 30, focus 0.5, Tier 2 on 8787 — the
@@ -1692,7 +1696,8 @@ support + ci-fix, seeds 11 / 23, 100 episodes, change at 30, focus 0.5, Tier 2 o
 `pgvector+rerank`, `senselab`) and `rsi-c1-baselines` (`pgvector`, `pgvector-diy+outcomes`,
 `context-window`; running) on the same protocol and seeds. **Per-cell K1–K4 with the engine
 version as a covariate**: `pre-n` (< 02:34:34Z), `post-n`, `post-seam4` (≥ 07:00:22Z),
-`post-seam5` (≥ the #794 cut); latency claims within one version only, as (n) fixed.
+`post-seam5` (≥ 08:27:24Z); latency claims within one version only, as (n) fixed. `rsi-c2`
+launched 08:31Z, 8 cells, on the `post-seam5` engine end to end.
 
 **E7 — a disclosed stand-in, not a change to (m).** (m) trains the two Managed Models on E1
 traces; E1 has not run. Bruno asked for the Managed Models to be built now, so two development
