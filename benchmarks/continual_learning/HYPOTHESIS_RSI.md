@@ -1455,3 +1455,80 @@ entries are reported as `first_exposure`. Neither changes what is measured; both
 whether the loop's one canary slot can be blocked by a fix to an entry nobody reads.
 `rsi-c1-rsi` (the P2/P3 run: `senselab-rsi-nocanary` + `senselab-rsi`, set C) is held until
 both are deployed; their cut times will be recorded here.
+
+### 2026-09-27 (m) — the Managed Model is evaluated on tickets and logs it never trained on
+
+**Why.** E7 trains two Managed Models (`senselab-s1`) on E1 `support` traces — one from
+`senselab-rsi` cells, one from `senselab` cells — and evaluates them in decision mode on
+held-out seeds 101/113/127. Held-out seeds change the schedule, the instances (order ids,
+plans, platforms, issuers) and, under a change set, the answers; they do **not** change the
+wording. `realworld.py` draws each support ticket from three fixed paraphrases per class
+and each CI failure from one fixed log line per failure, so every eval prompt's text has
+appeared in training. A reviewer will say the student was fine-tuned on the questions and
+their answers, and on that evidence they would be right. The distillation study's set B
+result (a student without memory 0.26 on changed support classes, with memory 0.50,
+frontier with memory 0.90) already separates *memorised answers* from *reads at eval
+time*, and its known-limits note concedes that eval scenarios share generators with
+training. (m) makes the separation a design, not a concession, and adds the tests Bruno
+asked for: the same evaluation, and then evaluations on similar but different tickets,
+logs and classes, to see how the student *with SenseLab connected* responds when what it
+could have memorised does not apply.
+
+**What changes.**
+
+1. **A contamination ladder for E7**, every rung on seeds 101/113/127, every rung run for
+   both students and three conditions: **S0** student alone (no memory), **S1** student +
+   SenseLab (the same protocol the teacher used; the memory is the eval cell's own,
+   built by S1's traces under the Tier 1 loop — nothing from training cells is read),
+   **F1** frontier + SenseLab (the bar).
+   - **L0 — held-out seeds, training wording** (the E7 as preregistered). Reported; not the
+     headline.
+   - **L1 — held-out wording.** Eval-only message sets: three new paraphrases per support
+     class (`msgs_eval`) and an eval-only log variant per CI failure (`log_eval`: a
+     different file, line, tool phrasing or error text that still identifies the failure
+     class as the fixed log does). Training cells never draw from these; eval cells draw
+     only from these. Same classes, same answers.
+   - **L2 — held-out answers.** Eval under a change set the student never saw (train on set
+     A cells, evaluate on set B; set C where the family has one), with training wording.
+     The distillation study's H8, now in the ladder.
+   - **L3 — held-out classes.** Eval-only classes with their own conventions: three support
+     classes and two CI failures that appear in no training cell (`eval_only=True` in the
+     issue tables), mixed into the eval schedule at the scenario's usual class weights. The
+     student cannot have memorised their answers; whatever S1 gains over S0 here it gained
+     by reading memory at eval time.
+   - **L4 — held-out family** (exploratory, reported, not claimed): the support-trained
+     students evaluated on ci-fix. The distillation study declines this claim and (m) does
+     not reverse that; the row is there so the reader sees the number rather than wonders.
+2. **A memorisation diagnostic**, reported beside every student number: S0 on L0 minus S0
+   on L1. If a student alone does well on training wording and falls on new wording, the
+   difference is what it memorised, stated in points rather than argued.
+3. **Endpoints per rung** (as E7): post-change first-attempt success on changed classes,
+   first-attempt success on eval-only classes (L3), pinned-case reproduction (L0 only —
+   pinned cases are training artefacts by definition), cost per solved task.
+4. **What is claimed.** The E7 claim moves from L0 to **L1 and L3**: a Managed Model
+   distilled from the repair record, with SenseLab connected, holds its advantage on
+   tickets and logs it never trained on and on classes it never saw, and that advantage is
+   attributable to reads (S1 − S0 on L3, where S0 has nothing to remember). The
+   `senselab-rsi`-trained student against the `senselab`-trained student is compared on the
+   same rungs; the attribution rule of (l) applies to what the difference is credited to.
+5. **Registration.** `msgs_eval`, `log_eval` and the eval-only classes are written before
+   any E1 cell runs and registered by the scenarios hash with set C; the E7 training
+   manifest lists the training cells and asserts none drew from an eval-only set or class.
+   "Exactly two Managed Models" stands.
+
+**Predictions.** (P1) L0 → L1: S0 falls by more than S1 does (memorisation shows in the
+student alone, and memory covers it). (P2) On L3, S1 > S0 for both students with the
+gap credited to reads; F1 > S1 (the small model uses memory less well than the frontier,
+as the distillation study found). (P3) The `senselab-rsi`-trained student ≥ the
+`senselab`-trained student on L1–L3, the difference small and reported as such unless the
+E1 repair record differs materially between the arms (the (l) attribution rule decides what
+it is credited to). **What falsifies:** S1 ≈ S0 on L1 or L3 means the student is not
+reading memory in decision mode and the E7 value was memorisation — reported as such; a
+large L0 − L1 drop for S1 as well means the wording, not the memory, carried the E7
+number.
+
+**Scope note.** Development phase. No student has been trained; E1 has not run. (m) adds
+eval-only content and an evaluation design; it changes no arm, no training recipe and no
+scenario the teachers see. Bruno raised the concern on 2026-09-27 JST and asked for the
+same tests plus tests on similar-but-different tickets, logs and issues; L0, L1 and L3 are
+those.
