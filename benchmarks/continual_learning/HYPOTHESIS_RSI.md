@@ -1898,3 +1898,10 @@ seeds is an in-sample check, and the confirmatory seeds are the test.
 **What does not change.** No arm, scenario, change set, rubric or metric. `rsi-c3` waits for
 this PR's deploy; if Bruno prefers, it can run on the #795 cut alone (then 5b gets its own
 run).
+
+**Cut record, #795 (seams 7 and 6).** Merged 12:38:49Z (`e1cd6018`); "Deploy to Google
+Cloud" run 36319683320, `deploy` job done 12:49:04Z (Cloud Run `amfs-api-02075-nq9` ready
+12:48:06Z, `pro-api-00783-pb5`), run green 12:50:24Z. **The cut is 12:50:24Z.** No
+`senselab-rsi` cell was running across it (`rsi-c2` ended 12:45Z). Engine covariate for
+cells after this cut and before 5b's: `post-seam7`. **5b:** PR amfs-internal #796 opened
+12:56Z from `main` at `e1cd6018`, one commit `65a44936`; cut to be recorded on merge.
