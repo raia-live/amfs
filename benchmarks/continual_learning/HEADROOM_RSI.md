@@ -1112,6 +1112,176 @@ fires *with fixes shipped*. The paper reports that as the finding for this engin
 with the content analysis above as the mechanism, and `rsi-c3` on the #795 cut as the test
 of whether a proof set that covers both halves changes it.
 
+### `rsi-c3` complete (800/800) — the repair loop on the `post-seam5b` engine: the proof set is built, and the outcome it grades cannot see the conditional
+
+`rsi-c3` is `rsi-c2`'s command with the run name changed (set C, seeds 11/23, support +
+ci-fix, SenseLab and the no-canary ablation, 100 episodes, change at 30, focus 0.5, Tier 2
+hub on 8787 through the same tunnel). It ran 13:40Z–18:10Z on 2026-09-27, all eight cells on
+the `post-seam5b` engine (#795 and #796 live: seams 4, 5, 5b, 6, 7; cut 13:39:13Z). 800/800
+episodes; 4 fail-open reflection `ReadTimeout`s (one per ablation cell, the episode completed)
+and 2 client-side seal `ReadTimeout`s whose traces the server did persist. 40 fixes were
+proposed (24 SenseLab, 16 ablation; 32 regime, 8 judge), 149 Tier 2 replays were delivered
+and all but one sealed (48 in `rsi-c2` — the proof set is what grew), six canaries started in-cell on
+SenseLab (four regime, two judge), 11 memories shipped — all 11 on the ablation, as in c2.
+Paired with `rsi-c2` and `rsi-c1-tier1` (`senselab` = SenseLab − repair loop). First-attempt
+success, episodes 30–99; dev seeds, small n, no significance claimed.
+
+**Moved half (n = 23 / 20 / 19 / 13):**
+
+| cell | SenseLab − repair loop | **SenseLab** c2 → c3 | SenseLab − canary c2 → c3 |
+|---|---|---|---|
+| support s11 | 26 | 39 → **30** (7/23) | 22 → 9 |
+| support s23 | 55 | 40 → **45** (9/20) | 30 → 15 |
+| ci-fix s11 | 79 | 63 → **58** (11/19) | 53 → 68 |
+| ci-fix s23 | 46 | 46 → **38** (5/13) | 38 → 54 |
+
+**Kept half (n = 12 / 15 / 16 / 22):** SenseLab 33 → 33, 47 → 53, 62 → 62, 82 → 77; the
+ablation 42 → 50, 73 → 60, 75 → 88, 73 → 86; `senselab` 50 / 67 / 75 / 77. **Unchanged
+classes:** SenseLab 100 / 100 / 97 / 97; the ablation 97 / 100 / 100 / 94. **Pre-change
+(episodes 0–29):** 67–90 % in every c3 cell. Cost per episode is flat c2 → c3 ($25.04 →
+$24.75 for the 800); the Tier 2 replays cost $6.08 on the hub's side against $2.49 — the
+price of a 3–6-case proof set, at $0.20–2.05 per cell.
+
+**Reading of the outcome table.** The moved half is level or down on three of four SenseLab
+cells (−9, +5, −5, −8) and, on the ablation, down sharply on support (−13, −15) and up on
+ci-fix (+15, +16). Against `senselab`, SenseLab is above it on support s11 (30 vs 26) and
+below on the other three (45 vs 55, 58 vs 79, 38 vs 46); the ablation is below it on three and
+above on ci-fix s23 (54 vs 46). **(l)'s P2 clause fires again, with fixes shipped**, on both
+arms. The mechanism is in the ledger below.
+
+**P8 (seam 7 — replays during a canary): met.** 39 replays were sealed while `a9a53641`'s
+canary was running on support s23 and 33 while `d27a641f`'s ran on ci-fix s23; the router
+re-stamped 26 of them onto the canary's branch (19 and 7; the OSS root cause is untouched,
+as stated), and every one was graded on the replayed fix's branch — the eight support s23
+fixes with a re-stamped replay all received Tier 2 verdicts (`63098274`, `e5de8605`,
+`35676701`, `faeaf921`, `87bf3b8a` failed; `a6cac7e6`, `46da73a6`, `f694a0cd` passed), as did
+the five on ci-fix s23, where in c2 they would have ended `missing`. The
+one `missing` case in the run (`76b09639`, case `ae6fd09c`) has no sealed trace anywhere: the
+replay episode itself raised `ReadTimeout` and the hub ledger shows `trace_id: None`.
+`a9a53641`'s tally ended 25 canary / 30 control served runs with 19 canary-stamped replays
+excluded; `d27a641f`'s 30 / 25 equals the served-run count exactly. No replay trace is in any
+canary tally. Both falsifiers clear.
+
+**P9 (seam 6 — the proof set).** 31 regime fixes reached Tier 2 with a case set; sizes 1 ×1,
+2 ×2, 3 ×5, 4 ×17, 5 ×4, 6 ×2. **(a) met:** the one one-case set (`8e4f98ca`, support
+ablation s11, `mobile full data export failure`) is on a canonical situation with no earlier
+served run on that agent; every other set has ≥ 2. **(c) met:** two regime fixes failed Tier 2
+on a kept case — `4667af4b` (support s11, 1 kept + 3 failed cases failed) and `87bf3b8a`
+(support s23, 6/6 failed, including all three kept cases) — and four more failed only on
+their drafted or failed-run cases (`7e6b87a7`, `d7e91556`, `e5de8605`, `faeaf921`). All six
+Tier 2 failures are on support; **ci-fix had 19 regime fixes reach Tier 2 and 19 pass.**
+**(b) falsified, and worse than the baseline.** The corrections of the 24 post-change regime
+fixes that passed Tier 2 (`a4e16179`, proposed at episode 8, is pre-change and excluded, like
+c2's `1196bfc0`), classified against `SUPPORT_CHANGES_C` / `CI_CHANGES_C` before their Tier 2
+records were read:
+
+| reading | support (6) | ci-fix (18) | all |
+|---|---|---|---|
+| conditional on the right attribute, as the first action | 0 | 1 (`c1c5b3ad`: cassette in the diff → regenerate, else rerun) | **1/24** |
+| right attribute named, but not decisive or not first (`cb8c7221` code fix before the rerun; `0ab5cc39`, `126ff64c` name `legacy SDK/client` behind an OR on the PR title, which both halves carry) | 0 | 3 | 3/24 |
+| conditional on the wrong attribute (`816ffd48`, `fc4a65d9`, `ce242c82`: "manifest-only vs has code" — every set C PR has code) | 0 | 3 | 3/24 |
+| unconditional flip to the moved half's answer (bump) | 0 | 11 | 11/24 |
+| restatement of the pre-change answer or a sequential hedge without the condition (smaller ranges → web export → escalate; reinstall → settings) | 6 | 0 | 6/24 |
+
+**20/24 (83 %) do not encode the conditional and 23/24 do not act on it first**, against
+c2's 9/14 and 12/14. Five of the ci-fix s23 flips state the anti-rule outright — `28a3bcb8`
+"do not add an audit exception simply because the PR title mentions … legacy-SDK",
+`66a04308`, `6f993614`, `b20c20aa`, `3d349afe` likewise — and every one passed a 3–4-case
+proof set that included kept-half runs where the exception is the right answer.
+
+**Why the proof set passed them: the outcome it grades.** The cases are graded on the
+replayed run's `outcome_type` against `expected_outcome: success`, and this customer's
+outcome is *episode* success within three attempts. On the 280 post-change runs of the
+changed classes (both arms, prod traces joined to the ledger): the kept half reports
+`success` on 118/130 (87 first-attempt, 23 second, 8 third) and the moved half on 108/150
+(57 / 39 / 12). A flipped rule on a kept-half PR bumps, is rejected, adds the exception and
+seals `success`; the case passes. The proof set can only fail a fix that makes the agent
+lose the episode outright — and on ci-fix, where there is no escalation and every cell is at
+99–100 % episode success, that never happens. On support, where escalating is a failure, it
+happened six times. **The corollary for the proof set's composition:** 25 of the 31 sets are
+{the drafted run + kept-half passes}; only six carry any other failed run, because a regime
+fix is proposed at the situation's *first* outright failure, before others exist, and the
+moved-half runs that took two attempts are `success` to the engine. The conditional set C
+encodes is visible in first-attempt success — which the engine never receives. This is a
+finding about what the customer's outcome signal carries, not about case selection; the
+remedy is a decision for Bruno (options in the message, none taken): the harness reporting a
+second-attempt success as `minor_failure` changes a preregistered outcome definition for
+every arm; the engine grading a proof case on the attempt count the SDK already stamps
+changes the customer contract. Neither is in this run.
+
+**P7′ (seam 5b — the embedding second stage), per situated regime canary, post-start served
+runs, ground truth = the class tag; graded = canonical situation equals the fix's:**
+
+| canary | cell | fix's situation → canonical | recall | purity | what was missed / merged |
+|---|---|---|---|---|---|
+| `a9a53641` | support s23 | data export timeout → `large export failure` | 6/10 = **0.60** | 6/6 = 1.00 | `ios pro all data export timeout`, `ios all data export error`, `web data export error`, `android data export failure` — all four went to a second export canonical, `data export android`, by the **token rule** (containment), which runs first |
+| `a4e16179` | ci-fix s11 | pip audit failure (pre-change) | 9/21 = **0.43** | 9/13 = **0.69** | missed `pip audit pinned dependency` ×10 → own canonical `audit pinned dependency` by the token rule; merged four `audit-free` runs the agent labelled `(pip) audit (ci) failure` |
+| `cb8c7221` | ci-fix s11 | flaky integration ci failure → **`type error ci`** | 1/2 = 0.50 | 1/2 = **0.50** | joined `type error ci` **by embedding** (cosine 0.793 ≥ 0.75); only 2 in-class runs post-start |
+| `d27a641f` | ci-fix s23 | pip audit failure → **`audit check failure`** | 2/12 = **0.17** | 2/6 = **0.33** | `audit check failure` absorbed `format check failure` ×8 (cosine 0.793) and `type check failure` **by embedding**; the moved half's `pip audit pinned dependency` ×4 and five other spellings sit in `audit pinned related change` |
+| pooled | | | 18/45 = **0.40** | 18/27 = **0.67** | |
+
+**P7′ is falsified on all three falsifiers** (pooled recall < 0.80, two canaries under 0.50,
+pooled purity < 0.90), and both numbers are below c2's token-rule-only 0.71 / 0.92. The two
+mechanisms are visible in the alias table: (i) the embedding stage over-merges short generic
+CI labels — with the in-image model, `flaky integration ci failure` ~ `type error ci` is
+0.793 and `format check failure` ~ `audit check failure` 0.793, both above the 0.75 floor
+chosen on the support export in (q), where no such pairs exist; on ci-agent `253808283`,
+`unknown ci failure` absorbed `type error ci`, `integration flaky ci failure` and `format ci
+failure` the same way. (ii) The token rule runs first and pre-empts a better embedding match:
+`android data export failure` contains `data export android` (a canonical created earlier)
+and joins it at containment 1.0, although it is 0.830 from `large export failure` and the
+first-seen-canonical effect from c2 is thereby kept. The in-sample caveat in (r) cuts the
+other way from the one anticipated: the floor was chosen on support labels and fails on
+ci-fix labels in the same seeds. **No change is made.** The stage has an off switch
+(`AMFS_EVAL_SITUATION_EMBED=0` on the service) and a floor variable; raising the floor to 0.80
+would cut the two 0.793 false joins and keep `pip audit failure` ~ `audit check failure`
+(0.808) and `pip audit pinned dependency` ~ `pip audit failure` (0.847), on a margin of
+0.01–0.02 — a number to distrust on this evidence. Both are Bruno's call.
+
+**Seam 8, now the largest untreated seam.** In c2 one fix was drafted from the loop's own
+replay; in c3, with 149 replays instead of 48, **13 of 40 fixes** (10 regime, 3 judge) have a
+`manifest.predicted_fixes` trace carrying `replay_delivery_id`: on ci-fix s23 SenseLab the
+chain `3d349afe` → (its replay) → `66a04308` → (its replay) → `6f993614`, and `b20c20aa` →
+`ce242c82`, `fc4a65d9` → `126ff64c`; on the ablation `2b326866` → `816ffd48` → `dbe883f4` +
+`1931f1c3` and `c6906527` → `fae636c0`, **four of which shipped**; on support s23 the judge
+fix `f694a0cd` (now in canary) was drafted from two `critical_failure` replays of `87bf3b8a`
+sealed on `repair/a9a53641`. Eight of the 24 passed regime fixes above were drafted from a
+replay. Seam 6 amplified it: a bigger proof set is more replays, and the regime and judge
+triggers read every one as served traffic. (A side effect visible in the export: the Tier 1
+run of a fix drafted from a replay replays the replay's task and inherits its
+`replay_delivery_id` — nine such `origin` traces, harmless to the tallies, which exclude
+either flag.) The rule #795 gave the canary tally
+(`_TRAFFIC_SQL`) is the rule both triggers need; (q)'s P10 stands as the prediction if Bruno
+approves it. Not built.
+
+**K1–K4, briefly.** K2 (proposal → canary start) on SenseLab: 5, 4, 7, 3 sessions for
+`a9a53641`, `cb8c7221`, `a4e16179`, `d27a641f`. K3 at cell end: `a9a53641` graded 4 canary / 2
+control before its 60-session timeout, `a4e16179` 8 / 1, `d27a641f` 5 / 1 (running), `cb8c7221`
+0 / 2 (running); none reached the 8 / 8 decision bar in-cell — at a 50 % split and 1–2
+in-situation runs per 10 sessions the canary needs more than a 100-episode cell, as in c2.
+K4, moved half after the ablation's first ship vs the other arm on the same episodes: support
+s11 2/15 vs 6/15, s23 3/16 vs 9/16; ci-fix s11 10/12 vs 9/12, s23 3/5 vs 2/5 — the support
+ships hurt, the ci-fix ships (flips, on a moved half whose answer is the flip) helped there
+and cost the kept half nothing the outcome can see.
+
+**What the paper takes from `rsi-c3` (dev seeds).** Seams 6 and 7 did what they were built
+to do at the mechanism level: P8 met on both falsifiers, the case set went from 1 to 3–6, and
+Tier 2 failed six regime fixes it would have passed on one case, two of them on the kept
+half (P9 a, c). The headline prediction, P9(b), is falsified in the direction opposite to the
+one predicted — 83 % non-conditional against 64 % — and the mechanism is now identified
+exactly: **the outcome a customer reports is coarser than the behaviour the fix changes**;
+episode success after retries is `success`, so the proof set grades a flipped rule as
+harmless wherever the agent can recover, which on ci-fix is always. Seam 5b, deployed on an
+in-sample offline result, made situation identity worse on the family it was not checked on
+(P7′ falsified on every falsifier) and is left switched on pending Bruno's decision. Seam 8
+grew from one fix to thirteen because seam 6 multiplied the replays it feeds on. The
+attribution table's sentence does not change: the repair loop's contribution to the moved
+half is zero or negative on three of four cells for the third run on the third engine cut,
+and (l)'s P2 clause fires with fixes shipped. What has changed is the explanation: it is no
+longer "the proof is one case" but "the proof grades the wrong signal", which is a statement
+about the outcome contract between the customer and the loop, and a candidate for the
+paper's central negative result.
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families

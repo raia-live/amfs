@@ -1915,3 +1915,19 @@ except the run name — `senselab-rsi` and `senselab-rsi-nocanary`, set C, suppo
 seeds 11 / 23, 100 episodes, change at 30, focus 0.5, Tier 2 on 8787 through the same
 tunnel. Reads out P8, P9, P7′ and the (l) P2 clause per cell, paired with `rsi-c2` and
 `rsi-c1-tier1`.
+
+**Readout record (`rsi-c3`, 800/800, 13:40Z–18:10Z; full readout in HEADROOM).** P8 **met**
+(26 replays re-stamped onto a running canary's branch, all graded; the one `missing` case has
+no sealed trace; no replay in any canary tally). P9(a) **met**, P9(c) **met** (two regime
+fixes failed Tier 2 on a kept case, four more on their failed cases; all six on support).
+P9(b) **falsified**: 20/24 (83 %) passed post-change regime fixes do not encode the
+conditional, against the 9/14 baseline and the ≤ 25 % bar — the proof cases are graded on
+episode-level `outcome_type`, which this customer reports as `success` after a recovered
+second attempt (108/150 moved-half runs), so a flipped rule passes every kept case where the
+agent can recover; on ci-fix that is always. P7′ **falsified on all three falsifiers**:
+pooled recall 0.40, purity 0.67 (c2 token rule: 0.71 / 0.92); the 0.75 floor, chosen on the
+support export, merges short CI labels (`flaky integration ci failure` ~ `type error ci`
+0.793; `format check failure` ~ `audit check failure` 0.793). Seam 8: 13/40 fixes drafted
+from the loop's own replays (c2: 1/33). (l)'s P2 clause fires with fixes shipped on both arms.
+**No change made**; decisions on 5b (off switch / floor), seam 8, and the outcome signal the
+proof set grades are put to Bruno.
