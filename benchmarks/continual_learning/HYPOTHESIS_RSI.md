@@ -1457,6 +1457,21 @@ whether the loop's one canary slot can be blocked by a fix to an entry nobody re
 both are deployed; their cut times will be recorded here. *2026-09-27 09:5x JST:* at Bruno's
 request both were combined into amfs-internal #789 for a single deployment; #787 and #788
 closed as superseded (branches kept). #789 is the PR whose cut time gates `rsi-c1-rsi`.
+**Cut time (recorded 2026-09-27).** #789 merged 00:56:43Z (`0713035b`); "Deploy to Google
+Cloud" run 36284021830 green at 01:14:44Z. `rsi-c1-rsi` launched 01:17Z (8 cells, 800
+episodes: `senselab-rsi-nocanary` + `senselab-rsi`, support + ci-fix, seeds 11/23, set C,
+`--episodes 100 --change-at 30 --change-focus 0.5`, Tier 2 hub on 8787) — every session of
+this run is on the post-#789 engine. `rsi-c1-tier1` finished 1200/1200 at 01:19Z; its two
+late ci-fix control agents (`ci-agent-311372896`, `ci-agent-773578895`) received the
+`auto_propose=false` hold at 01:19:26Z, after their cells had ended (the watcher had died
+with its shell). Control-arm proposals before the holds: 3 and 2 on those two agents, 5 / 1
+/ 5 on the three held support agents, 0 on the other three — all `proposed`, all on
+`repair/*` branches, none tested, shipped or read by a control session (control reads
+main). No proposal on any held agent was enqueued after its hold: the three fixes created
+23:59:00–00:01:20Z on `support-agent-432812137` (held 23:58:24Z) came from a `fix_propose`
+job queued 23:58:04Z, checked in `amfs_eval_jobs`. The separation is now by mechanism for
+every control agent of the (l) runs; the pre-hold proposals are a cost line (repair-agent
+calls on control identities), not a contamination path.
 
 ### 2026-09-27 (m) — the Managed Model is evaluated on tickets and logs it never trained on
 
