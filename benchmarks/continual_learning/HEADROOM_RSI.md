@@ -813,8 +813,8 @@ seeds, small n, no significance claimed.
 |---|---|---|---|---|---|
 | support s11 | 0 (0/23) | 4 | 4 | 0 | **30** (7/23) |
 | support s23 | 0 (0/20) | 0 | 0 | 0 | **25** (5/20) |
-| ci-fix s11 | 47 (9/19) | running | 11 | running | **68** (13/19) |
-| ci-fix s23 | 31 (4/13) | running | 8 | running | **15** (2/13) |
+| ci-fix s11 | 47 (9/19) | 47 | 11 | 53 | **68** (13/19) |
+| ci-fix s23 | 31 (4/13) | 23 | 8 | 31 | **15** (2/13) |
 
 **Kept half — same classes, old action still correct:**
 
@@ -822,8 +822,8 @@ seeds, small n, no significance claimed.
 |---|---|---|---|---|---|
 | support s11 | 83 | 83 | 75 | 75 | 33 |
 | support s23 | 73 | 73 | 80 | 80 | 87 |
-| ci-fix s11 | 12 | running | 100 | running | 62 |
-| ci-fix s23 | 9 | running | 86 | running | 68 |
+| ci-fix s11 | 12 | 50 | 100 | 44 | 62 |
+| ci-fix s23 | 9 | 0 | 86 | 36 | 68 |
 
 **Unchanged classes:**
 
@@ -831,11 +831,13 @@ seeds, small n, no significance claimed.
 |---|---|---|---|---|---|
 | support s11 | 51 | 86 | 86 | 66 | 94 |
 | support s23 | 54 | 86 | 94 | 71 | 97 |
-| ci-fix s11 | 89 | running | 100 | running | 97 |
-| ci-fix s23 | 71 | running | 97 | running | 97 |
+| ci-fix s11 | 89 | 100 | 100 | 97 | 97 |
+| ci-fix s23 | 71 | 100 | 97 | 86 | 97 |
 
-`context-window` and the ci-fix `pgvector` / `pgvector-diy+outcomes` cells are in
-`rsi-c1-baselines`, running; the tables are completed when it ends.
+`rsi-c1-baselines` finished 07:30Z (800/800 on the eight `pgvector` / `pgvector-diy+outcomes`
+cells, 0 errors). Its four `context-window` cells did not run: the runner was given the paper's
+name and the harness arm is `raw-traces` (amendment (b), `CL_RAW_TRACES_TOKENS = 24000`); they
+run as `rsi-c1-baselines-cw` (launched 07:32Z) and the column is added when it ends.
 
 **Reading.** On support the retrieval baselines sit at 0–4 % on the moved half: they retrieve
 the stale fix and follow it, every time, and frontier alone is at 0 because the new rule is
@@ -844,9 +846,12 @@ record marks the entry *contested*, the briefing says so, and the agent explores
 repeating. On ci-fix, frontier alone beats every retrieval baseline on the moved half (47 /
 31 vs 11 / 8): the PR's files show the attribute and an agent with no memory reads them,
 while an agent served a confident stale memory follows it — the cost of memory without
-evidence. SenseLab is 21 points above frontier alone on s11 (68) and below it on s23 (15).
+evidence; plain `pgvector` (no reranker) lands where frontier alone does (47 / 23), and
+`pgvector-diy+outcomes` a little above it (53 / 31). SenseLab is 21 points above frontier
+alone on s11 (68) and below every arm on s23 (15).
 On the kept half frontier alone cannot know the old fix on ci-fix (9–12 %) and the memory
-systems can (SenseLab 62–68, pgvector+rerank 86–100); on support SenseLab pays for its
+systems can to the degree they still serve it (SenseLab 62–68, pgvector+rerank 86–100,
+pgvector 0–50); on support SenseLab pays for its
 exploration on the moved half with a lower kept half in s11 (33). On the unchanged classes
 SenseLab is 94–97 % in every cell against 51–89 % for frontier alone and 66–94 % for the
 retrieval baselines.
