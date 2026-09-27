@@ -897,6 +897,69 @@ SenseLab is second on s11 (68) and last on s23 (15); the gain SenseLab has is th
 loop's, and the repair loop's contribution on set C is the open question `rsi-c2` answers —
 not a "SenseLab vs SenseLab-RSI" comparison.
 
+### E7 at L0 — the two development Managed Models on held-out seeds (`e7-l0-students`, `e7-l0-frontier`)
+
+The stand-in (o) discloses, evaluated at the ladder's first rung. **L0 is reported, not
+claimed** ((m) §1: same classes, same wording as training; the claim lives at L1 and L3,
+which need the eval-only content (m) specifies and which is not yet written). Two development
+students, both `senselab-s1`, both trained on the dev-seed set-C support traces of one arm
+(200 sealed traces, 2 cells each), both live as v1 under the **relaxed gate** — the default
+gate fails both on `exact_agreement 0.000 < 0.45`, stated here as (o) requires: the
+**SenseLab-trained student** (`sup-senselab-c1`, `senselab-s1-n3an6qag44m0`, teacher = the
+full engine, 181/200 training successes) and the **ablation-trained student**
+(`sup-norepair-c1`, `senselab-s1-ohhw29s7hz2q`, teacher = SenseLab without the repair loop,
+175/200). Serving: `context_k = 3`, priors on, server retrieval, no fallback. Eval: support set
+C, seeds 101 / 113 / 127, 100 episodes per cell, change at episode 30; **S0** student alone,
+**S1** student with SenseLab's outcome loop as (m) specifies (the eval cell's own memory,
+built from S1's sealed traces; the student writes no notes — what it reads is the seeded
+record plus the engine's evidence statuses, `action_priors` and `recommendation`; nothing from
+a training cell is readable), **F1** GPT-5.5 with the same outcome loop. 1 500 / 1 500
+episodes, 0 cell errors; three F1 episodes in s127 lost their reflection write to a
+`ReadTimeout` (fail-open, the episodes stand). Post-change first-attempt success, episodes
+30–99, pooled over the three seeds:
+
+| condition | moved half (n = 54) | kept half (n = 51) | unchanged (n = 105) | pre-change (n = 90) | $ / episode | $ / solved |
+|---|---|---|---|---|---|---|
+| SenseLab-trained student alone (S0) | 9 | 88 | 69 | 80 | 0.0007 | 0.0008 |
+| **SenseLab-trained student + SenseLab (S1)** | **33** | 69 | 98 | 71 | 0.0015 | 0.0017 |
+| ablation-trained student alone (S0) | 0 | 100 | 90 | 94 | 0.0007 | 0.0008 |
+| ablation-trained student + SenseLab (S1) | 30 | 65 | 97 | 84 | 0.0017 | 0.0020 |
+| GPT-5.5 + SenseLab (F1) | 22 | 69 | 99 | 80 | 0.0348 | 0.0418 |
+
+Moved half per seed (s101 / s113 / s127; n = 16 / 21 / 17): SenseLab-trained S1 **12 / 38 /
+47**, ablation-trained S1 19 / 38 / 29, F1 6 / 29 / 29, both S0 ≤ 12 in every seed.
+
+**Reading.** (1) *The gain is the read, not the weights.* S1 − S0 on the moved half is
++24 points for the SenseLab-trained student and +30 for the ablation-trained one, in every
+seed; alone, neither student takes the new action first (9 % and 0 %). The record does the
+work the way it does for the frontier: ~4 discredited entries served per episode with
+`avoid` set, and a `recommendation` the student follows. (2) *The two students are close,
+and the direction is (m) P3's.* Paired per seed the SenseLab-trained student is −7 / 0 /
++18 points against the ablation-trained one — mean +4, sign-changing across three seeds;
+"small and reported as such" is the pre-specified sentence, and it is the one this rung
+supports. The attribution rule of (l) applies: the teachers' records differ (repair
+trajectories and lesson entries in one, not the other) and nothing at L0 separates that
+from noise. (3) *F1 < S1 at L0 is the contamination the ladder exists for.* The students
+beat the frontier by 8–11 points on the moved half and match it on the unchanged classes at
+**1/23 of the cost** ($0.0015 vs $0.0348 per episode); (m) P2 predicts F1 > S1 *on L3*, where
+the student has nothing to have memorised, and that is where the direction is tested — an L0
+student win is expected and is not evidence of anything but training on these classes.
+(4) *The memorisation diagnostic is already visible in S0.* The SenseLab-trained student alone
+solves 96 % of moved-half episodes (mean 2.1 attempts) with 9 % first-attempt: it has learnt
+its teacher's recovery path — first the stale action, then the one the environment accepted —
+and replays it without a memory read; the ablation-trained student alone is 0 % first-attempt,
+44 % episode success, 100 % on the kept half and 90 % on the unchanged classes — it learnt the
+*old* rule better and the recovery worse. That is H12's premise in the raw (the repair record
+contains the repair) and it is exactly what L1's S0 drop is designed to measure; nothing is
+claimed from it here. (5) *S1 pays on the kept half* like every SenseLab cell in this document
+(65–69 vs S0's 88–100): the record marks the class contested and the student explores where
+the old action was still right. (6) *Not computed at this rung:* pinned-case reproduction
+(E7's third endpoint, L0 only) needs the training cells' pinned cases replayed against the
+students; it is in the analysis backlog, not omitted by design. The confirmatory E7 students
+remain the ones (m) specifies — trained on E1 traces after the freeze — and the ladder's L1–L3
+rungs need (m)'s eval-only message sets, log variants and classes written and registered
+first.
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families
