@@ -1606,4 +1606,18 @@ proposed for a situation the agent keeps meeting reaches a canary verdict (pass,
 the clock; *what falsifies* — a regime fix in a recurring situation still ending
 `ungraded`, or being held for exposure while runs in its situation are being sealed.
 
-**Cut time.** *(to be recorded when #790 is merged and deployed.)*
+**Cut time (recorded 2026-09-27).** #790 merged 02:22:31Z (`c4949443`); "Deploy to Google
+Cloud" run 36288330859: the `deploy` job finished 02:33:07Z (Cloud Run `amfs-api-02035-cdm`
+ready 02:31:27Z, `pro-api-00778-mvr`), the run green at 02:34:34Z. **The cut is 02:34:34Z**,
+by the convention used for #789. *Correction to the paragraph above:* `rsi-c1-rsi` is not
+pre-#790 end to end. Its cells run in sequence, and at the cut the support-`s11` cells had
+finished (100/100 each, all sessions pre-#790), the support-`s23` cells were mid-run —
+`senselab-rsi-nocanary` s23 at ep 23 (episodes 0–22 pre, 23–99 post), `senselab-rsi` s23 at
+ep 3 (0–2 pre, 3–99 post) — and the four ci-fix cells had not started, so they are on the
+(n) engine end to end. **Analysis rule, fixed now:** engine version is a per-episode
+covariate (`ts < 02:34:34Z` → `pre-n`, else `post-n`); the (l) P2/P3 verdict counts are
+reported per cell with the split stated, and any latency claim (time to a canary verdict,
+time-to-repair) is made only within one engine version — never across the cut. The s23
+support cells are the one pair where a regime fix proposed pre-cut could be canaried
+post-cut; if either has such a fix, it is reported as a straddling case, not counted for
+or against the (n) prediction. The ci-fix cells are the clean (n) cells of this run.
