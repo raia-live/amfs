@@ -1812,16 +1812,19 @@ case). (b) Among regime fixes that **pass** Tier 2, the share whose shipped/cana
 correction does not encode the conditional — a restatement of the pre-change answer, an
 unconditional flip, or a sequential hedge that names both answers without the condition
 (the reading applied to `5d317c0a`, `71b44f84`, `abee5262`, `6e3dcf9b`, recorded per fix in
-the readout before its Tier 2 outcome is looked at) — falls from 4/4 in `rsi-c2` to ≤ 1/4:
-the failing and kept runs replayed together are what a one-case set could not test. A hedge
-can still pass (it succeeds on both halves at the cost of an attempt), so (b) is expected to
-move mostly through restatements and flips failing. (c) Tier 2 **failures** rise: at least one regime
+the readout before its Tier 2 outcome is looked at) — falls to **≤ 25 %** of passed regime
+fixes. *Baseline, corrected after the full `rsi-c2` readout (HEADROOM; this paragraph first
+said 4/4 from the four fixes read at the time):* of the fourteen post-change regime fixes
+that passed Tier 2 in `rsi-c2`, **9/14 (64 %)** do not encode the conditional and 12/14 do
+not act on it first (three encode the right attribute behind a rerun). The failing and kept
+runs replayed together are what a one-case set could not test. A hedge can still pass (it
+succeeds on both halves at the cost of an attempt), so (b) is expected to move mostly through
+restatements and flips failing. (c) Tier 2 **failures** rise: at least one regime
 fix fails Tier 2 on a kept case (`repaired > 0` and `failed > 0` in the replay record) in the
 eight cells — the mechanism visibly doing its job. *What falsifies:* (a) a regime fix
 reaching Tier 2 with one case while the situation has ≥ 1 earlier sealed run on that agent;
-(b) the non-conditional share among passed fixes still ≥ 2/4 (≥ 50 % if the count differs);
-(c) no Tier 2 failure on a kept case across the eight cells while ≥ 4 regime fixes reach
-Tier 2. P2/P3 are not re-predicted: the intended effect on solved-after-change is via fewer
+(b) the non-conditional share among passed fixes still ≥ 50 %; (c) no Tier 2 failure on a
+kept case across the eight cells while ≥ 4 regime fixes reach Tier 2. P2/P3 are not re-predicted: the intended effect on solved-after-change is via fewer
 wrong ships, and (b) is the direct measure.
 
 **Seam 5b, offline check (not built; decision pending).** Bruno's condition was an offline
@@ -1843,3 +1846,18 @@ is written — with the caveat, stated here in advance, that the threshold was c
 seed 11 and 23 export, so `rsi-c3` on those seeds is an in-sample check of it; the
 out-of-sample test is the confirmatory seeds. The offline scripts are outside the
 repository (`/tmp/sit_eval.py`, `/tmp/sit_eval_emb.py`).
+
+**Seam 8, found in the `rsi-c2` readout (finding only; no code, no PR until Bruno says so).**
+Canary `4c01d9d5` (support s11) was drafted from trace `2813e38b`, which is the **Tier 2
+replay of another fix's case** (`0cb64b9f`, sealed on `repair/0cb64b9f`, outcome failure),
+not a served run. The regime-shift pass fires on a failing seal that read an entry the record
+had validated; a replay's failure on a fix branch reads to it as the entry failing on main,
+so the loop proposed a regime fix from its own test of another fix. The rule #795 gives the
+canary tally (`_TRAFFIC_SQL`: no `origin`, no `replay_delivery_id`) is the rule the regime
+trigger needs. *If approved:* one clause in `regime.py`'s trigger; prediction P10 — no regime
+fix in `rsi-c3` has a `manifest.predicted_fixes` trace carrying `origin` or
+`replay_delivery_id` (falsified by one). Also observed: the ablation's `1196bfc0` (ci-fix
+s11) is a **pre-change** regime proposal (episode 7, situation `unknown ci failure`) that
+shipped at episode 10 — 5k's first-exposure false positive, now able to ship because Tier 2
+passes a one-case set; counted as a false ship in the readout, and (like seam 6) a
+proof-set question rather than a trigger one.

@@ -960,6 +960,158 @@ remain the ones (m) specifies — trained on E1 traces after the freeze — and 
 rungs need (m)'s eval-only message sets, log variants and classes written and registered
 first.
 
+### `rsi-c2` complete (800/800) — the repair loop on the `post-seam5` engine: Tier 2 works, Tier 3 grades, and what it ships is mostly the wrong rule
+
+`rsi-c2` (set C, seeds 11/23, support + ci-fix, SenseLab and the no-canary ablation, 100
+episodes, change at 30, focus 0.5, Tier 2 replay hub on 8787) ran 08:30Z–12:45Z on
+2026-09-27, all eight cells on the `post-seam5` engine (#793 and #794 live; cut 08:27:24Z),
+0 episode errors. 33 fixes were proposed across the eight agents (16 on SenseLab, 17 on the
+ablation), four canaries started in-cell, nine memories shipped — all nine on the ablation.
+Paired with `rsi-c1-rsi` (same cells, `pre-n`/`post-n` engine) and `rsi-c1-tier1`
+(`senselab` = SenseLab − repair loop). First-attempt success, episodes 30–99, per cell; dev
+seeds, small n, no significance claimed.
+
+**Moved half (n = 23 / 20 / 19 / 13):**
+
+| cell | SenseLab − repair loop | **SenseLab** c1 → c2 | SenseLab − canary c1 → c2 |
+|---|---|---|---|
+| support s11 | 26 | 30 → **39** (9/23) | 4 → 22 |
+| support s23 | 55 | 25 → **40** (8/20) | 5 → 30 |
+| ci-fix s11 | 79 | 68 → **63** (12/19) | 63 → 53 |
+| ci-fix s23 | 46 | 15 → **46** (6/13) | 31 → 38 |
+
+**Kept half (n = 12 / 15 / 16 / 22):** SenseLab 33 → 33, 87 → 47, 62 → 62, 68 → 82; the
+ablation 50 → 42, 73 → 73, 88 → 75, 86 → 73; `senselab` 50 / 67 / 75 / 77. **Unchanged
+classes:** SenseLab 100 / 100 / 94 / 100; the ablation 100 / 100 / 100 / 97; `senselab` 97 /
+100 / 94 / 94. **Pre-change (episodes 0–29):** 73–93 % in every c2 cell. Cost per episode
+post-change is flat c1 → c2 ($0.051 → 0.053 support, $0.045 → 0.046 ci-fix, both arms
+alike); the Tier 2 replays cost $0.12–1.17 per pair of cells on top, on the hub's side.
+
+**Reading of the outcome table.** The moved half moved up on three of four SenseLab cells
+(+9, +15, +31) and down on one (−5); the no-canary ablation rose on three (+18, +25, +7) and
+fell on one (−10).
+Against `senselab` the picture is unchanged from c1: SenseLab is above it on support s11
+(39 vs 26) and ci-fix s23 (46 vs 46, level), below on support s23 (40 vs 55) and ci-fix s11
+(63 vs 79). On these n the c1 → c2 differences are within a few episodes; what changed
+between the runs is the engine (seams 4 and 5), and the fix ledger below is where that
+shows, not this table.
+
+**P6 (seam 4 — a regime fix gets a Tier 2 verdict).** Zero `replay_pending: … no cases`
+events in 33 fixes (in c1 it was every regime fix). **On the ablation P6 holds:** ten
+regime fixes passed Tier 1, ten received a Tier 2 verdict in-cell (8 passed, 2 failed), and
+every one of the eight passed replays shipped in the same cell (the ninth ship, `5d317c0a`,
+came through an inconclusive Tier 1 and a passed replay); no replay passed a fix whose
+replayed run reported failure. **On SenseLab P6 is falsified, by seam 7:** `0dde8588`
+(support s11, `test_passed` at episode 85) had its one case delivered, replayed and sealed as
+a success at 09:33:47Z and ended the cell with the case `missing`, because the running canary
+`4c01d9d5` re-stamped the replay's branch (HYPOTHESIS (p)). Eight replay traces were
+re-stamped in total — four under `4c01d9d5` (fixes `b66f87c1`, `8fca099f`, `0dde8588`,
+`76148c9c`), four under `2b87f293` (`273dfacc`, `b96968fa` ×2, `41b0ba5d`) — and every
+re-stamped one was sealed on the *canary* bucket; the 40 replays whose sessions the router
+bucketed control (5) or that ran with no canary live (35) were all graded. The six
+SenseLab support fixes left `test_inconclusive` with replays `requested` at cell end are
+this mechanism, not missing deliveries (the hub ledger shows every delivery sealed; the
+one `commit_error` in the run is a client `ReadTimeout` on the ablation's `53c3b04f`).
+Amendment (q), PR amfs-internal #795, is the fix; P8 is its prediction.
+
+**P7 (seam 5 — situation identity), per situated canary, post-start served runs; ground
+truth = the harness's class tag on the run's episode; graded = the run's canonical situation
+equals the fix's:**
+
+| canary | cell | fix's situation (canonical) | recall | purity | what was missed / merged |
+|---|---|---|---|---|---|
+| `4c01d9d5` | support s11 | csv export timeout | 3/6 = **0.50** | 3/3 = 1.00 | `data export error` ×2, `large export failing` |
+| `2b87f293` | support s23 | card declined payment | 9/9 = **1.00** | 9/9 = 1.00 | — |
+| `71b44f84` | ci-fix s11 | pip audit pinned change → `audit pinned related change` | 5/11 = **0.45** | 5/7 = **0.71** | missed `pip audit requests pinned requirement` ×4, `… direct pin`, `… pinned dependency`; merged two `audit-free` runs labelled `pip audit (pinned) related (change)` |
+| `5811ca2e` | ci-fix s23 | pip audit pinned related requests → `pip audit related change` | 7/8 = **0.88** | 7/7 = 1.00 | `audit pinned ci failure` |
+| pooled | | | 24/34 = **0.71** | 24/26 = **0.92** | |
+
+Against `rsi-c1-rsi`'s one situated canary (2/15 = 0.13) the rule moved recall to 0.71
+pooled and 0.45–1.00 per canary; purity is 0.92 pooled. **P7 as preregistered (≥ 0.80 /
+≥ 0.90) is met on two canaries and pooled on purity only; recall pooled 0.71 is short of
+0.80 and above the 0.50 falsifier; `71b44f84` alone fires the recall falsifier (0.45 <
+0.50) and is under the purity bar (0.71, at the 0.70 falsifier).** Two mechanisms, both
+visible in the misses: (i) synonyms with no shared stem (`data export error` for `csv export
+timeout`) — the offline check in HYPOTHESIS (q) shows an embedding second stage recovers
+these and the token rule cannot; (ii) the canonical is the *first-seen* spelling, so
+`pip audit pinned change` resolved to an earlier `audit pinned related change` and later
+spellings are compared against that, not against the fix's own label — `pip audit requests
+pinned requirement` shares two stems with it, under both thresholds. The merge on
+`71b44f84` is the agent's own: it labelled two `audit-free` PRs `pip audit related change`,
+which is the same label it uses for the pinned class, and no rule on labels separates them.
+The two ci-fix canaries also show what the rule is for: with 55 and 40 post-start runs, 11
+and 8 in class, the canaries graded 6 and 6 runs in 55 and 40 sessions — the situation
+recurs about once in five sessions, and at `min_outcomes 8` per arm a decision needs ~80
+sessions of traffic. That is the (n) latency question, unchanged by seam 5.
+
+**K1–K4 (`post-seam5` for every cell).** *K1:* 0 of 4 in-cell canaries decided (all four
+`running` at cell end; `2b87f293` was stopped by the benchmark's 60-session timeout at 5/5
+graded, one recurrence, and returned to `test_passed`; the other three wait for 6–7 more
+graded runs at 60 % of a cell's traffic). *K2:* proposal → canary start 4, 1, 4, 5
+sessions (median 4) — every canary via a passed Tier 2 replay or the slot fill, none held
+behind a replay. *K3:* graded canary/control at cell end 2/1, 5/5, 2/4, 4/2 — every regime
+canary graded in both arms (5k's 0/0 is gone). *K4:* SenseLab shipped 0 in 4 cells (its
+Tier 2-passed fixes are in canary or queued behind one — `a0a40f5d`, `e4ddb72a` sat
+`canary_pending` on ci-fix s23 behind `5811ca2e`); the ablation shipped 1 / 1 / 3 / 4, first
+post-change ship at episodes 45 / 35 / 55 / 40. One of the ablation's ships is
+**pre-change**: `1196bfc0` (ci-fix s11) was proposed at episode 7 on the situation `unknown
+ci failure` and shipped at episode 10 — a regime proposal on a first-exposure failure
+(5k's false-positive mechanism), shipping a README-shaped note; it is counted as a false
+ship. Post-first-ship, moved half, the ablation against `senselab` on the same episodes:
+27 vs 27, 33 vs 61, 67 vs 83, 45 vs 55 — **0 / −28 / −17 / −9 points**; kept half −10 /
++7 / 0 / −11; unchanged classes within 4 points.
+
+**(l) P2 — fails with fixes shipped.** The ablation shipped by episode 60 in 4 of 4 cells
+(the first clause holds), and after the first ship the moved half is 27–67 %, never ≥ 85 %
+and never above `senselab` paired — in three cells below it. This is the pre-specified
+clause: *"if P2 fails with fixes shipped, the repair loop's synthesis adds nothing over a
+capable agent with priors … the paper reports the repair loop as a validation and safety
+layer, not an intelligence layer."* On this engine cut that is the paper's sentence, and
+the shipped content says why. Every regime fix that passed Tier 2 passed on **one case**
+(seam 6); read against set C's actual conditionals (`realworld.py`
+`SUPPORT_CHANGES_C` / `CI_CHANGES_C`), the fourteen post-change regime fixes that passed
+Tier 2 are: **the true conditional as the first action — 2** (`c39ec61a`, `c116e01c`,
+ci-fix s23 ablation, one situation, shipped 4 s apart: "cassette in the diff → regenerate;
+only `webhooks.py` → rerun once"); **the right attribute but sequenced behind the old action
+— 3** (`abee5262`, `a0a40f5d`, `e4ddb72a`: "rerun first; if it persists *and* the PR touches
+a cassette, regenerate" — right on episode success, wrong on first attempt on the moved
+half); **not the conditional — 9**: restatements of the pre-change answer (`5d317c0a`
+split-the-range for export timeout, `0a0c2b9a` settings steps for notifications, `4c01d9d5`
+workaround-then-escalate), unconditional flips (`71b44f84`, `5811ca2e` "bump, do not add the
+exception" — right on the moved half, wrong for every `legacy_sdk/` PR), sequential hedges
+(`6e3dcf9b`, `6236e8e2` "try one, if rejected the other"; `2b87f293` "update card, refresh
+session, then escalate" — neither `resend_email` nor the issuer), and one conditional on the
+wrong attribute (`2d4d0cac`: "pin *and* related code in the diff → exception" — both halves
+of set C's PRs have both). 9/14 do not encode the rule and 12/14 do not act on it first.
+The one arm-level success — ci-fix s23's two conditional ships at episode 55 — is followed
+by a moved half of 45 % (5/11) against `senselab`'s 55 %: the record also holds `2d4d0cac`,
+shipped at 40 with the wrong attribute for the other class, and the agent reads both.
+
+**Two further findings.** (1) **Seam 8, not yet a PR candidate until Bruno says so:**
+`4c01d9d5` — the support s11 canary — was drafted from trace `2813e38b`, which is not a
+served run: it is the Tier 2 replay of judge fix `0cb64b9f`'s case, sealed on
+`repair/0cb64b9f` with a failing outcome. The regime-shift pass reads a failing seal on an
+entry the run read, and a replay's failure on a fix branch counts to it as the entry
+failing on main. The loop proposed a regime fix from its own test of another fix; the
+`_TRAFFIC_SQL` rule #795 applies to the canary tally is the rule the regime pass needs on
+its trigger. (2) The support s23 judge fix `273dfacc` entered **canary after the cell**
+(12:20Z, pct 10, via the sweep's slot fill once its lost replay expired), on an agent that
+seals nothing; it will time out at 24 h with 0/0. Left untouched, as every prod canary is.
+
+**What the paper takes from `rsi-c2` (dev seeds).** Seams 4 and 5 did what their
+predictions said within the stated bars on the ablation and on two of four canaries: a
+regime fix now gets a Tier 2 verdict, ships under the replay policy, and a situated canary
+grades 0.45–1.00 of its class instead of 0.13. What the run then exposes is the next layer
+down: (a) a one-case Tier 2 passes the wrong rule 9 times in 14 (seam 6, in #795 with P9);
+(b) a running canary swallows later replays (seam 7, in #795 with P8); (c) the token rule
+misses synonyms and inherits its first spelling (seam 5b, offline result in (q), decision
+pending); (d) the regime trigger reads the loop's own replays as traffic (seam 8, above).
+The attribution table's sentence does not change on this cut: the repair loop's
+contribution to the moved half is zero or negative on 3 of 4 cells, and (l)'s P2 clause
+fires *with fixes shipped*. The paper reports that as the finding for this engine version,
+with the content analysis above as the mechanism, and `rsi-c3` on the #795 cut as the test
+of whether a proof set that covers both halves changes it.
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families
