@@ -809,35 +809,35 @@ seeds, small n, no significance claimed.
 
 **Moved half — the instances whose correct action changed (the RSI scenario):**
 
-| cell | frontier alone | pgvector | pgvector+rerank | pgvector-diy+outcomes | **SenseLab** |
-|---|---|---|---|---|---|
-| support s11 | 0 (0/23) | 4 | 4 | 0 | **30** (7/23) |
-| support s23 | 0 (0/20) | 0 | 0 | 0 | **25** (5/20) |
-| ci-fix s11 | 47 (9/19) | 47 | 11 | 53 | **68** (13/19) |
-| ci-fix s23 | 31 (4/13) | 23 | 8 | 31 | **15** (2/13) |
+| cell | frontier alone | context-window | pgvector | pgvector+rerank | pgvector-diy+outcomes | **SenseLab** |
+|---|---|---|---|---|---|---|
+| support s11 | 0 (0/23) | 0 | 4 | 4 | 0 | **30** (7/23) |
+| support s23 | 0 (0/20) | 0 | 0 | 0 | 0 | **25** (5/20) |
+| ci-fix s11 | 47 (9/19) | 84 | 47 | 11 | 53 | **68** (13/19) |
+| ci-fix s23 | 31 (4/13) | 69 | 23 | 8 | 31 | **15** (2/13) |
 
 **Kept half — same classes, old action still correct:**
 
-| cell | frontier alone | pgvector | pgvector+rerank | pgvector-diy+outcomes | **SenseLab** |
-|---|---|---|---|---|---|
-| support s11 | 83 | 83 | 75 | 75 | 33 |
-| support s23 | 73 | 73 | 80 | 80 | 87 |
-| ci-fix s11 | 12 | 50 | 100 | 44 | 62 |
-| ci-fix s23 | 9 | 0 | 86 | 36 | 68 |
+| cell | frontier alone | context-window | pgvector | pgvector+rerank | pgvector-diy+outcomes | **SenseLab** |
+|---|---|---|---|---|---|---|
+| support s11 | 83 | 92 | 83 | 75 | 75 | 33 |
+| support s23 | 73 | 100 | 73 | 80 | 80 | 87 |
+| ci-fix s11 | 12 | 100 | 50 | 100 | 44 | 62 |
+| ci-fix s23 | 9 | 100 | 0 | 86 | 36 | 68 |
 
 **Unchanged classes:**
 
-| cell | frontier alone | pgvector | pgvector+rerank | pgvector-diy+outcomes | **SenseLab** |
-|---|---|---|---|---|---|
-| support s11 | 51 | 86 | 86 | 66 | 94 |
-| support s23 | 54 | 86 | 94 | 71 | 97 |
-| ci-fix s11 | 89 | 100 | 100 | 97 | 97 |
-| ci-fix s23 | 71 | 100 | 97 | 86 | 97 |
+| cell | frontier alone | context-window | pgvector | pgvector+rerank | pgvector-diy+outcomes | **SenseLab** |
+|---|---|---|---|---|---|---|
+| support s11 | 51 | 100 | 86 | 86 | 66 | 94 |
+| support s23 | 54 | 100 | 86 | 94 | 71 | 97 |
+| ci-fix s11 | 89 | 100 | 100 | 100 | 97 | 97 |
+| ci-fix s23 | 71 | 100 | 100 | 97 | 86 | 97 |
 
 `rsi-c1-baselines` finished 07:30Z (800/800 on the eight `pgvector` / `pgvector-diy+outcomes`
-cells, 0 errors). Its four `context-window` cells did not run: the runner was given the paper's
-name and the harness arm is `raw-traces` (amendment (b), `CL_RAW_TRACES_TOKENS = 24000`); they
-run as `rsi-c1-baselines-cw` (launched 07:32Z) and the column is added when it ends.
+cells, 0 errors). Its four `context-window` cells did not run — the runner was given the paper's
+name and the harness arm is `raw-traces` (amendment (b), `CL_RAW_TRACES_TOKENS = 24000`) — and
+ran as `rsi-c1-baselines-cw`, 07:32Z–07:45Z, 400/400, 0 errors.
 
 **Reading.** On support the retrieval baselines sit at 0–4 % on the moved half: they retrieve
 the stale fix and follow it, every time, and frontier alone is at 0 because the new rule is
@@ -856,6 +856,23 @@ exploration on the moved half with a lower kept half in s11 (33). On the unchang
 SenseLab is 94–97 % in every cell against 51–89 % for frontier alone and 66–94 % for the
 retrieval baselines.
 
+**The context-window baseline is the finding of this fill-in.** With every prior transcript
+of the cell in the prompt (24 000-token cap), the frontier model on ci-fix reaches **84 / 69 %
+on the moved half** — the highest of any arm, SenseLab included — and 100 % on the kept half
+and the unchanged classes. It is reading the rule off the history: the transcripts hold the
+PR files, the action taken and the environment's verdict for every earlier task, so the
+conditional is inferable in-context once a few moved and kept instances have been seen. On
+support the same arm is at **0 %** on the moved half in both cells, like every other baseline:
+the ticket transcripts do not show the attribute the rule turns on (app version, plan, issuer
+country are in `lookup_account`, which the earlier transcripts do not always call), so history
+alone carries the old answer. The cost is the other axis the paper reports (E6): post-change,
+context-window is $0.075 (ci-fix) and $0.105 (support) per episode against SenseLab's $0.024 /
+$0.026 and frontier alone's $0.008 — three to four times SenseLab, and it grows with the cell.
+The paper states both: on ci-fix set C a long context recovers the rule better than SenseLab on
+the dev seeds at 3× the cost, and on support only SenseLab's record moves the agent off the
+stale answer at all. The E1 confirmatory cells decide whether this holds on the six other
+families.
+
 **Attribution (the one table the ablations appear in), moved-half first-attempt success:**
 
 | cell | **SenseLab** | SenseLab − repair loop | SenseLab − canary |
@@ -873,10 +890,12 @@ sets, seam 4) and the one situated canary graded 2 of 15 runs (label drift, seam
 loop added tested-but-unshipped branches and lesson entries to the record and recovered no
 rule inside the window. Both seams are engine changes (#793 deployed 07:00:22Z; #794 open)
 with predictions P6 / P7 in (o); `rsi-c2` is the run that tests whether the repair loop turns
-this attribution positive. The paper's sentence for the dev seeds is therefore: SenseLab is
-above every baseline on the moved half in three of four cells and on the unchanged classes in
-all of them, the gain is the outcome loop's, and the repair loop's contribution on set C is
-the open question `rsi-c2` answers — not a "SenseLab vs SenseLab-RSI" comparison.
+this attribution positive. The paper's sentence for the dev seeds is therefore: on support SenseLab is
+the only arm above 4 % on the moved half (25–30 %) and is 94–97 % on the unchanged classes;
+on ci-fix the context-window baseline leads the moved half (84 / 69) at 3× SenseLab's cost,
+SenseLab is second on s11 (68) and last on s23 (15); the gain SenseLab has is the outcome
+loop's, and the repair loop's contribution on set C is the open question `rsi-c2` answers —
+not a "SenseLab vs SenseLab-RSI" comparison.
 
 ## Discipline
 
