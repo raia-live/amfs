@@ -1904,4 +1904,14 @@ Cloud" run 36319683320, `deploy` job done 12:49:04Z (Cloud Run `amfs-api-02075-n
 12:48:06Z, `pro-api-00783-pb5`), run green 12:50:24Z. **The cut is 12:50:24Z.** No
 `senselab-rsi` cell was running across it (`rsi-c2` ended 12:45Z). Engine covariate for
 cells after this cut and before 5b's: `post-seam7`. **5b:** PR amfs-internal #796 opened
-12:56Z from `main` at `e1cd6018`, one commit `65a44936`; cut to be recorded on merge.
+12:56Z from `main` at `e1cd6018`, one commit `65a44936`.
+
+**Cut record, #796 (seam 5b).** Merged 13:27:45Z (`ad520bb7`); "Deploy to Google Cloud" run
+36322473362, `deploy` job done 13:37:45Z (Cloud Run `amfs-api-02083-rgp` ready 13:36:54Z,
+`pro-api-00784-zq5`), run green 13:39:13Z. **The cut is 13:39:13Z.** No `senselab-rsi` cell
+ran between the two cuts. Engine covariate from here: `post-seam5b` (= seams 4, 5, 5b, 6, 7
+live). **Run plan:** `rsi-c3` launched after this cut with the `rsi-c2` command unchanged
+except the run name — `senselab-rsi` and `senselab-rsi-nocanary`, set C, support + ci-fix,
+seeds 11 / 23, 100 episodes, change at 30, focus 0.5, Tier 2 on 8787 through the same
+tunnel. Reads out P8, P9, P7′ and the (l) P2 clause per cell, paired with `rsi-c2` and
+`rsi-c1-tier1`.
