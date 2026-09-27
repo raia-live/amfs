@@ -1454,7 +1454,9 @@ candidate only if an earlier success of the same agent in that situation read it
 entries are reported as `first_exposure`. Neither changes what is measured; both change
 whether the loop's one canary slot can be blocked by a fix to an entry nobody reads.
 `rsi-c1-rsi` (the P2/P3 run: `senselab-rsi-nocanary` + `senselab-rsi`, set C) is held until
-both are deployed; their cut times will be recorded here.
+both are deployed; their cut times will be recorded here. *2026-09-27 09:5x JST:* at Bruno's
+request both were combined into amfs-internal #789 for a single deployment; #787 and #788
+closed as superseded (branches kept). #789 is the PR whose cut time gates `rsi-c1-rsi`.
 
 ### 2026-09-27 (m) — the Managed Model is evaluated on tickets and logs it never trained on
 
