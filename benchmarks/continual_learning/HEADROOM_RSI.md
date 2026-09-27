@@ -706,6 +706,95 @@ episodes — the number a shipped fix would have to recover to match a maintaine
 the rule. The ceiling argument in (l) stands; the paper states the bound as measured rather
 than as "within 3 points". Dev seeds only; the confirmatory oracle cells run with E1.
 
+### P2/P3 readout — `rsi-c1-rsi` complete (800/800): the canary grades for the first time, and the two seams it finds
+
+`rsi-c1-rsi` (set C, seeds 11/23, support + ci-fix, `senselab-rsi` and
+`senselab-rsi-nocanary`, 100 episodes, change at 30, focus 0.5) ran 01:17Z–05:06Z on
+2026-09-27. Engine: the support-s11 cells pre-#790, the support-s23 cells straddling the
+02:34:34Z cut, the four ci-fix cells post-#790 (HYPOTHESIS (n) cut record). Seventeen fixes
+were proposed across the eight agents; three canaries started; one memory shipped.
+
+**Moved half, episodes 30–99, first-attempt success (n = 35 per cell), with the paired
+`senselab` cell from `rsi-c1-tier1`:**
+
+| family | seed | `senselab` | `senselab-rsi` | `senselab-rsi-nocanary` |
+|---|---|---|---|---|
+| support | 11 | 34 | 31 | 20 |
+| support | 23 | 60 | 51 | 34 |
+| ci-fix | 11 | 77 | 66 | 74 |
+| ci-fix | 23 | 66 | 49 | 66 |
+
+The kept half stayed 94–100 % in every cell (no regression). Neither RSI arm beats
+`senselab` on the moved half on any of the eight cells; the nocanary support cells are
+14–26 points below it.
+
+**P2 — not met.** `senselab-rsi-nocanary` shipped in 1 of 4 cells, and at episode 94
+(support s23, `3e521221`, a judge fix on the situation "ios team card decline"; two moved
+episodes remained, both succeeded, as did `senselab`'s). The support-s11 cell's one fix
+and the s23 cell's other two ended `test_failed` at Tier 2 — the agent's own replay still
+failed 1–3 cases. The two ci-fix nocanary cells proposed four fixes, all regime-shift
+proposals ("… stopped working", carrying a situation), all Tier 1 `test_passed` — **and none
+shipped**: a regime proposal has no failing runs behind it, so its case set is empty, the
+customer replay cannot be asked (`replay_pending: the fix's case set has no cases`), and the
+nocanary policy, which ships on a passed replay, has nothing to ship on. The clause in (l)
+does not fire — P2 failed *without* fixes shipped, so it says nothing yet about what a
+shipped fix is worth; it says the nocanary arm cannot ship the one kind of fix set C is
+built to produce. **Seam 4:** the regime path needs a Tier 2 of its own (the fix's
+*situation* as the case set — the failing runs in it since the shift — or a direct route to
+the canary when the replay has no cases, which is what the sweep gave the canary arm).
+
+**P3 — not met, and the mechanism is different from 5k.** Three canaries started, none by
+the (l) route — every one via the sweep's slot fill or a passed replay — and **none decided
+within its cell**; all three were `running` when traffic stopped and will end at the 24-hour
+ceiling. But two of them graded, which no canary before #790 did:
+
+- `025df85b` (support s23, judge `cl-task-failure`, started episode 45): 54 sessions routed
+  26/28, **54/54 graded**, recurrence 1/26 canary vs 2/28 control, p = 0.60. The canary
+  works end to end; the effect it measured is nil on 26 runs. Post-start moved half: 50 %
+  vs `senselab` 69 % paired (n = 26).
+- `11dcc6b1` (ci-fix s23, judge `cl-task-failure`, started episode 50): 49/49 graded,
+  0 recurrences in either arm (p = 1.0). The behaviour the judge flags did not recur on
+  main either after episode 50 — nothing for the branch to prevent.
+- `9ca1e6b5` (ci-fix s11, **situation-graded**, "pip audit pinned dependency", started
+  episode 45): the first (n) canary. 2 graded canary, 0 control, in 57 sessions over 24
+  minutes. The situation *was* recurring — the agent declared a pip-audit situation on 15
+  of those sessions — under ten different labels ("pip audit pinned dependency", "ci
+  pip audit pinned related", "pip audit failure", "pip audit legacy sdk pin", "pip audit
+  reports export pin", …). In the cell's first 45 episodes it had written "pip audit pinned
+  dependency" nine times against three variants; after the canary started its wording
+  drifted with the tasks. Situation grading matches the folded
+  string exactly, so 13 of 15 runs in the situation were invisible to it. **This is the (n)
+  falsifier as written** ("a regime fix in a recurring situation … held for exposure while
+  runs in its situation are being sealed"), and the cause is not the grading rule but the
+  label: the situation is agent-declared free text, and the whole (h) contract — records,
+  priors, `pooled`, and now the canary — keys on it. **Seam 5:** situation identity has to
+  be the server's, not the agent's — cluster the labels an agent uses (the Cortex already
+  detects two kinds of task pooled under one label; the inverse, one kind of task under
+  many labels, is the same computation), and let a situated fix be graded on the cluster its
+  failing runs fell in. Until then a situated canary is exactly as reliable as the agent's
+  spelling.
+
+Two smaller findings. `graded_by` stored the "and none reached these runs" sentence on a
+canary that was being graded (fixed, amfs-internal #792). And the queue behaved as #790
+says: on `ci-agent-782226690` two more tested fixes waited behind `9ca1e6b5` for the rest
+of the cell with no event — the slot was held by a canary that had 2 graded runs, one more
+than the preemption rule's zero. Whether a canary at 2/0 after 50 sessions in a situation
+the traffic keeps declaring should keep the slot is a question for (n)'s successor, not a
+bug.
+
+**What the paper takes from this run (dev seeds).** Tier 3 is now a working instrument:
+routing, exposure, judge grading and the tally all did what #790 says on two canaries, and
+the numbers it returned are honest nulls, not artefacts. What the loop still cannot do on
+this benchmark is produce a *shippable regime fix inside the measurement window*: the
+judge fixes it can ship or canary target failures the judge sees (task failure), not the
+moved rule, and the regime fixes that do target the moved rule cannot pass Tier 2 (no
+cases) or be graded at Tier 3 (label drift). The moved-half deficit of the RSI arms against
+`senselab` is the cost of that: extra tested-but-unshipped branches and lesson entries in
+the record, no recovered rule. Amendment (o), to be preregistered before the next dev run:
+seams 4 and 5 as engine changes (PR candidates), the (n) prediction re-stated on
+server-clustered situations, and a per-cell K1–K4 table with the engine version as a
+covariate.
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families
