@@ -1713,3 +1713,58 @@ trained on E1 traces after the freeze.
 
 **What does not change.** No arm, scenario, change set, rubric or metric is added or altered;
 the seeds, the dev / confirmatory split, the freeze rule, and E1–E7 as specified stand.
+
+### 2026-09-27 (p) — seam 7, found in `rsi-c2`: a running canary swallows the Tier 2 replays of every later fix
+
+**Finding (10:50Z, `rsi-c2` support s11 complete, s23 at 64–68/100).** On the SenseLab arm
+(agent `…336387308`) the situated canary of fix `4c01d9d5` started 09:00:36Z. Every Tier 2
+replay the harness ran for that agent *after* that moment whose session the router bucketed
+into the **canary arm** was sealed with `attributes.memory_branch = repair/4c01d9d5` and
+`canary_arm = canary` — the running canary's branch, not the branch of the fix being replayed
+(`b66f87c1`, `8fca099f`, `0dde8588`, `76148c9c`, 09:12–09:41Z; the SDK had stamped
+`memory_branch = repair/<that fix>` on the bag and the server's routed stamps were merged on
+top). Replays bucketed **control** kept their branch and were graded. The replayed fix's
+grader looks for a trace *on its own branch* (`fix_store.trace_for_case(branch=…)`), finds
+none, marks the case `missing`, and the replay stays `requested` until its one-hour deadline
+expires it. Same pattern on the s23 SenseLab agent (`…292476129`) once canary `2b87f293`
+started 10:16:47Z: `273dfacc` 1 of 3 cases lost, `b96968fa` 2 of 3. On the `-nocanary` arm no
+canary runs and every delivered replay was graded (the one exception, `53c3b04f`, is a client
+commit `ReadTimeout` — a different thing). Reads were not affected: the replay session named
+its branch on every read and the server honours a named branch; only the seal's stamp was
+overwritten. Two further consequences: the lost replays were **counted in the running
+canary's tally as canary-arm runs** (four of `4c01d9d5`'s 30 canary traces are replays of
+other fixes' cases — seam 5's in-situation grading kept them out of the graded count here
+because their situations differ, but the `traces` count is inflated and an in-situation replay
+would have voted); and a replay past its deadline is expired only by a grading sweep, which
+runs on the agent's traffic — the s11 agents stopped sealing at episode 99, so their
+`requested` replays sit past deadline unexpired.
+
+**Where it lives.** The routing layer's decision is made from headers (`x-amfs-memory-branch`
+wins as "explicit", else the live canary buckets `x-amfs-session`); the SDK's `checkout()` and
+the SDK's own `ReplayReceiver` transmit the branch as a `branch=` parameter on reads and as
+`attributes.memory_branch` on the commit — neither sends the header — and
+`_merge_routed_attributes` puts the server's stamps over the client's bag for every key, not
+only the `canary_*` keys it reserves. A customer running the documented receiver hits this the
+moment one of their fixes is in canary. **Engine change, PR candidate, not started** (Bruno
+approves before any code): a commit whose bag declares a non-main `memory_branch` other than
+the routed one is a replay, not a canary participant — keep its branch and drop the routed
+`canary_*` stamps (server merge), and/or have the SDK send the explicit-branch header when a
+branch is checked out (SDK). Either restores the documented contract.
+
+**Consequence for P6.** P6 is **falsified on the SenseLab arm** in support s11 by this
+mechanism, not by seam 4's: `0dde8588` passed Tier 1 (09:33Z), its one case was delivered,
+replayed and sealed as a success at 09:33:47Z, and the fix ended the cell without a Tier 2
+verdict. Case sets were non-empty on every regime fix (seam 4 held: no `replay_pending: … no
+cases` since the cut). On the `-nocanary` arm P6 holds so far. The `rsi-c2` readout reports
+P6 per arm with this attribution.
+
+**Prediction (P8, for the fixed engine, dev seeds, set C).** With the fix deployed and the cut
+recorded, on the SenseLab arm every Tier 2 replay delivered while a canary is running is
+graded on the replayed fix's branch (no `missing` case whose harness ledger shows a sealed
+trace), and no trace carrying `replay_delivery_id` appears in any canary's arm counts. *What
+falsifies:* a delivered, sealed replay marked `missing` during a canary; or a replay trace in a
+canary tally.
+
+**What does not change.** Nothing mid-run: `rsi-c2` continues on the same engine and harness
+so its eight cells share one covariate; the ci-fix cells will show the same loss wherever a
+canary starts. No arm, scenario, change set, rubric or metric is added or altered.
