@@ -795,6 +795,84 @@ seams 4 and 5 as engine changes (PR candidates), the (n) prediction re-stated on
 server-clustered situations, and a per-cell K1–K4 table with the engine version as a
 covariate.
 
+### The same run under the (o) rule — SenseLab against the baselines on set C (dev seeds)
+
+The readout above presents `senselab-rsi` against `senselab` as two systems. They are one
+system; the paper compares **SenseLab** (the full engine) with the baselines, and the
+repair-loop ablation belongs in the attribution table only (HYPOTHESIS (o)). Re-stated here
+with the paired cells of `rsi-c1-tier1` and `rsi-c1-baselines` on the same protocol and
+seeds. **Correction:** the table above labelled "moved half, n = 35" is all changed-class
+post-change episodes (moved and kept halves together); the moved half is 13–23 episodes per
+cell, and the "kept half 94–100 %" line describes the *unchanged* classes. The three
+populations are separated below. First-attempt success, episodes 30–99, per cell; dev
+seeds, small n, no significance claimed.
+
+**Moved half — the instances whose correct action changed (the RSI scenario):**
+
+| cell | frontier alone | pgvector | pgvector+rerank | pgvector-diy+outcomes | **SenseLab** |
+|---|---|---|---|---|---|
+| support s11 | 0 (0/23) | 4 | 4 | 0 | **30** (7/23) |
+| support s23 | 0 (0/20) | 0 | 0 | 0 | **25** (5/20) |
+| ci-fix s11 | 47 (9/19) | running | 11 | running | **68** (13/19) |
+| ci-fix s23 | 31 (4/13) | running | 8 | running | **15** (2/13) |
+
+**Kept half — same classes, old action still correct:**
+
+| cell | frontier alone | pgvector | pgvector+rerank | pgvector-diy+outcomes | **SenseLab** |
+|---|---|---|---|---|---|
+| support s11 | 83 | 83 | 75 | 75 | 33 |
+| support s23 | 73 | 73 | 80 | 80 | 87 |
+| ci-fix s11 | 12 | running | 100 | running | 62 |
+| ci-fix s23 | 9 | running | 86 | running | 68 |
+
+**Unchanged classes:**
+
+| cell | frontier alone | pgvector | pgvector+rerank | pgvector-diy+outcomes | **SenseLab** |
+|---|---|---|---|---|---|
+| support s11 | 51 | 86 | 86 | 66 | 94 |
+| support s23 | 54 | 86 | 94 | 71 | 97 |
+| ci-fix s11 | 89 | running | 100 | running | 97 |
+| ci-fix s23 | 71 | running | 97 | running | 97 |
+
+`context-window` and the ci-fix `pgvector` / `pgvector-diy+outcomes` cells are in
+`rsi-c1-baselines`, running; the tables are completed when it ends.
+
+**Reading.** On support the retrieval baselines sit at 0–4 % on the moved half: they retrieve
+the stale fix and follow it, every time, and frontier alone is at 0 because the new rule is
+not inferable from the ticket without memory of the change. SenseLab is at 25–30 %: its
+record marks the entry *contested*, the briefing says so, and the agent explores instead of
+repeating. On ci-fix, frontier alone beats every retrieval baseline on the moved half (47 /
+31 vs 11 / 8): the PR's files show the attribute and an agent with no memory reads them,
+while an agent served a confident stale memory follows it — the cost of memory without
+evidence. SenseLab is 21 points above frontier alone on s11 (68) and below it on s23 (15).
+On the kept half frontier alone cannot know the old fix on ci-fix (9–12 %) and the memory
+systems can (SenseLab 62–68, pgvector+rerank 86–100); on support SenseLab pays for its
+exploration on the moved half with a lower kept half in s11 (33). On the unchanged classes
+SenseLab is 94–97 % in every cell against 51–89 % for frontier alone and 66–94 % for the
+retrieval baselines.
+
+**Attribution (the one table the ablations appear in), moved-half first-attempt success:**
+
+| cell | **SenseLab** | SenseLab − repair loop | SenseLab − canary |
+|---|---|---|---|
+| support s11 | 30 | 26 | 4 |
+| support s23 | 25 | 55 | 5 |
+| ci-fix s11 | 68 | 79 | 63 |
+| ci-fix s23 | 15 | 46 | 31 |
+
+By the (l) attribution rule the set-C gains over the baselines on these dev cells are
+credited to **Tier 1, the outcome loop**: the ablation without the repair loop is equal or
+higher in every cell, so the repair loop's contribution here is zero or negative. The
+mechanism is the one the readout above diagnosed — no regime fix reached Tier 2 (empty case
+sets, seam 4) and the one situated canary graded 2 of 15 runs (label drift, seam 5) — so the
+loop added tested-but-unshipped branches and lesson entries to the record and recovered no
+rule inside the window. Both seams are engine changes (#793 deployed 07:00:22Z; #794 open)
+with predictions P6 / P7 in (o); `rsi-c2` is the run that tests whether the repair loop turns
+this attribution positive. The paper's sentence for the dev seeds is therefore: SenseLab is
+above every baseline on the moved half in three of four cells and on the unchanged classes in
+all of them, the gain is the outcome loop's, and the repair loop's contribution on set C is
+the open question `rsi-c2` answers — not a "SenseLab vs SenseLab-RSI" comparison.
+
 ## Discipline
 
 - Development runs: pilots and `-dev` cells on seeds **11 and 23** only, families

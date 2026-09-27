@@ -1621,3 +1621,90 @@ time-to-repair) is made only within one engine version — never across the cut.
 support cells are the one pair where a regime fix proposed pre-cut could be canaried
 post-cut; if either has such a fix, it is reported as a straddling case, not counted for
 or against the (n) prediction. The ci-fix cells are the clean (n) cells of this run.
+
+### 2026-09-27 (o) — one system in every result; seams 4 and 5 as engine changes; the E7 stand-in
+
+**Why.** Bruno (2026-09-27 JST): SenseLab and its recursive self-improvement are one system —
+RSI is *what SenseLab delivers* — so the paper never shows "SenseLab vs SenseLab-RSI" as two
+results; the RSI features show up as SenseLab doing better than every other approach on the
+scenarios only a self-improving system can handle. (l) already fixed this mapping; the P2/P3
+readout of `rsi-c1-rsi` in HEADROOM_RSI.md, and messages about it, presented `senselab-rsi`
+against `senselab` as competing systems. That was a presentation error, and this amendment
+makes the rule binding on every readout from now on. Nothing about the measurement changes.
+
+**Presentation rule (binding).**
+
+1. **One system.** *SenseLab* in every results table, figure and sentence is the full engine
+   — harness arm `senselab-rsi`. It is compared with frontier alone (`none`), `pgvector`,
+   `pgvector+rerank`, `pgvector-diy+outcomes`, `context-window`, and the maintainer oracle as
+   the upper bound. Mem0 and Zep are not run — the Arms section has said so since v1 (appendix:
+   gridv4 data), and the Mem0 plan has no retrieval budget; they are not added back.
+2. **Ablations in one place.** The rows "SenseLab − repair loop" (`senselab`), "− canary"
+   (`senselab-rsi-nocanary`), "− replay", "(review)", "− protocol", "(judges only)" appear in
+   exactly one table — the attribution table that credits gains to tiers by the (l) attribution
+   rule — and nowhere else. They are never a column beside SenseLab in a headline table and
+   never described as a system or a competitor.
+3. **No harness names in results.** `senselab`, `senselab-rsi`, … appear only in this document,
+   the reproducibility appendix (command lines, cell ids) and code. Results text says
+   "SenseLab", "SenseLab without the repair loop", "the retrieval baselines".
+4. **Readouts follow the rule.** HEADROOM readouts from this amendment on are written this
+   way. The `rsi-c1-rsi` P2/P3 readout is left as the record and re-stated under the rule below
+   it, with one correction found while re-stating it (the table labelled "moved half, n = 35"
+   was all changed-class post-change episodes; the moved half is n = 13–23 per cell; and "kept
+   half 94–100 %" was the *unchanged* classes). The numbers themselves are unchanged.
+
+**Seam 4 — engine change, deployed (amfs-internal #793).** *What:* a fix's case set now
+includes the runs its manifest predicts it fixes (`FixService.evidence_trace_ids`), the
+customer replay re-attaches the suite when the set is empty, and a case without a judge is
+graded on the outcome the replayed run reports (previously it passed on nothing). *Why:*
+regime fixes — the fixes set C is built to produce — had empty case sets (Tier 1 tests the
+manifest, the case set came from verdicts and behaviours only), so Tier 2 could not be asked
+(`replay_pending: the fix's case set has no cases`) and the `-nocanary` policy, which ships on
+a passed replay, had nothing to ship on: in `rsi-c1-rsi` all four ci-fix regime fixes ended
+the cell `test_passed`, unshipped. **Cut:** merged 06:50:12Z (`9f8c7b55`); "Deploy to Google
+Cloud" run 36301272477 green at 07:00:22Z. **The cut is 07:00:22Z.** *Prediction (P6, dev
+seeds, set C):* every regime fix that passes Tier 1 receives a Tier 2 verdict (pass or fail)
+inside its cell; `replay_pending: … no cases` does not appear on any regime fix; under
+`-nocanary` a regime fix whose replay passes ships in the same cell. (l) P2 is unchanged and
+is now testable. *What falsifies:* a regime fix that passed Tier 1 ending its cell without a
+Tier 2 verdict; or a replay passing a fix whose replayed runs reported failure.
+
+**Seam 5 — engine change, PR open (amfs-internal #794).** *What:* server-side situation
+identity. When a trace seals with `attributes.situation`, the label is folded and resolved to
+the agent's canonical situation — the first-seen spelling among the agent's canonicals whose
+stemmed tokens it shares (Jaccard ≥ 0.5, or ≥ ⅔ of the shorter label's tokens with ≥ 2 shared)
+— and the pair is stored in `amfs_eval_situation_aliases`; the regime guard, the canary's
+situation grading and the exposure check compare canonicals (alias joined at read time, traces
+immutable, fall-back to the spelling). Deterministic and stated; no model call. *Why:* the (n)
+falsifier fired in `rsi-c1-rsi` — canary `9ca1e6b5` graded 2 of 15 runs in a recurring
+situation because the agent spelled it ten ways. *Prediction (P7, dev seeds, set C):* for a
+situated canary, of the post-start runs whose episode the harness tags with the fix's class
+(`change_class`, the benchmark's ground truth), ≥ 80 % are graded (recall), and ≥ 90 % of the
+graded runs are in that class (purity). This is the acceptance check of the engine change,
+computed from tags the runner already writes — not a benchmark endpoint. The (n) prediction is
+re-stated on resolved situations: a regime fix in a recurring situation reaches a canary
+verdict within the cell. *What falsifies:* recall < 50 % (the rule does not capture the
+drift) or purity < 70 % (the rule merges classes). Cut time recorded here when #794 deploys.
+
+**Run plan.** `rsi-c2` after the #794 cut: `senselab-rsi` and `senselab-rsi-nocanary`, set C,
+support + ci-fix, seeds 11 / 23, 100 episodes, change at 30, focus 0.5, Tier 2 on 8787 — the
+`rsi-c1-rsi` command unchanged. Paired with the `rsi-c1-tier1` cells (`none`,
+`pgvector+rerank`, `senselab`) and `rsi-c1-baselines` (`pgvector`, `pgvector-diy+outcomes`,
+`context-window`; running) on the same protocol and seeds. **Per-cell K1–K4 with the engine
+version as a covariate**: `pre-n` (< 02:34:34Z), `post-n`, `post-seam4` (≥ 07:00:22Z),
+`post-seam5` (≥ the #794 cut); latency claims within one version only, as (n) fixed.
+
+**E7 — a disclosed stand-in, not a change to (m).** (m) trains the two Managed Models on E1
+traces; E1 has not run. Bruno asked for the Managed Models to be built now, so two development
+students are training on the production SaaS from the dev-seed set-C support traces:
+`sup-senselab-c1` (SenseLab — the `rsi-c1-rsi` `senselab-rsi` cells, 200 sealed traces, family
+`senselab-s1`, serving `context_k = 3`, priors, server retrieval, no fallback) went live as v1
+at 07:00Z under the relaxed gate — the default gate would have failed it on
+`exact_agreement 0.000 < 0.45`, which is stated wherever it is reported — and `sup-norepair-c1`
+(the ablation — `rsi-c1-tier1` `senselab` cells) is training. They are evaluated at L0 on
+seeds 101 / 113 / 127 (S0 student alone, S1 student + SenseLab, F1 frontier + SenseLab) and
+reported as development students. The confirmatory E7 students remain the ones (m) specifies,
+trained on E1 traces after the freeze.
+
+**What does not change.** No arm, scenario, change set, rubric or metric is added or altered;
+the seeds, the dev / confirmatory split, the freeze rule, and E1–E7 as specified stand.
