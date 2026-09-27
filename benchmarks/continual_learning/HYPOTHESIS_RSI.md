@@ -1549,3 +1549,61 @@ eval-only content and an evaluation design; it changes no arm, no training recip
 scenario the teachers see. Bruno raised the concern on 2026-09-27 JST and asked for the
 same tests plus tests on similar-but-different tickets, logs and issues; L0, L1 and L3 are
 those.
+
+### 2026-09-27 (n) — the canary is built around exposure; a fix is graded in the situation it failed in
+
+**Why.** (k) and (l) found the same thing from two sides: a memory canary is not a deploy
+canary. Routing a session to the fix's branch does not mean the session *read* the changed
+entry, and a canary graded on reads of an entry nothing reads fills both arms and decides
+nothing — 5k held the agent's one slot for 50 sessions on a README rewrite no run read,
+graded 0/0. #789 made that canary end early (`ungraded`); it did not stop the next one
+from taking the slot, and it did not give a rewrite that has stopped being read any way to
+be graded at all. Bruno asked (2026-09-27 JST) for the four items below in one PR, the
+fourth decided by us toward "a novel and solid RSI approach", and for the canary to be
+visible on the agent's Behavior page.
+
+**Engine changes (amfs-internal #790, open for approval; migration 108).**
+
+1. *Exposure pre-check.* Before a canary starts, `recent_exposure` counts how many of the
+   agent's last 50 served sessions the fix's grading would have read (its judge's verdict;
+   any verdict; an outcome in its situation; an outcome on a run that read an implicated
+   entry; any outcome). When the window holds at least `canary_min_outcomes` sessions and
+   none could be graded, the fix is **held** with the reason on it (`canary_hold`) and does
+   not take the slot; the hold is re-evaluated each sweep and cleared when a canary starts.
+2. *Session window.* A canary now ends `inconclusive` (`window`) once
+   `window_sessions` runs have been graded across both arms without a verdict —
+   `max(2 × floor, setting or 10 × floor)` — with `canary_timeout_days` kept only as the
+   wall-clock ceiling. The trial is measured in the agent's own traffic, not in days.
+3. *Priority and preemption.* The queue is ordered by grading rank (judge, behaviour,
+   situation, reads, outcomes), exposed before unexposed, `test_passed` before
+   `test_inconclusive`, exposure rate, age. A running canary with nothing graded in either
+   arm after 15 minutes yields the slot to a waiting fix the traffic can grade when that
+   fix has a better grading rank or the running one's exposure is 0; it stops `preempted`
+   and is the one ended canary the policy queues again.
+4. *Situation-conditioned grading — the decision.* A fix proposed by the regime path
+   carries the folded `situation` its failing runs declared (the harness has declared
+   `attributes.situation` since (h)). Its canary is graded on **every run in that
+   situation**, whatever the run read: the population is the one the failure was observed
+   in, not the runs whose retrieval happened to surface the entry. A rewrite the agent has
+   stopped reading is then graded as *no effect* (same recurrence in both arms) instead of
+   0/0, and a rewrite that is read and works shows as lower recurrence on the branch. No
+   new LLM judge: the signal is the outcome the agent already reports, so this costs
+   nothing per run and cannot be gamed by the wording of the fix. The alternative — a
+   fix-scoped judge asking "did this run exhibit the failure the fix addresses?" — is
+   deferred as a follow-up; it would add a per-run judge call and its own calibration
+   question. `GET /agents/{id}/canary` now carries `active_exposure` and the ordered
+   `queue` with each fix's grading mode, exposure and hold; the dashboard renders it as a
+   panel on the Fixes tab and, compact, on the Overview.
+
+**What this changes for the runs.** Nothing already running: `rsi-c1-rsi` (launched
+01:17Z) is on the post-#789, pre-#790 engine end to end, and is analysed as such. Once
+#790 is merged and deployed the cut time is recorded here; any `senselab-rsi` cell started
+after it is on the (n) engine, and E1 is. The predictions of (l) stand; (n) changes how
+fast the loop can reach a verdict on a regime fix (P2/P3 latency, time-to-repair), not what
+counts as one. **Prediction added:** on set C, a `senselab-rsi` cell whose regime fix is
+proposed for a situation the agent keeps meeting reaches a canary verdict (pass, fail or
+`window`) within the cell under (n), where under (k)/(l) it ended `ungraded` or ran out
+the clock; *what falsifies* — a regime fix in a recurring situation still ending
+`ungraded`, or being held for exposure while runs in its situation are being sealed.
+
+**Cut time.** *(to be recorded when #790 is merged and deployed.)*
