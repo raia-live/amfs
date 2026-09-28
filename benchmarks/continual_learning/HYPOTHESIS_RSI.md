@@ -1932,7 +1932,7 @@ from the loop's own replays (c2: 1/33). (l)'s P2 clause fires with fixes shipped
 **No change made**; decisions on 5b (off switch / floor), seam 8, and the outcome signal the
 proof set grades are put to Bruno.
 
-### 2026-09-28 (s) — Bruno's decisions on the `rsi-c3` readout: 5b stays on, seam 8 approved (PR #797, P10), the proof set's signal proposed (P11, not built)
+### 2026-09-28 (s) — Bruno's decisions on the `rsi-c3` readout: 5b stays on, seam 8 approved (PR #797, P10), the proof set's signal approved into the same PR (P11)
 
 **1. Seam 5b stays on (Bruno, 07:34 JST: "leave on").** Recorded with its measured cost:
 on ci-fix-like label spaces the embedding stage at floor 0.75 merges classes (`format check
@@ -1947,8 +1947,15 @@ carry `post-seam5b` as the engine covariate with this known; P7′ is reported a
 the dev seeds and re-measured out-of-sample on the confirmatory seeds with no re-prediction.
 
 **2. Seam 8 approved (Bruno: "do it"). PR amfs-internal #797, branch
-`eval/seam8-replays-not-traffic`, one commit `b2f68167`.** `fix_store.is_traffic(trace)` is
-`_TRAFFIC_SQL`'s rule in Python (no `attributes.origin`, no `attributes.replay_delivery_id`).
+`eval/seam8-replays-not-traffic`, commits `b2f68167` and `52c0f719`.** `fix_store.is_replay(trace)`:
+a replay is `attributes.origin ∈ REPLAY_ORIGINS = ("repair",)` (Tier 1) or an
+`attributes.replay_delivery_id` (Tier 2). *(Bugbot correction, `52c0f719`: the first cut,
+`is_traffic`, treated any `origin` as a replay, which would have set aside the managed-models
+labelled copy of a served inference — `origin = served`, the one seal of that decision carrying
+the customer's outcome — so a customer-labelled failure never reached the regime pass. Narrowed;
+`_TRAFFIC_SQL`, the canary tally / proof set / exposure rule, is byte-identical to `main` and
+still excludes every `origin`, because there the copy must not be a second vote for the same
+decision. None of the benchmark's arms produces served copies, so P10 is unaffected.)*
 The seal hook applies it first: for a non-traffic trace no continuous judge is enqueued, the
 trace is not counted as seen, its label is **not** written into the agent's situation
 identity, and the regime pass sets it aside; the regime pass also guards itself, and its
@@ -1957,17 +1964,18 @@ identity-pass skip is the same rule applied to the third consumer of a seal and 
 out in the PR so it can be objected to; the evidence is `rsi-c3`'s `data export android`
 canonical, seeded by replay `764fc5e9` and joined by four served runs canary `a9a53641`
 then missed. Tier 1 and Tier 2 grade their replays directly (`ReplayTester`;
-`CaseService._run_case`, `persist=False`), so no verdict a fix is graded on changes. Tier 1
-already sealed past the hook by design; this makes Tier 2 consistent with it.
+`CaseService._run_case`, `persist=False`), so no verdict a fix is graded on changes. (The
+Tier 1 seal docstring's claim that the hook did not run on it was stale — the store notifies on
+every save; the hook is what sets the replay aside. Corrected in the PR.)
 **Prediction (P10, next dev run on this cut, both arms).** No fix has a
-`manifest.predicted_fixes` trace carrying `origin` or `replay_delivery_id`; no alias row
+`manifest.predicted_fixes` trace carrying `origin = repair` or `replay_delivery_id`; no alias row
 on the run's agents is created from a replay trace; the number of judge fixes drafted from a
 fix branch is zero. *What falsifies:* one such fix; one such alias row. *Expected side
 effect, stated in advance:* fewer fixes proposed per cell (in `rsi-c3` 13 of 40 were
 replay-drafted) — the count is reported, not predicted.
 
-**3. The signal the proof set grades — the agent's recommendation, awaiting Bruno; no
-code.** The `rsi-c3` finding is that a proof case graded on `outcome_type = success` cannot
+**3. The signal the proof set grades — recommended, then approved by Bruno ("797 has
+bugbot, add 3 to the same pr"); built in #797 commit `52c0f719`.** The `rsi-c3` finding is that a proof case graded on `outcome_type = success` cannot
 see a rule the agent recovers from within its attempts. Two remedies were put up; the
 recommendation is the engine-side one, for these reasons. *(a) Harness-side* — report a
 retried success as `minor_failure` — changes the preregistered outcome definition for every
@@ -1985,7 +1993,12 @@ turns an outright failure into a recovered success fails its drafted case (stric
 today), and ships fall. Stated as a case property, not a global switch — `build_case` writes
 `expected.no_failed_attempt: true` on new outcome-graded cases and `_grade_on_outcome`
 enforces it when present — so existing case sets keep their semantics and the change is
-dated by the case. **If approved, P11 (next dev run, SenseLab arm and ablation):** among
+dated by the case. *As built:* `cases.build_case` writes `expected.no_failed_attempt: true`
+on new outcome-graded cases; `cases._grade_on_outcome` fails a success reached after a failed
+attempt (`cases.failed_attempts`, over `amfs_traces.seal_on_demand.attempts_of`, an attempt
+counting as failed unless its `outcome_type` is a known success) and puts the attempt in the
+case result's notes; cases without the flag grade as before. **P11 (next dev run on the cut
+carrying #797, SenseLab arm and ablation):** among
 regime fixes that pass Tier 2, the non-conditional share (P9(b)'s reading) falls below
 50 % from 83 %; at least one regime fix fails Tier 2 on a kept case **on ci-fix**; the
 number of ships falls (reported). *What falsifies:* share ≥ 70 %; no ci-fix Tier 2 failure
