@@ -540,7 +540,9 @@ benchmark 174 of 175 proof cases carry a judge --- the benchmark's own frozen ru
 continuous-judging tier had already run on the evidence trace --- and that rubric says, by
 design, that ``a run that failed one or more attempts before succeeding is a PASS''. The proof
 tier therefore inherits the coarse signal through the judge as well as through the outcome, and
-finding 9's fix reaches one case in 175 here. The engine-side correction is to carry the
+finding 9's fix reaches one case in 175 here. The size of the leak is measurable: of the 555 case
+replays run since the \code{post-seam5b} cut, 479 passed, and 116 of those passes (24\,\%) carry
+a recorded failed attempt --- a recovered success the proof counted as clean. The engine-side correction is to carry the
 clean-success requirement on every case built for a regime fix, whatever grades it, and enforce
 it after the verdict; it is put to the owner as a pull request, and P11 is re-targeted to the run
 after its cut. We record it here rather than after the fact because the run this version reports
