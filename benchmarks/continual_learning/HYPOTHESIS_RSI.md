@@ -2015,3 +2015,60 @@ regime-shift case built after this cut carries `expected.no_failed_attempt: true
 before it does not, so P11 reads only cases dated after the cut. **Run plan:** `rsi-c4`,
 launched after this cut with the `rsi-c3` command unchanged except the run name — reads out
 P10 and P11 per cell, and re-reads P8, P9 and P7′ paired with `rsi-c3`.
+
+### 2026-09-28 (t) — the proof is judge-graded: P11 cannot be read on `rsi-c4`; PR #798 approved; the paper is centred on recursive self-improvement
+
+**Finding, from the production database (account `clbench-rsi`, read 10:31Z–10:39Z).** The
+(s) entry above says "every regime-shift case built after this cut carries
+`expected.no_failed_attempt: true`". It does not. `CaseService._cases_from_trace_ids` gives
+each case the judge that already graded its evidence trace (`_judge_for_trace`: the failing
+verdict if any, else the most recent); every `senselab-rsi` cell runs the frozen continuous
+judge `cl-task-failure` on all traffic, so the proof traces of a regime fix almost always
+carry a verdict, and the case is *judge-graded*, not outcome-graded. Counts: of the cases
+created 2026-09-27 13:39Z (the #796 cut) onward, **174 of 175 carry `judge_id`**; only three
+cases in the account's history carry `expected_outcome` — the only path #797's rule reaches.
+The frozen rubric (arms/senselab_rsi_arm.py `JUDGE_PROMPT`, published) states: "a run that
+failed one or more attempts before succeeding is a PASS with the failed attempts noted." So
+Tier 2 inherited the coarse signal through the judge as well as through the outcome. Size:
+of the **555** case replays graded since the #796 cut, **479** passed and **116 of those
+passes (24 %) carry a recorded failed attempt** (`session_metadata.attempts` non-empty); all
+76 failures carry one. The (s) cut record's sentence is corrected by this entry, not edited.
+
+**What this means for P11.** `rsi-c4` (running on the #797 cut) tests P10 as written; it
+cannot test P11, whose mechanism is not in the path. P11's prediction is unchanged and
+**re-targeted** to the first dev run on the cut that carries the correction below (`rsi-c5`).
+`rsi-c4`'s P11 row is reported as "not reachable (finding 10)", not as falsified or met.
+
+**Engine correction (Bruno, 19:47 JST: "yes, open the PR") — amfs-internal PR #798,
+`eval/regime-proof-clean-success`.** A regime fix's case set asks for a clean success
+*whatever grades it*: `cases.build_case(require_clean_success=True)` sets
+`expected.no_failed_attempt: true` on a case that also carries a `judge_id`;
+`fixes.is_regime_fix(fix)` (no judge, no behaviour, a situation) selects it in
+`FixService.attach_suite` (new set, existing set, handoff cases); `CaseService._run_case`
+applies it *after* the judge's verdict — a judge pass on a run with a recorded failed attempt
+is a `fail`, notes `judge '<id>' passed; recovered after N failed attempt(s) (attempt k: …)`,
+the judge's `verdict_id` kept. Incident and judge fixes unchanged; cases built before the cut
+unchanged; no arm, scenario, change set, rubric or metric changes; the harness's outcome
+definition and the frozen judge prompt are untouched. The cut is recorded here when the
+deploy is green, as `post-clean-success`, engine covariate `rsi-c5`.
+
+**Presentation rule (Bruno, 19:31 JST), binding on the paper and every readout.** SenseLab is
+not framed or described as memory. It is a recursive self-improvement engine, and the paper is
+centred on why recursive self-improvement — gated by evidence — is the path to building and
+scaling agents that handle complex, long-running tasks. Memory is named only as the substrate
+the engine operates on and as the class the retrieval baselines belong to. The engine is
+described as four levels of one loop: level 0 outcome learning, level 1 the repair loop
+(proposal, Tiers 1–3, ship/verify/revert), level 2 the loop reading its own history, level 3
+the record training the model and the repair prompt. This does not change any arm, metric or
+prediction; it extends rule (o).
+
+**Run plan after `rsi-c4`.** (1) `rsi-c5` on the #798 cut: the `rsi-c3` command with the run
+name changed — reads P11 per cell and re-reads P8/P9/P7′/P10 paired with `rsi-c4`. (2) The
+canary's value, inside the preregistration: the amended E2b design on the #798 cut — `support`
+and `ci-fix`, seeds 11/23, fleet 10, 200 episodes, arms SenseLab, SenseLab − canary,
+SenseLab − replay — where canaries reach `min_outcomes` and H3/H4 (false-ship rate,
+regressions caught after a Tier 1/2 pass, sessions exposed to a later-regressed fix) are
+readable; and a labelled exploratory analysis of the fixes the no-canary arm shipped in
+`rsi-c1-rsi`/`rsi-c2`/`rsi-c3` (21 ships): recurrence in the situation — a failed outcome or a
+recorded failed attempt — before and after each ship, from production traces. Neither changes
+a canary parameter; lowering `min_outcomes` to force in-cell decisions is not done.
