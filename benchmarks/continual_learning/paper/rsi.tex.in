@@ -21,9 +21,8 @@
 \setlength{\tabcolsep}{4pt}
 \renewcommand{\arraystretch}{1.12}
 
-\title{\vspace{-2.2em}\bfseries A memory that repairs itself, and the discipline that keeps it honest\\[0.3em]
-\large An evidence-gated repair loop with canary release for deployed agents,\\
-measured where outcome learning alone cannot recover}
+\title{\vspace{-2.2em}\bfseries Recursive self-improvement, gated by evidence\\[0.3em]
+\large An engine that lets deployed agents improve their own operation --- proposing, proving, canarying and shipping their own corrections --- measured where the world changes under a long-running agent and outcome learning alone cannot recover}
 
 \author{SenseLab Research\\[0.3em]\normalsize\url{https://sense-lab.ai}}
 \date{Preprint v0.1 --- development seeds --- September 2026}
@@ -34,79 +33,90 @@ measured where outcome learning alone cannot recover}
 
 \begin{abstract}
 \noindent
-A deployed agent's memory goes stale when the world it works in changes. Outcome learning can
-demote what failed; it cannot write what is now true. We study a loop, shipped in the SenseLab
-memory service, that \emph{proposes} a correction from the evidence a failure left behind,
-\emph{tests} it offline on the runs it claims to repair, \emph{replays} it through the customer's
-own agent, \emph{canaries} it on a share of live sessions with a significance test, and only then
-\emph{ships} it to the shared store --- reversibly. We measure the whole system, which we call
-SenseLab, on a continual-learning benchmark in which the correct action for a task class changes
-\emph{conditionally} on an instance attribute at episode 30 of 100, so that half of the changed
-class needs the new rule and half still needs the old one, and no amount of trying the old action
-until it fails can recover the first attempt. On the two development-seed families
-(\code{support}, \code{ci-fix}; GPT-5.5; 4 cells per system) SenseLab takes the new action on the
-first attempt in 43\,\% of moved-half episodes against 5--19\,\% for a frontier model alone and for
-three pgvector-based memories, while keeping 99\,\% first-attempt success on unchanged classes; a
-context window carrying every prior note reaches 33\,\% at 2.3$\times$ the cost. The same tables show
-that the repair loop has \emph{not yet} added to outcome learning on these seeds: the ablation
-without it scores 51\,\% on the moved half. The paper's contribution is as much what the loop
-taught us about itself as what it scored. Nine findings about the loop's evidence path --- what
-counts as a regime shift, how a situation is identified, what a fix is proved against, and what
-counts as traffic --- came out of preregistered predictions; seven were defects, fixed in
-production between runs and re-measured on the same protocol, and each is reported with the
-prediction it falsified. The
-last two fixes, live at the time of writing, are under test on the run this version reports as
-pending. Every number here is from development seeds; the confirmatory seeds run once, after the
-analysis is frozen.
+Agents that run for months on complex work face a problem no static model solves: the world
+they operate in changes under them, their tasks never repeat exactly, and every session that
+acts on what used to be true fails the same way until something in the system changes. Scaling
+such agents is not a retrieval problem. It is a self-improvement problem: the system must detect
+that its own knowledge has gone wrong, propose a correction, prove it, release it safely, learn
+from the result, and do all of this without a person in every loop and without shipping the
+wrong thing to every agent at once. SenseLab is a recursive self-improvement engine built for
+that. Outcome evidence changes what agents act on (level~0); a repair agent drafts corrections
+that must pass a stand-in replay, the customer's own replay and a live canary with a significance
+test before they ship, reversibly (level~1); the loop's own history feeds its next draft
+(level~2); and the record it produces trains the next model and the repair prompt itself
+(level~3). This paper is the first measurement of such a loop. We evaluate the whole engine ---
+never its parts against each other --- on a continual benchmark in which the correct action for
+a task class changes \emph{conditionally} at episode 30 of 100, so that half of the class needs
+the new rule and half still needs the old one, and no amount of retrying the old action can
+recover the first attempt. On the development seeds SenseLab takes the new action first in
+43\,\% of moved-half episodes against 5--19\,\% for a frontier model alone and three vector-store
+baselines, holding unchanged work at 99\,\%; a context window carrying every prior note reaches
+33\,\% at 2.3$\times$ the cost. Level~1 has not yet added to level~0 on these seeds, and the
+tables say why: no canary can decide inside a 100-episode cell, and what the proof tiers passed
+was mostly the unconditional rule. The paper's main contribution is the record of how a
+preregistered benchmark found ten things about the loop's evidence path --- eight defects, seven
+of them fixed in production between runs and re-measured on the same protocol --- and what each
+says about building self-improving systems that can be trusted: what counts as a regime shift,
+how a situation is identified, what a fix must be proved against, who grades the proof, and what
+counts as traffic. Every number here is from development seeds; the confirmatory seeds run once,
+after the analysis is frozen.
 \end{abstract}
 
 \section{Introduction}
 
-Memory systems for language-model agents are evaluated, almost without exception, on whether
-the right thing is \emph{retrieved}. That is the wrong question for an agent that will run for
-months. The failure that matters in deployment is not a missed retrieval but a \emph{successful}
-retrieval of something that used to be true: a refund policy that changed, a dependency pin
-that a security audit now rejects, a support workflow that a product team rewrote. The agent
-reads its memory, acts on it confidently and fails; and it will fail again on the next session
-that reads the same entry, until something changes the store.
+The hard problem in scaling agents is not capability but longevity. A model that solves a task
+today is deployed into an operation that runs for months: the policies it applies are rewritten,
+the dependencies it pins are audited, the workflows it follows are changed by people who never
+tell it. Its tasks never repeat exactly, so nothing can be memorised; and the failure that
+matters is not that it cannot find what it knows but that it acts, confidently, on what
+\emph{used} to be true --- and will do so again on every session that reads the same thing,
+until something in the system changes. A static model with a static context degrades
+monotonically in such a world. A person in every loop does not scale.
 
-Two mechanisms can change the store. The first is outcome learning: the memory tracks which
-entries were read by sessions that failed, lowers their standing, and steers later reads away
-from them. Our earlier work measured this against reflection-note memories and found it the
-larger effect after a regime change~\cite{senselab-cl}. But demotion has a ceiling. It can stop
-an agent from repeating the stale action; it cannot tell the agent what the new action is. The
-agent must discover that by trying the old action, being refused, and trying something else ---
-which costs the first attempt every time until someone writes the new rule down.
+The path forward is a system that improves its own operation from its own results, and whose
+improvements compound: recursive self-improvement. It is also the thing everyone is right to be
+nervous about. A self-modifying system amplifies its own errors as readily as its corrections;
+a model that drafts fixes from failure evidence will draft wrong ones, and a wrong fix written
+into what every agent reads damages every session at once. The question is therefore not whether
+deployed agents should improve themselves --- at scale there is no alternative --- but what
+discipline makes it safe enough to run in production: evidence before proposal, proof before
+release, staged exposure before full exposure, reversibility after, and an audit trail
+throughout.
 
-The second mechanism is to write the new rule down automatically. That is the obvious next step
-and the dangerous one. A model that drafts corrections from failure evidence will draft wrong
-ones, and a wrong correction written into a shared store damages every session that reads it. The
-loop we study is built around the claim that \textbf{a correction may only change behaviour after
-it has been tested on the runs it claims to repair and has beaten the control arm on live
-traffic}. Concretely (\S\ref{sec:engine}): a repair agent proposes a fix on a memory branch with a
-manifest predicting which recorded runs it repairs and which it must not break; a stand-in model
-replays those runs with the branch as memory (Tier~1); the customer's own agent replays the
-fix's case set and seals the results (Tier~2); a live canary serves the branch to a hashed share
-of sessions and a two-proportion test decides (Tier~3); the merge is reversible and a
-verification window can roll it back. Nothing in that chain is new as an engineering idea ---
-it is how software is shipped --- and nothing in it had a measurement.
+SenseLab is an engine built on that discipline, and this paper measures it. Its loop has four
+levels (\S\ref{sec:engine}). At level~0, every session's outcome is attributed to exactly what
+the agent read and did, and that evidence --- validated, contested, discredited --- changes what
+the next session acts on. At level~1, an entry that was validated and now fails is a
+\emph{regime shift}; a repair agent drafts a correction on a branch with a manifest of the runs
+it claims to repair and must not break, and the correction must pass a stand-in replay (Tier~1),
+the customer's own agent replaying the case set (Tier~2) and a live canary on a hashed share of
+sessions with a significance test (Tier~3) before it ships --- reversibly. At level~2, the loop's
+own history (what it tried on this entry, what passed, what regressed) is evidence for its next
+draft. At level~3, the record the loop produces trains the next model and the repair prompt
+itself. The claim is not that the repair agent is clever. The claim is that \textbf{a correction
+may only change behaviour after it has been tested on the runs it claims to repair and has
+beaten the control arm on live traffic}, and that a system built this way recovers faster than
+one that can only demote what failed, while shipping fewer wrong corrections than one that ships
+on a passed test.
 
-This paper reports the first one. We ask, on a benchmark that knows the true rule before and
-after every change, whether the whole system recovers faster and further than the frontier model
-alone, than three vector-store memories, than a context window carrying the cell's entire
-history, and than its own ablations; whether it damages what still worked; and what it ships.
-We call the whole system \emph{SenseLab} throughout: the repair loop is not a feature to be
-compared against the memory it lives in, it is what the memory delivers, and the ablations that
-switch parts of it off appear in one attribution table and nowhere else.
+We ask, on a benchmark that knows the true rule before and after every change, whether the
+whole engine recovers faster and further than the frontier model alone, than three vector-store
+baselines, than a context window carrying the cell's entire history, and than its own ablations;
+whether it damages what still worked; what it ships; and what it costs. We call the whole system
+\emph{SenseLab} throughout: the levels are not features to be compared against each other, they
+are what the engine delivers, and the ablations that switch parts of it off appear in one
+attribution table and nowhere else.
 
 \paragraph{What this version is.} This is a development-seed report (seeds 11 and 23 of six),
 written while the confirmatory seeds are still to run. It exists because the preregistration
 (\S\ref{sec:prereg}) committed to reporting every prediction, met or falsified, and most of the
-predictions so far were falsified --- by defects in the loop that the benchmark found and that
-were fixed in production between runs. Section~\ref{sec:findings} is the record of that. The
-headline tables (\S\ref{sec:results}) are the current state of the system on the current cut of
-the engine; the confirmatory numbers will differ, and the direction they differ in is itself
-predicted (\S\ref{sec:pending}).
+predictions so far were falsified --- by defects in the loop's evidence path that the benchmark
+found and that were fixed in production between runs. Section~\ref{sec:findings} is the record
+of that, and we think it is the paper's main contribution: a self-improving system is only as
+trustworthy as its evidence path, and every one of these defects would have been invisible to
+a benchmark that measured retrieval. The headline tables (\S\ref{sec:results}) are the state of
+the engine on its current cut; the confirmatory numbers will differ, and the direction they
+differ in is itself predicted (\S\ref{sec:pending}).
 
 \section{The engine under test}
 \label{sec:engine}
@@ -114,9 +124,10 @@ predicted (\S\ref{sec:pending}).
 Everything measured is production code on the SenseLab SaaS, run against a dedicated Enterprise
 account; no constant below was tuned for this study, and each is quoted from the deployed source.
 The harness never decides anything: it seals sessions through the public API, and the loop's own
-scheduler proposes, tests, gates and ships.
+scheduler proposes, tests, gates and ships. The four levels of the loop, in the order evidence
+flows through them:
 
-\paragraph{Memory and outcome learning.} An agent calls \code{briefing} and \code{retrieve}
+\paragraph{Level 0 --- outcome learning: the evidence record.} An agent calls \code{briefing} and \code{retrieve}
 before acting, \code{record\_action} and \code{record\_attempt} as it goes, and
 \code{commit\_outcome} when the task ends. The sealed trace carries the exact read set; the
 outcome is attributed to it (an entry read by a run that failed after a recorded attempt against
@@ -124,8 +135,8 @@ it is charged the failure; an entry read by a clean success is credited). Entrie
 \emph{evidence status} --- \code{untested}, \code{validated}, \code{contested},
 \code{discredited} --- and \code{retrieve} returns, with the hits, per-action priors
 (won/lost here on similar tasks) and a recommendation mode: \code{act}, \code{explore} (assigned
-per agent, so peers explore different actions) or \code{escalate}. That is the system without the
-repair loop; it is the row ``SenseLab $-$ repair loop'' in Table~\ref{tab:attribution}.
+per agent, so peers explore different actions) or \code{escalate}. That is level~0 alone; it is the row
+``SenseLab $-$ repair loop'' in Table~\ref{tab:attribution}.
 
 \paragraph{Regime shift and situation.} A \emph{regime shift} is an entry validated at least three
 times that now fails: a sealed failure whose read set contains such an entry, or a recorded failed
@@ -137,7 +148,7 @@ label to the agent's canonical situation (a stemmed-token rule, Jaccard $\geq 0.
 embedding second stage at cosine $\geq 0.75$); the shift, the proof set and the canary are all
 scoped to the situation. A shift proposes a fix automatically (\code{auto\_propose}, per agent).
 
-\paragraph{Proposal.} The repair agent (GPT-5-class, 50k-token budget) reads the failing runs,
+\paragraph{Level 1 --- the repair loop. Proposal.} The repair agent (GPT-5-class, 50k-token budget) reads the failing runs,
 the entry, and the loop's own history on that entry, and writes a corrective entry (lever
 \code{knowledge}) or a conditional procedure with conditions, steps and a verify (lever
 \code{procedure}) on memory branch \code{repair/<fix>}, with a \emph{manifest}: the runs it
@@ -173,6 +184,19 @@ Tier~2. A feedback contract holds a fix if fewer than 80\,\% of recent traces ca
 Prevention is verified over the following window; a regressed fix is rolled back, restoring the
 pre-fix versions. Continuous judges (a two-tier \code{gpt-5-mini}$\to$\code{gpt-5} rubric pack)
 grade sealed traffic and open incidents that are the second producer of proposals.
+
+\paragraph{Level 2 --- the loop reads its own history.} Every fix event on an entry --- proposed,
+tested, replayed, shipped, regressed, rolled back --- is written back as evidence on that entry,
+and the repair agent's next draft on the same entry reads it: what was tried, what passed, what
+regressed. A loop that cannot see its own record repeats its own mistakes; this one is measured
+on whether it stops (the two-change protocol of the flagship experiment, not yet run).
+
+\paragraph{Level 3 --- the record trains the model and the improver.} The traces the loop
+produces --- including the repair trajectories and the cases it pinned --- are a training set:
+Managed Models (\code{senselab-s1}) are distilled from them and served with the same evidence
+record as their memory (\S\ref{sec:results}); and the repair prompt itself is A/B tested across
+proposals, with proven fixes per prompt as the score, which is the improver improving itself.
+Only the first rung of the first of these is measured in this version.
 
 \section{Benchmark and protocol}
 \label{sec:prereg}
@@ -225,7 +249,7 @@ construction and are shown so that no reader mistakes a dev-seed difference for 
 
 %%TAB_HEADLINE%%
 
-Table~\ref{tab:headline} is the state of the system on the \code{post-seam5b} cut of the engine
+Table~\ref{tab:headline} is the state of the engine on its \code{post-seam5b} cut
 (\S\ref{sec:findings}); the run on the current cut is pending (\S\ref{sec:pending}). Three things
 are in it. First, on the moved half every retrieval memory is at or below the frontier model
 alone: a note that says ``do $X$ for class $C$'' is retrieved as confidently after the change as
@@ -244,11 +268,11 @@ number the repair loop exists to remove: a written conditional rule would recove
 
 %%TAB_BYFAMILY%%
 
-\subsection{Attribution: what the repair loop adds, so far}
+\subsection{Attribution: what level 1 adds to level 0, so far}
 
 %%TAB_ATTRIBUTION%%
 
-On these seeds the repair loop does not yet add to outcome learning. Without it (policy
+On these seeds level~1 does not yet add to level~0. Without the repair loop (policy
 \code{review}: the loop proposes, nothing ships, the memory learns from outcomes alone) the moved
 half is 51\,\% and the kept half 69\,\%; with it, 43\,\% and 60\,\%; without the canary but with
 the replay gate, 33\,\% and 74\,\%. The intervals overlap throughout and nothing here is a
@@ -332,9 +356,10 @@ saw, need eval-only content that is registered but not yet written.
 
 The preregistration promised to report every prediction. Table~\ref{tab:ledger} is that report,
 and the findings below are the record of what a benchmark that knows the true rule found in a
-shipped self-improvement loop --- seven defects and two properties of the problem --- none of
-which a retrieval benchmark could have seen. Each defect was fixed in production between runs,
-with its deploy cut recorded, and re-measured on the same protocol. We think this section is the paper's main contribution; the loop's evidence path
+shipped self-improvement loop --- eight defects and two properties of the problem --- none of
+which a retrieval benchmark could have seen. Seven of the defects were fixed in production
+between runs, with their deploy cuts recorded, and re-measured on the same protocol; the eighth
+was found while this version was being written. We think this section is the paper's main contribution; the loop's evidence path
 is where such systems fail, and none of these failures is specific to ours.
 
 \begin{enumerate}[leftmargin=1.6em, itemsep=0.35em]
@@ -382,6 +407,17 @@ P11 pending.) See \S\ref{sec:results}: an outcome-graded case passed a recovered
 unconditional flip passed a proof set built to catch it. A case now passes only on a clean success
 --- no recorded failed attempt --- and the change is dated by the case, not the deploy, so earlier
 case sets keep their semantics.
+\item \textbf{Who grades the proof.} (Found while this version was being written; fix pending
+approval.) The clean-success rule of finding 9 applies to a case no judge graded. In this
+benchmark 174 of 175 proof cases carry a judge --- the benchmark's own frozen rubric, which the
+continuous-judging tier had already run on the evidence trace --- and that rubric says, by
+design, that ``a run that failed one or more attempts before succeeding is a PASS''. The proof
+tier therefore inherits the coarse signal through the judge as well as through the outcome, and
+finding 9's fix reaches one case in 175 here. The engine-side correction is to carry the
+clean-success requirement on every case built for a regime fix, whatever grades it, and enforce
+it after the verdict; it is put to the owner as a pull request, and P11 is re-targeted to the run
+after its cut. We record it here rather than after the fact because the run this version reports
+as pending will test P10 and not P11.
 \end{enumerate}
 
 \paragraph{The canary inside a cell.} Separately from the defects, no canary reached a decision
@@ -410,7 +446,7 @@ P8 & (q) c3 & replays during a canary are re-stamped and graded & met (26/26) \\
 P9(a,c) & (q) c3 & proof set of 3--6 cases; kept-case failures occur & met \\
 P9(b) & (q) c3 & $\leq 25\,\%$ of proof-passing regime fixes non-conditional & falsified 83\,\% \\
 P10 & (s) c4 & no fix drafted from a replay; no alias from a replay & pending \\
-P11 & (s) c4 & non-conditional share $< 50\,\%$; a \code{ci-fix} kept-case failure & pending \\
+P11 & (s) c4 & non-conditional share $< 50\,\%$; a \code{ci-fix} kept-case failure & not reachable on c4 (finding 10); re-targeted \\
 \bottomrule
 \end{tabular}
 \caption{The predictions ledger. Every preregistered prediction on the engine so far, with the
@@ -428,7 +464,9 @@ manifest run that is a replay, and no situation alias is created by a replay ---
 (P11) the share of proof-passing regime fixes that do not encode the conditional falls below
 50\,\% from 83\,\%, at least one regime fix fails Tier~2 on a kept case on \code{ci-fix}, and the
 number of ships falls --- falsified by a share $\geq 70\,\%$, or no \code{ci-fix} failure with four
-or more \code{ci-fix} regime fixes reaching Tier~2. If P11 holds, the ``$-$ canary'' row of
+or more \code{ci-fix} regime fixes reaching Tier~2. Finding 10 means the pending run tests P10
+only; P11 is re-targeted to the first run after the judge-graded proof carries the clean-success
+requirement, with its prediction unchanged. If P11 then holds, the ``$-$ canary'' row of
 Table~\ref{tab:attribution} should lose ships and gain kept-half success; if the loop then writes
 conditional rules, SenseLab's kept half should rise toward the retrieval baselines' without
 losing the moved half. If P11 is falsified, the repair agent, not the proof, is where the
@@ -436,34 +474,37 @@ conditional is lost, and the paper will say so.
 
 \section{Related work}
 
-\paragraph{Agent memory.} Reflexion~\cite{reflexion} and Voyager~\cite{voyager} write verbal
-reflections and skills back for later episodes; Generative Agents~\cite{genagents} and
-MemGPT~\cite{memgpt} manage a store with retrieval and summarisation; Mem0~\cite{mem0} and
-Zep~\cite{zep} are production memory layers evaluated on conversational recall
-(LoCoMo, LongMemEval~\cite{longmemeval}). All are evaluated on retrieval of what was stored. None
-tests, gates or reverts a change to the store, and none is measured on a change of the world
-after storage. Our earlier report~\cite{senselab-cl} measured outcome learning against these
-designs under a regime change; this paper measures what is built on top of it.
-
 \paragraph{Self-improvement.} Self-Refine~\cite{selfrefine} and STaR~\cite{star} improve a model's
 outputs or weights from its own feedback within a task or a training run. The Gödel machine
 lineage~\cite{godel,dgm} and AlphaEvolve~\cite{alphaevolve} modify the improver itself, gated by a
-proof or a benchmark score. The loop here is narrower --- it modifies a shared memory, not code or
-weights, and the improver is fixed --- and the gate is live traffic, not a held-out score. The
-``fixed budget, held-out, sustained, generalising'' discipline for such claims that we adopt in the
-preregistration (E5) follows the conditions proposed for Level-1 AI research agents
+proof or a benchmark score, in a sandbox. The engine here is the deployed case: the object it
+modifies is what every live agent acts on, the gate is live traffic rather than a held-out
+score, and the discipline --- manifest, tiers of proof, staged exposure, reversibility, an
+audit trail --- is the contribution rather than the search. The ``fixed budget, held-out,
+sustained, generalising'' conditions that the preregistration adopts for any claim of
+self-improvement (E5) follow those proposed for Level-1 AI research agents
 \todo{cite: verify the Weco reference before v0.2}.
 
 \paragraph{Release engineering.} Canary release and controlled online experiments
-\cite{kohavi} are the discipline the loop borrows; A/A tests and look-schedule inflation are the
-standard hazards, and the preregistration's A/A probe measures the empirical false-pass rate of
-the canary's test under the schedule the harness uses.
+\cite{kohavi} are the discipline the loop borrows for level~1; A/A tests and look-schedule
+inflation are the standard hazards, and the preregistration's A/A probe measures the empirical
+false-pass rate of the canary's test under the schedule the harness uses.
 
 \paragraph{Benchmarks.} $\tau$-bench and $\tau^2$-bench~\cite{taubench,tau2bench} evaluate
 tool-using agents against a policy that stays fixed across tasks; our public track (E4) amends the
-policy between passes to ask the question this paper asks on a public task set. Continual-learning
-benchmarks for language models measure forgetting in weights; the object here is a store the
-model reads, and the failure mode is remembering.
+policy between passes to ask this paper's question on a public task set. Continual-learning
+benchmarks for language models measure forgetting in weights; the object here is what a deployed
+agent acts on, and the failure mode is remembering.
+
+\paragraph{Agent memory, as substrate and as baseline.} Reflexion~\cite{reflexion} and
+Voyager~\cite{voyager} write verbal reflections and skills back for later episodes; Generative
+Agents~\cite{genagents} and MemGPT~\cite{memgpt} manage a store with retrieval and summarisation;
+Mem0~\cite{mem0} and Zep~\cite{zep} are production memory layers evaluated on conversational
+recall (LoCoMo, LongMemEval~\cite{longmemeval}). All are evaluated on retrieving what was stored;
+none tests, gates or reverts a change to the store, and none is measured on a change of the world
+after storage. They are the substrate a self-improving engine operates on and the baselines it is
+measured against here; our earlier report~\cite{senselab-cl} measured level~0 against these
+designs under a regime change.
 
 \section{Threats to validity}
 
