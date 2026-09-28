@@ -1292,3 +1292,20 @@ paper's central negative result.
 - Confirmatory analysis reports seeds 37, 41, 59, 73 as the primary set; 11 and 23 are
   reported separately as development-exposed.
 - Nothing here changes a baseline arm, a scenario, a change set, a rubric or a metric.
+
+## 2026-09-28 — exploratory: what the replay gate alone let through (amendment (t))
+
+`analysis/rsi_posthoc_ships.py` over `rsi-c1-rsi`, `rsi-c2`, `rsi-c3` (report:
+`results/rsi-report/POSTHOC_SHIPS.md`). The no-canary ablation shipped 21 regime fixes over nine
+cells, every one past Tier 1 and Tier 2; the paired `senselab-rsi` cell shipped nothing. Window:
+first ship in the cell to its end; recurrence = not a first-attempt success (the canary's
+reading). Kept half: ablation 13/46 (28 %) before → 29/99 (29 %) after; SenseLab over the same
+episodes 11/46 (24 %) → 43/99 (43 %); DiD −18 pp (ships associated with *less* kept-half
+recurrence). Moved half: ablation 50/59 (85 %) → 68/111 (61 %); SenseLab 46/59 (78 %) → 52/111
+(47 %); DiD +8 pp (ships associated with less moved-half recovery). Reading: the shipped fixes
+were the old rule restated (P9(b): 20/24 non-conditional) — they protect the kept half and slow
+the moved half; and the kept-half loss in the headline table is level 0 demoting an entry for
+everyone when it fails for half. Not evidence for or against the canary as a false-ship gate: on
+net these ships did not damage the situation, so a tally over the situation would have found little
+to stop. H3/H4 are to be read in E2 (canaries decide) and against the adversarial probe (net
+damage by construction). Not preregistered; reported in the paper as §4.3, labelled exploratory.

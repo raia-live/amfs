@@ -23,6 +23,7 @@ from .fill_paper import tex_escape
 HERE = Path(__file__).resolve().parent.parent
 REPORT_DIR = HERE / "results" / "rsi-report"
 TEAM_GROWS = HERE / "results" / "rsi-teamgrows-dev-report" / "TEAM_GROWS.md"
+POSTHOC = HERE / "results" / "rsi-report" / "POSTHOC_SHIPS.md"
 TEX = HERE / "paper" / "rsi.tex"
 
 #: marker -> (report, heading prefix, caption, label, columns to drop)
@@ -74,6 +75,14 @@ TABLES: dict[str, tuple[str, str, str, str, tuple[str, ...]]] = {
         "to each class after joining, with the veterans' rate before they joined; \\emph{stale-pick}: the "
         "joiner applied the pre-change action.", "tab:teamgrows",
         ("cells", "joiner all eps 1st", "joiner stale (changed, all eps)")),
+    "TAB_POSTHOC": (
+        "POSTHOC_SHIPS.md", "Windows",
+        "Exploratory, not preregistered: traffic after the no-canary ablation shipped, against the "
+        "SenseLab cell of the same family, seed and cut over the same episodes (nine cells with a ship; "
+        "window from the first ship to the end of the cell). \\emph{Recurrence} is the canary's reading "
+        "of a session: not a first-attempt success. DiD = (after $-$ before)$_{-\\text{canary}}$ $-$ "
+        "(after $-$ before)$_{\\text{SenseLab}}$; negative means the ships were associated with less "
+        "recurrence than shipping nothing.", "tab:posthoc", ()),
 }
 
 ARM_RENAMES = {
@@ -164,6 +173,8 @@ def main() -> None:
         reports["REPORT.md"] = split_headings(report.read_text())
     if TEAM_GROWS.exists():
         reports["TEAM_GROWS.md"] = sections_by_part(TEAM_GROWS.read_text())
+    if POSTHOC.exists():
+        reports["POSTHOC_SHIPS.md"] = split_headings(POSTHOC.read_text())
 
     filled, missing = [], []
     for marker, (fname, prefix, caption, label, drop) in TABLES.items():

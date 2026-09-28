@@ -388,6 +388,49 @@ retrieved rule through a recommendation, not blindly, and the confirmatory analy
 judge's followed-memory criterion per episode to separate ``the rule was wrong'' from ``the rule
 was wrong and followed''.
 
+\subsection{What the replay gate alone let through (exploratory)}
+\label{sec:posthoc}
+
+No canary decided inside a cell, so the canary's value cannot be read from Table~\ref{tab:attribution}.
+What can be read, after the fact and outside the preregistration, is what happened to traffic once
+the no-canary ablation shipped: 21 ships over nine cells in three dev runs, every one a regime fix
+that had passed Tier~1 and Tier~2. Table~\ref{tab:posthoc} takes each such cell from its first ship
+to its end and compares the two halves of the changed class with the SenseLab cell of the same
+family, seed and cut over the same episodes --- which shipped nothing.
+
+\begin{table}[H]
+\centering\scriptsize\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{population} & \textbf{$-$canary before} & \textbf{$-$canary after} & \textbf{SenseLab before} & \textbf{SenseLab after} & \textbf{DiD} \\
+\midrule
+kept & 13/46 (28\%) & 29/99 (29\%) & 11/46 (24\%) & 43/99 (43\%) & -18\% \\
+moved & 50/59 (85\%) & 68/111 (61\%) & 46/59 (78\%) & 52/111 (47\%) & +8\% \\
+\bottomrule
+\end{tabular}
+\caption{Exploratory, not preregistered: traffic after the no-canary ablation shipped, against the SenseLab cell of the same family, seed and cut over the same episodes (nine cells with a ship; window from the first ship to the end of the cell). \emph{Recurrence} is the canary's reading of a session: not a first-attempt success. DiD = (after $-$ before)$_{-\text{canary}}$ $-$ (after $-$ before)$_{\text{SenseLab}}$; negative means the ships were associated with less recurrence than shipping nothing.}
+\label{tab:posthoc}
+\end{table}
+
+
+The ships did not break the kept half. Recurrence on the kept half stayed flat in the ablation
+(28\,\% to 29\,\%) while it rose in the SenseLab cell over the same episodes (24\,\% to 43\,\%),
+a difference of 18 points in the ablation's favour; on the moved half the ships were associated
+with eight points \emph{less} recovery. Read with the hand-coding of \S\ref{sec:findings} (20 of 24
+proof-passing regime fixes restated the rule without its condition), this is one mechanism, not
+two: a correction that restates the old rule in better words protects the half for which the old
+rule still holds and slows the half for which it does not. It also names what level~0 does on its
+own when a validated entry starts failing conditionally: it demotes the entry for everyone,
+including the half it was still right for --- the kept-half loss in Table~\ref{tab:headline} is
+that demotion, and the repair loop is the only level that can write the condition back. For the
+canary this cuts both ways. A tally over all traffic in the situation would have seen the kept half
+improve and the moved half worsen and found little to stop; the false-ship question the
+preregistration asks (H3) is whether the canary refuses corrections that damage the situation on
+net, and these did not. The canary's value has to be read where canaries decide --- the fleet-10,
+200-episode design of E2 --- and against corrections that do net damage, which the adversarial
+probe supplies by construction. We report this analysis because it changed what we expect to
+find there.
+
 \subsection{SenseLab by engine cut}
 
 \begin{table}[H]
@@ -549,7 +592,7 @@ after its cut. We record it here rather than after the fact because the run this
 as pending will test P10 and not P11.
 \end{enumerate}
 
-\paragraph{The canary inside a cell.} Separately from the defects, no canary reached a decision
+\paragraph{The canary inside a cell (see also \S\ref{sec:posthoc}).} Separately from the defects, no canary reached a decision
 inside any 100-episode cell (K1--K4 in the readouts): a situated canary grades only in-situation
 runs, and at \code{pct}=50 with a floor of 8 per arm it needs 16 in-situation graded sessions
 after it starts, which a cell with 4--10 post-change exposures of one class cannot supply. This
