@@ -2004,3 +2004,14 @@ regime fixes that pass Tier 2, the non-conditional share (P9(b)'s reading) falls
 number of ships falls (reported). *What falsifies:* share ≥ 70 %; no ci-fix Tier 2 failure
 with ≥ 4 ci-fix regime fixes reaching Tier 2. *What does not change:* no arm, scenario,
 change set, rubric or metric; the harness's outcome definition is untouched.
+
+**Cut record, #797 (seam 8 + clean-success proof cases).** Merged 09:01:35Z (`c38c05f1`,
+Bruno: "merged"); "Deploy to Google Cloud" run 36400906999, `deploy` job 09:07:10Z–09:12:56Z
+(Cloud Run `amfs-api-02091-gn8` ready 09:11:52Z and at 100 % of traffic, `pro-api-00785-t9j`
+ready 09:08:32Z), run green 09:14:17Z. **The cut is 09:14:17Z.** No `senselab-rsi` cell ran
+between the #796 cut and this one (`rsi-c3` ended 18:10Z on 09-27). Engine covariate from
+here: `post-seam8` (= seams 4, 5, 5b, 6, 7, 8 and the clean-success case rule live). Every
+regime-shift case built after this cut carries `expected.no_failed_attempt: true`; every case
+before it does not, so P11 reads only cases dated after the cut. **Run plan:** `rsi-c4`,
+launched after this cut with the `rsi-c3` command unchanged except the run name — reads out
+P10 and P11 per cell, and re-reads P8, P9 and P7′ paired with `rsi-c3`.
