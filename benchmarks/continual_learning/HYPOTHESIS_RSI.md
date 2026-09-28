@@ -2072,3 +2072,15 @@ readable; and a labelled exploratory analysis of the fixes the no-canary arm shi
 `rsi-c1-rsi`/`rsi-c2`/`rsi-c3` (21 ships): recurrence in the situation — a failed outcome or a
 recorded failed attempt — before and after each ship, from production traces. Neither changes
 a canary parameter; lowering `min_outcomes` to force in-cell decisions is not done.
+
+**`rsi-c4` stopped at the #798 merge (11:22:18Z).** Bruno merged #798 at 11:20:39Z
+(`af1a26df`, "798 was merged"); the deploy started 11:20:42Z while `rsi-c4` was at 323 of
+800 episodes (`support` s11 complete on both arms, s23 at 59 and 64, `ci-fix` not started).
+Letting it run would have put the cut inside the run — every case built after the deploy
+would carry the flag, every one before would not — and its P8/P9/P7′ readings paired with
+`rsi-c3` would have mixed two engines. The run was stopped (SIGINT, then SIGTERM) at
+11:22:18Z, before the deploy could land, so its 323 episodes are `post-seam8` throughout.
+They are kept in `results/rsi-c4/` and used for no prediction; `rsi-c5`, launched on the
+#798 cut with the same command, reads P10 and P11 together and re-reads P8, P9 and P7′
+paired with `rsi-c3`. Cost of the decision: ~2 h of run time; gain: P10 and P11 on one clean
+covariate about seven hours sooner than the plan two paragraphs above.
