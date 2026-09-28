@@ -2084,3 +2084,14 @@ They are kept in `results/rsi-c4/` and used for no prediction; `rsi-c5`, launche
 #798 cut with the same command, reads P10 and P11 together and re-reads P8, P9 and P7′
 paired with `rsi-c3`. Cost of the decision: ~2 h of run time; gain: P10 and P11 on one clean
 covariate about seven hours sooner than the plan two paragraphs above.
+
+**Cut record, #798 (clean success on judge-graded regime proof cases).** Merged 11:20:39Z
+(`af1a26df`); "Deploy to Google Cloud" run 36415090536, `deploy` job 11:26:30Z–11:32:00Z
+(Cloud Run `amfs-api-02099-ft8` ready 11:30:55Z and at 100 % of traffic as the latest
+revision; `pro-api-00786-8fx` ready 11:27:50Z), run green 11:33:25Z. **The cut is 11:33:25Z.**
+No `senselab-rsi` cell ran between `rsi-c4`'s stop (11:22:18Z) and this cut. Engine covariate
+from here: `post-clean-success` (= `post-seam8` plus #798). **`rsi-c5` launched 11:34:26Z**
+(first attempt) and relaunched 11:35Z after the first process exited during setup without an
+episode (no episode was sealed under the first process); the command is the `rsi-c3` command
+with the run name changed. Reads P10 and P11 per cell; re-reads P8, P9 and P7′ paired with
+`rsi-c3`.
