@@ -2095,3 +2095,15 @@ from here: `post-clean-success` (= `post-seam8` plus #798). **`rsi-c5` launched 
 episode (no episode was sealed under the first process); the command is the `rsi-c3` command
 with the run name changed. Reads P10 and P11 per cell; re-reads P8, P9 and P7′ paired with
 `rsi-c3`.
+
+**E2b dev run on the #798 cut — `rsi-e2b-c5` (launched 2026-09-28 ~21:45Z).** The canary-value
+run named in the (t) run plan, as run: `support` and `ci-fix`, GPT-5.5, seeds 11 and 23, **fleet
+10, 200 episodes, change at 50** (set C, `--change-focus 0.5`, opaque ids), arms `senselab-rsi`,
+`senselab-rsi-nocanary`, `senselab-rsi-noreplay`; canary parameters unchanged (pct 50,
+min_outcomes 8, timeout 60, look every 5); Tier 2 on (`CL_RSI_TIER2=1`), 3 cells in parallel.
+2,400 episodes. Development seeds: everything read from it is exploratory for the confirmatory
+E2 and is labelled so. Endpoints read: canaries reaching a decision (count, episodes to
+decision), false-ship rate and regressions caught after a Tier 1/2 pass (H3/H4), sessions
+exposed to a later-regressed fix, time-to-repair, ships per arm, moved/kept/unchanged first-
+attempt success per arm over episodes 50–199, and the same P9(b) hand-coding of every fix
+that passes Tier 2 or ships.
