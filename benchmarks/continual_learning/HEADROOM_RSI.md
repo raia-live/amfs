@@ -1309,3 +1309,52 @@ everyone when it fails for half. Not evidence for or against the canary as a fal
 net these ships did not damage the situation, so a tally over the situation would have found little
 to stop. H3/H4 are to be read in E2 (canaries decide) and against the adversarial probe (net
 damage by construction). Not preregistered; reported in the paper as §4.3, labelled exploratory.
+
+## 2026-09-29 — `rsi-c5` readout (cut `post-clean-success`, #797 + #798; amendment (t))
+
+800/800 episodes, 7 infra errors; support + ci-fix × seeds 11/23 × {SenseLab, SenseLab − canary};
+launched 11:35Z, finished 16:24Z. Report: `results/rsi-report/REPORT.md` (`--senselab-run rsi-c5`).
+
+**Headline (SenseLab, 4 cells).** Moved half 34 % (25/74) [17, 56]; kept 63 % (41/65) [29, 77];
+unchanged 96 % (132/137); escalated 8 %; $0.033/ep. Baselines unchanged (frontier 17, pgvector
+17, +rerank 5, DIY 19, context window 33 at $0.070). Paired moved-half deltas: SenseLab wins 4/4
+cells against frontier (+16), pgvector (+17), +rerank (+30), DIY (+15); 2/4 against the context
+window (mean −3: +17/+16 support, −21/−23 ci-fix). By family: support moved 17 % (7/42), kept
+44 % (12/27); ci-fix moved 56 % (18/32), kept 76 % (29/38). Ablation − canary: moved 37 %, kept
+75 %; by family ci-fix 62/84, support 17/63. Level 0 alone (rsi-c1-tier1): 51/69. Compared with
+`rsi-c3` (43/60) SenseLab's moved half is 9 pp lower on the same seeds; the interval covers both.
+
+**Lifecycle.** SenseLab: 16 proposed (13 regime, 3 judge); Tier 1 9 pass / 7 inconclusive / 0
+fail; **Tier 2 3 pass / 13 fail**; 3 canaries started, 3 undecided at ep 100 (canary-arm graded
+0–1, control 0–6, floor 8); 0 shipped. Ablation: 17 proposed (13 regime); Tier 2 2 pass / 12 fail
+/ 3 open; **2 shipped** (`repo-readme-ci`, regime, ci-fix s11; one judge fix, support s11).
+`rsi-c3` for comparison: SenseLab 24 proposed, Tier 2 15 pass / 8 fail; ablation shipped 11/16.
+
+**P10 (seam 8) — met.** Of the 47 runs cited by the 33 fix manifests created after the #798 cut,
+0 carry `replay_delivery_id` or `origin=repair` (all 47 joined to traces); 134 of the 928
+sessions sealed in the window were replays. Alias rows since the cut: 364; the seal hook returns
+`not traffic` for a replay before situation identity runs, so none can come from a replay.
+
+**P11 — (a) falsified, (b) met, (c) met.** Regime fixes reaching Tier 2: 23 (SenseLab 13,
+ablation 10 + 3 still open). Failed 19: **5 on a kept case** (SenseLab support 1, ci-fix 2;
+ablation support 1, ci-fix 1), 10 on a moved case only, 4 on a pre-change/unchanged case only.
+Passed 4 about the changed class (+1 `procedure-verify-before-refund-double-billed`, a regime
+shift on an unchanged class): `pip-audit-pinned-related-add-exception-requests` (SenseLab ci-fix
+s11, canary), `pip-audit-pinned-dependency-add-exception-after-source-bump-fails` (SenseLab ci-fix
+s23, canary), `repo-readme-ci` (ablation ci-fix s11, shipped), and the support canary fix. Hand-
+coded against `CI_CHANGES_C["audit-pinned"]` (touches `legacy_sdk/` → keep pin + exception; else
+bump): all three ci-fix passers say "bump, exception only if policy permits" — unconditional Y;
+`repo-readme-ci` also restates "rerun only for clear flakes" unconditionally. (a) 4/4 = 100 % ≥
+70 % → falsified. (b) ci-fix kept-case Tier 2 failures: 3 ≥ 1 → met. (c) ships 11 → 2 → met.
+Reading: the proof now rejects both ways a draft misses a conditional — the old rule restated
+fails its moved case; the wholesale flip fails its kept case — and the survivors are wholesale
+flips whose kept-half replays passed cleanly because the replaying agent did not follow the entry
+into the wrong action. The conditional is lost in the repair agent's draft, not in the proof. Not
+done here: a change to the drafting prompt (engine change; proposal to Bruno, not made).
+
+**P8/P9 re-read.** P8: every regime fix's case set has 3–7 cases mixing failed and passed runs
+of the situation (kept, moved, pre) ✓. P9(b) on this cut: 4/4 non-conditional among passers (see
+P11(a)). P7′ not re-read in this pass.
+
+**Paper.** Refilled from `rsi-c5` (Tables 1–5, 7; caption cut label `post-clean-success`);
+abstract/§4.1/§4.2/§5 ledger/§6 updated to these numbers and readouts.

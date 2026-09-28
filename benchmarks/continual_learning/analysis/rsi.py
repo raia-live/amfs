@@ -52,7 +52,10 @@ CUTS: list[tuple[str, str, str]] = [
     ("rsi-c1-rsi", "pre-seam4", "#787/#788: per-agent auto-propose, situation contract"),
     ("rsi-c2", "post-seam5", "#793 case sets for regime fixes; #794 situation identity"),
     ("rsi-c3", "post-seam5b", "#795 canary re-stamps replays, post-shift cases; #796 embedding stage"),
-    ("rsi-c4", "post-seam8", "#797 replays are not traffic; proof cases need a clean success"),
+    # rsi-c4 (post-seam8) was stopped at 323 episodes when #798 merged (HYPOTHESIS (t)); it is
+    # kept on disk and used for no prediction, so it is not a row here.
+    ("rsi-c5", "post-clean-success",
+     "#797 replays are not traffic; #797/#798 proof cases need a clean success, whatever grades them"),
 ]
 SCENARIOS = ("support", "ci-fix")
 SEEDS = (11, 23)

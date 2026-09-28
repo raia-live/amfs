@@ -34,7 +34,7 @@ TABLES: dict[str, tuple[str, str, str, str, tuple[str, ...]]] = {
         "per system: \\code{support} and \\code{ci-fix} $\\times$ seeds 11 / 23). First-attempt success on "
         "every post-change episode. \\emph{Moved half}: changed-class instances whose rule changed; "
         "\\emph{kept half}: changed-class instances whose rule did not. Brackets: cell-level bootstrap 95\\% "
-        "interval. Development seeds; SenseLab on the \\code{post-seam5b} engine cut.",
+        "interval. Development seeds; SenseLab on the \\code{post-clean-success} engine cut.",
         "tab:headline", ("cells", "infra err")),
     "TAB_PAIRED": (
         "REPORT.md", "1b. Paired cell deltas, moved half",
