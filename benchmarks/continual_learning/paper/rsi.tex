@@ -276,6 +276,16 @@ SenseLab & 34 \% (25/74) [17, 56] & 63 \% (41/65) [29, 77] & 96 \% (132/137) & 8
 \end{table}
 
 
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_headline.png}
+\caption{First-attempt success after the rule changes conditionally (episodes 30--99, four cells,
+GPT-5.5): the moved half, the kept half and the unchanged classes, one bar per system, with
+cell-level bootstrap 95\,\% intervals. Same numbers as Table~\ref{tab:headline}.}
+\label{fig:headline}
+\end{figure}
+
 Table~\ref{tab:headline} is the state of the engine on its current cut, \code{post-clean-success}
 (\S\ref{sec:findings}, findings 8--10 live). Three things
 are in it. First, on the moved half every retrieval memory is at or below the frontier model
@@ -329,6 +339,20 @@ SenseLab & 17 \% (7/42) & 44 \% (12/27) & 97 \% (65/67) & 56 \% (18/32) & 76 \% 
 \label{tab:byfamily}
 \end{table}
 
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_curves.png}
+\caption{First-attempt success by 10-episode block across the change at episode 30, pooled over
+the four cells: the classes whose rule changes (left; before the change every system is at
+80--90\,\%, after it the rule holds for the kept half only) and the unchanged classes (right).
+SenseLab is drawn heavy with its cell-level bootstrap band; the other systems' bands are of the
+same width and are omitted for legibility. Recovery is partial for every system inside 70
+episodes; the context window recovers most on \code{ci-fix} because the whole history fits in
+its prompt (Table~\ref{tab:byfamily}).}
+\label{fig:curves}
+\end{figure}
 
 \subsection{Attribution: what level 1 adds to level 0, so far}
 
@@ -483,6 +507,17 @@ post-clean-success (`rsi-c5`) & 34 \% (25/74) & 63 \% (41/65) & 96 \% (132/137) 
 \end{table}
 
 
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_cuts.png}
+\caption{SenseLab on successive cuts of the engine, same protocol and seeds. Left: outcome
+endpoints, which move within their intervals. Right: the loop's own lifecycle counts over the
+four cells --- what it proposed, what passed Tier~1 and Tier~2, how many canaries started and
+what shipped (nothing, on every cut: no canary decided inside a 100-episode cell).}
+\label{fig:cuts}
+\end{figure}
+
 Table~\ref{tab:cuts} is the same protocol on successive cuts of the engine and is the trace of
 \S\ref{sec:findings} in numbers: the loop went from 9 proposals and 2 Tier~2 verdicts on the first
 cut to 24 and 15 on the third as its evidence path was repaired, while the outcome endpoints
@@ -512,6 +547,15 @@ SenseLab $-$ repair loop & 6,537 & 0.032 & 0.000 & 0.000 & 0.000 & 3.8 & 0.005 &
 \label{tab:cost}
 \end{table}
 
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.62\textwidth]{figures/fig_cost.png}
+\caption{Recovery on the moved half against all-in cost per episode, the loop's own spend
+included (Table~\ref{tab:cost}); vertical bars are the cell-level bootstrap intervals.}
+\label{fig:cost}
+\end{figure}
 
 Every call is charged to the system that caused it, wherever it ran. The agent's own calls are
 in the episode records. The loop's platform-side calls are on the benchmark account's evaluation

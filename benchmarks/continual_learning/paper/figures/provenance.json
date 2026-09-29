@@ -1,0 +1,36 @@
+{
+ "senselab_run": "rsi-c5",
+ "seeds": [
+  11,
+  23
+ ],
+ "models": [
+  "gpt-5.5"
+ ],
+ "systems": {
+  "Frontier alone": [
+   "rsi-c1-tier1",
+   "none"
+  ],
+  "Context window": [
+   "rsi-c1-baselines-cw",
+   "raw-traces"
+  ],
+  "pgvector": [
+   "rsi-c1-baselines",
+   "pgvector"
+  ],
+  "pgvector + rerank": [
+   "rsi-c1-tier1",
+   "pgvector+rerank"
+  ],
+  "pgvector + outcomes (DIY)": [
+   "rsi-c1-baselines",
+   "pgvector-diy+outcomes"
+  ],
+  "SenseLab": [
+   "rsi-c5",
+   "senselab-rsi"
+  ]
+ }
+}
