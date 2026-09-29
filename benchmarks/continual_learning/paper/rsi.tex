@@ -185,8 +185,8 @@ less (one-sided two-proportion $z$-test, $p<0.05$) or when the one-sided 95\,\% 
 control; it fails when the canary arm recurs significantly more. Before \emph{post-canary-ni}
 the primary asked for a significant improvement, and no canary ever passed (finding 11). The
 benchmark maps the production defaults (10\,\%, 20 outcomes, 14 days) to \code{pct}=50,
-\code{min\_outcomes}=8, a timeout of 60 sessions (200, the cell horizon, from amendment~(v)),
-evaluated every 5 graded sessions. One canary per agent at a time.
+\code{min\_outcomes}=8, a timeout of 60 sessions (the cell horizon --- 100 or 200 --- from
+amendment~(v) on), evaluated every 5 graded sessions. One canary per agent at a time.
 
 \paragraph{Ship, verify, revert.} Policy \code{auto\_after\_canary} merges a passed canary's branch
 into \code{main}; \code{auto\_after\_replay} (the ``$-$ canary'' ablation) merges on a passed
@@ -213,7 +213,7 @@ Only the first rung of the first of these is measured in this version.
 
 \paragraph{Preregistration.} Hypotheses, arms, metrics, seeds, the dev/confirmatory split and the
 analysis freeze were registered before the first run (\code{HYPOTHESIS\_RSI.md}, tag
-\code{prereg-rsi-v1}); every change since is a dated amendment (a)--(s) appended below the
+\code{prereg-rsi-v1}); every change since is a dated amendment (a)--(x) appended below the
 original, each with a prediction and what would falsify it. Seeds 11 and 23 are the development
 seeds; 37, 41, 59 and 73 run once, after the analysis code is tagged \code{analysis-freeze-rsi}.
 Engine changes made between runs are recorded with their deploy cut to the second, and every
@@ -474,9 +474,10 @@ net, and these did not. The canary's value has to be read where canaries decide 
 probe supplies by construction. We report this analysis because it changed what we expect to
 find there.
 
-\paragraph{Where canaries could decide.} We then ran the E2 shape on development seeds: the same
-two families and seeds, ten agents sharing one store, 200 episodes with the change at 50, three
-arms (SenseLab, $-$canary, $-$replay), 2,400 episodes. On \code{ci-fix} every arm recovers both
+\paragraph{Where canaries could decide.} We then ran the E2 shape on development seeds
+(\code{rsi-e2b-c5}, cut \code{post-clean-success}): the same two families and seeds, ten agents
+sharing one store, 200 episodes with the change at 50, three arms (SenseLab, $-$canary,
+$-$replay), 2,400 episodes. On \code{ci-fix} every arm recovers both
 halves by episode 130 (moved half 93--100\,\%, kept 94--96\,\% over episodes 130--199; 70--77 and
 83--90 over all post-change episodes); on \code{support} none does (moved 26--32\,\%, kept
 51--63\,\%). The arms are indistinguishable at this sample. Twenty canaries started and none
@@ -622,9 +623,10 @@ saw, need eval-only content that is registered but not yet written.
 The preregistration promised to report every prediction. Table~\ref{tab:ledger} is that report,
 and the findings below are the record of what a benchmark that knows the true rule found in a
 shipped self-improvement loop --- nine defects and two properties of the problem --- none of
-which a retrieval benchmark could have seen. Eight of the defects were fixed in production between
-runs, with their deploy cuts recorded, and re-measured on the same protocol; the ninth was found in
-the last run before this version and is open. We think this section is the paper's main contribution; the loop's evidence path
+which a retrieval benchmark could have seen. All nine were fixed in production between runs, with
+their deploy cuts recorded; eight have been re-measured on the same protocol, and the ninth was
+found in the last run before this version, so its re-measurement is the run this version reports
+as open. We think this section is the paper's main contribution; the loop's evidence path
 is where such systems fail, and none of these failures is specific to ours.
 
 \begin{enumerate}[leftmargin=1.6em, itemsep=0.35em]
@@ -824,15 +826,24 @@ designs under a regime change.
 \item \textbf{Development seeds.} Every number is from two seeds on two families, chosen for
 development. The confirmatory seeds run once after the freeze; nothing here is a confirmed
 difference, and the intervals say so.
-\item \textbf{One model, one effort level.} GPT-5.5 at low effort. The preregistration includes
-Claude Opus 5; it has not run on set C.
+\item \textbf{One model, one effort level.} GPT-5.5 at low effort. Claude Opus 5 has not run on
+set C on the development seeds; it is half of the confirmatory grid (amendment (w)), where every
+cell is model-aware.
 \item \textbf{The benchmark's outcome is coarse.} The harness reports \code{success} for an episode
 solved within three attempts; that is what the customer reports, and it hid finding 9 from the
 proof set for two runs. The clean-success rule reads the attempts the agent already records; a
 customer whose agent never records attempts sees no change and gets no protection.
-\item \textbf{The engine changed between runs.} Seven fixes were deployed during the study. Every
-result carries its cut; latency claims are within one cut only; and the changes are to the
-loop's evidence path, not to any threshold constant, which the preregistration forbids.
+\item \textbf{The engine changed between runs.} Nine defects were fixed in production during the
+study (amfs-internal \#780--\#799). Every result carries its cut; latency claims are within one cut
+only; and the changes are to the loop's evidence path, not to any threshold constant, which the
+preregistration forbids. The one gate rule that changed --- the canary's primary, from
+superiority to non-inferiority (finding 11) --- was preregistered with its falsifier before the
+run that tests it.
+\item \textbf{The loop's drafting cost is an estimate.} Judge verdicts and Tier~2 replays are
+charged exactly per cell; the repair agent's spend is the account ledger's remainder spread over
+every draft on the account (\S\ref{sec:cost}), so a cell that drafted long fixes is under-charged
+and one that drafted short ones over-charged. The confirmatory runs snapshot the ledger per cell
+and report the difference directly.
 \item \textbf{Hand-coding.} The ``non-conditional'' share (P9(b), P11) is a reading of the shipped
 text against the known change by one coder; the confirmatory run will use two, blind to arm.
 \item \textbf{The harness routes the canary.} The production router runs in the MCP gateway; the
