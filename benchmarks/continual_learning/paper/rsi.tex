@@ -764,11 +764,21 @@ the live canary, which grades what agents actually do with the entry, and the fo
 criterion, which separates a wrong rule from a wrong rule that was followed. The next engine
 change, if any, is to the drafting prompt: it is put to the owner as a proposal, not made.
 
-What remains before the confirmatory seeds is in the preregistration: the remaining eight
-families' set~C, registered by hash; the second model; the flagship fleet-10, 200-episode design
-where canaries decide (E2), read for false ships and regressions caught; verdict sources (E3);
-the A/A, adversarial, reward-hacking and manifest-calibration probes; the loop's own spend in
-Table~\ref{tab:cost}; and the Managed Model rungs above L0 (E7).
+\paragraph{The confirmatory scope, reduced before it ran.} Amendment (w), declared before any
+confirmatory-seed cell and before the analysis freeze, reduces the confirmatory grid to what the
+paper's claims rest on: seeds 37/41/59/73 on the two set-C families (\code{support},
+\code{ci-fix}), both agent models (GPT-5.5 and Claude Opus~5), fleet~1 on the C protocol with
+every system in Table~\ref{tab:headline} and both ablations, and fleet~10 on the E2b protocol
+(200 episodes, change at 50) with SenseLab and its two gate ablations --- 22,400 episodes on the
+\code{post-canary-ni} cut. The loop has not been run on the remaining eight families: they appear
+only in the level-0 comparison of the earlier ten-family grid (SenseLab with the loop held,
+against the same baselines, change sets A and B, development seeds), cited as such; their
+held-out set~C is not authored, and the held-out-family design of amendment (l) lapses with it. The paired test is the exact sign-flip
+test over cells with Holm across systems (amendment (x)); the mixed-effects learning-curve model
+named in the preregistration is not run, for the reasons given there. What is not run at all and
+is reported as not run: verdict sources (E3), the public track (E4), the A/A, adversarial,
+reward-hacking and manifest-calibration probes, and the Managed Model rungs above L0 (E7). Each
+is a claim this paper does not make.
 
 \section{Related work}
 
@@ -838,20 +848,29 @@ run rather than take our reading of it.
 \code{rsi-c1-tier1} (\code{none}, \code{pgvector+rerank}, \code{senselab}),
 \code{rsi-c1-baselines} (\code{pgvector}, \code{pgvector-diy+outcomes}),
 \code{rsi-c1-baselines-cw} (\code{raw-traces}); SenseLab \code{rsi-c1-rsi}, \code{rsi-c2},
-\code{rsi-c3}, \code{rsi-c4} (\code{senselab-rsi}, \code{senselab-rsi-nocanary}). Cell id
+\code{rsi-c3}, \code{rsi-c5}, \code{rsi-c6} (\code{senselab-rsi}, \code{senselab-rsi-nocanary}); fleet~10
+\code{rsi-e2b-c5}, \code{rsi-e2b-c6} (plus \code{senselab-rsi-noreplay}, 200 episodes, change at 50,
+\code{-rep}); confirmatory \code{rsi-conf-f1-s<seed>} and \code{rsi-conf-e2b-s<seed>} from
+\code{confirm\_rsi.sh}. Cell id
 \code{<family>|<arm>|gpt-5.5|s<seed>|} \code{e100-d300-n0.0-f0-a1-c30-x0.5-oid-vC}. Command:
 \begin{quote}\scriptsize\ttfamily\raggedright python -m continual\_learning.runner --run <run> --scenarios support ci-fix --arms <arms> --models gpt-5.5 --seeds 11 23 --fleet 1 --episodes 100 --change-at 30 --change-focus 0.5 --change-variant C --opaque-ids --workers 2\end{quote}
 with \code{CL\_RSI\_TIER2=1} and a Tier~2 replay receiver reachable from the service.
 
 \paragraph{Engine cuts.} \code{pre-seam4}: amfs-internal \#787/\#788. \code{post-seam5}: \#793
 (07:00:22Z), \#794 (08:27:24Z, 2026-09-27). \code{post-seam5b}: \#795 (12:50:24Z), \#796
-(13:39:13Z). \code{post-seam8}: \#797 (09:14:17Z, 2026-09-28). Each cut's Cloud Run revision is in
+(13:39:13Z). \code{post-seam8}: \#797 (09:14:17Z, 2026-09-28). \code{post-clean-success}: \#798.
+\code{post-canary-ni}: \#799 (11:35:32Z, 2026-09-29). Each cut's Cloud Run revision is in
 \code{HYPOTHESIS\_RSI.md}.
 
-\paragraph{Analysis.} \code{python -m benchmarks.continual\_learning.analysis.rsi --senselab-run
-rsi-c3 --paper} writes \code{results/rsi-report/REPORT.md} and \code{report.json};
-\code{analysis.fill\_rsi\_paper} fills this document from it. The preregistration, amendments,
-readouts (\code{HEADROOM\_RSI.md}) and change sets are published with the paper.
+\paragraph{Analysis.} \code{python -m benchmarks.continual\_learning.analysis.rsi --paper} writes
+\code{results/rsi-report/REPORT.md} and \code{report.json} for the development seeds;
+\code{--seeds 37 41 59 73 --models gpt-5.5 claude-opus-5 --runs <confirmatory runs> --report-dir
+results/rsi-report-confirmatory} is the confirmatory read; \code{analysis.fill\_rsi\_paper} fills
+this document from the report and \code{analysis.rsi\_figures} draws the figures.
+\code{analysis.platform\_calibration} reads the account ledger for the cost table
+(\S\ref{sec:cost}). The analysis code is tagged \code{analysis-freeze-rsi} before the
+confirmatory runs. The preregistration, amendments, readouts (\code{HEADROOM\_RSI.md}), change
+sets, run records and the two blind coders' sheets are published with the paper.
 
 \begin{thebibliography}{99}\small
 \bibitem{senselab-cl} SenseLab Research. From memory to recursive self-improvement: agents that

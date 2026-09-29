@@ -2207,7 +2207,12 @@ fleet 1 and fleet 10 (E2b protocol), the same arms as `rsi-c5` / `rsi-e2b-c6`, o
 `post-canary-ni` cut, parallelised on GCP. The remaining eight families are reported from the
 existing dev-seed runs (change sets A/B, seeds 11/23) in a separate table labelled *dev-seed,
 not confirmatory*; set C for those families is **not** authored (the held-out-blind design of (l)
-lapses with it and is said so in the paper). Predictions P1–P14 keep their pre-specified form;
+lapses with it and is said so in the paper). *(Clarified 13:30Z, same day: the existing dev-seed
+runs on those eight families are the ten-family grid's level-0 runs — `senselab` with the loop
+held, against the same baselines — not `senselab-rsi`; the loop has not been run on them and the
+paper says so. That table is a level-0 appendix, not an RSI result. "Parallelised on GCP" reads
+"one runner process per protocol × seed on the benchmark host, `confirm_rsi.sh`; GCP only if the
+host cannot hold it".)* Predictions P1–P14 keep their pre-specified form;
 those that name "≥ N families" are read over the two families and reported as such. Every paired
 test is Holm-corrected over the families actually run. Nothing else changes: no arm, scenario,
 rubric, metric or parameter. **Order of work:** `rsi-e2b-c6` readout → fleet-1 `rsi-c6` (headline
