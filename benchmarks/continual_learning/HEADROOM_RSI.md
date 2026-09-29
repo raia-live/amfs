@@ -1407,3 +1407,87 @@ merely not worse never ships inside the timeout.
 
 **Hand-coding of Tier-2 passers / ships (P9(b) reading):** deferred to the v0.2 pass with two
 coders; 15 fixes (12 `test_passed`, 3 regime ships).
+
+## 2026-09-29 — `rsi-c6` readout (cut `post-canary-ni`, #799; amendment (v))
+
+800/800 episodes, 0 infra errors; support + ci-fix × seeds 11/23 × {SenseLab, SenseLab − canary};
+launched 12:57Z, finished 17:30Z. Report: `results/rsi-report/REPORT.md` (`--senselab-run rsi-c6`).
+The run predates the ledger snapshotter (runner change 13:10Z), so `budget_snapshots.jsonl` holds
+one manual `run_end_manual` row (spent $94.17 at 17:31:12Z, of which $46.79 judges) and a note;
+per-draft cost from the ledger remainder is $0.134 (354 drafts). The headline is the fleet-1
+re-measurement of finding 11 (#799); the fleet-10 re-measurement is `rsi-e2b-c6`, still running.
+
+**Headline (SenseLab, 4 cells).** Moved half 33 % (25/75) [14, 56]; kept 63 % (41/65) [40, 76];
+unchanged 96 % (134/140); escalated 8 %; $0.033/ep agent, **$0.046/ep all in** (judges 0.004,
+replays 0.004, drafts 0.004 — the loop is a quarter of the cost; 3.0 drafts per 100 episodes).
+Baselines unchanged (frontier 17, pgvector 17, +rerank 5, DIY 19, context window 33 at $0.070 and
+24.3k tokens/ep against SenseLab's 6.6k). Paired moved-half deltas: SenseLab wins 4/4 cells
+against frontier (+16), pgvector (+17), +rerank (+30), DIY (+15); 2/4 against the context window
+(mean −3). By family: support moved 16 % (7/43), kept 44 % (12/27); ci-fix moved 56 % (18/32),
+kept 76 % (29/38). Ablation − canary: moved 39 % (29/75), kept 62 % (40/65), unchanged 99 %; by
+family support 19/48, ci-fix 66/71. Level 0 alone (`rsi-c1-tier1`): 51/69. Against `rsi-c5` on the same
+seeds (34/63/96) the headline is flat; against `rsi-c3` (43/60) 10 pp lower on the moved half,
+interval covering both. Cost ratios: 4.2× frontier, 1.3–1.7× pgvector, 0.66× the context window
+(which is 1.5× SenseLab all-in and 2.1× agent-only). Memory time 14.8 s/ep, wall 25 s/ep.
+
+**Lifecycle.** SenseLab: 13 proposed (8 regime, 5 judge); Tier 1 4 pass / 8 inconclusive / 0
+fail; **Tier 2 4 pass / 7 fail / 1 open**; 3 canaries started, 3 undecided at ep 100; 0 shipped.
+Ablation − canary: 14 proposed (10 regime, 4 judge); Tier 1 4 / 9 / 1; **Tier 2 0 pass / 13 fail**;
+**0 shipped**. Cut series for the ablation's ships: `rsi-c3` 11/16 → `rsi-c5` 2/17 → `rsi-c6`
+0/14; SenseLab's Tier 2 passes 15 → 3 → 4.
+
+**Canaries (`results/rsi-c6/canary_readout.json`, `--no-db`).** Three started, all in SenseLab
+cells, all from `test_passed`, none decided, none with a kept case in its proof set (so P14 is
+undefined here as it was on c5):
+- support s11, judge fix `fb8abb07` ("Misrouted escalation advice"): **fully graded — canary
+  18/18 exposed, control 31/31**, recurred 1 vs 3 (6 % vs 10 %, p = 0.61); the one-sided 95 %
+  Newcombe bound on canary − control is 13 points against a margin of 10 → *running*, no verdict.
+  Reproduced by hand (Wilson/Newcombe, z = 1.645): 0.128. The bound falls under the margin at
+  ≈15 graded per arm if the canary never recurs, ≈30 at 6 % vs 10 %, ≈50 at equal recurrence; a
+  100-episode cell gave this canary 18 and 31.
+- support s23, regime fix `1b11895d` (android-notifications): canary graded 2 of 33 exposed,
+  control 5 of 28; floor 8 → waiting.
+- ci-fix s11, regime fix `c411355d` (pip-audit exception): canary 4 of 15, control 1 of 10 →
+  waiting.
+The judge-fix canary grades every exposed run; the two regime canaries grade 6–27 % of theirs.
+The same gap did not appear in the first `rsi-e2b-c6` cell (77 and 101 exposed, 9 and 10
+graded, floor reached). Why a fleet-1 regime canary grades so few of the runs that read its entry
+is not diagnosed here; P12's graded/exposed ≥ 0.8 clause on `rsi-e2b-c6` is the preregistered
+read of it. Engine question for Bruno if it holds up, not acted on.
+
+**Tier 2 on regime fixes (both arms): 17 verdicts, 15 failed, 2 passed.** Failed: **4 on a kept
+case** (SenseLab support s11 card-declined ×1; ablation support s11 card-declined ×2 and ci-fix
+s11 pip-audit ×1), 10 on a moved case only, 1 on a pre-change case only (ablation ci-fix s23
+`pip-audit-pinned-legacy-bump-fails-add-exception`). One more regime fix (SenseLab ci-fix s11,
+`ci-pip-audit-pinned-related-change-exception-not-bump`) has its Tier 2 still open at run end
+with its kept case already failed. Passed 2, both SenseLab, both in canary, neither shipped —
+hand-read against the true set-C condition:
+- `1b11895d` (support s23, android-notifications; true rule: app_major ≥ 9 → reinstall, else
+  settings change). The draft's evidence names SUP-74943, the ticket that needed the reinstall,
+  and the fix is a **retry ladder** — settings first, then clear cache, then reinstall "when the
+  settings check-in has already been tried" — with an irrelevant condition (Wi-Fi vs cellular).
+  It branches on what has already failed, not on the app version. Not conditional in the P11(a′)
+  sense; and it is the old rule with an appended escalation, which is why its moved-case replay
+  passed cleanly (the replaying agent went straight to reinstall).
+- `c411355d` (ci-fix s11, audit-pinned; true rule: touches `legacy_sdk/` → keep pin + exception,
+  else bump). The draft says "prefer bumping … even if the changed files include related legacy
+  code; add an exception only if the bump fails and repo policy permits" — the **wholesale flip**
+  again, and the opposite of the true condition. Its kept-case replays passed cleanly because the
+  replaying agent did not follow the entry into the wrong action (the same reading as c5).
+P11(a′) is *not* read from this: the preregistered read is two coders blind to arm and verdict
+over every regime fix whose proof set holds a kept case — **12 on this cut**
+(`results/rsi-coding/sheet.csv`, `INSTRUCTIONS.md`; `key.json` is private). Bruno picks the
+coders. The second clause (kept-case proof rejections < 5 of 23) reads 4 of 17 here.
+
+**What the drafting change (v) did and did not do.** The repair agent is now shown the
+situation's passing runs and asked for the condition that separates them from the failing ones.
+Of 17 regime drafts reaching Tier 2, at least the two passers still do not state the input
+condition — one names the right ticket and generalises it as a procedure, the other flips the
+rule wholesale. Whether the other 15 do is what the coding sheet is for. Not done here: any
+further change to the drafting prompt (engine change; proposal to Bruno, not made).
+
+**Paper (v0.2, commit `3c10d752`).** Refilled from `rsi-c6` (Tables 1–5, 7; caption cut label
+`post-canary-ni`; cuts table gains the `rsi-c6` row); abstract, §4.1 headline/attribution/
+lifecycle/proof paragraphs, §4.2 cuts paragraph, §4.3 cost, §5 findings intro, §6 pending updated
+to these numbers; figures regenerated. `fig_canary` and the fleet-10 paragraph wait on
+`rsi-e2b-c6`.
