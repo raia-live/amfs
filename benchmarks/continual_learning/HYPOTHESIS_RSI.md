@@ -2214,3 +2214,39 @@ rubric, metric or parameter. **Order of work:** `rsi-e2b-c6` readout → fleet-1
 on the final cut, 800 episodes) → freeze tag Thu 2026-10-02 → confirmatory Thu–Fri → v1.0 Sat
 2026-10-04. Reversible until the confirmatory launch: restoring the ten-family grid is the (c)
 option and moves v1.0 to ~2026-10-07.
+
+### 2026-09-29 (x) — the confirmatory statistics, fixed before the freeze; the loop's spend accounted
+
+**Paired test.** The Statistics section names "paired deltas on (family, seed, model, fleet)" and
+Holm across secondary endpoints but no test statistic. Fixed now, before any confirmatory cell:
+the primary endpoint (moved-half first-attempt success, episodes 30–99) is compared SenseLab
+minus each baseline per cell, and the mean paired delta is tested with the **exact two-sided
+sign-flip (permutation) test** over the cells (all 2^n sign assignments; n = 16 at fleet 1 —
+2 families × 4 seeds × 2 models), Holm-adjusted across the five baselines. Secondary endpoints
+(kept half, unchanged classes, escalations) are tested the same way, Holm within endpoint. The
+cell-level bootstrap intervals stay. **The mixed-effects logistic regression named for the
+learning curves is not run**: neither `scipy` nor `statsmodels` is in the harness environment,
+a Bayesian mixed GLM is the only logistic mixed model `statsmodels` offers, and the cell-level
+permutation test needs no distributional assumption; learning curves are reported descriptively
+(per-episode-block rates with cell-level bootstrap). Declared here so it is not a post-hoc
+choice. Implemented in `analysis/rsi.py` (`sign_flip_p`, `holm`; cells are (family, seed, model);
+`--seeds 37 41 59 73 --models gpt-5.5 claude-opus-5 --runs <confirmatory runs> --report-dir
+results/rsi-report-confirmatory` is the confirmatory invocation and writes beside, never over,
+the dev readout). Checked on the dev seeds: with four cells the smallest attainable p is 0.125,
+so no dev table carries a significance claim.
+
+**Cost accounting (E6).** The loop's platform-side spend was missing from the cost table (the
+"arm $" column read 0.000 for SenseLab; the paper said so in a todo). Fixed: judge verdicts and
+Tier 2 replays are exact per cell from the run records; the repair agent's spend is not
+persisted per fix, so it is priced at the account ledger's remainder per draft
+(`analysis/platform_calibration.py`: USD 0.135 per draft at 13:05Z from USD 77.6 spent, 39.1 of
+it judges, over 285 drafts) and labelled an estimate. From `rsi-c6` on, the runner snapshots the
+ledger at run start, after every cell and at run end (`budget_snapshots.jsonl`), so the
+confirmatory runs report the ledger difference and the estimate is checked against it. Dev
+numbers: SenseLab USD 0.050 per episode all in, one third of it the loop; 4.4× the frontier
+model alone, 1.8× pgvector, 0.7× the context window.
+
+**Run log.** `rsi-c6` (fleet 1, the `rsi-c5` command on the `post-canary-ni` cut, canary
+timeout and window = the 100-episode cell horizon by the (v) rule) launched 12:57:01Z; two
+earlier launch attempts (12:53:13Z, 12:54:03Z) were killed by the tool shell before their first
+episode and left two provisioned agents with no traces (`results/rsi-c6/orphan_agents.txt`).

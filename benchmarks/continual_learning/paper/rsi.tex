@@ -295,17 +295,17 @@ number the repair loop exists to remove: a written conditional rule would recove
 
 \begin{table}[H]
 \centering\scriptsize\setlength{\tabcolsep}{3pt}
-\begin{tabular}{lrrrrrr}
+\resizebox{\linewidth}{!}{\begin{tabular}{lrrrrrrrr}
 \toprule
-\textbf{pair} & \textbf{support s11} & \textbf{support s23} & \textbf{ci-fix s11} & \textbf{ci-fix s23} & \textbf{mean} & \textbf{cells won} \\
+\textbf{pair} & \textbf{support s11} & \textbf{support s23} & \textbf{ci-fix s11} & \textbf{ci-fix s23} & \textbf{mean} & \textbf{cells won} & \textbf{p} & \textbf{p (Holm)} \\
 \midrule
-SenseLab $-$ Frontier alone & +17 & +16 & +16 & +15 & +16 & 4/4 \\
-SenseLab $-$ Context window & +17 & +16 & -21 & -23 & -3 & 2/4 \\
-SenseLab $-$ pgvector & +13 & +16 & +16 & +23 & +17 & 4/4 \\
-SenseLab $-$ pgvector + rerank & +13 & +16 & +53 & +38 & +30 & 4/4 \\
-SenseLab $-$ pgvector + outcomes (DIY) & +17 & +16 & +11 & +15 & +15 & 4/4 \\
+SenseLab $-$ Frontier alone & +17 & +16 & +16 & +15 & +16 & 4/4 & 0.125 & 0.625 \\
+SenseLab $-$ Context window & +17 & +16 & -21 & -23 & -3 & 2/4 & 0.750 & 0.750 \\
+SenseLab $-$ pgvector & +13 & +16 & +16 & +23 & +17 & 4/4 & 0.125 & 0.625 \\
+SenseLab $-$ pgvector + rerank & +13 & +16 & +53 & +38 & +30 & 4/4 & 0.125 & 0.625 \\
+SenseLab $-$ pgvector + outcomes (DIY) & +17 & +16 & +11 & +15 & +15 & 4/4 & 0.125 & 0.625 \\
 \bottomrule
-\end{tabular}
+\end{tabular}}
 \caption{SenseLab minus each system on the moved half, per cell, in percentage points, paired on (family, seed).}
 \label{tab:paired}
 \end{table}

@@ -58,8 +58,29 @@ CUTS: list[tuple[str, str, str]] = [
      "#797 replays are not traffic; #797/#798 proof cases need a clean success, whatever grades them"),
 ]
 SCENARIOS = ("support", "ci-fix")
-SEEDS = (11, 23)
+#: development seeds and model; ``--seeds 37 41 59 73 --models gpt-5.5 claude-opus-5`` is the
+#: confirmatory read (HYPOTHESIS_RSI.md, amendment (w)). A cell is (family, seed, model).
+SEEDS: tuple[int, ...] = (11, 23)
+MODELS: tuple[str, ...] = ("gpt-5.5",)
 BOOT = 2000
+CellKey = tuple[str, int, str]
+
+
+def cell_keys() -> list[CellKey]:
+    return [(s, seed, m) for s in SCENARIOS for seed in SEEDS for m in MODELS]
+
+
+def key_of_cell_id(cell: str) -> CellKey | None:
+    """``family|arm|model|sNN|...`` -> (family, seed, model)."""
+    parts = cell.split("|")
+    if len(parts) < 4:
+        return None
+    return parts[0], int(parts[3].lstrip("s")), parts[2]
+
+
+def cell_label(k: CellKey) -> str:
+    fam, seed, model = k
+    return f"{fam} s{seed}" if len(MODELS) == 1 else f"{fam} s{seed} {model}"
 
 
 # ---------------------------------------------------------------------------
@@ -140,14 +161,15 @@ class Cell:
 CELL_EPISODES = 100
 
 
-def cells_of(run: str, arm: str) -> dict[tuple[str, int], Cell]:
+def cells_of(run: str, arm: str) -> dict[CellKey, Cell]:
     """The finished cells of *arm* in *run*; a cell still running (or aborted) is left out,
     so a table never mixes a complete cell with a partial one."""
-    out: dict[tuple[str, int], Cell] = defaultdict(Cell)
+    out: dict[CellKey, Cell] = defaultdict(Cell)
     for e in episodes(run):
-        if e.get("arm") != arm or e.get("scenario") not in SCENARIOS or e.get("seed") not in SEEDS:
+        if (e.get("arm") != arm or e.get("scenario") not in SCENARIOS or e.get("seed") not in SEEDS
+                or e.get("model") not in MODELS):
             continue
-        out[(e["scenario"], int(e["seed"]))].add(e)
+        out[(e["scenario"], int(e["seed"]), e["model"])].add(e)
     return {k: c for k, c in out.items() if c.episodes + c.errors >= CELL_EPISODES}
 
 
@@ -194,12 +216,11 @@ def fix_rows(run: str, arm: str) -> list[dict[str, Any]]:
     out = []
     for r in reports(run):
         cell = r.get("cell", "")
-        parts = cell.split("|")
-        if len(parts) < 4 or parts[1] != arm:
+        key = key_of_cell_id(cell)
+        if key is None or cell.split("|")[1] != arm or key[1] not in SEEDS or key[2] not in MODELS:
             continue
-        scen, seed = parts[0], int(parts[3].lstrip("s"))
         for fx in (r.get("report") or {}).get("fixes") or []:
-            out.append({"scenario": scen, "seed": seed, **fx})
+            out.append({"scenario": key[0], "seed": key[1], "model": key[2], **fx})
     return out
 
 
@@ -220,13 +241,13 @@ def platform_costs(run: str, arm: str) -> dict[tuple[str, int], dict[str, float]
     verdict's ``cost_usd`` (exact), every Tier 2 replay the harness re-ran for the fix's case
     set (exact; the agent's own calls on the branch), and the number of fixes the repair
     agent drafted (priced at :func:`per_draft_usd`, an estimate)."""
-    out: dict[tuple[str, int], dict[str, float]] = {}
+    out: dict[CellKey, dict[str, float]] = {}
     for r in reports(run):
-        parts = r.get("cell", "").split("|")
-        if len(parts) < 4 or parts[1] != arm:
+        cell = r.get("cell", "")
+        key = key_of_cell_id(cell)
+        if key is None or cell.split("|")[1] != arm:
             continue
         rep = r.get("report") or {}
-        key = (parts[0], int(parts[3].lstrip("s")))
         d = out.setdefault(key, {"judge_usd": 0.0, "replay_usd": 0.0, "drafts": 0, "fixes": 0, "verdicts": 0})
         for v in (rep.get("verdicts") or {}).get("items") or []:
             d["judge_usd"] += float(v.get("cost_usd") or 0.0)
@@ -244,9 +265,9 @@ def platform_costs(run: str, arm: str) -> dict[tuple[str, int], dict[str, float]
     ledger = RESULTS / run / "platform_ledger.json"
     if ledger.exists():
         for cell, d in (json.loads(ledger.read_text()).get("cells") or {}).items():
-            parts = cell.split("|")
-            if len(parts) >= 4 and parts[1] == arm:
-                out[(parts[0], int(parts[3].lstrip("s")))] = {
+            key = key_of_cell_id(cell)
+            if key is not None and cell.split("|")[1] == arm:
+                out[key] = {
                     "judge_usd": float(d.get("judge_usd", 0.0)), "replay_usd": 0.0,
                     "drafts": int(d.get("drafts", 0)), "fixes": int(d.get("fixes", 0)),
                     "verdicts": int(d.get("verdicts", 0))}
@@ -260,7 +281,7 @@ def ledger_delta(run: str) -> dict[str, Any] | None:
     path = RESULTS / run / "budget_snapshots.jsonl"
     if not path.exists():
         return None
-    snaps = [json.loads(l) for l in path.open() if l.strip()]
+    snaps = [json.loads(line) for line in path.open() if line.strip()]
     snaps = [s for s in snaps if s.get("spent_usd") is not None]
     if len(snaps) < 2:
         return None
@@ -341,26 +362,91 @@ HEAD = ["system", "cells", "moved half", "kept half", "unchanged classes", "pre-
         "episode success", "escalated", "infra err", "$/ep"]
 
 
-def paired_rows(systems: dict[str, tuple[str, str]], senselab: tuple[str, str], p: str) -> list[list[str]]:
+def sign_flip_p(deltas: list[float], seed: int = 11) -> float | None:
+    """Two-sided p-value of the mean paired delta under the null that each cell's delta is
+    symmetric about zero: exact enumeration of all 2^n sign assignments up to n = 20, Monte
+    Carlo (20,000 draws) beyond. Needs no distributional assumption and is the paired test
+    the preregistration's cell-level design calls for; with n = 4 (dev seeds) the smallest
+    attainable p is 0.125, which is why dev tables carry no stars."""
+    n = len(deltas)
+    if n < 2:
+        return None
+    obs = abs(sum(deltas))
+    if n <= 20:
+        hits = total = 0
+        for mask in range(1 << n):
+            s = sum(d if mask >> i & 1 else -d for i, d in enumerate(deltas))
+            hits += abs(s) >= obs - 1e-12
+            total += 1
+        return hits / total
+    rng = random.Random(seed)
+    draws = 20000
+    hits = sum(abs(sum(d if rng.random() < 0.5 else -d for d in deltas)) >= obs - 1e-12 for _ in range(draws))
+    return (hits + 1) / (draws + 1)
+
+
+def holm(pvals: dict[str, float | None]) -> dict[str, float | None]:
+    """Holm step-down adjustment over the family of tests given (None passes through)."""
+    items = sorted(((k, p) for k, p in pvals.items() if p is not None), key=lambda kv: kv[1])
+    m = len(items)
+    out: dict[str, float | None] = {k: None for k in pvals}
+    running = 0.0
+    for i, (k, p) in enumerate(items):
+        running = max(running, min(1.0, (m - i) * p))
+        out[k] = running
+    return out
+
+
+def paired_deltas(systems: dict[str, tuple[str, str]], senselab: tuple[str, str], p: str
+                  ) -> dict[str, dict[CellKey, float]]:
+    """SenseLab minus each system on population *p*, per cell, over the cells both have."""
     sl = cells_of(*senselab)
-    rows = []
+    out: dict[str, dict[CellKey, float]] = {}
     for name, (run, arm) in systems.items():
         other = cells_of(run, arm)
-        deltas, cols = [], []
-        for scen in SCENARIOS:
-            for seed in SEEDS:
-                a, b = sl.get((scen, seed)), other.get((scen, seed))
-                if a and b and a.rate(p) is not None and b.rate(p) is not None:
-                    d = a.rate(p) - b.rate(p)
-                    deltas.append(d)
-                    cols.append(f"{100 * d:+.0f}")
-                else:
-                    cols.append("—")
-        if deltas:
-            mean = statistics.mean(deltas)
-            wins = sum(1 for d in deltas if d > 0)
-            rows.append([f"SenseLab − {name}", *cols, f"{100 * mean:+.0f}", f"{wins}/{len(deltas)}"])
-    return rows
+        d: dict[CellKey, float] = {}
+        for k in cell_keys():
+            a, b = sl.get(k), other.get(k)
+            if a and b and a.rate(p) is not None and b.rate(p) is not None:
+                d[k] = a.rate(p) - b.rate(p)
+        out[name] = d
+    return out
+
+
+def paired_rows(systems: dict[str, tuple[str, str]], senselab: tuple[str, str], p: str
+                ) -> tuple[list[str], list[list[str]], dict[str, Any]]:
+    """Per-cell paired deltas (percentage points) when the design has at most eight cells;
+    per family × model means beyond that. Always: the mean, cells won, the exact sign-flip p
+    and its Holm adjustment across the systems compared."""
+    keys = cell_keys()
+    per_cell = len(keys) <= 8
+    deltas = paired_deltas(systems, senselab, p)
+    pv = {name: sign_flip_p(list(d.values())) for name, d in deltas.items()}
+    adj = holm(pv)
+    if per_cell:
+        cols = [cell_label(k) for k in keys]
+    else:
+        cols = [f"{fam} {m}" for fam in SCENARIOS for m in MODELS]
+    rows, data = [], {}
+    for name, d in deltas.items():
+        if not d:
+            continue
+        if per_cell:
+            cells = [f"{100 * d[k]:+.0f}" if k in d else "—" for k in keys]
+        else:
+            cells = []
+            for fam in SCENARIOS:
+                for m in MODELS:
+                    v = [x for (f, _, mm), x in d.items() if f == fam and mm == m]
+                    cells.append(f"{100 * statistics.mean(v):+.0f}" if v else "—")
+        mean = statistics.mean(d.values())
+        wins = sum(1 for x in d.values() if x > 0)
+        rows.append([f"SenseLab − {name}", *cells, f"{100 * mean:+.0f}", f"{wins}/{len(d)}",
+                     f"{pv[name]:.3f}" if pv[name] is not None else "—",
+                     f"{adj[name]:.3f}" if adj[name] is not None else "—"])
+        data[name] = {"deltas": {cell_label(k): v for k, v in d.items()}, "mean": mean, "wins": wins,
+                      "n": len(d), "p_sign_flip": pv[name], "p_holm": adj[name]}
+    return ["pair", *cols, "mean", "cells won", "p", "p (Holm)"], rows, data
 
 
 def by_family_rows(systems: dict[str, tuple[str, str]]) -> list[list[str]]:
@@ -369,7 +455,19 @@ def by_family_rows(systems: dict[str, tuple[str, str]]) -> list[list[str]]:
         cells = cells_of(run, arm)
         row = [name]
         for scen in SCENARIOS:
-            cs = [c for (s, _), c in cells.items() if s == scen]
+            cs = [c for (s, _, _), c in cells.items() if s == scen]
+            row += [fmt_rate(cs, "moved"), fmt_rate(cs, "kept"), fmt_rate(cs, "unchanged")]
+        rows.append(row)
+    return rows
+
+
+def by_model_rows(systems: dict[str, tuple[str, str]]) -> list[list[str]]:
+    rows = []
+    for name, (run, arm) in systems.items():
+        cells = cells_of(run, arm)
+        row = [name]
+        for m in MODELS:
+            cs = [c for (_, _, mm), c in cells.items() if mm == m]
             row += [fmt_rate(cs, "moved"), fmt_rate(cs, "kept"), fmt_rate(cs, "unchanged")]
         rows.append(row)
     return rows
@@ -444,35 +542,83 @@ def newest_complete_senselab_run() -> str:
 
 
 def main() -> None:
+    global SEEDS, MODELS, REPORT_DIR  # noqa: PLW0603 — module constants the tables close over
     ap = argparse.ArgumentParser()
     ap.add_argument("--senselab-run", default=None, help="the SenseLab run for the headline (default: newest complete)")
     ap.add_argument("--paper", action="store_true", help="write results/rsi-report/REPORT.md and report.json")
+    ap.add_argument("--seeds", nargs="+", type=int, default=list(SEEDS),
+                    help="cell seeds (dev: 11 23; confirmatory: 37 41 59 73)")
+    ap.add_argument("--models", nargs="+", default=list(MODELS), help="agent models the cells were run on")
+    ap.add_argument("--report-dir", type=Path, default=None,
+                    help="where REPORT.md / report.json go (default results/rsi-report; the confirmatory read "
+                         "uses results/rsi-report-confirmatory so it never overwrites the dev readout)")
+    ap.add_argument("--runs", nargs="*", default=None,
+                    help="restrict every system to these runs (the confirmatory read names its own runs; "
+                         "a system whose run is not listed is reported with 0 cells)")
     args = ap.parse_args()
+    SEEDS, MODELS = tuple(args.seeds), tuple(args.models)
+    if args.report_dir:
+        REPORT_DIR = args.report_dir
+    confirmatory = set(SEEDS) & {37, 41, 59, 73} and not set(SEEDS) & {11, 23}
 
-    sl_run = args.senselab_run or newest_complete_senselab_run()
+    def resolve(arm: str, default_run: str) -> str:
+        """With ``--runs``, the listed run that holds finished cells of *arm* at these seeds and
+        models (the confirmatory runs have their own names); otherwise the dev default."""
+        if args.runs is None:
+            return default_run
+        for run in args.runs:
+            if cells_of(run, arm):
+                return run
+        return "__not_run__"
+
+    sl_run = args.senselab_run or (resolve(SENSELAB_ARM, "") if args.runs else newest_complete_senselab_run())
     senselab = (sl_run, SENSELAB_ARM)
-    systems: dict[str, tuple[str, str]] = {**BASELINES, "SenseLab": senselab}
-    data: dict[str, Any] = {"senselab_run": sl_run, "seeds": list(SEEDS), "scenarios": list(SCENARIOS)}
-    md: list[str] = [f"# RSI paper — development-seed readout (set C, seeds {', '.join(map(str, SEEDS))}; "
-                     f"SenseLab from `{sl_run}`)", ""]
+    systems: dict[str, tuple[str, str]] = {**{k: (resolve(a, r), a) for k, (r, a) in BASELINES.items()},
+                                           "SenseLab": senselab}
+    ablations = {k: (resolve(a, r or sl_run), a) for k, (r, a) in ABLATIONS.items()}
+    data: dict[str, Any] = {"senselab_run": sl_run, "seeds": list(SEEDS), "models": list(MODELS),
+                            "scenarios": list(SCENARIOS), "confirmatory": bool(confirmatory)}
+    n_cells = len(cell_keys())
+    kind = "confirmatory readout" if confirmatory else "development-seed readout"
+    md: list[str] = [f"# RSI paper — {kind} (set C, seeds {', '.join(map(str, SEEDS))}, "
+                     f"{' / '.join(MODELS)}; SenseLab from `{sl_run}`)", ""]
 
     md += ["## 1. After the rule changes conditionally", "",
-           "First-attempt success on every post-change episode (30–99), pooled over the four cells "
-           "(support / ci-fix × seeds 11 / 23), GPT-5.5. Moved half: changed-class instances whose rule "
-           "changed; kept half: changed-class instances whose rule did not. Brackets: cell-level bootstrap "
-           "95 % interval. Infra errors are excluded from every rate.", ""]
+           f"First-attempt success on every post-change episode (30–99), pooled over the {n_cells} cells "
+           f"(support / ci-fix × seeds {' / '.join(map(str, SEEDS))} × {' / '.join(MODELS)}). Moved half: "
+           "changed-class instances whose rule changed; kept half: changed-class instances whose rule did not. "
+           "Brackets: cell-level bootstrap 95 % interval. Infra errors are excluded from every rate.", ""]
     rows, d = system_rows(systems, ci=True)
     md += md_table(HEAD, rows) + [""]
     data["headline"] = d
 
     md += ["## 1b. Paired cell deltas, moved half", "",
-           "SenseLab minus each system on the moved half, per cell (percentage points), paired on (family, seed).", ""]
-    cols = [f"{s} s{seed}" for s in SCENARIOS for seed in SEEDS]
-    md += md_table(["pair", *cols, "mean", "cells won"], paired_rows(BASELINES, senselab, "moved")) + [""]
+           "SenseLab minus each system on the moved half (percentage points), paired on (family, seed, model). "
+           "p: exact two-sided sign-flip test of the mean paired delta over the cells; Holm: adjusted across "
+           "the systems in this table. "
+           + ("Four cells cannot reach p < 0.125; the dev read carries no significance claim."
+              if n_cells <= 4 else f"{n_cells} cells; the smallest attainable p is {2 / 2 ** n_cells:.4f}."), ""]
+    head, rows, d = paired_rows(BASELINES, senselab, "moved")
+    md += md_table(head, rows) + [""]
+    data["paired_moved"] = d
+    secondary: dict[str, Any] = {}
+    for p in ("kept", "unchanged"):
+        _, _, dd = paired_rows(BASELINES, senselab, p)
+        secondary[p] = dd
+    data["paired_secondary"] = secondary
+    if confirmatory:
+        md += ["### Secondary endpoints (paired, Holm within endpoint)", ""]
+        for p in ("kept", "unchanged"):
+            head, rows, _ = paired_rows(BASELINES, senselab, p)
+            md += [f"**{p} half**" if p == "kept" else "**unchanged classes**", ""] + md_table(head, rows) + [""]
 
     md += ["## 1c. By family", "", "First-attempt success per family: moved half, kept half, unchanged classes.", ""]
     fam_head = ["system"] + [f"{s}: {p}" for s in SCENARIOS for p in ("moved", "kept", "unchanged")]
     md += md_table(fam_head, by_family_rows(systems)) + [""]
+    if len(MODELS) > 1:
+        md += ["## 1d. By model", "", "First-attempt success per agent model: moved half, kept half, unchanged classes.", ""]
+        model_head = ["system"] + [f"{m}: {p}" for m in MODELS for p in ("moved", "kept", "unchanged")]
+        md += md_table(model_head, by_model_rows(systems)) + [""]
 
     md += ["## 2. SenseLab by engine cut", "",
            "Every SenseLab run on set C, oldest engine first. The engine changed between runs "
@@ -496,10 +642,9 @@ def main() -> None:
 
     md += ["## 3. Attribution", "",
            f"SenseLab (`{sl_run}`) against its own ablations on the same protocol: without the canary "
-           f"(same run) and without the repair loop (outcome learning alone, `rsi-c1-tier1`).", ""]
-    abl: dict[str, tuple[str, str]] = {"SenseLab": senselab}
-    for name, (run, arm) in ABLATIONS.items():
-        abl[name] = (run or sl_run, arm)
+           f"(same run) and without the repair loop (outcome learning alone, "
+           f"`{ablations['SenseLab − repair loop'][0]}`).", ""]
+    abl: dict[str, tuple[str, str]] = {"SenseLab": senselab, **ablations}
     rows, d = system_rows(abl, ci=True)
     md += md_table(HEAD, rows) + [""]
     data["attribution"] = d
@@ -533,7 +678,7 @@ def main() -> None:
               f"account at {cal.get('taken_at', '?')}" if cal else "calibration not taken")
            + "). Total sums the five. Memory s: time in memory calls per episode against the production API.",
            ""]
-    rows, d = cost_rows({**systems, **{k: (r or sl_run, a) for k, (r, a) in ABLATIONS.items()}})
+    rows, d = cost_rows({**systems, **ablations})
     md += md_table(COST_HEAD, rows) + [""]
     data["cost"] = {"calibration": cal, "systems": d}
     ledgers = {k: v["ledger"] for k, v in d.items() if v.get("ledger")}
