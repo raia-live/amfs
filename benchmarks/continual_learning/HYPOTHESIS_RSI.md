@@ -2107,3 +2107,20 @@ decision), false-ship rate and regressions caught after a Tier 1/2 pass (H3/H4),
 exposed to a later-regressed fix, time-to-repair, ships per arm, moved/kept/unchanged first-
 attempt success per arm over episodes 50–199, and the same P9(b) hand-coding of every fix
 that passes Tier 2 or ships.
+
+### 2026-09-29 (u) — `rsi-e2b-c5` read; finding 11: the canary grades by canonical situation and the agent's declarations fragment
+
+The E2b dev run of (t) completed (2,400/2,400). Readout in HEADROOM_RSI.md (same date).
+**Finding 11.** The canary counts exposure (runs that read the fix's entry) but grades only runs
+whose canonical situation equals the fix's; the agent declares its situation in its own words per
+run, situation identity folds those declarations to several canonicals per class, and the fix
+inherits whichever canonical its failing run had — so in 12 of 20 canaries 0–8 of 16–30 exposed
+runs were graded and 3 ended `ungraded`. No canary decided in 200 episodes with 10 agents; the one
+with 25/30 graded found no significant difference and timed out. This is an engine finding on
+seams 5/5b/(n); no change is made. Two candidate corrections are put to Bruno: (i) grade every
+exposed run with an outcome (exposure ∪ situation); (ii) merge canonicals within an agent that
+identity already folds to different targets. A third is a design question: the decision rule
+requires a significant difference, so a fix that is not worse never ships within the timeout.
+**Pre-specified if one is approved (P12):** on the same E2b protocol on the new cut, ≥ 1 canary in
+2 reaches `min_outcomes` on both arms in a cell (falsified by 0 of ≥ 6 canaries), and graded /
+exposed ≥ 0.8 per arm. No arm, scenario, change set, rubric or metric changes.

@@ -1358,3 +1358,52 @@ P11(a)). P7′ not re-read in this pass.
 
 **Paper.** Refilled from `rsi-c5` (Tables 1–5, 7; caption cut label `post-clean-success`);
 abstract/§4.1/§4.2/§5 ledger/§6 updated to these numbers and readouts.
+
+## 2026-09-29 — `rsi-e2b-c5` readout (E2b dev run on `post-clean-success`; amendment (t)) — exploratory
+
+2,400/2,400 episodes, 2 infra errors; support + ci-fix × seeds 11/23 × {SenseLab, − canary,
+− replay}; fleet 10, 200 episodes, change at 50 (set C). Launched 21:40Z, finished 07:2xZ.
+
+**First-attempt success, pooled over seeds (episodes 50–199; `@130+` = episodes 130–199).**
+ci-fix: SenseLab moved 70 % (46/66), kept 90 % (76/84), unchanged 99 %, @130+ moved 97 % (28/29)
+kept 96 %; − canary 77 / 83 / 100, @130+ 93 / 94; − replay 77 / 85 / 100, @130+ 100 / 96. support:
+SenseLab moved 29 % (24/82), kept 62 % (42/68), unchanged 100 %, @130+ moved 41 % (15/37) kept
+64 %; − canary 32 / 51, @130+ 46 / 53; − replay 26 / 63, @130+ 35 / 64. On ci-fix every arm
+recovers both halves by episode 130 with 10 agents sharing the store; on support none does. The
+three arms are indistinguishable on both families at this sample.
+
+**Ships.** − canary 4 (support s11: 1 judge fix; ci-fix s11: 1 regime; ci-fix s23: 2 regime);
+SenseLab 0; − replay 0. Tier 2 (SenseLab cells): support 4 passed / 17 failed / 1 inconclusive;
+ci-fix 2 passed / 4 failed. − replay (no Tier 2): Tier 1 passed 11, inconclusive 10.
+
+**Canaries: 20 started, 0 decided.** 13 stopped by the benchmark timeout (60 sessions), 3 ended
+`inconclusive: ungraded`, 4 still running at episode 200. Tallies at stop (canary / control):
+traces 22 / 33 graded 1 / 0; 29 / 31 graded 4 / 1; 25 / 30 graded 25 / 30 (recurred 3 / 5 — both
+arms past `min_outcomes`, recurrence 12 % vs 17 %, no significant difference, no decision within
+the timeout); 30 / 25 graded 8 / 5; 16 / 14 graded 0 / 0 ("none declared it"); 17 / 12 and 19 / 11
+graded 0 / 0; 29 / 25 graded 2 / 1; 28 / 26 graded 7 / 11; 27 / 28 graded 4 / 6; 7 / 46 graded
+2 / 2; 3 / 52 graded 3 / 52; 6 / 48 graded 1 / 3; 8 / 46 graded 1 / 13.
+
+**Finding 11 — the canary grades by canonical situation, and the agent's declarations fragment
+into several canonicals.** `graded_by` reads "graded on outcomes of runs in the situation
+'<canonical>'". Every run declares a situation (200/200 in the ci-fix s11 − replay cell), in the
+agent's own words and often carrying the very condition the change turns on: 'pip audit requests
+pin with legacy sdk' (15), 'pip audit pinned related change' (11), 'pip audit related change' (9),
+'pip audit requirements plus nonclient code' (6), 'pip audit pinned dependency' (5), … Situation
+identity (seams 5/5b) folded 56 declarations of that agent into 10 canonicals, and the pip-audit
+declarations to the canonical **'pip audit failure'** — while the four pip-audit fixes carry the
+canonicals 'pip audit pinned change', 'pip audit pinned dependency' and 'pip audit pinned related
+change', assigned when each was proposed. Exposure is counted (traces = runs that read the entry:
+16–30 per arm) but grading requires the run's canonical to equal the fix's, so 0–8 of 25–30
+exposed runs are graded and the note says "none declared it; there is nothing here for the canary
+to read". This — not the horizon — is why no canary in `rsi-c3`, `rsi-c5` or this run reached a
+decision except the one whose declarations happened to be stable ('payment declined checkout',
+25/30 graded), and that one found no significant difference. Two engine questions for Bruno, not
+acted on: (i) should a run that read the fix's entry and reported an outcome count as graded
+whatever its declared canonical (exposure ∪ situation), and (ii) should situation identity merge
+canonicals within an agent whose declarations it already folds to different targets. A third
+observation for the design: the decision rule waits for a *significant* difference; a fix that is
+merely not worse never ships inside the timeout.
+
+**Hand-coding of Tier-2 passers / ships (P9(b) reading):** deferred to the v0.2 pass with two
+coders; 15 fixes (12 `test_passed`, 3 regime ships).
