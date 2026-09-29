@@ -2196,3 +2196,21 @@ added). #799 merged `db5e1905` at 11:24:23Z; deploy run 36561541416, deploy job 
 (deploy job green). Every trace of the account sealed after it is on the corrected canary and
 prompt; `rsi-e2b-c6` (the E2b rerun of this amendment) starts after the cut with
 `CL_RSI_CANARY_TIMEOUT=200 CL_RSI_CANARY_WINDOW=200`, otherwise the (t) E2b command verbatim.
+
+### 2026-09-29 (w) — confirmatory scope reduced before any confirmatory run; v1.0 targeted 2026-10-04
+
+Declared before any confirmatory-seed run and before `analysis-freeze-rsi`. The owner has set a
+deadline the full grid (10 families × 2 models × 4 confirmatory seeds, ~60k episodes) cannot meet.
+**Confirmatory scope:** seeds 37/41/59/73 on the two set-C families (`support`, `ci-fix` — the
+families the headline, the attribution table and the canary result are built on), both models,
+fleet 1 and fleet 10 (E2b protocol), the same arms as `rsi-c5` / `rsi-e2b-c6`, on the
+`post-canary-ni` cut, parallelised on GCP. The remaining eight families are reported from the
+existing dev-seed runs (change sets A/B, seeds 11/23) in a separate table labelled *dev-seed,
+not confirmatory*; set C for those families is **not** authored (the held-out-blind design of (l)
+lapses with it and is said so in the paper). Predictions P1–P14 keep their pre-specified form;
+those that name "≥ N families" are read over the two families and reported as such. Every paired
+test is Holm-corrected over the families actually run. Nothing else changes: no arm, scenario,
+rubric, metric or parameter. **Order of work:** `rsi-e2b-c6` readout → fleet-1 `rsi-c6` (headline
+on the final cut, 800 episodes) → freeze tag Thu 2026-10-02 → confirmatory Thu–Fri → v1.0 Sat
+2026-10-04. Reversible until the confirmatory launch: restoring the ten-family grid is the (c)
+option and moves v1.0 to ~2026-10-07.
