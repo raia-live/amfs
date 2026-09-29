@@ -55,11 +55,11 @@ baselines, holding unchanged work at 96\,\%; a context window carrying every pri
 tables say why: no canary can decide inside a 100-episode cell, and until the last engine cut what
 the proof tiers passed was the unconditional rule --- on the current cut the proof rejects 19 of
 23 regime fixes, and what it still passes is a wholesale flip the replaying agent did not follow. The paper's main contribution is the record of how a
-preregistered benchmark found ten things about the loop's evidence path --- eight defects, all
+preregistered benchmark found eleven things about the loop's evidence path --- nine defects, eight of them
 fixed in production between runs and re-measured on the same protocol --- and what each
 says about building self-improving systems that can be trusted: what counts as a regime shift,
-how a situation is identified, what a fix must be proved against, who grades the proof, and what
-counts as traffic. Every number here is from development seeds; the confirmatory seeds run once,
+how a situation is identified, what a fix must be proved against, who grades the proof, what
+counts as traffic, and which runs a canary can grade. Every number here is from development seeds; the confirmatory seeds run once,
 after the analysis is frozen.
 \end{abstract}
 
@@ -345,6 +345,20 @@ net, and these did not. The canary's value has to be read where canaries decide 
 probe supplies by construction. We report this analysis because it changed what we expect to
 find there.
 
+\paragraph{Where canaries could decide.} We then ran the E2 shape on development seeds: the same
+two families and seeds, ten agents sharing one store, 200 episodes with the change at 50, three
+arms (SenseLab, $-$canary, $-$replay), 2,400 episodes. On \code{ci-fix} every arm recovers both
+halves by episode 130 (moved half 93--100\,\%, kept 94--96\,\% over episodes 130--199; 70--77 and
+83--90 over all post-change episodes); on \code{support} none does (moved 26--32\,\%, kept
+51--63\,\%). The arms are indistinguishable at this sample. Twenty canaries started and none
+decided: thirteen were stopped by the 60-session timeout, three ended with no gradable run, four
+were running at episode 200. The reason is finding 11 (\S\ref{sec:findings}): of 16--30 exposed
+runs per arm, 0--8 could be graded, because grading is by canonical situation and the agent's
+declarations of its situation had been folded to other canonicals than the fix's. The $-$canary
+arm shipped four fixes (three regime); SenseLab and $-$replay shipped none. The canary's value
+therefore remains unmeasured, and the measurement now waits on an engine correction rather than
+on a longer horizon.
+
 \subsection{SenseLab by engine cut}
 
 %%TAB_CUTS%%
@@ -394,9 +408,10 @@ saw, need eval-only content that is registered but not yet written.
 
 The preregistration promised to report every prediction. Table~\ref{tab:ledger} is that report,
 and the findings below are the record of what a benchmark that knows the true rule found in a
-shipped self-improvement loop --- eight defects and two properties of the problem --- none of
-which a retrieval benchmark could have seen. Every defect was fixed in production between runs,
-with its deploy cut recorded, and re-measured on the same protocol. We think this section is the paper's main contribution; the loop's evidence path
+shipped self-improvement loop --- nine defects and two properties of the problem --- none of
+which a retrieval benchmark could have seen. Eight of the defects were fixed in production between
+runs, with their deploy cuts recorded, and re-measured on the same protocol; the ninth was found in
+the last run before this version and is open. We think this section is the paper's main contribution; the loop's evidence path
 is where such systems fail, and none of these failures is specific to ours.
 
 \begin{enumerate}[leftmargin=1.6em, itemsep=0.35em]
@@ -456,6 +471,20 @@ a recorded failed attempt --- a recovered success the proof counted as clean. Th
 clean-success requirement on every case built for a regime fix, whatever grades it, and enforce
 it after the verdict. It shipped as the \code{post-clean-success} cut; the run on it is
 Table~\ref{tab:headline}, and P11 is read on it (\S\ref{sec:pending}).
+\item \textbf{The canary grades by canonical situation, and the agent's declarations fragment.}
+(Found in the fleet-10, 200-episode run of \S\ref{sec:posthoc}; not yet fixed.) A canary counts
+exposure --- runs that read the fix's entry --- but grades only runs whose canonical situation
+equals the fix's. The agent declares its situation per run in its own words, often carrying the
+very condition the change turns on (``pip audit requests pin with legacy sdk'', ``pip audit
+requirements plus nonclient code''); situation identity folds one agent's 56 declarations to 10
+canonicals, the pip-audit ones to ``pip audit failure'' --- while the fixes carry ``pip audit
+pinned change'' and two more, assigned when each was proposed. So 0--8 of 16--30 exposed runs per
+arm are graded, three canaries end ``none declared it'', and no canary decides in 200 episodes
+with ten agents; the one whose declarations were stable reached 25/30 graded, found recurrence of
+12\,\% against 17\,\% --- no significant difference --- and timed out, because the rule waits for
+a significant \emph{improvement}. This, not the horizon, is why no canary has decided in any run.
+The corrections (grade every exposed run with an outcome; merge canonicals an agent's identity
+already folds apart) are put to the owner; the third point is a design question.
 \end{enumerate}
 
 \paragraph{The canary inside a cell (see also \S\ref{sec:posthoc}).} Separately from the defects, no canary reached a decision
