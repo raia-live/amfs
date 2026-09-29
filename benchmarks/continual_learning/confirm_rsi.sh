@@ -12,7 +12,12 @@
 #   ./confirm_rsi.sh launch e2b <seed>    fleet 10, E2b protocol (200 episodes, change at 50), SenseLab and
 #                                         its two gate ablations; run name rsi-conf-e2b-s<seed>
 #   ./confirm_rsi.sh status               episode counts and the last log line of every confirmatory run
+#   ./confirm_rsi.sh tunnels              the ngrok agent's tunnels and whether a hub listens on each
+#   ./confirm_rsi.sh prune                delete the tunnels whose hub is gone (launch does this too)
 #   ./confirm_rsi.sh read                 the confirmatory readout into results/rsi-report-confirmatory
+#
+# Launch order: the four f1 processes first, then the four e2b ones. The ngrok account allows five
+# tunnels on its agent session; launches past the fifth share the pooled URL (see prune_tunnels).
 #
 # Protocol constants are those of the dev runs `rsi-c5` / `rsi-c6` (fleet 1) and `rsi-e2b-c6`
 # (fleet 10): CL_RSI_TIER2=1, CL_RSI_VERDICT_WAIT=240, CL_SENSELAB_TIMEOUT=90, canary timeout and
@@ -29,15 +34,68 @@ SEEDS_ALL="37 41 59 73"
 F1_ARMS="none raw-traces pgvector pgvector+rerank pgvector-diy+outcomes senselab senselab-rsi senselab-rsi-nocanary"
 E2B_ARMS="senselab-rsi senselab-rsi-nocanary senselab-rsi-noreplay"
 
-port_for() {  # a distinct hub port per (protocol, seed): f1 8790-8793, e2b 8794-8797
+port_for() {  # a distinct hub port per (protocol, seed): f1 8787 (the agent's own tunnel), 8791-8793; e2b 8794-8797
   local proto="$1" seed="$2" i=0
   for s in $SEEDS_ALL; do [[ "$s" == "$seed" ]] && break; i=$((i + 1)); done
-  [[ "$proto" == "f1" ]] && echo $((8790 + i)) || echo $((8794 + i))
+  if [[ "$proto" == "f1" ]]; then [[ $i -eq 0 ]] && echo 8787 || echo $((8790 + i)); else echo $((8794 + i)); fi
 }
 
 common_env() {  # the .env plus the protocol constants; nothing is printed
   set -a; source "$HERE/.env"; set +a
   export CL_RSI_TIER2=1 CL_RSI_VERDICT_WAIT=240 CL_SENSELAB_TIMEOUT=90 CL_REPLAY_SIBLINGS="8787-8797"
+}
+
+# The ngrok account runs at most 5 endpoints on one agent session (measured 2026-09-29), and the
+# eight runner processes each carry a replay hub. Every tunnel of the account pools on one reserved
+# domain, and a hub hands a webhook it cannot verify to the sibling whose secret signed it
+# (replay_hub.py), so a hub does not need a tunnel of its own: it needs the pooled URL and one
+# tunnelled hub alive. Rule: prune tunnels whose local port no longer listens; the first five
+# launches get their own tunnel (the hub opens it); later launches are given the pooled URL
+# (CL_REPLAY_PUBLIC_URL). Launch the four f1 processes first — they run longest — so the hubs that
+# outlive the rest are the tunnelled ones.
+NGROK_API="${NGROK_API:-http://127.0.0.1:4040}"
+TUNNEL_CAP=5
+
+tunnels_json() { curl -s -m 5 "$NGROK_API/api/tunnels" 2>/dev/null || echo '{"tunnels":[]}'; }
+
+stale_tunnels() {  # names of tunnels whose local port has no listener
+  TJ="$(tunnels_json)" python3 - <<'PY'
+import json, os, socket
+for t in json.loads(os.environ["TJ"]).get("tunnels", []):
+    addr = str(t.get("config", {}).get("addr", ""))
+    port = int(addr.rsplit(":", 1)[-1]) if addr.rsplit(":", 1)[-1].isdigit() else 0
+    s = socket.socket(); s.settimeout(1)
+    alive = port and s.connect_ex(("127.0.0.1", port)) == 0
+    s.close()
+    # the agent's own command-line tunnel is never deleted: it may be the agent session itself
+    if not alive and t["name"] != "command_line":
+        print(t["name"])
+PY
+}
+
+prune_tunnels() {  # delete tunnels to ports with no listener (finished runs); prints what it removed
+  local name
+  while read -r name; do
+    [[ -n "$name" ]] || continue
+    curl -s -m 5 -o /dev/null -X DELETE "$NGROK_API/api/tunnels/$name" && echo "pruned stale tunnel $name"
+  done < <(stale_tunnels)
+}
+
+tunnel_count() {
+  TJ="$(tunnels_json)" python3 - <<'PY'
+import json, os
+print(len(json.loads(os.environ["TJ"]).get("tunnels", [])))
+PY
+}
+
+pooled_url() {  # the reserved domain every tunnel shares (never printed by the caller)
+  TJ="$(tunnels_json)" python3 - <<'PY'
+import json, os
+for t in json.loads(os.environ["TJ"]).get("tunnels", []):
+    u = str(t.get("public_url", ""))
+    if u.startswith("https://"):
+        print(u.rstrip("/")); break
+PY
 }
 
 runner_cmd() {  # proto seed -> the runner argv (without env)
@@ -70,9 +128,21 @@ case "$cmd" in
     cd "$BENCH"; mkdir -p "continual_learning/results/$run"
     if pgrep -f -- "--run $run " > /dev/null; then echo "$run is already running"; exit 1; fi
     horizon=100; [[ "$proto" == "e2b" ]] && horizon=200
+    port="$(port_for "$proto" "$seed")"
+    if python3 -c "import socket,sys; s=socket.socket(); s.settimeout(1); sys.exit(0 if s.connect_ex(('127.0.0.1', $port)) == 0 else 1)"; then
+      echo "port :$port is still in use (an earlier run's hub?); not launching $run"; exit 1
+    fi
+    prune_tunnels
+    shared=""
+    if [[ "$(tunnel_count)" -ge "$TUNNEL_CAP" ]]; then
+      shared="$(pooled_url)"
+      [[ -n "$shared" ]] || { echo "tunnel cap reached and no pooled URL to share"; exit 1; }
+      echo "$run: tunnel cap ($TUNNEL_CAP) reached; hub on :$port shares the pooled URL via sibling forwarding"
+    fi
     (
       common_env
-      export CL_REPLAY_PORT="$(port_for "$proto" "$seed")" CL_RSI_CANARY_TIMEOUT="$horizon" CL_RSI_CANARY_WINDOW="$horizon"
+      export CL_REPLAY_PORT="$port" CL_RSI_CANARY_TIMEOUT="$horizon" CL_RSI_CANARY_WINDOW="$horizon"
+      [[ -n "$shared" ]] && export CL_REPLAY_PUBLIC_URL="$shared"
       export PYTHONUNBUFFERED=1
       # shellcheck disable=SC2046
       perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- "$PY" $(runner_cmd "$proto" "$seed") \
@@ -80,6 +150,22 @@ case "$cmd" in
     )
     sleep 2
     echo "launched $run at $(date -u +%FT%TZ): $(pgrep -f -- "--run $run " | head -1)"
+    ;;
+  tunnels)
+    # the ngrok agent's tunnels: local port and whether a hub listens there (URLs not printed)
+    TJ="$(tunnels_json)" python3 - <<'PY'
+import json, os, socket
+ts = json.loads(os.environ["TJ"]).get("tunnels", [])
+print(f"{len(ts)} tunnel(s) on the agent session (cap 5)")
+for t in ts:
+    addr = str(t.get("config", {}).get("addr", "")); port = int(addr.rsplit(":", 1)[-1])
+    s = socket.socket(); s.settimeout(1); alive = s.connect_ex(("127.0.0.1", port)) == 0; s.close()
+    state = "hub listening" if alive else "STALE (no listener; launch prunes it)"
+    print(f"  {t['name']:<20} :{port}  {state}")
+PY
+    ;;
+  prune)
+    prune_tunnels
     ;;
   status)
     cd "$HERE/results"
