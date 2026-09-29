@@ -221,6 +221,9 @@ class ProClient:
         return self._call("GET", "/api/v1/eval/readiness")
 
     def budget(self) -> dict[str, Any]:
+        """``spent_usd`` is every platform-side LLM call the account caused this month
+        (judges, repair agent, stand-in replay, lever, discovery), settled as it happens.
+        The runner snapshots it so a run's platform spend is a difference of two readings."""
         return self._call("GET", "/api/v1/eval/budget")
 
     def repairs_summary(self, agent_id: str | None = None) -> dict[str, Any]:

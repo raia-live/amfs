@@ -203,6 +203,72 @@ def fix_rows(run: str, arm: str) -> list[dict[str, Any]]:
     return out
 
 
+CALIBRATION = REPORT_DIR / "platform_calibration.json"
+
+
+def per_draft_usd() -> float | None:
+    """The account-ledger remainder per fix the repair agent drafted (repair agent, Tier 1
+    stand-in replay, lever, discovery), from ``analysis/platform_calibration.py``; ``None``
+    when the calibration has not been taken."""
+    if not CALIBRATION.exists():
+        return None
+    return json.loads(CALIBRATION.read_text()).get("per_draft_usd")
+
+
+def platform_costs(run: str, arm: str) -> dict[tuple[str, int], dict[str, float]]:
+    """What the loop spent on the platform side per cell, from the arm report: every judge
+    verdict's ``cost_usd`` (exact), every Tier 2 replay the harness re-ran for the fix's case
+    set (exact; the agent's own calls on the branch), and the number of fixes the repair
+    agent drafted (priced at :func:`per_draft_usd`, an estimate)."""
+    out: dict[tuple[str, int], dict[str, float]] = {}
+    for r in reports(run):
+        parts = r.get("cell", "").split("|")
+        if len(parts) < 4 or parts[1] != arm:
+            continue
+        rep = r.get("report") or {}
+        key = (parts[0], int(parts[3].lstrip("s")))
+        d = out.setdefault(key, {"judge_usd": 0.0, "replay_usd": 0.0, "drafts": 0, "fixes": 0, "verdicts": 0})
+        for v in (rep.get("verdicts") or {}).get("items") or []:
+            d["judge_usd"] += float(v.get("cost_usd") or 0.0)
+            d["verdicts"] += 1
+        for rp in (rep.get("tier2") or {}).get("replays") or []:
+            d["replay_usd"] += float((rp.get("usage") or {}).get("cost_usd") or 0.0)
+        for fx in rep.get("fixes") or []:
+            d["fixes"] += 1
+            d["drafts"] += 1 if (fx.get("manifest") or {}).get("model") else 0
+    if out:
+        return out
+    # Arms that write no arm report (``senselab`` with the loop held at review, the oracle
+    # arms) still cause platform spend — regime proposals drafted and held. Their per-cell
+    # counts are dumped from the account by ``analysis/platform_calibration.py --runs``.
+    ledger = RESULTS / run / "platform_ledger.json"
+    if ledger.exists():
+        for cell, d in (json.loads(ledger.read_text()).get("cells") or {}).items():
+            parts = cell.split("|")
+            if len(parts) >= 4 and parts[1] == arm:
+                out[(parts[0], int(parts[3].lstrip("s")))] = {
+                    "judge_usd": float(d.get("judge_usd", 0.0)), "replay_usd": 0.0,
+                    "drafts": int(d.get("drafts", 0)), "fixes": int(d.get("fixes", 0)),
+                    "verdicts": int(d.get("verdicts", 0))}
+    return out
+
+
+def ledger_delta(run: str) -> dict[str, Any] | None:
+    """The run's platform spend as the account ledger saw it: last reading minus first, from
+    ``budget_snapshots.jsonl`` (runs started after 2026-09-29). Shared with any run on the
+    account at the same time, which the caller says."""
+    path = RESULTS / run / "budget_snapshots.jsonl"
+    if not path.exists():
+        return None
+    snaps = [json.loads(l) for l in path.open() if l.strip()]
+    snaps = [s for s in snaps if s.get("spent_usd") is not None]
+    if len(snaps) < 2:
+        return None
+    return {"start": snaps[0]["at_iso"], "end": snaps[-1]["at_iso"],
+            "delta_usd": round(float(snaps[-1]["spent_usd"]) - float(snaps[0]["spent_usd"]), 4),
+            "complete": snaps[-1].get("label") == "run_end"}
+
+
 def lifecycle(fixes: list[dict[str, Any]]) -> dict[str, int]:
     """Counts over the arm report's fix records. Tier 1 ``test.status`` is passed /
     inconclusive / failed / skipped; Tier 2 ``replay.status`` is passed / failed / requested /
@@ -325,19 +391,44 @@ LIFECYCLE_HEAD = ["arm", "proposed", "regime / judge", "T1 pass / inc. / fail",
                   "drafted by the repair agent"]
 
 
-def cost_rows(systems: dict[str, tuple[str, str]]) -> list[list[str]]:
-    rows = []
+COST_HEAD = ["system", "tokens/ep", "agent $/ep", "arm $/ep", "judges $/ep", "replays $/ep",
+             "drafts/100 ep", "drafts $/ep (est.)", "total $/ep", "memory s/ep", "wall s/ep"]
+
+
+def cost_rows(systems: dict[str, tuple[str, str]]) -> tuple[list[list[str]], dict[str, Any]]:
+    """Per-episode spend by where it is charged. *agent*: the agent's own calls (episode
+    records). *arm*: reflection / consolidation the arm ran per episode (episode records).
+    *judges*, *replays*: the loop's platform-side judge verdicts and the Tier 2 replays the
+    harness re-ran, both exact from the arm reports. *drafts*: fixes the repair agent
+    drafted, priced at the account ledger's remainder per draft (``platform_calibration.json``)
+    — the repair agent, Tier 1 stand-in replay, lever and discovery are not persisted per fix,
+    so this column is an estimate and says so. *total* sums the five."""
+    rows, data = [], {}
+    draft_usd = per_draft_usd()
     for name, (run, arm) in systems.items():
-        cells = list(cells_of(run, arm).values())
-        eps = sum(c.episodes for c in cells)
+        cells = cells_of(run, arm)
+        eps = sum(c.episodes for c in cells.values())
         if not eps:
             continue
-        rows.append([name, f"{sum(c.tokens for c in cells) / eps:,.0f}",
-                     f"{sum(c.cost for c in cells) / eps:.3f}",
-                     f"{sum(c.extra_cost for c in cells) / eps:.3f}",
-                     f"{sum(c.memory_ms for c in cells) / eps / 1000:.1f}",
-                     f"{sum(c.wall_ms for c in cells) / eps / 1000:.0f}"])
-    return rows
+        plat = platform_costs(run, arm)
+        judge = sum(plat.get(k, {}).get("judge_usd", 0.0) for k in cells)
+        replay = sum(plat.get(k, {}).get("replay_usd", 0.0) for k in cells)
+        drafts = sum(int(plat.get(k, {}).get("drafts", 0)) for k in cells)
+        drafts_usd = drafts * draft_usd if draft_usd is not None else None
+        agent = sum(c.cost for c in cells.values())
+        extra = sum(c.extra_cost for c in cells.values())
+        total = agent + extra + judge + replay + (drafts_usd or 0.0)
+        rows.append([name, f"{sum(c.tokens for c in cells.values()) / eps:,.0f}",
+                     f"{agent / eps:.3f}", f"{extra / eps:.3f}", f"{judge / eps:.3f}", f"{replay / eps:.3f}",
+                     f"{100 * drafts / eps:.1f}",
+                     f"{drafts_usd / eps:.3f}" if drafts_usd is not None else ("—" if drafts else "0.000"),
+                     f"{total / eps:.3f}" + ("+" if drafts and drafts_usd is None else ""),
+                     f"{sum(c.memory_ms for c in cells.values()) / eps / 1000:.1f}",
+                     f"{sum(c.wall_ms for c in cells.values()) / eps / 1000:.0f}"])
+        data[name] = {"run": run, "episodes": eps, "agent_usd": agent, "arm_usd": extra, "judge_usd": judge,
+                      "replay_usd": replay, "drafts": drafts, "drafts_usd_est": drafts_usd, "total_usd": total,
+                      "usd_per_episode": total / eps, "ledger": ledger_delta(run)}
+    return rows, data
 
 
 # ---------------------------------------------------------------------------
@@ -429,12 +520,30 @@ def main() -> None:
     md += md_table(LIFECYCLE_HEAD, rows) + [""]
     data["lifecycle"] = d
 
+    cal = json.loads(CALIBRATION.read_text()) if CALIBRATION.exists() else {}
     md += ["## 5. Cost and latency", "",
-           "Per episode, pooled over the four cells. Agent $ is the agent's own calls; arm $ is every other "
-           "call the arm caused (reflection, repair agent, stand-in replay, judges). Memory s is time in memory "
-           "calls per episode against the production API.", ""]
-    md += md_table(["system", "tokens/ep", "agent $/ep", "arm $/ep", "memory s/ep", "wall s/ep"],
-                   cost_rows({**systems, **{k: (r or sl_run, a) for k, (r, a) in ABLATIONS.items()}})) + [""]
+           "Per episode, pooled over the four cells, by where the call is charged. Agent $: the agent's own "
+           "calls. Arm $: reflection / consolidation the arm ran per episode. Judges $ and replays $: the "
+           "loop's judge verdicts and the Tier 2 replays the harness re-ran on the fix branch, exact from the "
+           "arm reports. Drafts: fixes the repair agent drafted per 100 episodes, priced at the account "
+           "ledger's remainder per draft (repair agent, Tier 1 stand-in replay, lever, discovery — not "
+           "persisted per fix, so an estimate: "
+           + (f"${cal.get('per_draft_usd', 0):.3f} per draft from ${cal.get('spent_usd', 0):.2f} spent, "
+              f"${cal.get('verdict_usd', 0):.2f} of it judges, over {cal.get('drafted_fixes', 0)} drafts on the "
+              f"account at {cal.get('taken_at', '?')}" if cal else "calibration not taken")
+           + "). Total sums the five. Memory s: time in memory calls per episode against the production API.",
+           ""]
+    rows, d = cost_rows({**systems, **{k: (r or sl_run, a) for k, (r, a) in ABLATIONS.items()}})
+    md += md_table(COST_HEAD, rows) + [""]
+    data["cost"] = {"calibration": cal, "systems": d}
+    ledgers = {k: v["ledger"] for k, v in d.items() if v.get("ledger")}
+    if ledgers:
+        md += ["Account-ledger check (runs whose runner snapshotted the ledger; a delta is shared with any "
+               "other run on the account in the same window):", ""]
+        md += [f"- {k}: `{v['run']}` ledger delta ${ledgers[k]['delta_usd']:.2f} from {ledgers[k]['start']} to "
+               f"{ledgers[k]['end']}{'' if ledgers[k]['complete'] else ' (run not finished)'}; estimate for the "
+               f"run's cells ${v['judge_usd'] + (v['drafts_usd_est'] or 0):.2f}"
+               for k, v in d.items() if v.get("ledger")] + [""]
 
     text = "\n".join(md)
     print(text)

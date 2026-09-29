@@ -16,6 +16,7 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -436,6 +437,8 @@ def main() -> None:
         for c in todo:
             print(" ", c.id)
         return
+    ledger = _ledger_snapshotter(out_dir, any(c.arm.startswith("senselab") for c in todo))
+    ledger("run_start")
     # cells that already have partial rows are re-run from scratch in a fresh scope suffix
     cells_path = out_dir / "cells.json"
     summaries: dict[str, dict] = {}
@@ -468,7 +471,42 @@ def main() -> None:
             print("CELL DONE", json.dumps(s), flush=True)
             with _write_lock:
                 cells_path.write_text(json.dumps(list(summaries.values()), indent=2))
+            ledger("cell_done", cell=s["cell"])
+    ledger("run_end")
     _drop_sdk_backlog()
+
+
+def _ledger_snapshotter(out_dir: Path, hosted: bool) -> Callable[..., None]:
+    """Append a reading of the account's eval budget (``spent_usd``: every platform-side LLM
+    call the account caused — judges, repair agent, stand-in replay, lever, discovery) to
+    ``budget_snapshots.jsonl`` at run start, after every cell and at run end. A run's platform
+    spend is then a difference of two readings; runs sharing the account at the same time
+    share the delta (the analysis apportions it and says so). The cost is the account's own
+    ledger, not a harness estimate (HYPOTHESIS_RSI.md, E6). No-op for local-only arms; a
+    failed reading is recorded as such rather than stopping the run."""
+    if not hosted:
+        return lambda *_a, **_k: None
+    path = out_dir / "budget_snapshots.jsonl"
+
+    def snap(label: str, **extra: Any) -> None:
+        rec: dict[str, Any] = {"at": time.time(), "label": label, **extra,
+                               "at_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        try:
+            from .pro_client import ProClient
+
+            client = ProClient(timeout=30.0)
+            try:
+                b = client.budget()
+            finally:
+                client.close()
+            rec.update(spent_usd=b.get("spent_usd"), period_start=b.get("period_start"),
+                       monthly_usd_cap=b.get("monthly_usd_cap"))
+        except Exception as e:  # noqa: BLE001
+            rec["error"] = f"{type(e).__name__}: {e}"[:200]
+        with _write_lock, path.open("a") as f:
+            f.write(json.dumps(rec, default=str) + "\n")
+
+    return snap
 
 
 def _drop_sdk_backlog() -> None:

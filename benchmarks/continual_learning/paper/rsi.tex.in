@@ -51,7 +51,7 @@ the new rule and half still needs the old one, and no amount of retrying the old
 recover the first attempt. On the development seeds SenseLab takes the new action first in
 34\,\% of moved-half episodes against 5--19\,\% for a frontier model alone and three vector-store
 baselines, holding unchanged work at 96\,\%; a context window carrying every prior note reaches
-33\,\% at 2.1$\times$ the cost. Level~1 has not yet added to level~0 on these seeds, and the
+33\,\% at 1.4$\times$ the all-in cost (2.1$\times$ the agent's own). Level~1 has not yet added to level~0 on these seeds, and the
 tables say why: no canary can decide inside a 100-episode cell, and until the last engine cut what
 the proof tiers passed was the unconditional rule --- on the current cut the proof rejects 19 of
 23 regime fixes, and what it still passes is a wholesale flip the replaying agent did not follow. The paper's main contribution is the record of how a
@@ -269,8 +269,8 @@ only system that recovers the moved half on both families while holding the unch
 at 96\,\%: 34\,\% [17, 56] against 5--19\,\% for the frontier model and the three vector stores,
 winning every paired cell. The context window ties it in the mean (33\,\%) by beating it on
 \code{ci-fix} (78 against 56: the whole history fits in 24k tokens and the model can see the
-change happen) and doing nothing on \code{support} (0/43, SenseLab 7/42), at 2.1$\times$ the cost
-and 3.6$\times$ the tokens. Third, SenseLab pays on the kept half: 63\,\% against 86--98\,\% for the systems that
+change happen) and doing nothing on \code{support} (0/43, SenseLab 7/42), at 1.4$\times$ the all-in cost
+(2.1$\times$ the agent's own calls) and 3.6$\times$ the tokens. Third, SenseLab pays on the kept half: 63\,\% against 86--98\,\% for the systems that
 simply keep applying the old rule. That cost is the shape of the mechanism --- the entry is
 marked contested and the agent explores where the old action was still right --- and it is the
 number the repair loop exists to remove: a written conditional rule would recover the moved half
@@ -379,14 +379,31 @@ moved within noise. The cut under test now is the first on which the loop's proo
 conditional.
 
 \subsection{Cost}
+\label{sec:cost}
 
 %%TAB_COST%%
 
-SenseLab's agent cost per episode (0.031) is within 15\,\% of the pgvector memories and
-2.3$\times$ below the context window; its memory time (12\,s per episode against the production
-API, under the harness's rate pacing) is the price of reading the evidence record rather than a
-vector index. The loop's own spend --- repair agent, stand-in replays and judges --- is charged to
-the account's evaluation ledger and is \todo{not yet in this table; E6 in the preregistration}.
+Every call is charged to the system that caused it, wherever it ran. The agent's own calls are
+in the episode records. The loop's platform-side calls are on the benchmark account's evaluation
+ledger, which settles every judge verdict, repair-agent step, stand-in replay, lever
+classification and discovery call as it happens; judge verdicts also carry their own cost, and
+every verdict and every Tier~2 replay of a cell is in the run record, so those two columns are
+exact per cell. The repair agent's spend is not persisted per fix. It is recovered as the
+ledger's remainder --- what the account spent minus what its judges cost, over every fix the
+agent drafted on the account (USD~0.135 per draft at the time of writing, from USD~77.6 spent, 39.1
+of it judges, over 285 drafts) --- and applied per cell as drafts~$\times$ that rate; the column
+says \emph{est.} because it is one. Runs launched from the day the ledger was first snapshotted
+carry a reading at run start, after every cell and at run end, so the confirmatory runs report
+the ledger difference directly and this estimate is checked against it.
+
+On these seeds SenseLab costs USD~0.050 per episode all in: 4.4$\times$ the frontier model alone
+(0.011), 1.8$\times$ the pgvector memories (0.027--0.035), and 0.7$\times$ the context window
+(0.070). One third of it is the loop (judges 0.004, Tier~2 replays 0.007, drafts 0.005 per
+episode); the rest is the agent reading a longer briefing than a top-5 retrieval. Holding the
+loop at review still drafts (3.8 proposals per 100 episodes, 0.037 per episode): the drafting
+is what a person would read. Memory time (12\,s per episode against the production API, under
+the harness's rate pacing) is the price of reading the evidence record rather than a vector
+index.
 
 \subsection{Two probes on the earlier change set}
 
@@ -530,7 +547,7 @@ P9(a,c) & (q) c3 & proof set of 3--6 cases; kept-case failures occur & met \\
 P9(b) & (q) c3 & $\leq 25\,\%$ of proof-passing regime fixes non-conditional & falsified 83\,\% \\
 P10 & (s) c5 & no fix drafted from a replay; no alias from a replay & met (0 of 47 manifest runs; 134 replays present) \\
 P11 & (t) c5 & non-conditional share $< 50\,\%$; a \code{ci-fix} kept-case failure; ships fall & (a) falsified 4/4; (b) met, 3; (c) met, 11 $\to$ 2 \\
-P12--P14, P11(a$'$) & (v) c6 & canaries reach the floor, decide, and no pass harms the kept class; drafts conditional & pending: PR~\#799 not yet deployed \\
+P12--P14, P11(a$'$) & (v) c6 & canaries reach the floor, decide, and no pass harms the kept class; drafts conditional & pending: \code{rsi-e2b-c6} running on the \#799 cut \\
 \bottomrule
 \end{tabular}
 \caption{The predictions ledger. Every preregistered prediction on the engine so far, with the

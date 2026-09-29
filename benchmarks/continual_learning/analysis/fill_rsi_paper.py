@@ -64,10 +64,14 @@ TABLES: dict[str, tuple[str, str, str, str, tuple[str, ...]]] = {
         "tab:lifecycle", ("reverted", "drafted by the repair agent")),
     "TAB_COST": (
         "REPORT.md", "5. Cost and latency",
-        "Cost and latency per episode. \\emph{agent \\$}: the agent's own calls; \\emph{arm \\$}: every other "
-        "call the arm caused that is charged per episode (reflection, consolidation); the repair loop's own "
-        "spend is on the account's evaluation ledger and not yet here. \\emph{memory s}: time in memory calls "
-        "against the production API.", "tab:cost", ()),
+        "Cost and latency per episode, by where the call is charged. \\emph{agent \\$}: the agent's own calls; "
+        "\\emph{arm \\$}: reflection or consolidation the arm ran per episode; \\emph{judges \\$} and "
+        "\\emph{replays \\$}: the loop's judge verdicts and the Tier~2 replays the harness re-ran on the fix "
+        "branch, exact from the run records; \\emph{drafts}: fixes the repair agent drafted per 100 episodes, "
+        "priced at the account ledger's remainder per draft (repair agent, Tier~1 stand-in replay, lever "
+        "classification, discovery --- not persisted per fix, so an estimate; \\S\\ref{sec:cost}). "
+        "\\emph{total} sums the five. \\emph{memory s}: time in memory calls against the production API.",
+        "tab:cost", ()),
     "TAB_TEAMGROWS": (
         "TEAM_GROWS.md", "pioneer/A. Joiner first exposures after ep 60",
         "When the team grows (set A, change at 20, fleet of six sharing one store; \\emph{pioneer}: one agent "
