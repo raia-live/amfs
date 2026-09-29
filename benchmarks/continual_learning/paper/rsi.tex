@@ -52,8 +52,10 @@ recover the first attempt. On the development seeds SenseLab takes the new actio
 33\,\% of moved-half episodes against 5--19\,\% for a frontier model alone and three vector-store
 baselines, holding unchanged work at 96\,\%; a context window carrying every prior note reaches
 the same 33\,\% at 1.5$\times$ the all-in cost (2.1$\times$ the agent's own). Level~1 has not yet added to level~0 on these seeds, and the
-tables say why: no canary can decide inside a 100-episode cell, and until the last engine cuts what
-the proof tiers passed was the unconditional rule --- on the current cut the proof rejects 15 of
+tables say why: no canary has decided inside a 100-episode cell, nor in 200 with ten agents ---
+where one reaches its floor the failure has already stopped recurring in control, so there is
+nothing live to gate --- and until the last engine cuts what the proof tiers passed was the
+unconditional rule --- on the current cut the proof rejects 15 of
 17 regime fixes, and the two it passes are a wholesale flip and a retry ladder, neither of which
 states the condition the world changed on. The paper's main contribution is the record of how a
 preregistered benchmark found eleven things about the loop's evidence path --- nine defects, all
@@ -503,8 +505,52 @@ were running at episode 200. The reason is finding 11 (\S\ref{sec:findings}): of
 runs per arm, 0--8 could be graded, because grading is by canonical situation and the agent's
 declarations of its situation had been folded to other canonicals than the fix's. The $-$canary
 arm shipped four fixes (three regime); SenseLab and $-$replay shipped none. The canary's value
-therefore remains unmeasured, and the measurement now waits on an engine correction rather than
+therefore remained unmeasured, and the measurement waited on an engine correction rather than
 on a longer horizon.
+
+\paragraph{The same run on the corrected cut.} The rerun (\code{rsi-e2b-c6}, cut
+\code{post-canary-ni}; 2,400 episodes, 1 infrastructure error) is the fleet-10 re-measurement of
+finding 11 and the read of P12--P14 (\S\ref{sec:pending}). The outcome picture did not move:
+on \code{ci-fix} every arm recovers both halves by episode 130 (moved 86--93\,\%, kept
+91--98\,\% over episodes 130--199; 71--77 and 81--92 over all post-change episodes); on
+\code{support} SenseLab's moved half is 38\,\% (31/82; 49\,\% over 130--199) against 35 and
+22 for $-$canary and $-$replay, kept 59 against 65 and 74, and the three arms are
+indistinguishable at this sample. The $-$canary arm shipped six fixes (five regime); SenseLab and
+$-$replay shipped none. Nine canaries started, all on regime fixes, and Figure~\ref{fig:canary}
+is their time course from the sealed traces' arm stamps. The correction did what it was for:
+the share of exposed runs the canary could grade rose from 0--27\,\% to 12--55\,\%, and four
+of the nine reached the floor of eight graded runs on both arms (P12's first clause: not met at
+4 of 9, not falsified; its second, graded/exposed $\geq 0.8$, is met by none). None decided (P13
+falsified, 0 of 9). Of the four at the floor, three found \textbf{no recurrence in either arm}
+(26/11, 27/22 and 15/12 graded, 0 recurred) --- by the time the canary could measure, the
+failure it was gating no longer occurred in control, and the rule that requires the failure live
+in control before a fix can ship (a fix for a failure that has stopped is not a fix) held it
+open. The fourth, on \code{support}, had 0\,\% against 10\,\% at 9 and 10 graded and a bound of
+14 points against the margin of 10; it was also started at cell episode 8, forty episodes before
+the change, on a regime signal the change had not yet caused. Two ended with no gradable run and
+three were still short of the floor. So the bottleneck moved: from grading (finding 11) to
+recurrence. On these families and this horizon, once a fix reaches the canary the fleet has
+mostly stopped making the mistake --- level~0's demotion and the agents' own recovery got there
+first --- which is a statement about \emph{when} the loop's evidence becomes available relative
+to when it is needed, and the reason the confirmatory fleet-10 cells carry the same read rather
+than a longer one. P14 is undefined (no verdict); read exploratorily, the kept-class
+first-attempt success in canary-arm against control-arm sessions on the two proof-passing
+\code{ci-fix} fixes with kept cases was 21 points \emph{lower} on one (17/26 against 13/15) and
+24 higher on the other (23/23 against 13/17): the sign the harm gate exists for, at a sample
+where it is noise.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_canary.png}
+\caption{The nine canaries of \code{rsi-e2b-c6} (fleet 10, 200 episodes, change at 50), each
+panel one fix: runs the router stamped to the canary arm (red) and the control arm (grey) by cell
+episode, from the sealed traces; dotted line = the graded floor of 8 per arm; the legend gives
+how many stamped runs the canary could grade. Canaries started from an inconclusive Tier~1
+route 10\,\% of traffic to the fix, the rest 50\,\%. Four reached the floor on both arms; none
+decided --- three because the failure no longer recurred in control, one because 9 and 10 graded
+runs leave the non-inferiority bound at 14 points against a margin of 10.}
+\label{fig:canary}
+\end{figure}
 
 \subsection{SenseLab by engine cut}
 
@@ -744,7 +790,8 @@ clean-success requirement on every case built for a regime fix, whatever grades 
 it after the verdict. It shipped as the \code{post-clean-success} cut; P11 is read on the run
 on that cut (\S\ref{sec:pending}), and Table~\ref{tab:cuts} carries it as a row.
 \item \textbf{The canary grades by canonical situation, and the agent's declarations fragment.}
-(Found in the fleet-10, 200-episode run of \S\ref{sec:posthoc}; not yet fixed.) A canary counts
+(Found in the fleet-10, 200-episode run of \S\ref{sec:posthoc}; fixed in \#799 and re-measured
+on both protocols.) A canary counts
 exposure --- runs that read the fix's entry --- but grades only runs whose canonical situation
 equals the fix's. The agent declares its situation per run in its own words, often carrying the
 very condition the change turns on (``pip audit requests pin with legacy sdk'', ``pip audit
@@ -763,7 +810,12 @@ replay tiers already proved. Canonical merging was not done: it changes situatio
 every customer with the opposite failure mode, and the canary no longer depends on it.
 Pre-registered on the rerun: P12 (canaries reach the floor), P13 (canaries decide), P14 (no pass
 harms the kept class) and P11(a$'$) (drafts state their condition; the regime draft now sees the
-situation's passing runs).
+situation's passing runs). Re-measured (\S\ref{sec:posthoc}): graded runs rose from 0--27\,\% of
+exposure to 12--55\,\%, four of nine canaries reached the floor, and none decided --- three
+because the failure had stopped recurring in control by the time the canary could measure it.
+The grading defect is closed; what the rerun shows is that the canary's evidence arrives after
+the fleet has recovered on its own, which is a property of the problem at this horizon rather
+than a defect.
 \end{enumerate}
 
 \paragraph{The canary inside a cell (see also \S\ref{sec:posthoc}).} Separately from the defects, no canary reached a decision
@@ -793,7 +845,10 @@ P9(a,c) & (q) c3 & proof set of 3--6 cases; kept-case failures occur & met \\
 P9(b) & (q) c3 & $\leq 25\,\%$ of proof-passing regime fixes non-conditional & falsified 83\,\% \\
 P10 & (s) c5 & no fix drafted from a replay; no alias from a replay & met (0 of 47 manifest runs; 134 replays present) \\
 P11 & (t) c5 & non-conditional share $< 50\,\%$; a \code{ci-fix} kept-case failure; ships fall & (a) falsified 4/4; (b) met, 3; (c) met, 11 $\to$ 2 \\
-P12--P14, P11(a$'$) & (v) c6 & canaries reach the floor, decide, and no pass harms the kept class; drafts conditional & pending: \code{rsi-e2b-c6} running on the \#799 cut \\
+P12 & (v) c6 & $\geq 1$ in 2 canaries reach the graded floor on both arms; graded/exposed $\geq 0.8$ & not met: 4 of 9; graded/exposed 0.12--0.55 (from 0--0.27) \\
+P13 & (v) c6 & $\geq 1$ in 3 canaries decide & falsified: 0 of 9 (7 from Tier~1 pass, 2 from inconclusive); 3 of 4 at the floor had 0 recurrence in both arms \\
+P14 & (v) c6 & no pass harms the kept class by $> 10$ pp (trace-joined) & undefined: no verdict \\
+P11(a$'$) & (v) c6 & $\geq 50\,\%$ of kept-case regime drafts state a condition (two blind coders); kept-case rejections $< 5$ of 23 & coding pending (37 items over \code{rsi-c6}, \code{rsi-e2b-c6}); rejections 4 of 17 and 11 of 39 --- the count fell, the share did not \\
 \bottomrule
 \end{tabular}
 \caption{The predictions ledger. Every preregistered prediction on the engine so far, with the
@@ -827,7 +882,21 @@ the regime fixes whose proof set holds a kept case, at least half state a condit
 coders blind to arm and verdict. On \code{rsi-c6} that population is 12 fixes; the sheet is
 drawn and the coding is pending. Our own reading of the two proof passers (\S\ref{sec:results})
 is not that count. The second clause of P11(a$'$) --- kept-case proof rejections fall below 5 of
-23 --- reads 4 of 17 on this cut: fewer in number, the same in share.
+23 --- reads 4 of 17 on this cut and 11 of 39 on the fleet-10 rerun: fewer in number where the
+run is the same size, the same or a higher share.
+
+\textbf{P12--P14} are read on the fleet-10 rerun (\code{rsi-e2b-c6}, \S\ref{sec:posthoc}).
+P12: 4 of 9 canaries reached the graded floor on both arms (not met at $\geq 1$ in 2; not
+falsified), and no canary graded 80\,\% of the runs that read its entry (0.12--0.55; before the
+correction 0--0.27). P13: 0 of 9 decided --- \emph{falsified}. P14: undefined, no verdict. The
+falsification of P13 is the informative one. Three of the four canaries at the floor had zero
+recurrence in both arms: the harm gate had nothing to gate because the fleet had stopped making
+the mistake before the gate could measure it. Whether a fix for a failure that no longer recurs
+should ship anyway --- as a written condition for the next agent, rather than a live correction
+--- is an engine question we put to the owner and do not answer here; the confirmatory fleet-10
+cells are read with P12--P14 as pre-specified. Why a canary grades only a third to a half of the
+runs that read its entry, after the correction that was meant to close that gap, is not
+diagnosed in this version.
 
 \paragraph{The confirmatory scope, reduced before it ran.} Amendment (w), declared before any
 confirmatory-seed cell and before the analysis freeze, reduces the confirmatory grid to what the

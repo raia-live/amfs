@@ -1,6 +1,6 @@
 {
  "senselab_run": "rsi-c6",
- "fleet_run": null,
+ "fleet_run": "rsi-e2b-c6",
  "seeds": [
   11,
   23

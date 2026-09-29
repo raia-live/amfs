@@ -1491,3 +1491,87 @@ further change to the drafting prompt (engine change; proposal to Bruno, not mad
 lifecycle/proof paragraphs, §4.2 cuts paragraph, §4.3 cost, §5 findings intro, §6 pending updated
 to these numbers; figures regenerated. `fig_canary` and the fleet-10 paragraph wait on
 `rsi-e2b-c6`.
+
+## 2026-09-30 — `rsi-e2b-c6` readout (E2b rerun on `post-canary-ni`, #799; amendment (v)) — P12/P13/P14
+
+2,400/2,400 episodes, 1 infra error; support + ci-fix × seeds 11/23 × {SenseLab, − canary,
+− replay}; fleet 10, 200 episodes, change at 50 (set C). Launched 11:36Z 2026-09-29 (right after
+the #799 cut at 11:35:32Z), finished 20:35:47Z. Tools: `analysis/rsi_canary_readout.py --run
+rsi-e2b-c6` against prod (`results/rsi-e2b-c6/canary_readout.json`; 0 unjoined stamped traces),
+`/tmp/e2b_readout.py` for outcomes/lifecycle, `analysis/rsi_figures.py --fleet-run rsi-e2b-c6`
+for `paper/figures/fig_canary.png`. Ledger: the run predates the snapshotter; a manual
+`run_end_manual` row ($97.55 at 20:37:21Z) is appended; 17:31–20:37Z ($3.38; 879 judge verdicts,
+$1.34) is this run alone over its last ~860 episodes, 12:49–17:31Z is shared with `rsi-c6`.
+
+**First-attempt success, pooled over seeds (post-change episodes 50–199; `@130+` = 130–199).**
+ci-fix: SenseLab moved 71 % (47/66), kept 81 % (68/84), unchanged 99 %, @130+ moved 93 % (27/29)
+kept 91 %; − canary 74 / 87 / 100, @130+ 86 / 94; − replay 77 / 92 / 100, @130+ 90 / 98. support:
+SenseLab moved 38 % (31/82), kept 59 % (40/68), unchanged 100 %, @130+ moved 49 % (18/37) kept
+64 %; − canary 35 / 65, @130+ 41 / 75; − replay 22 / 74, @130+ 43 / 72. Same picture as
+`rsi-e2b-c5` (ci-fix recovers both halves by 130 with ten agents sharing the store; support does
+not); the three arms are indistinguishable on both families at this sample. Per cell, support
+moved: SenseLab 36/39, − canary 25/43, − replay 8/33 (s11/s23).
+
+**Ships.** − canary **6** (support s11: 1 regime android + 1 judge "Escalation ping-pong"; ci-fix
+s11: 2 regime — billing-webhook fixture-edit, pip-audit intentional-pin exception; ci-fix s23: 2
+regime — pip-audit legacy-sdk exception, billing-integration cassette); SenseLab 0; − replay 0.
+Tier 2 (SenseLab cells): 4 passed / 23 failed / 2 open / 1 expired; regime 4 / 19 (failed on a
+kept case 5, moved-only 13, other 1). − canary: 6 passed / 14 failed / 2 open / 1 expired; regime
+5 / 11 (kept 6, moved-only 4, other 1); all five regime passers shipped. − replay (no Tier 2):
+Tier 1 passed 8, inconclusive 15; 5 canaries started (4 running, 1 ungraded).
+
+**Canaries: 9 started (SenseLab 4, − replay 5), all regime fixes, 0 decided.** Per canary
+(canary graded/exposed, control graded/exposed, recurred):
+- `68ef7eaf` support s11 SL (csv-export-timeout-android-workaround): 9/77, 10/101, 0 vs 1
+  (0 % vs 10 %, p = 0.33); one-sided bound **14 pp > 10** → running. Started 11:48Z ≈ cell
+  episode 8 — forty episodes *before* the change, on a "stopped working" signal the change had
+  not yet caused (a pre-change regime proposal; cf. the 5k first-exposure reading).
+- `92a2b2bd` ci-fix s11 SL (pip-audit intentional-pin exception; 2 kept cases in its proof set):
+  26/67, 11/58, **0 vs 0** → "the behavior did not recur in control, so there was nothing to fix
+  live"; running.
+- `6db3dd2a` ci-fix s11 − replay (pip-audit transitive exception): 27/74, 22/71, 0 vs 0 → same.
+- `0dcfa958` ci-fix s23 − replay (pip-audit legacy-pin exception): 15/52, 12/57, 0 vs 0 → same.
+- `4b182c4e` ci-fix s23 SL (pip-audit exception-rejected; 2 kept cases): 12/22, 5/22 → waiting
+  for control (floor 8).
+- `c670c009` support s11 − replay (card-declined escalate; from `test_inconclusive`, pct 10):
+  0/13, 16/132, control recurred 5 → waiting for canary-arm grades.
+- `77c44137` support s23 − replay (export-timeout smaller ranges; pct 10): 1/11, 20/119,
+  control recurred 6 → waiting.
+- `6d464503` support s23 SL (web-pro csv-export background; 1 kept case) and `e89b1221` ci-fix
+  s23 − replay (flaky-integration rerun): ended `inconclusive: ungraded` — 12/13 and 16/14 runs
+  reported outcomes, none gradable.
+
+**P12 — not met, not falsified.** 4 of 9 reached `min_outcomes` on both arms (needs ≥ 1 in 2;
+falsified only by 0 of ≥ 6). Graded/exposed ≥ 0.8 per arm: **met by none** — 0.12–0.55 on the
+canaries with grades (before #799: 0–0.27 excluding the one stable-declaration canary). The
+correction raised grading; it did not make exposure and grading the same thing. Why a run that
+read the fix's entry and reported an outcome is still not graded roughly half the time is **not
+diagnosed** (engine code; question for Bruno).
+
+**P13 — falsified.** 0 of 9 decided (falsified by 0 verdicts in ≥ 6). By start: `test_passed` 7
+(pct 50) 0 decided; `test_inconclusive` 2 (pct 10) 0 decided. Of the 4 at the floor, **3 had zero
+recurrence in both arms** — the non-inferiority rule (v) requires the failure live in control
+(control recurred ≥ 1), so a fix for a failure that has stopped cannot ship; the 4th sat at
+0 % vs 10 % with a 14-pp bound at 9/10 graded. The bottleneck moved from grading (finding 11) to
+recurrence: on ci-fix the fleet stops making the mistake (level 0 demotion + the agents' own
+recovery) before the canary has 8 graded runs per arm. Engine question for Bruno, not acted on:
+should a proof-passed fix whose failure no longer recurs in control ship as a written condition
+for the next agent (i.e. treat "nothing to fix live" as non-inferior), or stay held as now?
+
+**P14 — undefined** (no verdict; population 0). Exploratory, from the trace join (kept-class
+post-change FAS in canary-arm vs control-arm sessions), on the two proof-passing ci-fix fixes with
+kept cases: `92a2b2bd` canary 17/26 = 0.65 vs control 13/15 = 0.87 (**canary 21 pp lower**);
+`6db3dd2a` (no kept case) canary 23/23 vs control 13/17 (24 pp higher). Both directions at n =
+15–26; the sign P14 exists for, at a sample where it is noise. No test run.
+
+**P11(a′).** Coding sheet regenerated over both runs: **37 items** (`results/rsi-coding/sheet.csv`
++ `INSTRUCTIONS.md`; `key.json` private) — every regime fix in either run whose proof set holds a
+kept case, both arms, shuffled, blind to arm and verdict. Second clause (kept-case rejections
+< 5 of 23): `rsi-c6` 4 of 17, `rsi-e2b-c6` 11 of 39 (SenseLab 5/23, − canary 6/16) — the count
+fell where the run is the same size; the share did not (22 % → 24 % / 28 %).
+
+**Reading for the paper (§4.3 "The same run on the corrected cut", finding 11 closed, §6
+P12–P14, ledger rows split).** The grading defect is closed and re-measured; what the rerun
+shows is that at this horizon the canary's evidence arrives after the fleet has recovered on
+its own. The confirmatory fleet-10 cells keep the same read (P12–P14 as pre-specified); no
+protocol change.
