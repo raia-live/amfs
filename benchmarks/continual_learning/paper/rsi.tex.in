@@ -474,6 +474,44 @@ $-7/0/+18$ points across the three seeds --- ``small and reported as such'' is t
 sentence. Nothing is claimed from rung 0; rungs 1--3, on classes and wordings the students never
 saw, need eval-only content that is registered but not yet written.
 
+\section{Confirmatory results}
+\label{sec:confirmatory}
+
+The seeds 37, 41, 59 and 73 run once, on both agent models, after the analysis code is tagged
+\code{analysis-freeze-rsi}; every table in this section is filled by that frozen code from the
+confirmatory read and nothing in it is known when the freeze is made. The endpoints, the paired
+test (exact two-sided sign-flip over the sixteen cells, Holm across the five systems on the
+primary endpoint, Holm within each secondary endpoint) and the tables are those of
+amendments~(w) and~(x); the development-seed tables of \S\ref{sec:results} are not re-read.
+The prose of this section is written after the read and states, for each preregistered
+prediction, whether it was met.
+
+\paragraph{Primary endpoint: the moved half.}
+%%CONF_TAB_HEADLINE%%
+%%CONF_TAB_PAIRED%%
+
+\paragraph{Secondary endpoints: collateral damage.}
+%%CONF_TAB_PAIRED_KEPT%%
+%%CONF_TAB_PAIRED_UNCHANGED%%
+
+\paragraph{By family and by model.}
+%%CONF_TAB_BYFAMILY%%
+%%CONF_TAB_BYMODEL%%
+
+\paragraph{Attribution and the loop's lifecycle.}
+%%CONF_TAB_ATTRIBUTION%%
+%%CONF_TAB_LIFECYCLE%%
+
+\paragraph{Where canaries can decide: fleet 10, 200 episodes.} The E2b protocol on the four
+confirmatory seeds (SenseLab, $-$canary, $-$replay; 4,800 episodes per seed) is read with the
+canary readout of amendment~(v): P12 (canaries reach the graded floor on both arms), P13
+(canaries decide), P14 (no pass harms the kept class by more than the margin, joined to the
+sealed traces' arm stamps) and P11(a$'$) (drafts state their condition, two blind coders).
+\textcolor{red}{[pending: the fleet-10 confirmatory cells have not run.]}
+
+\paragraph{Cost.}
+%%CONF_TAB_COST%%
+
 \section{What the loop taught us about itself}
 \label{sec:findings}
 

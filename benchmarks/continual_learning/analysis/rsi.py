@@ -607,10 +607,10 @@ def main() -> None:
         secondary[p] = dd
     data["paired_secondary"] = secondary
     if confirmatory:
-        md += ["### Secondary endpoints (paired, Holm within endpoint)", ""]
-        for p in ("kept", "unchanged"):
+        for p, title in (("kept", "kept half"), ("unchanged", "unchanged classes")):
             head, rows, _ = paired_rows(BASELINES, senselab, p)
-            md += [f"**{p} half**" if p == "kept" else "**unchanged classes**", ""] + md_table(head, rows) + [""]
+            md += [f"### 1b-{p}. Secondary endpoint, paired: {title}", "",
+                   "Holm within this endpoint.", ""] + md_table(head, rows) + [""]
 
     md += ["## 1c. By family", "", "First-attempt success per family: moved half, kept half, unchanged classes.", ""]
     fam_head = ["system"] + [f"{s}: {p}" for s in SCENARIOS for p in ("moved", "kept", "unchanged")]

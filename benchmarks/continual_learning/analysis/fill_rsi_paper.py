@@ -22,9 +22,14 @@ from .fill_paper import tex_escape
 
 HERE = Path(__file__).resolve().parent.parent
 REPORT_DIR = HERE / "results" / "rsi-report"
+CONF_DIR = HERE / "results" / "rsi-report-confirmatory"
 TEAM_GROWS = HERE / "results" / "rsi-teamgrows-dev-report" / "TEAM_GROWS.md"
 POSTHOC = HERE / "results" / "rsi-report" / "POSTHOC_SHIPS.md"
 TEX = HERE / "paper" / "rsi.tex"
+
+CONF_NOTE = ("Confirmatory seeds 37 / 41 / 59 / 73, both agent models (GPT-5.5, Claude Opus~5), the two "
+             "set-C families, run once on the \\code{post-canary-ni} cut after \\code{analysis-freeze-rsi} "
+             "(amendment (w)).")
 
 #: marker -> (report, heading prefix, caption, label, columns to drop)
 TABLES: dict[str, tuple[str, str, str, str, tuple[str, ...]]] = {
@@ -87,6 +92,47 @@ TABLES: dict[str, tuple[str, str, str, str, tuple[str, ...]]] = {
         "of a session: not a first-attempt success. DiD = (after $-$ before)$_{-\\text{canary}}$ $-$ "
         "(after $-$ before)$_{\\text{SenseLab}}$; negative means the ships were associated with less "
         "recurrence than shipping nothing.", "tab:posthoc", ()),
+    # confirmatory read (results/rsi-report-confirmatory); pending until the seeds run
+    "CONF_TAB_HEADLINE": (
+        "CONF_REPORT.md", "1. After the rule changes conditionally",
+        "Confirmatory: after the rule changes conditionally. Sixteen cells per system "
+        "(\\code{support}, \\code{ci-fix} $\\times$ four seeds $\\times$ two models); first-attempt success on "
+        "every post-change episode; brackets: cell-level bootstrap 95\\% interval. " + CONF_NOTE,
+        "tab:conf-headline", ("cells", "infra err")),
+    "CONF_TAB_PAIRED": (
+        "CONF_REPORT.md", "1b. Paired cell deltas, moved half",
+        "Confirmatory primary endpoint: SenseLab minus each system on the moved half, percentage points, "
+        "paired on (family, seed, model); per family $\\times$ model means, the mean over the sixteen cells, "
+        "cells won, the exact two-sided sign-flip $p$ over the cells and its Holm adjustment across the five "
+        "systems (amendment (x)).", "tab:conf-paired", ()),
+    "CONF_TAB_PAIRED_KEPT": (
+        "CONF_REPORT.md", "1b-kept. Secondary endpoint, paired: kept half",
+        "Confirmatory secondary endpoint, the kept half: SenseLab minus each system, paired as in "
+        "Table~\\ref{tab:conf-paired}; Holm within this endpoint.", "tab:conf-paired-kept", ()),
+    "CONF_TAB_PAIRED_UNCHANGED": (
+        "CONF_REPORT.md", "1b-unchanged. Secondary endpoint, paired: unchanged classes",
+        "Confirmatory secondary endpoint, the unchanged classes: SenseLab minus each system, paired as in "
+        "Table~\\ref{tab:conf-paired}; Holm within this endpoint.", "tab:conf-paired-unchanged", ()),
+    "CONF_TAB_BYFAMILY": (
+        "CONF_REPORT.md", "1c. By family",
+        "Confirmatory, by family: first-attempt success on the moved half, the kept half and the unchanged "
+        "classes.", "tab:conf-byfamily", ()),
+    "CONF_TAB_BYMODEL": (
+        "CONF_REPORT.md", "1d. By model",
+        "Confirmatory, by agent model: first-attempt success on the moved half, the kept half and the "
+        "unchanged classes.", "tab:conf-bymodel", ()),
+    "CONF_TAB_ATTRIBUTION": (
+        "CONF_REPORT.md", "3. Attribution",
+        "Confirmatory attribution: SenseLab against its own ablations on the same sixteen cells. The only "
+        "confirmatory table in which the ablations appear.", "tab:conf-attribution", ("cells",)),
+    "CONF_TAB_LIFECYCLE": (
+        "CONF_REPORT.md", "4. Fix lifecycle",
+        "Confirmatory fix lifecycle by arm over the sixteen fleet-1 cells (the fleet-10 cells are read in "
+        "\\S\\ref{sec:confirmatory}).", "tab:conf-lifecycle", ("reverted", "drafted by the repair agent")),
+    "CONF_TAB_COST": (
+        "CONF_REPORT.md", "5. Cost and latency",
+        "Confirmatory cost and latency per episode, columns as in Table~\\ref{tab:cost}; the drafts column is "
+        "checked against the ledger difference the runs recorded.", "tab:conf-cost", ()),
 }
 
 ARM_RENAMES = {
@@ -164,6 +210,8 @@ def sections_by_part(md: str) -> dict[str, list[str]]:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--report-dir", default=str(REPORT_DIR))
+    ap.add_argument("--conf-report-dir", default=str(CONF_DIR),
+                    help="the confirmatory read (analysis.rsi --seeds 37 41 59 73 ...); CONF_TAB_* markers")
     ap.add_argument("--tex", default=str(TEX))
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -175,6 +223,9 @@ def main() -> None:
     report = Path(args.report_dir) / "REPORT.md"
     if report.exists():
         reports["REPORT.md"] = split_headings(report.read_text())
+    conf = Path(args.conf_report_dir) / "REPORT.md"
+    if conf.exists():
+        reports["CONF_REPORT.md"] = split_headings(conf.read_text())
     if TEAM_GROWS.exists():
         reports["TEAM_GROWS.md"] = sections_by_part(TEAM_GROWS.read_text())
     if POSTHOC.exists():
@@ -188,8 +239,11 @@ def main() -> None:
         key = next((k for k in secs if k.startswith(prefix)), None)
         lines = rename(filter_rows(secs.get(key, []), ROW_FILTERS.get(marker))) if key else []
         if not key or table_is_empty(lines):
-            tex = tex.replace(f"%%{marker}%%",
-                              rf"\textcolor{{red}}{{TODO: table ``{tex_escape(prefix)}'' not in {tex_escape(fname)} yet.}}")
+            note = (r"\textcolor{red}{[pending: the confirmatory seeds have not run; this table is filled from "
+                    r"\code{results/rsi-report-confirmatory} --- ``" + tex_escape(prefix) + "''.]}"
+                    if fname == "CONF_REPORT.md" else
+                    rf"\textcolor{{red}}{{TODO: table ``{tex_escape(prefix)}'' not in {tex_escape(fname)} yet.}}")
+            tex = tex.replace(f"%%{marker}%%", note)
             missing.append(marker)
             continue
         table = md_table_to_tex(drop_columns(lines, drop), caption, label)
