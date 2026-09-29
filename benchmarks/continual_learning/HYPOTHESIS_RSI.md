@@ -2124,3 +2124,67 @@ requires a significant difference, so a fix that is not worse never ships within
 **Pre-specified if one is approved (P12):** on the same E2b protocol on the new cut, ≥ 1 canary in
 2 reaches `min_outcomes` on both arms in a cell (falsified by 0 of ≥ 6 canaries), and graded /
 exposed ≥ 0.8 per arm. No arm, scenario, change set, rubric or metric changes.
+
+### 2026-09-29 (v) — corrections approved: grading population (i), non-inferiority rule, drafting; PR #799; P12 confirmed, P13 added
+
+Bruno approved (18:47 JST) correction (i) of (u), the decision-rule change, and the drafting
+change, and asked for the recommendation on record. Recommendation and rationale, as given:
+(i) grade every run the change could touch — runs in the fix's situation **or** runs that read an
+implicated entry — because both arms are bucketed by session hash and control reads the old
+version of the same entry, so the population stays symmetric, and the gate no longer depends on
+how an agent phrased a free-text field on one run; (ii) canonical merging **not** done — it
+changes situation identity for every customer with the opposite failure mode (over-merging), and
+after (i) the canary does not depend on it; kept as a stated limitation; (iii) the primary becomes
+**non-inferiority**, because the canary is the loop's harm gate: Tiers 1/2 prove the benefit on the
+failing runs by replay, and live traffic has to show the change does not make the agent worse on
+the runs the old rule still served — the harm the post-hoc of (t) measured on no-canary ships
+(−18 pp on the kept half). Under superiority a fix that is right and not worse never passed.
+
+**Engine change (amfs-internal PR #799, `eval/canary-noninferiority-exposure`, opened 19:2x JST,
+not merged):**
+- `FixStore.canary_arm_counts` / `recent_exposure`: a fix carrying a situation *and* implicated
+  entries is graded on `situation = canonical OR read an implicated entry`. Situation-only and
+  reads-only fixes unchanged. `graded_by` reads "graded on outcomes of runs in the situation '…'
+  or that read <entries>".
+- `repair.canary.decide` rule 4b: after the superiority pass/fail checks and before futility,
+  **passed** when the one-sided 95 % upper bound on (canary − control) recurrence — Newcombe
+  hybrid-score interval — is under `NONINFERIORITY_MARGIN = 0.10`, provided control recurred at
+  least once and the canary arm recurs under `FUTILITY_MAX_RECURRENCE` (0.75). Success guard,
+  significant-worse → failed, adherence, futility (no-effect, max-recurrence) and window are
+  unchanged. Level recurrence with tight arms, formerly `inconclusive: no_effect`, now passes.
+- Drafting: one sentence in `DEFAULT_REPAIR_PROMPT` (state the condition that separates the
+  failing runs from the passing ones; keep the rule where it holds); the regime `proposal` text
+  says the same; `propose_from_regime_shift` hands the agent the situation's newest
+  `REGIME_PROOF_PASSED` (3) served passing runs as `passing` evidence — the runs its proof set
+  replays as kept cases. Without them the sentence had nothing to act on (the draft saw one
+  failed run and a count of successes).
+- Tests: 845 eval unit tests pass; no new ruff findings.
+
+**Benchmark parameters for the rerun (E2b protocol of (t), cut `rsi-c6` = deploy of #799):**
+`CL_RSI_CANARY_TIMEOUT = 200` (the cell horizon; was 60 — the benchmark's own timeout, in
+sessions) and a new harness knob `CL_RSI_CANARY_WINDOW = 200` setting the product's
+`canary_window_sessions` (graded runs across both arms; default 0 → 10 × `min_outcomes` = 80,
+which would close a canary at the boundary where the non-inferiority bound at 12 % vs 17 %
+first clears the margin, ≈ 40/40). `pct` 50, `min_outcomes` 8, look every 5, Tier 2 on: unchanged.
+The knob defaults to 0 (product default), so earlier runs' semantics are preserved.
+
+**Pre-specified, before the run:**
+- **P12** (from (u), confirmed): ≥ 1 canary in 2 reaches `min_outcomes` graded on both arms in a
+  cell; falsified by 0 of ≥ 6. Graded / exposed ≥ 0.8 per arm.
+- **P13 (canary decides):** ≥ 1 canary in 3 reaches a verdict (`passed` or `failed`) within the
+  cell; falsified by 0 verdicts in ≥ 6 canaries. Read separately for canaries started from
+  `test_passed` (pct 50) and from `test_inconclusive` (pct 10).
+- **P14 (harm gate):** of canaries that reach a verdict on a fix whose replay set contains kept
+  cases, none passes with kept-class post-change first-attempt success in the canary arm below the
+  control arm by more than the margin (10 pp) over the cell — read by joining episode records to
+  their sealed traces' `canary_arm` stamps (prod DB, RLS-scoped), not from the engine's tally. One
+  such pass falsifies.
+- **P11(a′) (conditional drafts):** of regime fixes whose proof set contains ≥ 1 kept case, the
+  share whose `correction.value` states a condition (hand-coded by the two blind coders: does the
+  value name an input-dependent branch) is ≥ 0.5; on `rsi-c5` it was 0 of 23 (all unconditional).
+  Proof-set rejections for a kept-case failure fall below 5 of 23 (`rsi-c5`).
+- Presentation: "benefit proven by replay, no harm on live traffic". The paper's §3 sentence
+  "must have beaten the control arm on live traffic" is rewritten to the non-inferiority reading
+  before any (v) result is reported.
+No arm, scenario, change set, rubric or paired metric changes. The E2b rerun is the dev read
+(seeds 11/23); confirmatory grid unchanged.

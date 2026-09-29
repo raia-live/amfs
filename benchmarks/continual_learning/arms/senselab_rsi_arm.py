@@ -46,6 +46,10 @@ E2 mapping of the product defaults 10 / 20) and the harness-side timeout in sess
 ``CL_RSI_CANARY_TIMEOUT`` (default 60): the product's own timeout is in days and cannot fire
 inside a cell, so a canary still running after that many sessions is stopped by the harness
 and recorded as timed out. The look interval is ``CL_RSI_LOOK_EVERY`` (default 5).
+``CL_RSI_CANARY_WINDOW`` (default 0) sets the product's own ``canary_window_sessions`` — the
+canary's window in *graded* runs across both arms, after which the engine ends it
+``inconclusive: window``; 0 leaves the product default (10 × ``min_outcomes``). Amendment (v)
+sets it to the cell horizon so the engine's window is not shorter than the harness timeout.
 """
 
 from __future__ import annotations
@@ -263,6 +267,8 @@ class SenseLabRsiArm(SenseLabArm):
     canary_pct = _int_env("CL_RSI_CANARY_PCT", 50)
     canary_min_outcomes = _int_env("CL_RSI_CANARY_MIN", 8)
     canary_timeout_sessions = _int_env("CL_RSI_CANARY_TIMEOUT", 60)
+    # The product's window in graded runs across both arms; 0 = product default.
+    canary_window_sessions = _int_env("CL_RSI_CANARY_WINDOW", 0)
     look_every = _int_env("CL_RSI_LOOK_EVERY", 5)
     # Pacing floor: seconds to hold the cell after each seal until the trace is graded
     # (0 = no wait). Set from pilot 3 (HYPOTHESIS_RSI.md, amendment (e)).
@@ -364,6 +370,8 @@ class SenseLabRsiArm(SenseLabArm):
             fields: dict[str, Any] = dict(repair_policy=self.repair_policy, canary_pct=self.canary_pct,
                                           canary_min_outcomes=self.canary_min_outcomes, canary_timeout_days=1,
                                           auto_propose=self.auto_propose)
+            if self.canary_window_sessions:
+                fields["canary_window_sessions"] = self.canary_window_sessions
             if self.tier2:
                 from ..replay_hub import ReplayHub
 
@@ -393,7 +401,8 @@ class SenseLabRsiArm(SenseLabArm):
             self.events.append({"t": time.time(), "sessions": self.sessions_sealed, "kind": "agent_ready",
                                 "agent_id": agent_id, "settings": {k: settings.get(k) for k in (
                                     "auto_propose", "repair_policy", "canary_pct", "canary_min_outcomes",
-                                    "canary_timeout_days", "replay_fidelity_floor", "replay_webhook_url",
+                                    "canary_timeout_days", "canary_window_sessions", "replay_fidelity_floor",
+                                    "replay_webhook_url",
                                     "replay_wait_hours")},
                                 "contract": contract, "replay_webhook_ping": ping,
                                 "ms": round((time.perf_counter() - t0) * 1000, 1)})
@@ -647,6 +656,7 @@ class SenseLabRsiArm(SenseLabArm):
                                "verdict_source": self.verdict_source, "judges_on": self.judges_on,
                                "canary": {"pct": self.canary_pct, "min_outcomes": self.canary_min_outcomes,
                                           "timeout_sessions": self.canary_timeout_sessions, "look_every": self.look_every,
+                                          "window_sessions": self.canary_window_sessions,
                                           "inconclusive_pct_cap": INCONCLUSIVE_CANARY_PCT_CAP, "look_fills_queue": "k"},
                                "pacing": {"verdict_wait_s": self.verdict_wait_s, "verdict_poll_s": self.verdict_poll_s},
                                "tier2": {"enabled": self.tier2, "replay_wait_hours": self.replay_wait_hours,

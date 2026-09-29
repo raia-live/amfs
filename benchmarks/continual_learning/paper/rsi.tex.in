@@ -41,8 +41,8 @@ that its own knowledge has gone wrong, propose a correction, prove it, release i
 from the result, and do all of this without a person in every loop and without shipping the
 wrong thing to every agent at once. SenseLab is a recursive self-improvement engine built for
 that. Outcome evidence changes what agents act on (level~0); a repair agent drafts corrections
-that must pass a stand-in replay, the customer's own replay and a live canary with a significance
-test before they ship, reversibly (level~1); the loop's own history feeds its next draft
+that must pass a stand-in replay, the customer's own replay and a live canary that shows them
+no worse than the rule they replace before they ship, reversibly (level~1); the loop's own history feeds its next draft
 (level~2); and the record it produces trains the next model and the repair prompt itself
 (level~3). This paper is the first measurement of such a loop. We evaluate the whole engine ---
 never its parts against each other --- on a continual benchmark in which the correct action for
@@ -91,12 +91,13 @@ the next session acts on. At level~1, an entry that was validated and now fails 
 \emph{regime shift}; a repair agent drafts a correction on a branch with a manifest of the runs
 it claims to repair and must not break, and the correction must pass a stand-in replay (Tier~1),
 the customer's own agent replaying the case set (Tier~2) and a live canary on a hashed share of
-sessions with a significance test (Tier~3) before it ships --- reversibly. At level~2, the loop's
+sessions that must show the fix no worse than the rule it replaces (Tier~3) before it ships ---
+reversibly. At level~2, the loop's
 own history (what it tried on this entry, what passed, what regressed) is evidence for its next
 draft. At level~3, the record the loop produces trains the next model and the repair prompt
 itself. The claim is not that the repair agent is clever. The claim is that \textbf{a correction
-may only change behaviour after it has been tested on the runs it claims to repair and has
-beaten the control arm on live traffic}, and that a system built this way recovers faster than
+may only change behaviour after it has been tested on the runs it claims to repair and shown
+no worse than the control arm on live traffic}, and that a system built this way recovers faster than
 one that can only demote what failed, while shipping fewer wrong corrections than one that ships
 on a passed test.
 
@@ -173,11 +174,19 @@ the case (\S\ref{sec:findings}, finding 9).
 \paragraph{Tier 3 --- canary.} A passed fix opens a canary: sessions are bucketed by
 $\mathrm{sha256}(\mathit{fix}{:}\mathit{session})$, a share \code{pct} reads from the branch,
 writes always go to \code{main}, and the trace is stamped with its branch. \code{decide()}
-requires both arms to reach \code{min\_outcomes} graded runs \emph{in the fix's situation},
-guards that the canary's success rate is not below the control's, and runs a one-sided
-two-proportion $z$-test on the recurrence of the judged failure ($p<0.05$). The benchmark maps
-the production defaults (10\,\%, 20 outcomes, 14 days) to \code{pct}=50, \code{min\_outcomes}=8,
-timeout 60 sessions, evaluated every 5 graded sessions. One canary per agent at a time.
+requires both arms to reach \code{min\_outcomes} graded runs --- runs \emph{in the fix's
+situation or that read an entry the fix is about} (cut \emph{post-canary-ni}; before it,
+situation only: \S\ref{sec:findings}, finding 11) --- and guards that the canary's success rate
+is not below the control's. The canary is the loop's \emph{harm} gate: the replay tiers prove
+the benefit on the failing runs, and live traffic has to show the change does not make the agent
+worse on the runs the old rule still served. It passes when the canary arm recurs significantly
+less (one-sided two-proportion $z$-test, $p<0.05$) or when the one-sided 95\,\% upper bound
+(Newcombe) on canary$-$control recurrence is under a margin of 10 points with the failure live in
+control; it fails when the canary arm recurs significantly more. Before \emph{post-canary-ni}
+the primary asked for a significant improvement, and no canary ever passed (finding 11). The
+benchmark maps the production defaults (10\,\%, 20 outcomes, 14 days) to \code{pct}=50,
+\code{min\_outcomes}=8, a timeout of 60 sessions (200, the cell horizon, from amendment~(v)),
+evaluated every 5 graded sessions. One canary per agent at a time.
 
 \paragraph{Ship, verify, revert.} Policy \code{auto\_after\_canary} merges a passed canary's branch
 into \code{main}; \code{auto\_after\_replay} (the ``$-$ canary'' ablation) merges on a passed
@@ -483,8 +492,15 @@ arm are graded, three canaries end ``none declared it'', and no canary decides i
 with ten agents; the one whose declarations were stable reached 25/30 graded, found recurrence of
 12\,\% against 17\,\% --- no significant difference --- and timed out, because the rule waits for
 a significant \emph{improvement}. This, not the horizon, is why no canary has decided in any run.
-The corrections (grade every exposed run with an outcome; merge canonicals an agent's identity
-already folds apart) are put to the owner; the third point is a design question.
+Corrected after approval (amendment~(v), PR~\#799, cut \emph{post-canary-ni}): the canary grades
+runs in the fix's situation \emph{or} that read an entry the fix is about, and its primary is
+non-inferiority --- a one-sided 95\,\% Newcombe bound on canary$-$control recurrence under 10
+points, with the failure live in control --- because the canary is the harm gate on a change the
+replay tiers already proved. Canonical merging was not done: it changes situation identity for
+every customer with the opposite failure mode, and the canary no longer depends on it.
+Pre-registered on the rerun: P12 (canaries reach the floor), P13 (canaries decide), P14 (no pass
+harms the kept class) and P11(a$'$) (drafts state their condition; the regime draft now sees the
+situation's passing runs).
 \end{enumerate}
 
 \paragraph{The canary inside a cell (see also \S\ref{sec:posthoc}).} Separately from the defects, no canary reached a decision
@@ -514,6 +530,7 @@ P9(a,c) & (q) c3 & proof set of 3--6 cases; kept-case failures occur & met \\
 P9(b) & (q) c3 & $\leq 25\,\%$ of proof-passing regime fixes non-conditional & falsified 83\,\% \\
 P10 & (s) c5 & no fix drafted from a replay; no alias from a replay & met (0 of 47 manifest runs; 134 replays present) \\
 P11 & (t) c5 & non-conditional share $< 50\,\%$; a \code{ci-fix} kept-case failure; ships fall & (a) falsified 4/4; (b) met, 3; (c) met, 11 $\to$ 2 \\
+P12--P14, P11(a$'$) & (v) c6 & canaries reach the floor, decide, and no pass harms the kept class; drafts conditional & pending: PR~\#799 not yet deployed \\
 \bottomrule
 \end{tabular}
 \caption{The predictions ledger. Every preregistered prediction on the engine so far, with the
