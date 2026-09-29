@@ -205,9 +205,52 @@ def fig_cuts(out: Path) -> None:
     plt.close(fig)
 
 
+def fig_canary(run: str, out: Path, horizon: int = 200) -> bool:
+    """Every canary of a fleet run: exposure per arm against the cell's episode index, from the
+    sealed traces' stamps (``analysis/rsi_canary_readout.py`` -> ``canary_readout.json``), with
+    the graded floor and the verdict. Returns False when the readout is missing."""
+    path = rsi.RESULTS / run / "canary_readout.json"
+    if not path.exists():
+        return False
+    rows = [r for r in json.loads(path.read_text())["rows"] if r["p14"]["stamped_canary"] + r["p14"]["stamped_control"]]
+    if not rows:
+        return False
+    rows.sort(key=lambda r: (r["cell"], r["started_at"] or ""))
+    ncol = 4
+    nrow = (len(rows) + ncol - 1) // ncol
+    fig, axes = plt.subplots(nrow, ncol, figsize=(11, 2.3 * nrow), sharex=True, sharey=True, squeeze=False)
+    for ax, r in zip(axes.flat, rows, strict=False):
+        for arm, col in (("canary", "#d62728"), ("control", "#8c8c8c")):
+            eps = r["p14"]["episodes"][arm]
+            if eps:
+                ax.step(eps, range(1, len(eps) + 1), where="post", color=col, lw=1.3,
+                        label=f"{arm} ({r[f'{arm}_graded']} graded)")
+        ax.axhline(r["min_outcomes"], color="k", lw=0.6, ls=":")
+        fam, arm_name, _, seed, _ = r["cell"].split("|")
+        verdict = r["status"] + (f" ({r['reason']})" if r.get("reason") else "")
+        ax.set_title(f"{fam} {arm_name.replace('senselab-rsi', 'SL')} {seed} · from {r['started_from'].split('_')[1]}"
+                     f" · {verdict}", fontsize=6.5)
+        ax.legend(fontsize=6, frameon=False, loc="upper left")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.set_xlim(0, horizon)
+    for ax in axes.flat[len(rows):]:
+        ax.axis("off")
+    for ax in axes[-1]:
+        ax.set_xlabel("cell episode", fontsize=8)
+    for ax in axes[:, 0]:
+        ax.set_ylabel("exposed runs", fontsize=8)
+    fig.suptitle(f"Canaries of {run}: runs stamped to each arm by the router, from the sealed traces; "
+                 "dotted line = graded floor per arm", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out / "fig_canary.png", dpi=200)
+    plt.close(fig)
+    return True
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--senselab-run", default=None)
+    ap.add_argument("--fleet-run", default=None, help="fleet-10 run with a canary_readout.json (fig_canary)")
     ap.add_argument("--seeds", nargs="+", type=int, default=list(rsi.SEEDS))
     ap.add_argument("--models", nargs="+", default=list(rsi.MODELS))
     ap.add_argument("--out", type=Path, default=OUT)
@@ -220,8 +263,10 @@ def main() -> None:
     fig_curves(systems, args.out)
     fig_cost(systems, args.out)
     fig_cuts(args.out)
+    canary_drawn = bool(args.fleet_run) and fig_canary(args.fleet_run, args.out)
     (args.out / "provenance.json").write_text(json.dumps(
-        {"senselab_run": sl_run, "seeds": list(rsi.SEEDS), "models": list(rsi.MODELS),
+        {"senselab_run": sl_run, "fleet_run": args.fleet_run if canary_drawn else None,
+         "seeds": list(rsi.SEEDS), "models": list(rsi.MODELS),
          "systems": {k: list(v) for k, v in systems.items()}}, indent=1) + "\n")
     print(f"wrote {sorted(p.name for p in args.out.glob('fig_*.png'))} to {args.out}")
 

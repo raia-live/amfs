@@ -130,6 +130,8 @@ def readout(run: str, dsn: str | None, arms: tuple[str, ...]) -> dict[str, Any]:
                     "control": (co.get("graded") or 0) / co["traces"] if co.get("traces") else None},
                 "kept_cases": kept_cases, "moved_cases": moved_cases,
                 "p14": {"stamped_canary": len(st.get("canary", [])), "stamped_control": len(st.get("control", [])),
+                        "episodes": {a: sorted(int(e.get("episode", -1)) for e in st.get(a, []))
+                                     for a in ("canary", "control")},
                         "kept_post_change": {"canary": [k_can, s_can], "control": [k_con, s_con]},
                         "kept_fas": {"canary": rate_can, "control": rate_con},
                         "control_minus_canary": harm},
