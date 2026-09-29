@@ -2188,3 +2188,11 @@ The knob defaults to 0 (product default), so earlier runs' semantics are preserv
   before any (v) result is reported.
 No arm, scenario, change set, rubric or paired metric changes. The E2b rerun is the dev read
 (seeds 11/23); confirmatory grid unchanged.
+
+**Cut record — `post-canary-ni`.** Bugbot found one defect on #799 (the draft's kept-run scan
+asked with `failed_limit=0`, 24 rows against the proof set's 48; fixed `daf56132`, regression test
+added). #799 merged `db5e1905` at 11:24:23Z; deploy run 36561541416, deploy job 11:30:30Z–11:35:32Z,
+`amfs-api-02107-j28` ready 11:34:25Z at 100 % traffic, `pro-api-00787-hs5`. **Cut = 11:35:32Z**
+(deploy job green). Every trace of the account sealed after it is on the corrected canary and
+prompt; `rsi-e2b-c6` (the E2b rerun of this amendment) starts after the cut with
+`CL_RSI_CANARY_TIMEOUT=200 CL_RSI_CANARY_WINDOW=200`, otherwise the (t) E2b command verbatim.
