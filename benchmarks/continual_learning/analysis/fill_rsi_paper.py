@@ -39,7 +39,7 @@ TABLES: dict[str, tuple[str, str, str, str, tuple[str, ...]]] = {
         "per system: \\code{support} and \\code{ci-fix} $\\times$ seeds 11 / 23). First-attempt success on "
         "every post-change episode. \\emph{Moved half}: changed-class instances whose rule changed; "
         "\\emph{kept half}: changed-class instances whose rule did not. Brackets: cell-level bootstrap 95\\% "
-        "interval. Development seeds; SenseLab on the \\code{post-clean-success} engine cut.",
+        "interval. Development seeds; SenseLab on the \\code{post-canary-ni} engine cut.",
         "tab:headline", ("cells", "infra err")),
     "TAB_PAIRED": (
         "REPORT.md", "1b. Paired cell deltas, moved half",
@@ -53,7 +53,8 @@ TABLES: dict[str, tuple[str, str, str, str, tuple[str, ...]]] = {
         "REPORT.md", "2. SenseLab by engine cut",
         "SenseLab on successive cuts of the engine, same protocol and seeds. Fix counts are over the four "
         "SenseLab cells of each run. \\code{pre-seam4}: amfs-internal \\#787/\\#788; \\code{post-seam5}: \\#793, \\#794; "
-        "\\code{post-seam5b}: \\#795, \\#796; \\code{post-seam8}: \\#797 (\\S\\ref{sec:findings}).", "tab:cuts", ("cells", "what changed")),
+        "\\code{post-seam5b}: \\#795, \\#796; \\code{post-clean-success}: \\#797, \\#798; \\code{post-canary-ni}: "
+        "\\#799 (\\S\\ref{sec:findings}).", "tab:cuts", ("cells", "what changed")),
     "TAB_ATTRIBUTION": (
         "REPORT.md", "3. Attribution",
         "Attribution. SenseLab against its own ablations on the same protocol: without the canary (policy "

@@ -56,6 +56,9 @@ CUTS: list[tuple[str, str, str]] = [
     # kept on disk and used for no prediction, so it is not a row here.
     ("rsi-c5", "post-clean-success",
      "#797 replays are not traffic; #797/#798 proof cases need a clean success, whatever grades them"),
+    ("rsi-c6", "post-canary-ni",
+     "#799 canary grades runs in the situation or that read an implicated entry; non-inferiority primary; "
+     "regime draft sees the situation's passing runs"),
 ]
 SCENARIOS = ("support", "ci-fix")
 #: development seeds and model; ``--seeds 37 41 59 73 --models gpt-5.5 claude-opus-5`` is the

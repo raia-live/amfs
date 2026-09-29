@@ -25,7 +25,7 @@
 \large An engine that lets deployed agents improve their own operation --- proposing, proving, canarying and shipping their own corrections --- measured where the world changes under a long-running agent and outcome learning alone cannot recover}
 
 \author{SenseLab Research\\[0.3em]\normalsize\url{https://sense-lab.ai}}
-\date{Preprint v0.1 --- development seeds --- September 2026}
+\date{Preprint v0.2 --- development seeds --- September 2026}
 
 \begin{document}
 \sloppy
@@ -49,13 +49,14 @@ never its parts against each other --- on a continual benchmark in which the cor
 a task class changes \emph{conditionally} at episode 30 of 100, so that half of the class needs
 the new rule and half still needs the old one, and no amount of retrying the old action can
 recover the first attempt. On the development seeds SenseLab takes the new action first in
-34\,\% of moved-half episodes against 5--19\,\% for a frontier model alone and three vector-store
+33\,\% of moved-half episodes against 5--19\,\% for a frontier model alone and three vector-store
 baselines, holding unchanged work at 96\,\%; a context window carrying every prior note reaches
-33\,\% at 1.4$\times$ the all-in cost (2.1$\times$ the agent's own). Level~1 has not yet added to level~0 on these seeds, and the
-tables say why: no canary can decide inside a 100-episode cell, and until the last engine cut what
-the proof tiers passed was the unconditional rule --- on the current cut the proof rejects 19 of
-23 regime fixes, and what it still passes is a wholesale flip the replaying agent did not follow. The paper's main contribution is the record of how a
-preregistered benchmark found eleven things about the loop's evidence path --- nine defects, eight of them
+the same 33\,\% at 1.5$\times$ the all-in cost (2.1$\times$ the agent's own). Level~1 has not yet added to level~0 on these seeds, and the
+tables say why: no canary can decide inside a 100-episode cell, and until the last engine cuts what
+the proof tiers passed was the unconditional rule --- on the current cut the proof rejects 15 of
+17 regime fixes, and the two it passes are a wholesale flip and a retry ladder, neither of which
+states the condition the world changed on. The paper's main contribution is the record of how a
+preregistered benchmark found eleven things about the loop's evidence path --- nine defects, all
 fixed in production between runs and re-measured on the same protocol --- and what each
 says about building self-improving systems that can be trusted: what counts as a regime shift,
 how a situation is identified, what a fix must be proved against, who grades the proof, what
@@ -268,10 +269,10 @@ Context window & 33 \% (25/75) [0, 78] & 98 \% (64/65) [94, 100] & 100 \% (140/1
 pgvector & 17 \% (13/75) [2, 38] & 45 \% (29/65) [13, 78] & 93 \% (130/140) & 71 \% (85/120) & 88 \% (353/400) & 12 \% (47/400) & 0.027 \\
 pgvector + rerank & 5 \% (4/75) [1, 9] & 86 \% (56/65) [78, 95] & 94 \% (132/140) & 79 \% (95/120) & 90 \% (359/400) & 10 \% (41/400) & 0.028 \\
 pgvector + outcomes (DIY) & 19 \% (14/75) [0, 44] & 55 \% (36/65) [39, 78] & 80 \% (112/140) & 70 \% (84/120) & 88 \% (351/400) & 12 \% (49/400) & 0.035 \\
-SenseLab & 34 \% (25/74) [17, 56] & 63 \% (41/65) [29, 77] & 96 \% (132/137) & 83 \% (100/120) & 92 \% (363/396) & 8 \% (33/396) & 0.033 \\
+SenseLab & 33 \% (25/75) [14, 56] & 63 \% (41/65) [40, 76] & 96 \% (134/140) & 81 \% (97/120) & 92 \% (368/400) & 8 \% (32/400) & 0.033 \\
 \bottomrule
 \end{tabular}}
-\caption{After the rule changes conditionally (set C, change at episode 30 of 100; GPT-5.5; four cells per system: \code{support} and \code{ci-fix} $\times$ seeds 11 / 23). First-attempt success on every post-change episode. \emph{Moved half}: changed-class instances whose rule changed; \emph{kept half}: changed-class instances whose rule did not. Brackets: cell-level bootstrap 95\% interval. Development seeds; SenseLab on the \code{post-clean-success} engine cut.}
+\caption{After the rule changes conditionally (set C, change at episode 30 of 100; GPT-5.5; four cells per system: \code{support} and \code{ci-fix} $\times$ seeds 11 / 23). First-attempt success on every post-change episode. \emph{Moved half}: changed-class instances whose rule changed; \emph{kept half}: changed-class instances whose rule did not. Brackets: cell-level bootstrap 95\% interval. Development seeds; SenseLab on the \code{post-canary-ni} engine cut.}
 \label{tab:headline}
 \end{table}
 
@@ -286,19 +287,19 @@ cell-level bootstrap 95\,\% intervals. Same numbers as Table~\ref{tab:headline}.
 \label{fig:headline}
 \end{figure}
 
-Table~\ref{tab:headline} is the state of the engine on its current cut, \code{post-clean-success}
-(\S\ref{sec:findings}, findings 8--10 live). Three things
+Table~\ref{tab:headline} is the state of the engine on its current cut, \code{post-canary-ni}
+(\S\ref{sec:findings}, findings 8--11 live). Three things
 are in it. First, on the moved half every retrieval memory is at or below the frontier model
 alone: a note that says ``do $X$ for class $C$'' is retrieved as confidently after the change as
 before, and pgvector with reranking --- the best retriever --- is the \emph{worst} system on the
 moved half at 5\,\%, because it retrieves the stale note most reliably. Second, SenseLab is the
 only system that recovers the moved half on both families while holding the unchanged classes
-at 96\,\%: 34\,\% [17, 56] against 5--19\,\% for the frontier model and the three vector stores,
-winning every paired cell. The context window ties it in the mean (33\,\%) by beating it on
+at 96\,\%: 33\,\% [14, 56] against 5--19\,\% for the frontier model and the three vector stores,
+winning every paired cell. The context window ties it exactly (33\,\%) by beating it on
 \code{ci-fix} (78 against 56: the whole history fits in 24k tokens and the model can see the
-change happen) and doing nothing on \code{support} (0/43, SenseLab 7/42), at 1.4$\times$ the all-in cost
-(2.1$\times$ the agent's own calls) and 3.6$\times$ the tokens. Third, SenseLab pays on the kept half: 63\,\% against 86--98\,\% for the systems that
-simply keep applying the old rule. That cost is the shape of the mechanism --- the entry is
+change happen) and doing nothing on \code{support} (0/43, SenseLab 7/43), at 1.5$\times$ the all-in cost
+(2.1$\times$ the agent's own calls) and 3.7$\times$ the tokens. Third, SenseLab pays on the kept half: 63\,\% against 86\,\% and 98\,\% for the two
+systems that keep applying the old rule most reliably (pgvector + rerank and the context window). That cost is the shape of the mechanism --- the entry is
 marked contested and the agent explores where the old action was still right --- and it is the
 number the repair loop exists to remove: a written conditional rule would recover the moved half
 \emph{without} giving up the kept one. Whether it does yet is Table~\ref{tab:attribution}.
@@ -309,11 +310,11 @@ number the repair loop exists to remove: a written conditional rule would recove
 \toprule
 \textbf{pair} & \textbf{support s11} & \textbf{support s23} & \textbf{ci-fix s11} & \textbf{ci-fix s23} & \textbf{mean} & \textbf{cells won} & \textbf{p} & \textbf{p (Holm)} \\
 \midrule
-SenseLab $-$ Frontier alone & +17 & +16 & +16 & +15 & +16 & 4/4 & 0.125 & 0.625 \\
-SenseLab $-$ Context window & +17 & +16 & -21 & -23 & -3 & 2/4 & 0.750 & 0.750 \\
-SenseLab $-$ pgvector & +13 & +16 & +16 & +23 & +17 & 4/4 & 0.125 & 0.625 \\
-SenseLab $-$ pgvector + rerank & +13 & +16 & +53 & +38 & +30 & 4/4 & 0.125 & 0.625 \\
-SenseLab $-$ pgvector + outcomes (DIY) & +17 & +16 & +11 & +15 & +15 & 4/4 & 0.125 & 0.625 \\
+SenseLab $-$ Frontier alone & +26 & +5 & +11 & +23 & +16 & 4/4 & 0.125 & 0.625 \\
+SenseLab $-$ Context window & +26 & +5 & -26 & -15 & -3 & 2/4 & 0.875 & 0.875 \\
+SenseLab $-$ pgvector & +22 & +5 & +11 & +31 & +17 & 4/4 & 0.125 & 0.625 \\
+SenseLab $-$ pgvector + rerank & +22 & +5 & +47 & +46 & +30 & 4/4 & 0.125 & 0.625 \\
+SenseLab $-$ pgvector + outcomes (DIY) & +26 & +5 & +5 & +23 & +15 & 4/4 & 0.125 & 0.625 \\
 \bottomrule
 \end{tabular}}
 \caption{SenseLab minus each system on the moved half, per cell, in percentage points, paired on (family, seed).}
@@ -332,7 +333,7 @@ Context window & 0 \% (0/43) & 96 \% (26/27) & 100 \% (70/70) & 78 \% (25/32) & 
 pgvector & 2 \% (1/43) & 78 \% (21/27) & 86 \% (60/70) & 38 \% (12/32) & 21 \% (8/38) & 100 \% (70/70) \\
 pgvector + rerank & 2 \% (1/43) & 78 \% (21/27) & 90 \% (63/70) & 9 \% (3/32) & 92 \% (35/38) & 99 \% (69/70) \\
 pgvector + outcomes (DIY) & 0 \% (0/43) & 78 \% (21/27) & 69 \% (48/70) & 44 \% (14/32) & 39 \% (15/38) & 91 \% (64/70) \\
-SenseLab & 17 \% (7/42) & 44 \% (12/27) & 97 \% (65/67) & 56 \% (18/32) & 76 \% (29/38) & 96 \% (67/70) \\
+SenseLab & 16 \% (7/43) & 44 \% (12/27) & 96 \% (67/70) & 56 \% (18/32) & 76 \% (29/38) & 96 \% (67/70) \\
 \bottomrule
 \end{tabular}}
 \caption{By family: first-attempt success on the moved half, the kept half and the unchanged classes.}
@@ -362,8 +363,8 @@ its prompt (Table~\ref{tab:byfamily}).}
 \toprule
 \textbf{system} & \textbf{moved half} & \textbf{kept half} & \textbf{unchanged classes} & \textbf{pre-change} & \textbf{episode success} & \textbf{escalated} & \textbf{infra err} & \textbf{\$/ep} \\
 \midrule
-SenseLab & 34 \% (25/74) [17, 56] & 63 \% (41/65) [29, 77] & 96 \% (132/137) & 83 \% (100/120) & 92 \% (363/396) & 8 \% (33/396) & 4 & 0.033 \\
-SenseLab $-$ canary & 37 \% (27/73) [12, 62] & 75 \% (49/65) [54, 85] & 98 \% (136/139) & 80 \% (96/120) & 93 \% (370/397) & 7 \% (27/397) & 3 & 0.031 \\
+SenseLab & 33 \% (25/75) [14, 56] & 63 \% (41/65) [40, 76] & 96 \% (134/140) & 81 \% (97/120) & 92 \% (368/400) & 8 \% (32/400) & 0 & 0.033 \\
+SenseLab $-$ canary & 39 \% (29/75) [14, 66] & 62 \% (40/65) [42, 74] & 99 \% (139/140) & 79 \% (95/120) & 91 \% (365/400) & 9 \% (35/400) & 0 & 0.033 \\
 SenseLab $-$ repair loop & 51 \% (38/75) [33, 73] & 69 \% (45/65) [58, 76] & 96 \% (135/140) & 81 \% (97/120) & 92 \% (369/400) & 8 \% (31/400) & 0 & 0.032 \\
 \bottomrule
 \end{tabular}}
@@ -374,8 +375,8 @@ SenseLab $-$ repair loop & 51 \% (38/75) [33, 73] & 69 \% (45/65) [58, 76] & 96 
 
 On these seeds level~1 does not yet add to level~0. Without the repair loop (policy
 \code{review}: the loop proposes, nothing ships, the memory learns from outcomes alone) the moved
-half is 51\,\% and the kept half 69\,\%; with it, 34\,\% and 63\,\%; without the canary but with
-the replay gate, 37\,\% and 75\,\%. The intervals overlap throughout and nothing here is a
+half is 51\,\% and the kept half 69\,\%; with it, 33\,\% and 63\,\%; without the canary but with
+the replay gate, 39\,\% and 62\,\%. The intervals overlap throughout and nothing here is a
 difference. What the lifecycle table shows is \emph{why}, and it is not that the loop is idle.
 
 \begin{table}[H]
@@ -392,6 +393,8 @@ SenseLab, post-seam5b & 24 & 19 / 5 & 14 / 9 / 1 & 15 / 8 / 1 & 6 / 4 & 0 \\
 SenseLab $-$ canary, post-seam5b & 16 & 13 / 3 & 10 / 5 / 1 & 11 / 4 / 0 & 0 / 0 & 11 \\
 SenseLab, post-clean-success & 16 & 13 / 3 & 9 / 7 / 0 & 3 / 13 / 0 & 3 / 3 & 0 \\
 SenseLab $-$ canary, post-clean-success & 17 & 13 / 4 & 9 / 4 / 4 & 2 / 12 / 3 & 0 / 0 & 2 \\
+SenseLab, post-canary-ni & 13 & 8 / 5 & 4 / 8 / 0 & 4 / 7 / 1 & 3 / 3 & 0 \\
+SenseLab $-$ canary, post-canary-ni & 14 & 10 / 4 & 4 / 9 / 1 & 0 / 13 / 0 & 0 / 0 & 0 \\
 \bottomrule
 \end{tabular}}
 \caption{Fix lifecycle by run and arm. Tier~1: stand-in replay on the fix branch; Tier~2: the customer's replay of the case set; a canary grades live exposure in the fix's situation. \emph{open}: Tier~2 replays still awaited when the cell ended. No canary reached a decision inside a 100-episode cell; no fix was reverted; 96--100\% of proposals were drafted by the repair agent.}
@@ -399,37 +402,51 @@ SenseLab $-$ canary, post-clean-success & 17 & 13 / 4 & 9 / 4 / 4 & 2 / 12 / 3 &
 \end{table}
 
 
-On the current cut the loop proposed 16 fixes in the four SenseLab cells, 13 of them from regime
-shifts; 9 passed Tier~1 (7 inconclusive), \textbf{3 passed Tier~2 and 13 failed it}, and none
-shipped, because no canary reached \code{min\_outcomes} graded runs in its situation before the
-cell ended (the three canaries that started were still running at episode 100, with 0--1 canary-arm
-and 0--6 control-arm runs graded against a floor of 8). A running canary is not inert: half of the
-sessions in its situation read the fix branch while it runs, so an unshipped fix reaches behaviour
-in SenseLab cells too. On the previous cut the same protocol passed 15 of 24 at Tier~2 and the
-ablation without the canary shipped 11 of 16; on this cut the ablation shipped 2 of 17 (one
-regime fix, one judge fix), and its moved and kept halves are 62\,\% and 84\,\% on \code{ci-fix}
-(SenseLab: 56 and 76) and 17\,\% and 63\,\% on \code{support} (SenseLab: 17 and 44). With 27--43
+On the current cut the loop proposed 13 fixes in the four SenseLab cells, 8 of them from regime
+shifts; 4 passed Tier~1 (8 inconclusive), \textbf{4 passed Tier~2 and 7 failed it} (one still
+open), and none shipped: no canary decided before the cell ended. The three canaries that started
+were running at episode 100. Two, on regime fixes, had 2/8 and 4/8 canary-arm runs graded
+against the floor; the third, on a judge fix, was fully graded --- 18 canary-arm and 31
+control-arm runs --- and still had no verdict, because at 6\,\% against 10\,\% recurrence the
+one-sided bound on the difference was 13 points against a margin of 10. That is the arithmetic of
+the harm gate at this sample: with a 10\,\% control recurrence the bound falls under the margin at
+about 15 graded runs per arm if the canary never recurs, about 30 if it recurs at 6\,\%, and
+about 50 if it recurs as often as control; a 100-episode cell supplied 18 and 31 to its best
+canary. A running canary is not inert: half of the sessions in its situation read the fix branch
+while it runs, so an unshipped fix reaches behaviour in SenseLab cells too. Two cuts earlier the
+same protocol passed 15 of 24 at Tier~2 and the ablation without the canary shipped 11 of 16; on
+the previous cut the ablation shipped 2 of 17; on this cut it shipped \textbf{none} of 14 (Tier~2:
+0 passed, 13 failed), and its moved and kept halves are 66\,\% and 71\,\% on \code{ci-fix}
+(SenseLab: 56 and 76) and 19\,\% and 48\,\% on \code{support} (SenseLab: 16 and 44). With 27--43
 episodes per half per family none of these is a difference, and the confirmatory run is powered for
 one where this one is not.
 
 What the proof-passing fixes \emph{say} is not in doubt, and what the proof now rejects is the
-result of findings 9 and 10. On the previous cut, hand-coding the fix text against the true
+result of findings 9 and 10. Three cuts earlier, hand-coding the fix text against the true
 change, 20 of the 24 regime fixes that passed their proof set encoded an unconditional flip
 (``always $Y$'') where the change was conditional (``$Y$ when $a$, else $X$''); on \code{ci-fix},
 19 of 19. The proof graded a replay on the \emph{outcome} it reported --- or on a judge that, by
 its frozen rubric, passes a recovered run --- and this agent, like any agent with a retry budget,
-recovers: a fix that flipped the rule wholesale passed every case in which it could. On the
-current cut a proof case passes only on a clean success, whatever grades it, and Tier~2 failed 19
-of the 23 regime fixes that reached it: 5 on a \emph{kept} case (a wholesale flip broke the half
-the old rule still holds for; 3 of these on \code{ci-fix}), 10 on a \emph{moved} case only (the
-old rule in better words did not repair the half that moved), 4 on a pre-change or unchanged case.
-Both ways a correction can miss a conditional are now caught. The four that passed --- three in
-canary in SenseLab cells, one shipped by the ablation --- are all unconditional (``always bump''),
-and their kept-half replays succeeded cleanly anyway: the replaying agent read the rule and did
-not follow it into the wrong action. A proof pass is therefore now necessary but cannot by itself
-certify a conditional when the agent's compliance with an entry is partial; that is what the live
-canary and the judge's followed-memory criterion are for, and the confirmatory analysis reads the
+recovers: a fix that flipped the rule wholesale passed every case in which it could. Since the
+\code{post-clean-success} cut a proof case passes only on a clean success, whatever grades it. On
+that cut Tier~2 failed 19 of the 23 regime fixes that reached it (5 on a \emph{kept} case, 10 on a
+\emph{moved} case only, 4 on a pre-change or unchanged case); on the current cut, with the repair
+agent also handed the situation's passing runs (finding 11), it failed 15 of 17: 4 on a
+\emph{kept} case (a wholesale flip broke the half the old rule still holds for), 10 on a
+\emph{moved} case only (the old rule in better words did not repair the half that moved), 1 on a
+pre-change case. Both ways a correction can miss a conditional are caught. The two that passed
+--- both in canary in SenseLab cells, neither shipped --- are a wholesale flip on \code{ci-fix}
+(``prefer bumping \ldots{} even if the changed files include related legacy code'', the opposite
+of the true condition) and, on \code{support}, a retry ladder (settings, then cache, then
+reinstall) whose evidence section names the ticket that needed the new action but whose rule
+branches on what has already failed, not on the app version the change turned on. Their moved
+and kept replays succeeded cleanly anyway: the replaying agent read the rule and did not follow
+it into the wrong action. A proof pass is therefore now necessary but cannot by itself certify a
+conditional when the agent's compliance with an entry is partial; that is what the live canary
+and the judge's followed-memory criterion are for, and the confirmatory analysis reads the
 criterion per episode to separate ``the rule was wrong'' from ``the rule was wrong and followed''.
+Whether the drafts now state their condition (P11(a$'$)) is read by two coders blind to arm and
+verdict over every regime fix whose proof set holds a kept case --- 12 on this cut --- not by us.
 
 \subsection{What the replay gate alone let through (exploratory)}
 \label{sec:posthoc}
@@ -501,9 +518,10 @@ pre-seam4 (`rsi-c1-rsi`) & 36 \% (27/75) & 65 \% (42/65) & 96 \% (134/139) & 6 \
 post-seam5 (`rsi-c2`) & 47 \% (35/75) & 60 \% (39/65) & 99 \% (138/140) & 6 \% (24/400) & 16 & 6 & 0 \\
 post-seam5b (`rsi-c3`) & 43 \% (32/75) & 60 \% (39/65) & 99 \% (138/140) & 8 \% (30/400) & 24 & 15 & 0 \\
 post-clean-success (`rsi-c5`) & 34 \% (25/74) & 63 \% (41/65) & 96 \% (132/137) & 8 \% (33/396) & 16 & 3 & 0 \\
+post-canary-ni (`rsi-c6`) & 33 \% (25/75) & 63 \% (41/65) & 96 \% (134/140) & 8 \% (32/400) & 13 & 4 & 0 \\
 \bottomrule
 \end{tabular}}
-\caption{SenseLab on successive cuts of the engine, same protocol and seeds. Fix counts are over the four SenseLab cells of each run. \code{pre-seam4}: amfs-internal \#787/\#788; \code{post-seam5}: \#793, \#794; \code{post-seam5b}: \#795, \#796; \code{post-seam8}: \#797 (\S\ref{sec:findings}).}
+\caption{SenseLab on successive cuts of the engine, same protocol and seeds. Fix counts are over the four SenseLab cells of each run. \code{pre-seam4}: amfs-internal \#787/\#788; \code{post-seam5}: \#793, \#794; \code{post-seam5b}: \#795, \#796; \code{post-clean-success}: \#797, \#798; \code{post-canary-ni}: \#799 (\S\ref{sec:findings}).}
 \label{tab:cuts}
 \end{table}
 
@@ -520,10 +538,11 @@ what shipped (nothing, on every cut: no canary decided inside a 100-episode cell
 \end{figure}
 
 Table~\ref{tab:cuts} is the same protocol on successive cuts of the engine and is the trace of
-\S\ref{sec:findings} in numbers: the loop went from 9 proposals and 2 Tier~2 verdicts on the first
-cut to 24 and 15 on the third as its evidence path was repaired, while the outcome endpoints
-moved within noise. The cut under test now is the first on which the loop's proof set can see the
-conditional.
+\S\ref{sec:findings} in numbers: the loop went from 9 proposals and 2 Tier~2 passes on the first
+cut to 24 and 15 on the third as its evidence path was repaired, then to 16 and 3, and 13 and 4,
+as the proof learned to reject a recovered success --- while the outcome endpoints moved within
+noise throughout. The cut under test now is the first on which the proof set can see the
+conditional and the drafter is shown the runs the old rule still serves.
 
 \subsection{Cost}
 \label{sec:cost}
@@ -539,8 +558,8 @@ Context window & 24,322 & 0.070 & 0.000 & 0.000 & 0.000 & 0.0 & 0.000 & 0.070 & 
 pgvector & 4,475 & 0.027 & 0.000 & 0.000 & 0.000 & 0.0 & 0.000 & 0.027 & 0.0 & 9 \\
 pgvector + rerank & 3,953 & 0.025 & 0.003 & 0.000 & 0.000 & 0.0 & 0.000 & 0.028 & 0.0 & 10 \\
 pgvector + outcomes (DIY) & 5,406 & 0.029 & 0.005 & 0.000 & 0.000 & 0.0 & 0.000 & 0.035 & 0.0 & 9 \\
-SenseLab & 6,711 & 0.033 & 0.000 & 0.004 & 0.007 & 4.0 & 0.005 & 0.050 & 12.1 & 23 \\
-SenseLab $-$ canary & 6,204 & 0.031 & 0.000 & 0.004 & 0.007 & 4.3 & 0.006 & 0.048 & 10.3 & 21 \\
+SenseLab & 6,629 & 0.033 & 0.000 & 0.004 & 0.004 & 3.0 & 0.004 & 0.046 & 14.8 & 25 \\
+SenseLab $-$ canary & 6,581 & 0.033 & 0.000 & 0.005 & 0.007 & 3.5 & 0.005 & 0.049 & 14.1 & 24 \\
 SenseLab $-$ repair loop & 6,537 & 0.032 & 0.000 & 0.000 & 0.000 & 3.8 & 0.005 & 0.037 & 10.5 & 20 \\
 \bottomrule
 \end{tabular}}
@@ -571,12 +590,12 @@ says \emph{est.} because it is one. Runs launched from the day the ledger was fi
 carry a reading at run start, after every cell and at run end, so the confirmatory runs report
 the ledger difference directly and this estimate is checked against it.
 
-On these seeds SenseLab costs USD~0.050 per episode all in: 4.4$\times$ the frontier model alone
-(0.011), 1.8$\times$ the pgvector memories (0.027--0.035), and 0.7$\times$ the context window
-(0.070). One third of it is the loop (judges 0.004, Tier~2 replays 0.007, drafts 0.005 per
+On these seeds SenseLab costs USD~0.046 per episode all in: 4.2$\times$ the frontier model alone
+(0.011), 1.3--1.7$\times$ the pgvector memories (0.027--0.035), and 0.66$\times$ the context window
+(0.070). A quarter of it is the loop (judges 0.004, Tier~2 replays 0.004, drafts 0.004 per
 episode); the rest is the agent reading a longer briefing than a top-5 retrieval. Holding the
 loop at review still drafts (3.8 proposals per 100 episodes, 0.037 per episode): the drafting
-is what a person would read. Memory time (12\,s per episode against the production API, under
+is what a person would read. Memory time (15\,s per episode against the production API, under
 the harness's rate pacing) is the price of reading the evidence record rather than a vector
 index.
 
@@ -662,9 +681,9 @@ The preregistration promised to report every prediction. Table~\ref{tab:ledger} 
 and the findings below are the record of what a benchmark that knows the true rule found in a
 shipped self-improvement loop --- nine defects and two properties of the problem --- none of
 which a retrieval benchmark could have seen. All nine were fixed in production between runs, with
-their deploy cuts recorded; eight have been re-measured on the same protocol, and the ninth was
-found in the last run before this version, so its re-measurement is the run this version reports
-as open. We think this section is the paper's main contribution; the loop's evidence path
+their deploy cuts recorded, and all nine re-measured on the same protocol in the fleet-1 run the
+headline tables report; the ninth was found in the fleet-10 run, and its fleet-10 re-measurement
+is the run this version reports as open. We think this section is the paper's main contribution; the loop's evidence path
 is where such systems fail, and none of these failures is specific to ours.
 
 \begin{enumerate}[leftmargin=1.6em, itemsep=0.35em]
@@ -722,8 +741,8 @@ finding 9's fix reaches one case in 175 here. The size of the leak is measurable
 replays run since the \code{post-seam5b} cut, 479 passed, and 116 of those passes (24\,\%) carry
 a recorded failed attempt --- a recovered success the proof counted as clean. The engine-side correction is to carry the
 clean-success requirement on every case built for a regime fix, whatever grades it, and enforce
-it after the verdict. It shipped as the \code{post-clean-success} cut; the run on it is
-Table~\ref{tab:headline}, and P11 is read on it (\S\ref{sec:pending}).
+it after the verdict. It shipped as the \code{post-clean-success} cut; P11 is read on the run
+on that cut (\S\ref{sec:pending}), and Table~\ref{tab:cuts} carries it as a row.
 \item \textbf{The canary grades by canonical situation, and the agent's declarations fragment.}
 (Found in the fleet-10, 200-episode run of \S\ref{sec:posthoc}; not yet fixed.) A canary counts
 exposure --- runs that read the fix's entry --- but grades only runs whose canonical situation
@@ -786,9 +805,9 @@ the run this version reports as open.}
 \section{Pending, and what we expect}
 \label{sec:pending}
 
-The run on the current cut (\code{post-clean-success}: findings 8--10 live) is in
-Tables~\ref{tab:headline}--\ref{tab:lifecycle}. Its two preregistered predictions read as
-follows. \textbf{P10} (no fix has a manifest run that is a replay; no situation alias is created
+The headline tables are the run on the current cut, \code{post-canary-ni} (findings 8--11
+live; \code{rsi-c6}). The two predictions preregistered on the cut before it were read on that
+cut's run (\code{rsi-c5}) and stand as follows. \textbf{P10} (no fix has a manifest run that is a replay; no situation alias is created
 by a replay) is met: of the 47 runs cited by the 33 fix manifests drafted since the cut, none
 carries a replay tag, while 134 of the 928 sessions sealed in the same window were replays; and
 the seal hook sets a replay aside before situation identity runs, so no alias can come from one.
@@ -801,8 +820,14 @@ regime fixes, and the four survivors are wholesale flips whose kept-half replays
 the replaying agent did not follow the entry. Where the conditional is lost is therefore now
 located --- in the repair agent's draft, not in the proof --- and the two remaining instruments are
 the live canary, which grades what agents actually do with the entry, and the followed-memory
-criterion, which separates a wrong rule from a wrong rule that was followed. The next engine
-change, if any, is to the drafting prompt: it is put to the owner as a proposal, not made.
+criterion, which separates a wrong rule from a wrong rule that was followed. The drafting change
+that followed (amendment (v): state the condition that separates the failing runs from the
+passing ones, with the passing runs in hand) is live on the current cut, and P11(a$'$) reads it: of
+the regime fixes whose proof set holds a kept case, at least half state a condition, judged by two
+coders blind to arm and verdict. On \code{rsi-c6} that population is 12 fixes; the sheet is
+drawn and the coding is pending. Our own reading of the two proof passers (\S\ref{sec:results})
+is not that count. The second clause of P11(a$'$) --- kept-case proof rejections fall below 5 of
+23 --- reads 4 of 17 on this cut: fewer in number, the same in share.
 
 \paragraph{The confirmatory scope, reduced before it ran.} Amendment (w), declared before any
 confirmatory-seed cell and before the analysis freeze, reduces the confirmatory grid to what the
