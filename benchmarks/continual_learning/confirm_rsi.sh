@@ -90,11 +90,26 @@ case "$cmd" in
     done
     ;;
   read)
+    # The whole confirmatory read: tables, the fleet-10 canary readout (P12–P14; the trace join
+    # needs PGPASS_DSN in the environment, otherwise P14 is left undefined), the blind coding sheet
+    # for P11(a′) over every confirmatory run, then the paper fill. Set CL_CONF_FIGURES=1 to redraw
+    # the figures with the confirmatory seeds as well.
     cd "$BENCH/.."
     runs=$(cd "$HERE/results" && ls -d rsi-conf-* 2>/dev/null | tr '\n' ' ')
     # shellcheck disable=SC2086
     "$PY" -m benchmarks.continual_learning.analysis.rsi --seeds $SEEDS_ALL --models $MODELS --runs $runs \
       --report-dir benchmarks/continual_learning/results/rsi-report-confirmatory --paper
+    for r in $(cd "$HERE/results" && ls -d rsi-conf-e2b-* 2>/dev/null); do
+      if [ -n "${PGPASS_DSN:-}" ]; then
+        "$PY" -m benchmarks.continual_learning.analysis.rsi_canary_readout --run "$r"
+      else
+        "$PY" -m benchmarks.continual_learning.analysis.rsi_canary_readout --run "$r" --no-db
+      fi
+    done
+    # shellcheck disable=SC2086
+    "$PY" -m benchmarks.continual_learning.analysis.rsi_coding_sheet make --runs $runs \
+      --out benchmarks/continual_learning/results/rsi-coding-confirmatory
+    "$PY" -m benchmarks.continual_learning.analysis.fill_rsi_paper
     ;;
   *)
     sed -n '2,24p' "$0"; exit 1
