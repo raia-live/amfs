@@ -8,6 +8,7 @@ usage: python /tmp/fleet10_curve.py <run> [<run> ...]   (e.g. rsi-conf-e2b-r2-s3
 """
 from __future__ import annotations
 
+import os
 import random
 import sys
 
@@ -15,9 +16,11 @@ from benchmarks.continual_learning.analysis import rsi
 
 ARM = "senselab-rsi"
 BLOCK = 10
-# the confirmatory seeds and the E2b cell length, as `analysis.rsi --seeds` would set them
-rsi.SEEDS = (37, 41, 59, 73)
-rsi.CELL_EPISODES = 200
+# the confirmatory seeds and the E2b cell length, as `analysis.rsi --seeds` would set them;
+# CL_SEEDS / CL_CELL_EPISODES override them for the exploratory 400-episode cells of
+# amendment (ab) (rsi-x-canary-s11/-s23: CL_SEEDS=11,23 CL_CELL_EPISODES=400)
+rsi.SEEDS = tuple(int(s) for s in os.environ.get("CL_SEEDS", "37,41,59,73").split(","))
+rsi.CELL_EPISODES = int(os.environ.get("CL_CELL_EPISODES", "200"))
 
 
 def block_rates(runs: list[str], pop: str) -> list[tuple[int, int, int, float, float, float]]:
@@ -65,7 +68,9 @@ def main() -> None:
         for b, ok, n, r, lo, hi in rows:
             print(f"{b:>3}-{b + BLOCK - 1:<3} {ok:>4}/{n:<4} {r:6.2f}  [{lo:.2f}, {hi:.2f}]")
         # the windows the preregistration names: post-change 50-99 (E2b change at 50), 100-149, 150-199
-        for lo_, hi_ in ((50, 99), (100, 149), (150, 199)):
+        # (and on to the horizon for longer cells)
+        for lo_ in range(50, rsi.CELL_EPISODES, 50):
+            hi_ = lo_ + 49
             ok = sum(ok for b, ok, n, *_ in rows if lo_ <= b <= hi_)
             n = sum(n for b, ok, n, *_ in rows if lo_ <= b <= hi_)
             if n:
