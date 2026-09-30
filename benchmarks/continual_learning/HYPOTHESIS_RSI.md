@@ -2391,7 +2391,14 @@ canary-arm run *reads* in every fleet-1 cell whose canaries are open at deploy t
 2 alters how their verdicts close (a canary that would have timed out "inconclusive" now times
 out "unexercised" when unread). Neither can produce a pass that (z)'s arithmetic would not
 (a 100-episode canary cannot reach ~25 graded runs), and neither touches main reads, the
-scenarios, the change sets or the scoring. The deploy time is recorded here when known; the
+scenarios, the change sets or the scoring. **Deploy record (added 03:45Z):** OSS #454 merged
+03:17:14Z (`dc4e6d94`) and reached production by `oss-updated` dispatch at ~03:28Z; amfs-internal
+#801 merged 03:29:04Z (`301dd7ae`) and its deploy completed 03:40:19Z with OSS `dc4e6d94` checked
+out. The `post-canary-zero` cut is therefore **2026-09-30 03:40:19Z**; between 02:28Z (#800 live)
+and 03:40Z the live rule could pass an unread fix on the zero-count bound — no fleet-10 cell ran
+in that interval, and any fleet-1 canary verdict dated in it is listed and reported apart. The
+four fleet-10 cells (`rsi-conf-e2b-s{37,41,59,73}`) launched 03:42:29–03:42:45Z, after the cut,
+on hubs 8794–8797 sharing the pooled replay URL. The
 fleet-1 readout lists, per cell, the episodes completed before and after it, reports canary
 verdicts and reads for the two periods separately, and the fleet-1 headline is checked with the
 post-deploy episodes of each cell excluded (a difference in P12 direction between the two reads
