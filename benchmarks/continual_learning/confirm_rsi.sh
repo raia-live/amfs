@@ -22,7 +22,8 @@
 # Protocol constants are those of the dev runs `rsi-c5` / `rsi-c6` (fleet 1) and `rsi-e2b-c6`
 # (fleet 10): CL_RSI_TIER2=1, CL_RSI_VERDICT_WAIT=240, CL_SENSELAB_TIMEOUT=90, canary timeout and
 # window = the cell horizon (amendment (v) rule), --change-focus 0.5 --change-variant C --opaque-ids.
-# Overrides: CL_CONF_MODELS (default "gpt-5.5 claude-opus-5"), CL_CONF_WORKERS_F1 (3),
+# Overrides: CL_CONF_MODELS (default "gpt-5.5 claude-opus-5"), CL_CONF_E2B_ARMS (senselab-rsi),
+# CL_CONF_E2B_MODELS (gpt-5.5), CL_CONF_WORKERS_F1 (3),
 # CL_CONF_WORKERS_E2B (3).
 set -euo pipefail
 
@@ -32,7 +33,8 @@ PY="$BENCH/../.venv/bin/python"
 MODELS="${CL_CONF_MODELS:-gpt-5.5 claude-opus-5}"
 SEEDS_ALL="37 41 59 73"
 F1_ARMS="none raw-traces pgvector pgvector+rerank pgvector-diy+outcomes senselab senselab-rsi senselab-rsi-nocanary"
-E2B_ARMS="senselab-rsi senselab-rsi-nocanary senselab-rsi-noreplay"
+E2B_ARMS="${CL_CONF_E2B_ARMS:-senselab-rsi}"   # amendment (y): fleet 10 runs SenseLab only
+E2B_MODELS="${CL_CONF_E2B_MODELS:-gpt-5.5}"   # amendment (y): fleet 10 on gpt-5.5 only
 
 port_for() {  # a distinct hub port per (protocol, seed): f1 8787 (the agent's own tunnel), 8791-8793; e2b 8794-8797
   local proto="$1" seed="$2" i=0
@@ -106,7 +108,7 @@ runner_cmd() {  # proto seed -> the runner argv (without env)
          "--change-variant C --opaque-ids --workers ${CL_CONF_WORKERS_F1:-3}"
   else
     echo "-m continual_learning.runner --run rsi-conf-e2b-s$seed --scenarios support ci-fix --arms $E2B_ARMS" \
-         "--models $MODELS --seeds $seed --fleet 10 --episodes 200 --change-at 50 --change-focus 0.5" \
+         "--models $E2B_MODELS --seeds $seed --fleet 10 --episodes 200 --change-at 50 --change-focus 0.5" \
          "--change-variant C --opaque-ids --workers ${CL_CONF_WORKERS_E2B:-3}"
   fi
 }

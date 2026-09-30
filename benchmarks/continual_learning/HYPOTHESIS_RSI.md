@@ -2255,3 +2255,38 @@ model alone, 1.8× pgvector, 0.7× the context window.
 timeout and window = the 100-episode cell horizon by the (v) rule) launched 12:57:01Z; two
 earlier launch attempts (12:53:13Z, 12:54:03Z) were killed by the tool shell before their first
 episode and left two provisioned agents with no traces (`results/rsi-c6/orphan_agents.txt`).
+
+### 2026-09-30 (y) — confirmatory reduced again, before any confirmatory run; P11(a′) author-coded; freeze now
+
+Declared 2026-09-30 01:45Z, before the analysis freeze tag and before any confirmatory-seed cell,
+on the owner's instruction to deliver a credible paper without extending the schedule.
+
+**Scope.** The fleet-1 confirmatory stays as (w) declared: seeds 37/41/59/73 × {support, ci-fix}
+× {gpt-5.5, claude-opus-5} × the eight arms, 100 episodes, change at 30, set C — 12,800
+episodes; every primary and secondary endpoint of (x) is read on it unchanged. The fleet-10
+confirmatory is reduced to **SenseLab (`senselab-rsi`) only, gpt-5.5 only**: 4 seeds × 2
+families × 200 episodes, change at 50 — 1,600 episodes. It supplies the long-horizon learning
+curve on held-out seeds (descriptive, per (x)) and the P12–P14 canary readout on whatever
+canaries SenseLab starts. The `senselab-rsi-nocanary` and `senselab-rsi-noreplay` fleet-10 arms
+and the claude-opus-5 fleet-10 cells are **not run**: two fleet-10 dev runs (`rsi-e2b-c5`,
+`rsi-e2b-c6`, 4,800 episodes) already read the same way on both — arms indistinguishable, no
+canary decides at this horizon — and the paper reports them as the dev result they are. The
+paired fleet-10 ablation comparison therefore has no confirmatory read and is labelled dev-only
+wherever it appears.
+
+**P11(a′).** The "two blind coders" are replaced by the author, coding every item of the sheet
+(`results/rsi-coding/sheet.csv`, 37 regime fixes with a kept case over `rsi-c6` and
+`rsi-e2b-c6`) against the true set-C rules and the written instructions, before the confirmatory
+read. The author is not blind to arm or verdict; the coding, the key and every draft text are in
+the reproducibility package so anyone can re-code them. The threshold (≥ 0.5 conditional) is
+unchanged. No human-coding step is added for the confirmatory runs; the confirmatory sheet is
+generated and coded the same way.
+
+**Freeze.** `analysis-freeze-rsi` is tagged on the commit carrying this amendment. Analysis code
+(`analysis/rsi.py`, `rsi_canary_readout.py`, `rsi_coding_sheet.py`, `rsi_figures.py`,
+`fill_rsi_paper.py`, `platform_calibration.py`) does not change after the tag; prose does.
+
+**Presentation.** The paper carries a section on what level 1 did on the development seeds — the
+proof rejecting drafts that restate or flip the rule wholesale, and the canary holding fixes
+whose failure is no longer live — as the engine's gating record, stated once, without further
+runs. Nothing else in the protocol, arms, change sets, rubric, metrics or tests changes.
