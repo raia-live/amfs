@@ -50,7 +50,7 @@ from amfs_core.aggregates import (
 )
 from amfs_core.ranking import composite_score
 from amfs_core.ranking import entry_text as _entry_text
-from amfs_core.scope import SqlScope
+from amfs_core.scope import SqlScope, covers
 from amfs_core.ranking import keyword_coverage as _keyword_coverage
 from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
@@ -962,11 +962,6 @@ def _search_sync(adapter: Any, query: SearchQuery, branch: Any) -> list[MemoryEn
         return adapter.search(query)
 
 
-def _under_scope(entity_path: str, scope: str) -> bool:
-    """Whether *entity_path* is *scope* or lies under it."""
-    return entity_path == scope or entity_path.startswith(scope.rstrip("/") + "/")
-
-
 async def _branch_treatment(
     *,
     branch: str,
@@ -1006,7 +1001,7 @@ async def _branch_treatment(
         (d.entity_path, d.key)
         for d in diff or []
         if getattr(d, "diff_type", "") in ("added", "modified")
-        and _under_scope(d.entity_path, entity_path)
+        and covers(entity_path, d.entity_path)
         and not _is_synthetic_key(d.key)
         and not _is_excluded_entity(d.entity_path)
     }
@@ -3448,7 +3443,9 @@ async def retrieve_entries(
     #     a lexical hit where there are no vectors; an entry the query is not
     #     about stays where it is — a fix to the CI rule is not pinned onto a
     #     support ticket. Discredited entries are not pinned: a fix the record
-    #     has already failed is the avoid list's, not the head's. Main reads
+    #     has already failed is the avoid list's, not the head's; nor is a
+    #     procedure whose preconditions contradict the run's environment —
+    #     it is named in ``_meta.not_applicable`` like any other. Main reads
     #     are untouched.
     pinned = await _branch_treatment(
         branch=branch,
@@ -3461,6 +3458,21 @@ async def retrieve_entries(
         include_artifacts=req.include_artifacts,
         is_artifact=_is_artifact,
     )
+    if pinned:
+        if environment:
+            from amfs_core.models import preconditions_status as _preconditions_status
+
+            applicable: list[tuple[MemoryEntry, float, float]] = []
+            for entry, sim, keyword in pinned:
+                if _is_procedure(entry):
+                    status, detail = _preconditions_status(entry.value, environment)
+                    if status == "not_applicable":
+                        not_applicable.append({
+                            "entity_path": entry.entity_path, "key": entry.key, "why": detail,
+                        })
+                        continue
+                applicable.append((entry, sim, keyword))
+            pinned = applicable
     if pinned:
         pinned_scored: list[tuple[MemoryEntry, float, dict[str, Any]]] = []
         for entry, sim, keyword in pinned:

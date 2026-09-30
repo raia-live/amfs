@@ -148,3 +148,34 @@ def test_compact_rows_carry_the_flag(client) -> None:
     assert resp.status_code == 200, resp.text
     hits = _hits(resp)
     assert hits[0]["key"] == "pip-audit-corrected" and hits[0]["_pinned"] is True
+
+
+def test_a_pinned_procedure_still_answers_to_the_environment(client, mem) -> None:
+    """The branch's change is a procedure that wants python3.12. Pinning is
+    not a way around environment scoping: for a python3.9 run it is dropped
+    and named in ``_meta.not_applicable`` like any other procedure; for a
+    python3.12 run it leads the list, flagged."""
+    from amfs_core.models import MemoryType
+
+    mem.write(SCOPE, "pip-audit-procedure", {
+        "goal": "pip audit pinned dependency: bump the pin to the fixed version",
+        "preconditions": {"runtime": "python3.12"},
+        "steps": ["bump the pin", "run pip audit", "open the PR"],
+    }, confidence=0.45, memory_type=MemoryType.PROCEDURE)
+    mem._adapter.changed = [(SCOPE, "pip-audit-procedure")]
+    mem._read_tracker.clear()
+    body = {"query": "pip audit pinned dependency", "entity_path": SCOPE,
+            "min_confidence": 0.5, "limit": 5, "branch": BRANCH}
+
+    resp = client.post("/api/v1/retrieve", json={**body, "environment": {"runtime": "python3.9"}})
+    assert resp.status_code == 200, resp.text
+    assert "pip-audit-procedure" not in [h["key"] for h in _hits(resp)]
+    assert not any(h.get("_pinned") for h in _hits(resp))
+    meta = next(e for e in resp.json() if e.get("_meta"))
+    assert [r["key"] for r in meta["not_applicable"]] == ["pip-audit-procedure"]
+    assert meta["not_applicable"][0]["why"] == ["runtime: wants python3.12, run has python3.9"]
+
+    resp = client.post("/api/v1/retrieve", json={**body, "environment": {"runtime": "python3.12"}})
+    assert resp.status_code == 200, resp.text
+    hits = _hits(resp)
+    assert hits[0]["key"] == "pip-audit-procedure" and hits[0]["_pinned"] is True
