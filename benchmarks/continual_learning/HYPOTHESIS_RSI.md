@@ -2650,3 +2650,57 @@ unchanged 100 % in every post-change block (594/595). The (z″) run of the same
 drafts state a condition (author-coded; `results/rsi-coding-confirmatory/`), ci-fix 20/28 (17 on
 the PR's files), support 7/11 (none on the true variable) — met. Paper: `paper/rsi-engine`
 commits 75acb2f1, 0e0d735f, 501e6455, fe5788d2.
+
+### 2026-09-30 (ab) — exploratory: the canary on the traffic it is sized for (`rsi-x-canary-s{11,23}`)
+
+Declared 2026-09-30 21:40Z (06:40 local, 2026-10-01), after every confirmatory run had finished
+and been read ((aa) read record, 16:30Z), before any cell of this run. **Exploratory, not
+confirmatory.** Nothing in this section changes a confirmatory table, prediction, metric,
+constant or analysis-code path; the frozen tag `analysis-freeze-rsi` stands. Bruno chose this
+run over shipping v1.0 with the six-canary confirmatory read alone ("ok, lets go with the 'One
+high-traffic exploratory cell'"), on the condition that it runs and is read the same day.
+
+**Why.** The confirmatory fleet-10 read left five of six canaries open, three of them with both
+arms above the 8-graded floor (20/8, 14/10, 17/14). The engine's pass rule
+(`amfs_eval/repair/canary.py`, `NONINFERIORITY_MARGIN = 0.10`) is a one-sided 95 % Newcombe
+hybrid-score upper bound on canary − control recurrence; at the ~10 % recurrence the ci-fix
+corrections showed, that bound is 0.175 at 20 graded per arm, 0.118 at 40, 0.105 at 50 and
+0.095 at 60; at 20 % recurrence it needs ~80–100 per arm. The r2 canaries had 14–20 graded per
+arm from ~100–130 post-fix episodes at `change-focus 0.5`. The question this run asks is the one
+the confirmatory cells could not: **given the graded traffic the rule is sized for, does the
+canary decide — pass, fail or futility — and does a pass ship a fix the fleet then reads.**
+
+**Design (two changes to the E2b cell, both traffic).** `senselab-rsi` only, GPT-5.5, set C
+(`--change-variant C`), fleet 10 (replicas, as always for this arm), `--opaque-ids`, scenarios
+`support` and `ci-fix`, `--change-at 50`; **`--episodes 400`** (horizon doubled; harness canary
+timeout and engine `canary_window_sessions` set to 400, per (v)) and **`--change-focus 1.0`**
+(every post-change episode is drawn from the changed classes, so a fix's situation receives about
+twice the traffic it does at 0.5; the unchanged classes are therefore *not* measured after
+episode 50 in this run and no safety claim is read from it). Seeds **11 and 23 — the development
+seeds**, so the confirmatory seeds stay confirmatory. Runs `rsi-x-canary-s11` and
+`rsi-x-canary-s23`, one process per seed, hubs 8794/8795 with their own tunnels (two of the five
+slots), Tier 2 on, `CL_RSI_VERDICT_WAIT=240`, `CL_SENSELAB_TIMEOUT=90` — the (aa) environment
+otherwise unchanged. Cut: `post-replay-evidence` (12:52:04Z), the production the confirmatory r2
+cells ran on; no engine change since. 4 cells, 1,600 episodes, ~6.5 h wall (episodes in a cell
+are sequential, ~1.1/min; the four cells run in parallel), ~$100.
+
+**What is read, with the frozen tools only.** `rsi_canary_readout --run rsi-x-canary-s<seed>`
+and the supplementary three-class script (`paper/package/scripts/canary_classes.py`, `CL_CUT` =
+the cut above); the frozen population rule for the long-horizon block rates
+(`fleet10_curve.py` with `CELL_EPISODES=400`). Reported, descriptively, without a preregistered
+threshold: per canary the graded counts on both arms at decision or close, the verdict and its
+reason (`passed` / `failed` / `inconclusive: no_effect` / `inconclusive: ungraded` / `window` /
+`timeout` / open), the treated/untreated class, the recurrence on both arms and the engine's
+bound; per passed fix, whether it shipped and the moved-half kept rate on the fleet in the
+episodes after the ship against the episodes before it; the correction's live evidence
+(success/failure counts, confidence, discredited or not) at close. The expected graded counts
+(~70–100 canary / ~50–70 control per canary, if r2's rates scale with traffic) are a forecast,
+not a prediction with a falsifier. **The paper reports this run in a separate, labelled
+exploratory subsection of §Confirmatory**; it does not enter any confirmatory table, the ledger
+rows or the abstract's confirmatory numbers, and the abstract may mention it only as
+exploratory. If no canary passes, the decisions reached and the counts at which they were
+reached are reported as they are.
+
+**Not run.** Probe (b) (adversarial: a plausible wrong fix injected as a proposal). The harness
+has no injection path; building one is harness code with its own run and its own read, and its
+failing verdict needs the same graded counts this run is for. It stays in the paper's Pending.
