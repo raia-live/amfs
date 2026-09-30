@@ -57,8 +57,11 @@ baseline; none of the five paired comparisons survives the Holm correction at 16
 context window fits, it wins the half of the class whose rule did not change, by 24 points at
 three times the cost. Level~1 has not yet added to level~0 inside a 100-episode cell (45 against
 43\,\%), and the record says why: of the 32 fixes the loop proposed in those cells the replay
-tiers rejected 22 and passed 6, and no canary decided inside a cell --- the confirmatory
-ten-agent, 200-episode cells are this version's read of whether one can. The paper's main contribution is the record of how a
+tiers rejected 22 and passed 6, and no canary decided inside a cell. In the confirmatory
+ten-agent, 200-episode cells the canary arm reads the fix it is graded on (75\,\% of graded
+sessions, against 0 before the last two findings), four of six canaries reach the graded floor
+on both arms, one decides --- a failure --- and none ships; on the same cells the moved half
+rises from 37\,\% in the fifty episodes after the change to 75\,\% in the last fifty. The paper's main contribution is the record of how a
 preregistered benchmark found thirteen things about the loop's evidence path --- eleven defects,
 all fixed in production between runs and re-measured on the same protocol --- and what each
 says about building self-improving systems that can be trusted: what counts as a regime shift,
@@ -973,9 +976,58 @@ its fix for the first time in the project, and the loop's own replays discredite
 corrections within minutes, two before their canary's first session. They are reported there as
 measured and are not the confirmatory fleet-10 read. The confirmatory read is the rerun on the
 \code{post-replay-evidence} cut (amendment~(aa); \code{rsi-conf-e2b-r2-s\{37,41,59,73\}},
-launched 12:59--13:00Z on 2026-09-30, the same protocol and the same predictions).
-\textcolor{red}{[pending: the \code{-r2} cells are running; this paragraph is written from
-their read.]}
+launched 12:59--13:00Z on 2026-09-30, the same protocol and the same predictions; 400/400
+episodes each, finished 15:45--16:08Z).
+
+\paragraph{The confirmatory fleet-10 read.} Over the eight cells the loop proposed 48 fixes (39
+from a regime shift, 9 from the judges; 44 drafted by the repair agent, 4 from a template); the
+stand-in replay passed 23 and was inconclusive on 23; the customer's replay passed 6 and failed
+38; 6 canaries opened, in six different cells; 0 fixes shipped, 0 were reverted. \textbf{The
+canary arm now reads its fix.} In the sessions the canary graded, the fix's own key was a
+version-exact read in 57 of 76 (75\,\%; per canary 50, 100, 75, 100, 47 and 100\,\%), and the
+control arm read it in 0 of 54 --- P16 met (threshold 50\,\%; the engine's per-arm \code{read}
+count and the version-exact join agree within three sessions on every canary). Reads per canary
+arm at close were 2, 5, 8, 12, 14 and 18, median 10 against the floor of 8 --- P13$''$ met, four
+of the six arms at or above the floor (finding~12's run had 0, 0, 1, 1, 1 and 17). \textbf{P12}
+is met: 4 of 6 canaries reached the graded floor on both arms (10/10, 20/8, 14/10 and 17/14
+graded sessions); the graded share of the sessions routed to the arm was 0.23--0.36 on five of
+them and 1.0 on the sixth, so the second clause of P12 ($\geq 0.8$) is not met, for the
+structural reason finding~12 gives: exposure counts the arm's routing, grading counts the
+situation. \textbf{P13$'$} is not met and not falsified: one canary of six decided within the
+cell --- \code{8a908156} (\code{support}, seed 37, ``Android free-plan push notifications
+stopped''), \emph{failed} at 10/10 graded sessions on the zero-count bound (control had no
+recurrence; the canary arm had), with the fix read in 5 of the arm's 10 graded sessions, below
+the read floor, so by the class rule of amendment~(z$''$) it is a verdict on a partly treated arm
+and does not bear on P13$'$; the falsifier (0 verdicts in $\geq 6$ canaries) is not met by the
+letter and is by the class rule, and we report both. The other five were open when their cells
+ended: three with both arms above the floor (20/8, 14/10, 17/14) and no decision --- at these
+counts the non-inferiority test of finding~11 cannot close a 10-point margin either way, which is
+the gate's power at this horizon, not a defect --- and two with the control arm or the canary arm
+below it. On the treated population, kept-class first-attempt success in canary-arm sessions that
+read the fix, against control sessions in the same situation, was 1.00 (6) against 0.88 (17) and
+1.00 (6) against 0.77 (22) on the two \code{ci-fix} canaries that closed undecided with a
+treated population, 0.33 (6) against 0.40 (25) and 0.00 (3) against 0.70 (10) on the two
+\code{support}/\code{ci-fix} canaries at seed 41, all under the 8-session floor of P15$'$
+(underpowered, reported as such); P14 and P15 have no population, since nothing passed. Live
+evidence reached the corrections this time. Five of the six fixes wrote a correction (the sixth,
+the one that decided, wrote corrective entries only), and every one of the five was charged by
+canary-arm sessions that had read it: at close 14 wins and 0 failures (0.82), 12 and 2 (0.65),
+8 and 2 (0.47 --- discredited at the second failure and pinned all the same), and, for the two
+rewrites of the agent's own entries, born at 0.37 and 0.30 under the 0.8$\times$ rule, 7 and 26
+and 1 and 3, both discredited within two minutes of their first read. A correction born under
+the discredit threshold is discredited by its first failed attempt; the pin now keeps it as the
+arm's treatment regardless, and whether that threshold should apply to a correction under test
+is an engine question this version leaves open. No replay wrote an outcome row or a contrast
+lesson after the cut: 209 replays sealed in the window, 0 of 1,600 outcome rows from them.
+\textbf{The long horizon} (descriptive, per amendment~(x); pooled over the eight cells with a
+cell-level bootstrap): moved-half first-attempt success 37\,\% (40/109) in episodes 50--99,
+55\,\% (60/110) in 100--149 and 75\,\% (67/89) in 150--199 --- 88\,\% (15/17) in the last block;
+kept half 66, 76 and 72\,\%; unchanged classes 100\,\% in every post-change block (594/595). The
+first run of the same cells, on the cut before, read 32, 59 and 67\,\% on the moved half. At 200
+episodes with ten agents the system that could not be separated from its level-0 ablation inside a
+100-episode cell reaches three quarters of the moved half, and the canary --- now treating the
+arm it grades --- holds every one of the six fixes it opened: five for want of power, one on a
+failure it saw.
 
 \paragraph{Cost.}
 \begin{table}[H]
@@ -1173,7 +1225,8 @@ the canary is the test of the fix and can only test what the arm read. Verified 
 API before the rerun: on each of the three branches the correction is the first hit, pinned,
 marked discredited; on \code{main} nothing is pinned. What this finding leaves for the rerun to
 decide is whether the evidence the canary arm then produces vindicates the correction or
-discredits it for a reason --- which is the question the canary exists to answer.
+discredits it for a reason --- which is the question the canary exists to answer, and
+\S\ref{sec:confirmatory} reports it doing both.
 \end{enumerate}
 
 \paragraph{The canary inside a cell (see also \S\ref{sec:posthoc}).} Separately from the defects, no canary reached a decision
@@ -1213,7 +1266,7 @@ P11(a$'$) & (v) c6 & $\geq 50\,\%$ of kept-case regime drafts state a condition;
 (x) secondary & conf f1 & kept half and unchanged classes, same test, Holm within endpoint & kept: $+38$ vs Frontier (Holm 0.007), $-24$ vs the context window (1 of 16 cells, Holm 0.001), level with the pgvector arms; unchanged: $+23/{+}9/{+}16$ vs Frontier/rerank/DIY (Holm 0.002/0.035/0.004), $+3$ and $+4$ vs the context window and pgvector (Holm 0.13, 0.06) \\
 P11(a$'$) & conf f1 & $\geq 50\,\%$ of kept-case regime drafts state a condition & met, 27 of 39 (author-coded, same sheet and key); \code{ci-fix} 20 of 28, 17 of them on the PR's files; \code{support} 7 of 11, none on the true variable \\
 P12--P14, P13$'$, P13$''$, P15$'$, P16 & (z$''$) e2b, finding 13 & as (v), (z), (z$'$), (z$''$) on the fleet-10 cells run on \code{post-canary-visible} & measured, not the confirmatory read (five of six corrections discredited by replays before the arm read them): P12 s59 2 of 2 and s73 1 of 2 at the floor; P13 1 of 6 --- a failing verdict on an arm that never read the fix; P14 undefined; P13$''$ falsified, 1/1/8.5/0.5; P15$'$ no population; P16 20 of 108 graded sessions (19.8\,\%), 74\,\% on the one fix that was read \\
-same & conf e2b-r2 & as above, on \code{post-replay-evidence} (amendment~(aa)) & pending: \code{rsi-conf-e2b-r2-s\{37,41,59,73\}} running \\
+same & conf e2b-r2 & as above, on \code{post-replay-evidence} (amendment~(aa)); the confirmatory fleet-10 read & P12 met, 4 of 6 at the floor on both arms (graded/exposed 0.23--0.36 on five, 1.0 on one: second clause not met); P13$'$ not met, 1 of 6 decided (failed, zero-count bound, arm read the fix in 5 of 10 graded sessions --- below the read floor, so untreated by the class rule); P14/P15/P15$'$ no population (0 passes; treated kept-class comparisons all under 8 sessions); P13$''$ met, reads at close 2/5/8/12/14/18, median 10 vs floor 8; P16 met, 57 of 76 graded canary-arm sessions (75\,\%), control 0 of 54; 0 shipped, 0 reverted \\
 \bottomrule
 \end{tabular}
 \caption{The predictions ledger. Every preregistered prediction on the engine so far, with the
@@ -1267,7 +1320,9 @@ amendments~(z), (z$'$) and (z$''$) as pre-specified; that run read the fix on on
 and found the other five discredited by the loop's own replays before their arms could read them
 (finding~13), and is reported as measured in Table~\ref{tab:ledger}. The confirmatory read of
 P12--P14 and P13$'$/P13$''$/P15$'$/P16 is the rerun on \code{post-replay-evidence}
-(amendment~(aa), \code{rsi-conf-e2b-r2}), pending in this version.
+(amendment~(aa), \code{rsi-conf-e2b-r2}), reported in \S\ref{sec:confirmatory}: the arm reads
+its fix (P16 75\,\%, P13$''$ met), four of six canaries reach the floor on both arms (P12 met),
+one decides (P13$'$ not met), nothing ships (P14, P15 without population).
 
 \paragraph{The confirmatory scope, reduced before it ran.} Amendment (w), declared before any
 confirmatory-seed cell and before the analysis freeze, reduces the confirmatory grid to what the
