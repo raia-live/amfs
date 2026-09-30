@@ -3462,14 +3462,18 @@ async def retrieve_entries(
         if environment:
             from amfs_core.models import preconditions_status as _preconditions_status
 
+            # Named once: a pinned procedure above the caller's gate was a
+            # candidate too, and step 9 has already recorded it.
+            named = {(row["entity_path"], row["key"]) for row in not_applicable}
             applicable: list[tuple[MemoryEntry, float, float]] = []
             for entry, sim, keyword in pinned:
                 if _is_procedure(entry):
                     status, detail = _preconditions_status(entry.value, environment)
                     if status == "not_applicable":
-                        not_applicable.append({
-                            "entity_path": entry.entity_path, "key": entry.key, "why": detail,
-                        })
+                        if (entry.entity_path, entry.key) not in named:
+                            not_applicable.append({
+                                "entity_path": entry.entity_path, "key": entry.key, "why": detail,
+                            })
                         continue
                 applicable.append((entry, sim, keyword))
             pinned = applicable

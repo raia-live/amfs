@@ -175,6 +175,16 @@ def test_a_pinned_procedure_still_answers_to_the_environment(client, mem) -> Non
     assert [r["key"] for r in meta["not_applicable"]] == ["pip-audit-procedure"]
     assert meta["not_applicable"][0]["why"] == ["runtime: wants python3.12, run has python3.9"]
 
+    # Above the gate the procedure is a candidate as well as pinned, and both
+    # filters drop it: it is named once.
+    resp = client.post("/api/v1/retrieve", json={
+        **body, "min_confidence": 0.0, "environment": {"runtime": "python3.9"},
+    })
+    assert resp.status_code == 200, resp.text
+    assert "pip-audit-procedure" not in [h["key"] for h in _hits(resp)]
+    meta = next(e for e in resp.json() if e.get("_meta"))
+    assert [r["key"] for r in meta["not_applicable"]] == ["pip-audit-procedure"]
+
     resp = client.post("/api/v1/retrieve", json={**body, "environment": {"runtime": "python3.12"}})
     assert resp.status_code == 200, resp.text
     hits = _hits(resp)
