@@ -2000,10 +2000,15 @@ class AgentMemory:
 
         Skipped when the adapter learns remotely (the HTTP adapter): the server
         commits the same record on its own handle and writes the lesson there,
-        under the caller's identity. Never raises — a lesson is a bonus, and an
-        outcome that propagated must not be reported as failed because of it.
+        under the caller's identity. Skipped for a replay's record too: the
+        repair loop's test of a fix is not a session anyone served, and its
+        lesson named the fix under test as the entry to avoid — on ``main``,
+        for every agent. Never raises — a lesson is a bonus, and an outcome
+        that propagated must not be reported as failed because of it.
         """
         if getattr(self._adapter, "remote_learning", False):
+            return
+        if _evidence.is_replay_outcome(record):
             return
         try:
             lesson = _evidence.contrast_lesson(record)
