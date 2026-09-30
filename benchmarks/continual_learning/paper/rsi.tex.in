@@ -399,6 +399,18 @@ proof set is what separates the two: of the five drafts that passed Tier~2, the 
 conditional both name the true variable, and the three that are not are the flips and ladders
 above. Kept-case rejections, the second clause, were 4 of 17 on fleet 1 and 11 of 39 on fleet
 10 --- fewer than the 5 of 23 of the previous cut in count, not in share.
+The confirmatory fleet-1 runs (\S\ref{sec:confirmatory}; 39 such drafts, the same sheet,
+instructions and key, coded the same way) read the same: \textbf{27 of 39 (69\,\%) state a
+condition} --- met --- and the class split holds. On \code{ci-fix} 20 of 28 are conditional
+and 17 of them branch on the PR's files, 13 naming \code{legacy\_sdk/} or the cassette path
+exactly and 4 naming ``an intentional legacy pin'' without the path, or with the path and the
+actions inverted; the other 3 branch on whether the audit log names a fix version, or on PR
+intent. On \code{support} 7 of 11 are conditional and none names the true variable: they branch
+on platform (Android against web or iOS, 4 drafts), on whether a card is on file (2) or on
+whether the account is verified (1); the 4 unconditional drafts are the tier-1 playbook and
+three retry ladders. The drafts that pass on the CI family and fail on support are
+therefore the same drafts under the same instruction; the difference is where the evidence puts
+the variable in front of the drafter.
 
 \subsection{What the replay gate alone let through (exploratory)}
 \label{sec:posthoc}
@@ -594,21 +606,75 @@ amendments~(w) and~(x); the development-seed tables of \S\ref{sec:results} are n
 The prose of this section is written after the read and states, for each preregistered
 prediction, whether it was met.
 
+\paragraph{How the fleet-1 read was made.} The four confirmatory seeds ran as four per-seed
+runs (\code{rsi-conf-f1-s\{37,41,59,73\}}, 3,200 episodes each, 01:42--08:19Z on 2026-09-30, all
+before the \code{post-canary-visible} cut of finding~12, so every fleet-1 canary arm is untreated
+by construction). The frozen reader resolves one run per system, so the four were concatenated
+file-by-file into \code{rsi-conf-f1} before the read --- data staging, no code. Two wiring
+defects in the frozen reader, invisible on the development seeds because there the development
+runs \emph{are} the resolved runs, were corrected before any confirmatory number was read from a
+complete table: the paired tables were wired to the development run names and came out empty
+under \code{--runs}, and the lifecycle table iterated the development cut list. Neither touches a
+metric, endpoint, test statistic or population rule; the development read was written to disk
+before and after and is byte-identical. The correction is commit \code{e04f78cf} on the paper
+branch, the one post-freeze change to analysis code, and the preregistration's read record names
+it.
+
 \paragraph{Primary endpoint: the moved half.}
 %%CONF_TAB_HEADLINE%%
 %%CONF_TAB_PAIRED%%
+On the half of the changed classes whose rule moved, SenseLab's first-attempt success after the
+change is 45\,\% (127/283, cell-level interval [39, 51]) against 25--40\,\% for the five
+baselines. Paired on (family, seed, model) over the sixteen cells, the mean delta is positive
+against every baseline --- $+19$ pp over Frontier alone, $+4$ over the context window, $+13$ over
+pgvector, $+9$ over pgvector with a reranker, $+13$ over the DIY outcome store --- and SenseLab
+wins 8 to 11 of the 16 cells in each pairing. The exact sign-flip $p$ is 0.024 against Frontier
+alone and 0.040 against pgvector and the DIY store, 0.119 against the reranker and 0.544 against
+the context window; \emph{none survives Holm across the five systems at 0.05} (0.121, 0.544,
+0.159, 0.239, 0.159). The preregistered primary prediction --- SenseLab ahead of every baseline
+on the moved half --- is met in sign and in cells won, and not at the preregistered
+significance. Sixteen cells is the power the reduced confirmatory scope of amendment~(w) bought;
+the deltas are of the size the development seeds showed, and the reader should weigh them as
+estimates with the intervals above rather than as a rejection.
 
 \paragraph{Secondary endpoints: collateral damage.}
 %%CONF_TAB_PAIRED_KEPT%%
 %%CONF_TAB_PAIRED_UNCHANGED%%
+On the kept half --- changed classes whose rule did \emph{not} move --- SenseLab is at 69\,\%
+(191/276), above Frontier alone by 38 pp (14/16 cells, Holm 0.007), level with the three
+pgvector arms (deltas $+1$, $+1$, $+8$; none distinguishable), and \emph{below the context window
+by 24 pp} (1/16 cells, Holm 0.001). The context window carries every prior note and outcome of
+the cell in the prompt; on a rule that did not change, replaying the whole record is the right
+policy and it wins, at \$0.130 per episode against SenseLab's \$0.042. This is the cost of the
+moved-half gain on this protocol and it is reported as such: SenseLab's memory is selective and
+outcome-weighted, and on the kept half selection loses to exhaustive recall. On the unchanged
+classes SenseLab is at 100\,\% (556/557), above Frontier alone ($+23$, Holm 0.002), the reranker
+($+9$, 0.035) and the DIY store ($+16$, 0.004), and not distinguishable from the context window
+or plain pgvector; no baseline is above it.
 
 \paragraph{By family and by model.}
 %%CONF_TAB_BYFAMILY%%
 %%CONF_TAB_BYMODEL%%
+The moved-half gain is a \code{support} result. There SenseLab is at 42\,\% (62/149) against
+0--27\,\% for every baseline --- Frontier alone at 0/150 --- while on \code{ci-fix} it is at
+49\,\% (65/134) against 43--67\,\%, behind the context window (67\,\%). By model, SenseLab is
+level with the context window on GPT-5.5 (36\,\% both) and ahead on Claude Opus~5 (54\,\% against
+45\,\%, the next best); the pgvector arms swap order across the two models (13--27\,\% on GPT-5.5,
+37--51\,\% on Opus). Every system's kept-half and unchanged-class rates are within a few points
+across models; the model effect is on the moved half.
 
 \paragraph{Attribution and the loop's lifecycle.}
 %%CONF_TAB_ATTRIBUTION%%
 %%CONF_TAB_LIFECYCLE%%
+Inside a 100-episode cell at fleet size 1, the two ablations are indistinguishable from the
+full system: without the canary 44 / 71 / 99\,\% (moved / kept / unchanged), without the repair
+loop 43 / 68 / 99, against 45 / 69 / 100 --- the same reading as on the development seeds, and
+the reason the long-horizon protocol below exists. The loop was active: 32 fixes proposed in the
+sixteen SenseLab cells (23 from a regime shift, 9 from the judges), 16 passing the stand-in
+replay, 6 the customer replay, 5 canaries opened, 3 still undecided when their cell ended, 2
+shipped, 0 reverted. With the canary removed the same loop shipped 10 of 44 --- the canary gate
+holds back four fixes in five that the replay would have shipped, in cells where none of them
+could have been graded to a decision.
 
 \paragraph{The long horizon: fleet 10, 200 episodes.} The E2b protocol on the four
 confirmatory seeds runs SenseLab alone on GPT-5.5 (amendment~(y): 400 episodes per seed; the
@@ -617,8 +683,18 @@ the same way --- arms indistinguishable, no canary decides). It supplies the lea
 held-out seeds, descriptively, and the canary readout of amendment~(v) on whatever canaries
 SenseLab starts: P12 (canaries reach the graded floor on both arms), P13 (canaries decide), P14
 (no pass harms the kept class by more than the margin, joined to the sealed traces' arm stamps),
-and P11(a$'$) (drafts state their condition; author-coded as in \S\ref{sec:gating}).
-\textcolor{red}{[pending: the fleet-10 confirmatory cells have not run.]}
+P13$'$/P13$''$/P15$'$/P16 of amendments~(z) and~(z$'$) (the three classes; canary-arm reads of the
+fix), and P11(a$'$) (drafts state their condition; author-coded as in \S\ref{sec:gating}). The
+protocol ran twice on the confirmatory seeds. The first four cells
+(\code{rsi-conf-e2b-s\{37,41,59,73\}}, 400/400 each, 08:26--11:21Z on the
+\code{post-canary-visible} cut) are the read of finding~13 (\S\ref{sec:findings}): the arm read
+its fix for the first time in the project, and the loop's own replays discredited five of the six
+corrections within minutes, two before their canary's first session. They are reported there as
+measured and are not the confirmatory fleet-10 read. The confirmatory read is the rerun on the
+\code{post-replay-evidence} cut (amendment~(aa); \code{rsi-conf-e2b-r2-s\{37,41,59,73\}},
+launched 12:59--13:00Z on 2026-09-30, the same protocol and the same predictions).
+\textcolor{red}{[pending: the \code{-r2} cells are running; this paragraph is written from
+their read.]}
 
 \paragraph{Cost.}
 %%CONF_TAB_COST%%
@@ -753,7 +829,50 @@ version it replaces (floor 0.3) while the benchmark's agents read at a confidenc
 of the 31 shipped fixes that carry a correction, 20 sit below the gate on \code{main} --- visible
 now, but not read there --- while every corrective entry (0.7 or 0.75) is above it; on the canary
 branch the pin carries the correction to the head regardless.
-%% FILL-AFTER-READ: the fleet-10 re-measurement on post-canary-visible (P13'', P15', P16).
+The re-measurement on the corrected cut (the four \code{rsi-conf-e2b} cells, 400 episodes each,
+six canaries) is the first time in the project that a canary arm read its fix: the engine's
+per-arm \code{read} count, reproduced exactly by a version-exact join of the sealed traces'
+causal reads to the platform-authored versions on the fix branch (17 = 17, 1 = 1, 0 = 0), gives
+17 reads in 23 graded canary-arm sessions for the one fix that rewrote an existing key
+(\code{repo-readme-ci}, 74\,\% of graded sessions, P16 met for it), and 0, 0, 1, 1, 1 for the
+five that wrote a new key. P13$''$ (median canary-arm reads per run at the floor of 8) is
+falsified --- 1, 1, 8.5, 0.5 --- and P16 pooled is 20 of 108 graded sessions, 19.8\,\%, at the
+falsification line. That one fix was read and five were not is finding~13.
+\item \textbf{The loop's own replays discredited the fix before the arm could read it.} (Found
+2026-09-30 in the read record of the cells above; fixed in amfs \#455, cut
+\code{post-replay-evidence}; the confirmatory fleet-10 cells re-run on it, amendment~(aa).) Five
+of the six corrections were \emph{discredited} by outcome evidence within 1--24 minutes of being
+written, two of them before their canary's first session. The mechanism, traced on
+\code{b2b656c5}: the correction was written at 09:00:09Z with confidence 0.78; the loop's three
+Tier~2 replays of its cases ran over the next minute and all ended in \code{success} --- Tier~2
+\emph{passed} --- but two of them carried two recorded attempts each, and the attempt boundary of
+Level~0 does what it is for: each failed attempt charged the entry it had read with a failure.
+At $n=0$ one charge takes 0.78 to 0.41; by 09:01:14Z the posterior was under the discredit
+threshold and \code{discredited\_at} was set, 74 seconds before the canary started. Step 9b of
+\#454 does not pin a discredited entry (``a fix the record has already failed is the avoid
+list's''), and ranking pins one to $-1$, so the arm the branch existed to treat was never served
+it: 0 reads in 74 sessions. Verified in-process against the production rows: \code{diff\_branch}
+finds the entry, the branch's semantic pool holds it at rank 9 (similarity 0.78), and 9b returns
+nothing. \code{2ae2f0e0} went the same way and then \emph{failed} its canary at 09:49Z on an arm
+that had never read it (2 recurrences in 8 against 0 in 22) --- a failing verdict is not
+read-gated, so the gate rejected a treatment that was never applied. The one fix that was read
+(\code{repo-readme-ci}) was discredited after 23 minutes of live reads and read never again; the
+one that was not discredited (\code{f5241329}) was written six minutes before its cell ended.
+Before finding~12's fix, none of the 30 development and fleet-1 canary corrections had ever been
+discredited --- nobody could read them --- so making the fix readable is what exposed the seam.
+The same replays had written 425 \code{lesson-contrast-replay-*} entries onto \code{main} since
+2026-09-26, each naming a correction under test as the entry to avoid, for every agent on the
+account. The engine already held the rule that a replay is not traffic --- it is graded by the
+tier that asked for it, does not vote in a canary and does not count as exposure (finding~8,
+\#797) --- but only where the loop grades; the memory still learned from it. \#455 completes the
+rule on the memory side: a replay's outcome writes no outcome row (no evidence on the entries it
+read, no local evidence, no action prior, no contrast lesson), and a discredited entry is pinned
+on its own branch all the same, with its evidence on the row and out of the avoid list, because
+the canary is the test of the fix and can only test what the arm read. Verified through the live
+API before the rerun: on each of the three branches the correction is the first hit, pinned,
+marked discredited; on \code{main} nothing is pinned. What this finding leaves for the rerun to
+decide is whether the evidence the canary arm then produces vindicates the correction or
+discredits it for a reason --- which is the question the canary exists to answer.
 \end{enumerate}
 
 \paragraph{The canary inside a cell (see also \S\ref{sec:posthoc}).} Separately from the defects, no canary reached a decision
@@ -766,9 +885,10 @@ what ships when the gate is the replay alone.
 
 \begin{table}[H]
 \centering\scriptsize
-\begin{tabular}{llp{6.2cm}l}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}p{2.1cm}p{1.9cm}p{5.0cm}p{6.4cm}@{}}
 \toprule
-\textbf{P} & \textbf{Where} & \textbf{Prediction (dev seeds, set C unless stated)} & \textbf{Verdict} \\
+\textbf{P} & \textbf{Where} & \textbf{Prediction (dev seeds, set C unless stated; ``conf'' = confirmatory seeds)} & \textbf{Verdict} \\
 \midrule
 P1 & (k) 5k & a shift-drafted fix is graded on runs that read the entry & falsified 3/3 \\
 P2 & (l) c1 & $-$ canary ships a regime fix in every cell; recurrence falls & not met (1/4) \\
@@ -787,6 +907,12 @@ P12 & (v) c6 & $\geq 1$ in 2 canaries reach the graded floor on both arms; grade
 P13 & (v) c6 & $\geq 1$ in 3 canaries decide & falsified: 0 of 9 (7 from Tier~1 pass, 2 from inconclusive); 3 of 4 at the floor had 0 recurrence in both arms \\
 P14 & (v) c6 & no pass harms the kept class by $> 10$ pp (trace-joined) & undefined: no verdict \\
 P11(a$'$) & (v) c6 & $\geq 50\,\%$ of kept-case regime drafts state a condition; kept-case rejections $< 5$ of 23 & met, 21 of 37 (author-coded, (y)); CI 11/14 all on the true variable, support 9/23 none on it; rejections 4 of 17 and 11 of 39 --- the count fell, the share did not \\
+\midrule
+(x) primary & conf f1 & SenseLab $-$ each baseline $> 0$ on the moved half; exact sign-flip over 16 cells, Holm across the five & met in sign and in cells won: $+19/{+}4/{+}13/{+}9/{+}13$ pp, 11/8/11/9/10 of 16; $p$ 0.024/0.544/0.040/0.119/0.040, Holm 0.12/0.54/0.16/0.24/0.16 --- none survives \\
+(x) secondary & conf f1 & kept half and unchanged classes, same test, Holm within endpoint & kept: $+38$ vs Frontier (Holm 0.007), $-24$ vs the context window (1 of 16 cells, Holm 0.001), level with the pgvector arms; unchanged: $+23/{+}9/{+}16$ vs Frontier/rerank/DIY (Holm 0.002/0.035/0.004), $+3$ and $+4$ vs the context window and pgvector (Holm 0.13, 0.06) \\
+P11(a$'$) & conf f1 & $\geq 50\,\%$ of kept-case regime drafts state a condition & met, 27 of 39 (author-coded, same sheet and key); \code{ci-fix} 20 of 28, 17 of them on the PR's files; \code{support} 7 of 11, none on the true variable \\
+P12--P14, P13$'$, P13$''$, P15$'$, P16 & (z$''$) e2b, finding 13 & as (v), (z), (z$'$), (z$''$) on the fleet-10 cells run on \code{post-canary-visible} & measured, not the confirmatory read (five of six corrections discredited by replays before the arm read them): P12 s59 2 of 2 and s73 1 of 2 at the floor; P13 1 of 6 --- a failing verdict on an arm that never read the fix; P14 undefined; P13$''$ falsified, 1/1/8.5/0.5; P15$'$ no population; P16 20 of 108 graded sessions (19.8\,\%), 74\,\% on the one fix that was read \\
+same & conf e2b-r2 & as above, on \code{post-replay-evidence} (amendment~(aa)) & pending: \code{rsi-conf-e2b-r2-s\{37,41,59,73\}} running \\
 \bottomrule
 \end{tabular}
 \caption{The predictions ledger. Every preregistered prediction on the engine so far, with the
@@ -834,9 +960,13 @@ should ship anyway --- as a written condition for the next agent, rather than a 
 failure had stopped recurring in two arms neither of which had received the fix, so the question
 did not arise. Why a canary graded only a third to a half of the runs stamped to its arm is the
 same finding: the arm's runs read the branch's other keys (14--197 reads per canary), never the
-fix's, so ``exposure'' counted routing, not treatment. The confirmatory fleet-10 cells are read
+fix's, so ``exposure'' counted routing, not treatment. The confirmatory fleet-10 cells were run
 on the \code{post-canary-visible} cut with P12--P14 and the read-count predictions of
-amendments~(z) and~(z$'$) as pre-specified.
+amendments~(z), (z$'$) and (z$''$) as pre-specified; that run read the fix on one canary arm
+and found the other five discredited by the loop's own replays before their arms could read them
+(finding~13), and is reported as measured in Table~\ref{tab:ledger}. The confirmatory read of
+P12--P14 and P13$'$/P13$''$/P15$'$/P16 is the rerun on \code{post-replay-evidence}
+(amendment~(aa), \code{rsi-conf-e2b-r2}), pending in this version.
 
 \paragraph{The confirmatory scope, reduced before it ran.} Amendment (w), declared before any
 confirmatory-seed cell and before the analysis freeze, reduces the confirmatory grid to what the
@@ -849,7 +979,11 @@ confirmatory cell, cut the fleet-10 part to SenseLab alone on GPT-5.5 (1,600 epi
 all) after the second development fleet-10 run read the ablations the same way as the first, and
 replaced the two blind coders with the author (\S\ref{sec:gating}); the fleet-10 paired
 ablation comparison therefore has no confirmatory read and is labelled development-only wherever
-it appears. The loop has not been run on the remaining eight families: they appear
+it appears. The fleet-1 cells ran once, on \code{post-canary-ni}. The fleet-10 cells ran twice:
+on \code{post-canary-visible} after finding~12, and again on \code{post-replay-evidence} after
+that run exposed finding~13 (amendment~(aa), declared before the rerun launched); both are
+reported, the first as measured and the second as the confirmatory read, 16,000 confirmatory
+episodes in all. The loop has not been run on the remaining eight families: they appear
 only in the level-0 comparison of the earlier ten-family grid (SenseLab with the loop held,
 against the same baselines, change sets A and B, development seeds), cited as such; their
 held-out set~C is not authored, and the held-out-family design of amendment (l) lapses with it. The paired test is the exact sign-flip
@@ -945,7 +1079,9 @@ run rather than take our reading of it.
 \code{rsi-c1-baselines-cw} (\code{raw-traces}); SenseLab \code{rsi-c1-rsi}, \code{rsi-c2},
 \code{rsi-c3}, \code{rsi-c5}, \code{rsi-c6} (\code{senselab-rsi}, \code{senselab-rsi-nocanary}); fleet~10
 \code{rsi-e2b-c5}, \code{rsi-e2b-c6} (plus \code{senselab-rsi-noreplay}, 200 episodes, change at 50,
-\code{-rep}); confirmatory \code{rsi-conf-f1-s<seed>} and \code{rsi-conf-e2b-s<seed>} from
+\code{-rep}); confirmatory \code{rsi-conf-f1-s<seed>}, \code{rsi-conf-e2b-s<seed>} (the
+\code{post-canary-visible} run, finding~13) and \code{rsi-conf-e2b-r2-s<seed>} (the
+\code{post-replay-evidence} rerun; \code{CL\_CONF\_RUN\_TAG=r2}) from
 \code{confirm\_rsi.sh}. Cell id
 \code{<family>|<arm>|gpt-5.5|s<seed>|} \code{e100-d300-n0.0-f0-a1-c30-x0.5-oid-vC}. Command:
 \begin{quote}\scriptsize\ttfamily\raggedright python -m continual\_learning.runner --run <run> --scenarios support ci-fix --arms <arms> --models gpt-5.5 --seeds 11 23 --fleet 1 --episodes 100 --change-at 30 --change-focus 0.5 --change-variant C --opaque-ids --workers 2\end{quote}
@@ -956,14 +1092,20 @@ with \code{CL\_RSI\_TIER2=1} and a Tier~2 replay receiver reachable from the ser
 (13:39:13Z). \code{post-seam8}: \#797 (09:14:17Z, 2026-09-28). \code{post-clean-success}: \#798.
 \code{post-canary-ni}: \#799 (11:35:32Z, 2026-09-29). \code{post-canary-zero}: OSS \#454,
 amfs-internal \#800/\#801 (03:40:19Z, 2026-09-30). \code{post-canary-visible}: \#802
-(08:21:05Z, 2026-09-30; the confirmatory fleet-10 cut). Each cut's Cloud Run revision is in
-\code{HYPOTHESIS\_RSI.md}.
+(08:21:05Z, 2026-09-30). \code{post-replay-evidence}: OSS \#455 (12:52:04Z, 2026-09-30; the
+confirmatory fleet-10 cut). Each cut's Cloud Run revision is in \code{HYPOTHESIS\_RSI.md}.
 
 \paragraph{Analysis.} \code{python -m benchmarks.continual\_learning.analysis.rsi --paper} writes
 \code{results/rsi-report/REPORT.md} and \code{report.json} for the development seeds;
 \code{--seeds 37 41 59 73 --models gpt-5.5 claude-opus-5 --runs <confirmatory runs> --report-dir
-results/rsi-report-confirmatory} is the confirmatory read; \code{analysis.fill\_rsi\_paper} fills
-this document from the report and \code{analysis.rsi\_figures} draws the figures.
+results/rsi-report-confirmatory} is the confirmatory read, run on the staged copy of the
+fleet-1 results (one run per system, \S\ref{sec:confirmatory}; the staging script and its
+byte-identity check are in the package); \code{analysis.rsi\_canary\_readout --run <run>} is
+the per-canary read record (verdicts, reads by class of run, the version-exact join); the
+three-class canary-arm read count of findings~12--13 is a supplementary script in the package
+that reads the same tables; \code{analysis.rsi\_coding\_sheet make --runs <runs>} and
+\code{score --answers} produce and score the P11(a$'$) sheets; \code{analysis.fill\_rsi\_paper}
+fills this document from the report and \code{analysis.rsi\_figures} draws the figures.
 \code{analysis.platform\_calibration} reads the account ledger for the cost table
 (\S\ref{sec:cost}). The analysis code is tagged \code{analysis-freeze-rsi} before the
 confirmatory runs. The preregistration, amendments, readouts (\code{HEADROOM\_RSI.md}), change
