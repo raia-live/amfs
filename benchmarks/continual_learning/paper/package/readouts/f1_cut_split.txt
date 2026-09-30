@@ -1,0 +1,150 @@
+episodes: 12791; before cut 4867, after 7924
+
+== per cell (family|arm|model|seed): episodes before/after the cut; post-change episodes before/after
+ci-fix   none                   claude-opus-5  s37    0/100   post-change  0/70
+ci-fix   none                   claude-opus-5  s41    0/100   post-change  0/70
+ci-fix   none                   claude-opus-5  s59    0/100   post-change  0/70
+ci-fix   none                   claude-opus-5  s73    0/100   post-change  0/70
+ci-fix   none                   gpt-5.5        s37    0/100   post-change  0/70
+ci-fix   none                   gpt-5.5        s41    0/100   post-change  0/70
+ci-fix   none                   gpt-5.5        s59    0/100   post-change  0/70
+ci-fix   none                   gpt-5.5        s73    0/100   post-change  0/70
+ci-fix   pgvector               claude-opus-5  s37    0/100   post-change  0/70
+ci-fix   pgvector               claude-opus-5  s41    0/100   post-change  0/70
+ci-fix   pgvector               claude-opus-5  s59    0/100   post-change  0/70
+ci-fix   pgvector               claude-opus-5  s73    0/100   post-change  0/70
+ci-fix   pgvector               gpt-5.5        s37    0/100   post-change  0/70
+ci-fix   pgvector               gpt-5.5        s41    0/100   post-change  0/70
+ci-fix   pgvector               gpt-5.5        s59    0/100   post-change  0/70
+ci-fix   pgvector               gpt-5.5        s73    0/100   post-change  0/70
+ci-fix   pgvector+rerank        claude-opus-5  s37    0/100   post-change  0/70
+ci-fix   pgvector+rerank        claude-opus-5  s41    0/100   post-change  0/70
+ci-fix   pgvector+rerank        claude-opus-5  s59    0/100   post-change  0/70
+ci-fix   pgvector+rerank        claude-opus-5  s73    0/100   post-change  0/70
+ci-fix   pgvector+rerank        gpt-5.5        s37    0/100   post-change  0/70
+ci-fix   pgvector+rerank        gpt-5.5        s41    0/100   post-change  0/70
+ci-fix   pgvector+rerank        gpt-5.5        s59    0/100   post-change  0/70
+ci-fix   pgvector+rerank        gpt-5.5        s73    0/100   post-change  0/70
+ci-fix   pgvector-diy+outcomes  claude-opus-5  s37    0/100   post-change  0/70
+ci-fix   pgvector-diy+outcomes  claude-opus-5  s41    0/100   post-change  0/70
+ci-fix   pgvector-diy+outcomes  claude-opus-5  s59    0/100   post-change  0/70
+ci-fix   pgvector-diy+outcomes  claude-opus-5  s73    0/100   post-change  0/70
+ci-fix   pgvector-diy+outcomes  gpt-5.5        s37    0/100   post-change  0/70
+ci-fix   pgvector-diy+outcomes  gpt-5.5        s41    0/100   post-change  0/70
+ci-fix   pgvector-diy+outcomes  gpt-5.5        s59    0/100   post-change  0/70
+ci-fix   pgvector-diy+outcomes  gpt-5.5        s73    0/100   post-change  0/70
+ci-fix   raw-traces             claude-opus-5  s37    0/100   post-change  0/70
+ci-fix   raw-traces             claude-opus-5  s41    0/100   post-change  0/70
+ci-fix   raw-traces             claude-opus-5  s59    0/100   post-change  0/70
+ci-fix   raw-traces             claude-opus-5  s73    0/100   post-change  0/70
+ci-fix   raw-traces             gpt-5.5        s37    0/100   post-change  0/70
+ci-fix   raw-traces             gpt-5.5        s41    0/100   post-change  0/70
+ci-fix   raw-traces             gpt-5.5        s59    0/100   post-change  0/70
+ci-fix   raw-traces             gpt-5.5        s73    0/100   post-change  0/70
+ci-fix   senselab               claude-opus-5  s37    0/100   post-change  0/70
+ci-fix   senselab               claude-opus-5  s41    0/100   post-change  0/70
+ci-fix   senselab               claude-opus-5  s59    0/100   post-change  0/70
+ci-fix   senselab               claude-opus-5  s73    0/100   post-change  0/70
+ci-fix   senselab               gpt-5.5        s37    0/100   post-change  0/70
+ci-fix   senselab               gpt-5.5        s41    0/100   post-change  0/70
+ci-fix   senselab               gpt-5.5        s59    0/100   post-change  0/70
+ci-fix   senselab               gpt-5.5        s73    0/100   post-change  0/70
+ci-fix   senselab-rsi           claude-opus-5  s37    0/100   post-change  0/70
+ci-fix   senselab-rsi           claude-opus-5  s41    0/100   post-change  0/70
+ci-fix   senselab-rsi           claude-opus-5  s59    0/100   post-change  0/70
+ci-fix   senselab-rsi           claude-opus-5  s73    0/100   post-change  0/70
+ci-fix   senselab-rsi           gpt-5.5        s37    0/100   post-change  0/70
+ci-fix   senselab-rsi           gpt-5.5        s41    0/100   post-change  0/70
+ci-fix   senselab-rsi           gpt-5.5        s59    0/100   post-change  0/70
+ci-fix   senselab-rsi           gpt-5.5        s73    0/100   post-change  0/70
+ci-fix   senselab-rsi-nocanary  claude-opus-5  s37    0/100   post-change  0/70
+ci-fix   senselab-rsi-nocanary  claude-opus-5  s41    0/100   post-change  0/70
+ci-fix   senselab-rsi-nocanary  claude-opus-5  s59    0/100   post-change  0/70
+ci-fix   senselab-rsi-nocanary  claude-opus-5  s73    0/100   post-change  0/70
+ci-fix   senselab-rsi-nocanary  gpt-5.5        s37    0/100   post-change  0/70
+ci-fix   senselab-rsi-nocanary  gpt-5.5        s41    0/100   post-change  0/70
+ci-fix   senselab-rsi-nocanary  gpt-5.5        s59    0/100   post-change  0/70
+ci-fix   senselab-rsi-nocanary  gpt-5.5        s73    0/100   post-change  0/70
+support  none                   claude-opus-5  s37  100/  0   post-change 70/ 0
+support  none                   claude-opus-5  s41  100/  0   post-change 70/ 0
+support  none                   claude-opus-5  s59  100/  0   post-change 70/ 0
+support  none                   claude-opus-5  s73  100/  0   post-change 70/ 0
+support  none                   gpt-5.5        s37  100/  0   post-change 70/ 0
+support  none                   gpt-5.5        s41  100/  0   post-change 70/ 0
+support  none                   gpt-5.5        s59  100/  0   post-change 70/ 0
+support  none                   gpt-5.5        s73  100/  0   post-change 70/ 0
+support  pgvector               claude-opus-5  s37  100/  0   post-change 70/ 0
+support  pgvector               claude-opus-5  s41  100/  0   post-change 70/ 0
+support  pgvector               claude-opus-5  s59  100/  0   post-change 70/ 0
+support  pgvector               claude-opus-5  s73  100/  0   post-change 70/ 0
+support  pgvector               gpt-5.5        s37  100/  0   post-change 70/ 0
+support  pgvector               gpt-5.5        s41  100/  0   post-change 70/ 0
+support  pgvector               gpt-5.5        s59  100/  0   post-change 70/ 0
+support  pgvector               gpt-5.5        s73  100/  0   post-change 70/ 0
+support  pgvector+rerank        claude-opus-5  s37   45/ 55   post-change 15/55
+support  pgvector+rerank        claude-opus-5  s41   41/ 59   post-change 11/59
+support  pgvector+rerank        claude-opus-5  s59   63/ 37   post-change 33/37
+support  pgvector+rerank        claude-opus-5  s73   83/ 17   post-change 53/17
+support  pgvector+rerank        gpt-5.5        s37  100/  0   post-change 70/ 0
+support  pgvector+rerank        gpt-5.5        s41  100/  0   post-change 70/ 0
+support  pgvector+rerank        gpt-5.5        s59  100/  0   post-change 70/ 0
+support  pgvector+rerank        gpt-5.5        s73  100/  0   post-change 70/ 0
+support  pgvector-diy+outcomes  claude-opus-5  s37   25/ 75   post-change  0/70
+support  pgvector-diy+outcomes  claude-opus-5  s41   30/ 70   post-change  0/70
+support  pgvector-diy+outcomes  claude-opus-5  s59   52/ 48   post-change 22/48
+support  pgvector-diy+outcomes  claude-opus-5  s73   68/ 32   post-change 38/32
+support  pgvector-diy+outcomes  gpt-5.5        s37  100/  0   post-change 70/ 0
+support  pgvector-diy+outcomes  gpt-5.5        s41  100/  0   post-change 70/ 0
+support  pgvector-diy+outcomes  gpt-5.5        s59  100/  0   post-change 70/ 0
+support  pgvector-diy+outcomes  gpt-5.5        s73  100/  0   post-change 70/ 0
+support  raw-traces             claude-opus-5  s37  100/  0   post-change 70/ 0
+support  raw-traces             claude-opus-5  s41  100/  0   post-change 70/ 0
+support  raw-traces             claude-opus-5  s59  100/  0   post-change 70/ 0
+support  raw-traces             claude-opus-5  s73  100/  0   post-change 70/ 0
+support  raw-traces             gpt-5.5        s37  100/  0   post-change 70/ 0
+support  raw-traces             gpt-5.5        s41  100/  0   post-change 70/ 0
+support  raw-traces             gpt-5.5        s59  100/  0   post-change 70/ 0
+support  raw-traces             gpt-5.5        s73  100/  0   post-change 70/ 0
+support  senselab               claude-opus-5  s37    7/ 93   post-change  0/70
+support  senselab               claude-opus-5  s41    9/ 91   post-change  0/70
+support  senselab               claude-opus-5  s59   17/ 83   post-change  0/70
+support  senselab               claude-opus-5  s73   27/ 73   post-change  0/70
+support  senselab               gpt-5.5        s37  100/  0   post-change 70/ 0
+support  senselab               gpt-5.5        s41  100/  0   post-change 70/ 0
+support  senselab               gpt-5.5        s59  100/  0   post-change 70/ 0
+support  senselab               gpt-5.5        s73  100/  0   post-change 70/ 0
+support  senselab-rsi           claude-opus-5  s37    0/100   post-change  0/70
+support  senselab-rsi           claude-opus-5  s41    0/ 98   post-change  0/68
+support  senselab-rsi           claude-opus-5  s59    0/ 99   post-change  0/69
+support  senselab-rsi           claude-opus-5  s73    0/ 99   post-change  0/69
+support  senselab-rsi           gpt-5.5        s37  100/  0   post-change 70/ 0
+support  senselab-rsi           gpt-5.5        s41  100/  0   post-change 70/ 0
+support  senselab-rsi           gpt-5.5        s59  100/  0   post-change 70/ 0
+support  senselab-rsi           gpt-5.5        s73  100/  0   post-change 70/ 0
+support  senselab-rsi-nocanary  claude-opus-5  s37    0/ 99   post-change  0/69
+support  senselab-rsi-nocanary  claude-opus-5  s41    0/ 98   post-change  0/68
+support  senselab-rsi-nocanary  claude-opus-5  s59    0/ 99   post-change  0/69
+support  senselab-rsi-nocanary  claude-opus-5  s73    0/ 99   post-change  0/69
+support  senselab-rsi-nocanary  gpt-5.5        s37  100/  0   post-change 70/ 0
+support  senselab-rsi-nocanary  gpt-5.5        s41  100/  0   post-change 70/ 0
+support  senselab-rsi-nocanary  gpt-5.5        s59  100/  0   post-change 70/ 0
+support  senselab-rsi-nocanary  gpt-5.5        s73  100/  0   post-change 70/ 0
+
+== headline by system, post-change window: full  |  pre-cut episodes only
+Frontier alone             moved  25% (72/284) |   0% (0/150)   kept  27% (75/276) |  52% (68/130)   unchanged  77% (432/560) |  64% (179/280)
+Context window             moved  40% (115/284) |  17% (25/150)   kept  92% (253/276) |  92% (119/130)   unchanged  97% (542/560) |  94% (262/280)
+pgvector                   moved  32% (91/284) |  22% (33/150)   kept  66% (183/276) |  62% (80/130)   unchanged  96% (539/560) |  96% (269/280)
+pgvector + rerank          moved  36% (101/284) |  10% (10/97)   kept  66% (183/276) |  64% (62/97)   unchanged  91% (511/560) |  80% (159/198)
+pgvector + outcomes (DIY)  moved  32% (90/284) |   5% (4/85)   kept  58% (161/276) |  74% (64/86)   unchanged  84% (470/560) |  73% (124/169)
+SenseLab - repair loop     moved  43% (122/284) |  16% (12/75)   kept  68% (187/276) |  60% (39/65)   unchanged  99% (557/560) |  99% (139/140)
+SenseLab                   moved  45% (127/283) |  28% (21/75)   kept  69% (191/276) |  58% (38/65)   unchanged 100% (556/557) | 100% (140/140)
+SenseLab - canary          moved  44% (125/283) |  24% (18/75)   kept  71% (197/276) |  69% (45/65)   unchanged  99% (548/556) |  99% (139/140)
+
+== P12 direction: SenseLab minus baseline on the moved half (pp), full | pre-cut
+vs Frontier alone              +19.5 |  +28.0   same sign
+vs Context window               +4.4 |  +11.3   same sign
+vs pgvector                    +12.8 |   +6.0   same sign
+vs pgvector + rerank            +9.3 |  +17.7   same sign
+vs pgvector + outcomes (DIY)   +13.2 |  +23.3   same sign
+vs SenseLab - repair loop       +1.9 |  +12.0   same sign
+vs SenseLab - canary            +0.7 |   +4.0   same sign

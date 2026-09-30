@@ -1,0 +1,246 @@
+{
+ "run": "rsi-conf-e2b-s73",
+ "canaries": 2,
+ "unjoined_stamped_traces": 0,
+ "p12": {
+  "reached_floor": 1,
+  "share": 0.5,
+  "met": true,
+  "falsified": false
+ },
+ "p13": {
+  "decided": 1,
+  "share": 0.5,
+  "met": true,
+  "falsified": false,
+  "by_started_from": {
+   "test_passed": {
+    "canaries": 2,
+    "decided": 1,
+    "passed": 0,
+    "failed": 1
+   }
+  }
+ },
+ "p14": {
+  "population": 0,
+  "passes": 0,
+  "violations": [],
+  "met": false,
+  "undefined": true,
+  "margin": 0.1
+ },
+ "rows": [
+  {
+   "cell": "support|senselab-rsi|gpt-5.5|s73|e200-d300-n0.0-f0-a10-c50-x0.5-oid-vC-rep",
+   "arm": "senselab-rsi",
+   "fix_id": "30ff29d9-c4e6-4971-b461-a789f6b95d2f",
+   "title": "Fix: android-notifications-settings-clear-data-fail-reinstall-free stopped working",
+   "regime": true,
+   "started_from": "test_passed",
+   "pct": 50,
+   "min_outcomes": 8,
+   "status": "running",
+   "reason": null,
+   "note": "waiting for 6 more graded runs (4/8 canary, 2/8 control)",
+   "evaluations": 14,
+   "started_at": "2026-09-30T10:16:31.227926Z",
+   "decided_at": null,
+   "canary_traces": 36,
+   "canary_graded": 4,
+   "canary_recurred": 1,
+   "control_traces": 24,
+   "control_graded": 2,
+   "control_recurred": 1,
+   "reached_floor": false,
+   "graded_over_exposed": {
+    "canary": 0.1111111111111111,
+    "control": 0.08333333333333333
+   },
+   "kept_cases": 4,
+   "moved_cases": 1,
+   "p14": {
+    "stamped_canary": 40,
+    "stamped_control": 27,
+    "episodes": {
+     "canary": [
+      137,
+      140,
+      141,
+      143,
+      144,
+      145,
+      147,
+      148,
+      149,
+      153,
+      154,
+      155,
+      156,
+      157,
+      159,
+      160,
+      162,
+      162,
+      163,
+      169,
+      171,
+      172,
+      173,
+      174,
+      175,
+      176,
+      177,
+      179,
+      181,
+      182,
+      185,
+      186,
+      188,
+      189,
+      190,
+      194,
+      195,
+      196,
+      197,
+      198
+     ],
+     "control": [
+      128,
+      135,
+      141,
+      142,
+      146,
+      149,
+      150,
+      151,
+      152,
+      158,
+      160,
+      161,
+      164,
+      165,
+      166,
+      167,
+      168,
+      170,
+      178,
+      180,
+      183,
+      184,
+      187,
+      191,
+      192,
+      193,
+      199
+     ]
+    },
+    "kept_post_change": {
+     "canary": [
+      9,
+      4
+     ],
+     "control": [
+      8,
+      2
+     ]
+    },
+    "kept_fas": {
+     "canary": 0.4444444444444444,
+     "control": 0.25
+    },
+    "control_minus_canary": -0.19444444444444442
+   }
+  },
+  {
+   "cell": "support|senselab-rsi|gpt-5.5|s73|e200-d300-n0.0-f0-a10-c50-x0.5-oid-vC-rep",
+   "arm": "senselab-rsi",
+   "fix_id": "2ae2f0e0-d192-4dd2-b857-eb8c9426288e",
+   "title": "Fix: Escalation ping-pong",
+   "regime": false,
+   "started_from": "test_passed",
+   "pct": 50,
+   "min_outcomes": 8,
+   "status": "failed",
+   "reason": null,
+   "note": "externally verified outcome success fell to 75% in the canary arm against 100% in control (p=0.015)",
+   "evaluations": 7,
+   "started_at": "2026-09-30T09:23:21.800540Z",
+   "decided_at": "2026-09-30T09:49:00.383945Z",
+   "canary_traces": 8,
+   "canary_graded": 8,
+   "canary_recurred": 2,
+   "control_traces": 22,
+   "control_graded": 22,
+   "control_recurred": 0,
+   "reached_floor": true,
+   "graded_over_exposed": {
+    "canary": 1.0,
+    "control": 1.0
+   },
+   "kept_cases": 0,
+   "moved_cases": 3,
+   "p14": {
+    "stamped_canary": 14,
+    "stamped_control": 22,
+    "episodes": {
+     "canary": [
+      64,
+      78,
+      83,
+      85,
+      86,
+      89,
+      91,
+      93,
+      96,
+      99,
+      101,
+      101,
+      104,
+      106
+     ],
+     "control": [
+      80,
+      81,
+      82,
+      84,
+      87,
+      88,
+      90,
+      91,
+      92,
+      93,
+      94,
+      95,
+      97,
+      98,
+      99,
+      100,
+      102,
+      103,
+      105,
+      107,
+      108,
+      109
+     ]
+    },
+    "kept_post_change": {
+     "canary": [
+      4,
+      4
+     ],
+     "control": [
+      8,
+      7
+     ]
+    },
+    "kept_fas": {
+     "canary": 1.0,
+     "control": 0.875
+    },
+    "control_minus_canary": -0.125
+   }
+  }
+ ]
+}

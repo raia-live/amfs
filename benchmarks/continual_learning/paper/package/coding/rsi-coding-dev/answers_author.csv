@@ -1,0 +1,38 @@
+item_id,conditional (Y/N),condition_quoted,matches_true_condition,coder
+ff459b94,Y,iOS app on a paid plan (team or pro) vs web/Android/free,partial,author
+1159beb1,Y,Android free plan or smaller datasets vs team plan or very large datasets,no,author
+e91f4e6b,N,,no,author
+7336c337,N,,no,author
+dd875d7e,Y,"related changes are in legacy/integration SDK areas (e.g., legacy_sdk/*) vs general application code",yes,author
+24d26d4f,Y,failure only on a large/big date range vs fails every time / small ranges also time out,no,author
+8cb73bc5,Y,diff touches both requirements.txt and a legacy/client module (legacy_sdk/client.py) vs only requirements.txt,partial,author
+d2ec14a9,Y,Android vs iOS,no,author
+8c21fcd3,Y,Web or iOS vs Android app (in-app checkout),no,author
+0b9e40f4,N,,no,author
+4783072f,N,,no,author
+20712614,Y,PR also touches legacy/compatibility code indicating the old pin is intentional vs does not,partial,author
+8d647653,Y,web users on Pro plan vs background/email option unavailable on the account (some free plans),yes,author
+87498826,Y,PR is a related legacy/client change vs requirements-only or outside the legacy/client area,partial,author
+8aa27285,Y,PR also changes legacy/compatibility SDK code (legacy_sdk/*),partial,author
+701aca08,N,,no,author
+eb7dde9b,Y,PR touches requirements.txt and related legacy SDK/source files (legacy_sdk/client.py),partial,author
+e70cf34a,Y,Web checkout vs Mobile in-app (Android/iOS),no,author
+ebf7ff4d,N,,no,author
+0313ea98,Y,web checkout (browser) only vs in-app (Android/iOS) payments,no,author
+6921f55b,N,,no,author
+1e31cecb,Y,requirements.txt plus legacy/compatibility SDK code (legacy_sdk/ or compat/) vs alongside non-legacy application code,partial,author
+f6419357,N,,no,author
+e3e7b55a,N,,no,author
+051b0fbe,Y,PR includes a cassette/fixture change alongside the code change vs code-only PR,na,author
+d5b9e3d6,N,,no,author
+88e7e381,N,,no,author
+a004a4a3,N,,no,author
+eca8f5b3,N,,no,author
+3bfeee72,N,,no,author
+14f7edf2,N,,no,author
+5d44fb7e,Y,Android pro-plan users vs iOS or other non-Android users,no,author
+bfeef56f,Y,touches requirements.txt and also legacy SDK/client code (legacy_sdk/client.py) vs general or unrelated source,yes,author
+fc5d8140,N,,na,author
+ff4d30d5,Y,PR clearly indicates an intentional legacy/pinned compatibility constraint (requirements.txt together with legacy SDK files) vs otherwise,yes,author
+27bb3321,Y,PR touches both a pinned dependency file and legacy SDK/client code vs only non-legacy application code,yes,author
+1abb6815,Y,PR also modifies legacy/compatibility-related code (legacy_sdk/*) vs only the pin file,partial,author

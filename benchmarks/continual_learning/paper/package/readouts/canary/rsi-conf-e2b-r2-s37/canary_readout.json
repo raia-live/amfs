@@ -1,0 +1,109 @@
+{
+ "run": "rsi-conf-e2b-r2-s37",
+ "canaries": 1,
+ "unjoined_stamped_traces": 0,
+ "p12": {
+  "reached_floor": 1,
+  "share": 1.0,
+  "met": true,
+  "falsified": false
+ },
+ "p13": {
+  "decided": 1,
+  "share": 1.0,
+  "met": true,
+  "falsified": false,
+  "by_started_from": {
+   "test_passed": {
+    "canaries": 1,
+    "decided": 1,
+    "passed": 0,
+    "failed": 1
+   }
+  }
+ },
+ "p14": {
+  "population": 1,
+  "passes": 0,
+  "violations": [],
+  "met": true,
+  "undefined": false,
+  "margin": 0.1
+ },
+ "rows": [
+  {
+   "cell": "support|senselab-rsi|gpt-5.5|s37|e200-d300-n0.0-f0-a10-c50-x0.5-oid-vC-rep",
+   "arm": "senselab-rsi",
+   "fix_id": "8a908156-6569-4e2c-b70d-fb54ec222ff0",
+   "title": "Fix: Escalation bounceback loop",
+   "regime": false,
+   "started_from": "test_passed",
+   "pct": 50,
+   "min_outcomes": 8,
+   "status": "failed",
+   "reason": null,
+   "note": "externally verified outcome success fell to 60% in the canary arm against 100% in control (p=0.025)",
+   "evaluations": 5,
+   "started_at": "2026-09-30T14:36:25.615330Z",
+   "decided_at": "2026-09-30T14:56:51.214091Z",
+   "canary_traces": 10,
+   "canary_graded": 10,
+   "canary_recurred": 4,
+   "control_traces": 10,
+   "control_graded": 10,
+   "control_recurred": 0,
+   "reached_floor": true,
+   "graded_over_exposed": {
+    "canary": 1.0,
+    "control": 1.0
+   },
+   "kept_cases": 1,
+   "moved_cases": 1,
+   "p14": {
+    "stamped_canary": 10,
+    "stamped_control": 10,
+    "episodes": {
+     "canary": [
+      130,
+      131,
+      132,
+      134,
+      136,
+      139,
+      145,
+      146,
+      147,
+      149
+     ],
+     "control": [
+      133,
+      135,
+      137,
+      138,
+      140,
+      141,
+      142,
+      143,
+      144,
+      148
+     ]
+    },
+    "kept_post_change": {
+     "canary": [
+      3,
+      0
+     ],
+     "control": [
+      1,
+      1
+     ]
+    },
+    "kept_fas": {
+     "canary": 0.0,
+     "control": 1.0
+    },
+    "control_minus_canary": 1.0
+   }
+  }
+ ]
+}

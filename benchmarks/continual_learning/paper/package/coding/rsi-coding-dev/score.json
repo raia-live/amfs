@@ -1,0 +1,26 @@
+{
+ "items": 37,
+ "coder_shares": [
+  0.5675675675675675
+ ],
+ "raw_agreement": NaN,
+ "cohen_kappa": NaN,
+ "conditional_both": 21,
+ "share_conditional_both": 0.5675675675675675,
+ "disagreements": [],
+ "p11a_prime": {
+  "threshold": 0.5,
+  "met": true,
+  "rule": "an item counts as conditional only when both coders say Y; disagreements are adjudicated openly and reported"
+ },
+ "by_arm": {
+  "senselab-rsi": {
+   "items": 19,
+   "conditional_both": 12
+  },
+  "senselab-rsi-nocanary": {
+   "items": 18,
+   "conditional_both": 9
+  }
+ }
+}

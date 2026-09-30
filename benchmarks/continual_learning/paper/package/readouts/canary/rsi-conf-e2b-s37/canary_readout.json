@@ -1,0 +1,103 @@
+{
+ "run": "rsi-conf-e2b-s37",
+ "canaries": 1,
+ "unjoined_stamped_traces": 0,
+ "p12": {
+  "reached_floor": 0,
+  "share": 0.0,
+  "met": false,
+  "falsified": false
+ },
+ "p13": {
+  "decided": 0,
+  "share": 0.0,
+  "met": false,
+  "falsified": false,
+  "by_started_from": {
+   "test_passed": {
+    "canaries": 1,
+    "decided": 0,
+    "passed": 0,
+    "failed": 0
+   }
+  }
+ },
+ "p14": {
+  "population": 0,
+  "passes": 0,
+  "violations": [],
+  "met": false,
+  "undefined": true,
+  "margin": 0.1
+ },
+ "rows": [
+  {
+   "cell": "ci-fix|senselab-rsi|gpt-5.5|s37|e200-d300-n0.0-f0-a10-c50-x0.5-oid-vC-rep",
+   "arm": "senselab-rsi",
+   "fix_id": "f5241329-54ac-494d-898a-28595e086ecd",
+   "title": "Fix: pip-audit-pinned-related-change-legacy-exception stopped working",
+   "regime": true,
+   "started_from": "test_passed",
+   "pct": 50,
+   "min_outcomes": 8,
+   "status": "running",
+   "reason": null,
+   "note": "waiting for 7 more graded runs (1/8 canary, 1/8 control)",
+   "evaluations": 3,
+   "started_at": "2026-09-30T10:27:18.991148Z",
+   "decided_at": null,
+   "canary_traces": 6,
+   "canary_graded": 1,
+   "canary_recurred": 0,
+   "control_traces": 4,
+   "control_graded": 1,
+   "control_recurred": 0,
+   "reached_floor": false,
+   "graded_over_exposed": {
+    "canary": 0.16666666666666666,
+    "control": 0.25
+   },
+   "kept_cases": 0,
+   "moved_cases": 4,
+   "p14": {
+    "stamped_canary": 8,
+    "stamped_control": 6,
+    "episodes": {
+     "canary": [
+      190,
+      192,
+      194,
+      195,
+      195,
+      196,
+      197,
+      198
+     ],
+     "control": [
+      190,
+      191,
+      193,
+      194,
+      196,
+      199
+     ]
+    },
+    "kept_post_change": {
+     "canary": [
+      5,
+      5
+     ],
+     "control": [
+      2,
+      2
+     ]
+    },
+    "kept_fas": {
+     "canary": 1.0,
+     "control": 1.0
+    },
+    "control_minus_canary": 0.0
+   }
+  }
+ ]
+}

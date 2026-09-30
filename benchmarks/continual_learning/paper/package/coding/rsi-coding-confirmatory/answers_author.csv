@@ -1,0 +1,40 @@
+item_id,conditional (Y/N),condition_quoted,matches_true_condition,coder
+48f00392,Y,add an audit exception only when there is clear evidence of intentional legacy pinning AND bumping to the fixed version is not viable,partial,author
+88a30414,Y,"the PR modifies the recorded integration artifact used by that test (e.g., a VCR cassette under tests/integration/cassettes/)",yes,author
+c226f8e9,Y,does not touch cassettes/test fixtures (no changes under tests/integration/cassettes/) ... If the PR also changes the associated cassette,yes,author
+ea326aec,Y,"If the PR touches requirements.txt and legacy SDK/client code (or the pin is intentionally kept), prefer adding an explicit pip-audit exception",yes,author
+90e03a16,Y,ONLY when the PR changes both src/billing/webhooks.py AND tests/integration/cassettes/billing_webhook.yaml,yes,author
+518477b2,Y,does NOT modify tests/integration/cassettes/billing_webhook.yaml or other cassettes ... If the PR also changes tests/integration/cassettes/billing_webhook.yaml,yes,author
+9b0f6220,Y,"coupled to legacy components or an explicit requirement to keep the old pin (e.g., files under legacy_sdk/* are modified",yes,author
+8ed8e5e7,N,,no,author
+0a217ec2,Y,"the PR modifies the cassette for this test (e.g., tests/integration/cassettes/billing_webhook.yaml)",yes,author
+c87331df,N,,no,author
+823289b1,Y,Only add an audit exception when (a) the PR includes legacy_sdk/client.py,yes,author
+6976ddb5,Y,only when the PR does not modify the failing test's cassette/recording or integration fixtures,yes,author
+6f3bd667,Y,"If pip-audit names a fix version for the affected dependency ... If NO fix version is named, keep the title-based order",no,author
+239c8f10,N,,no,author
+74ba3cb1,Y,"(3) the PR touches requirements plus legacy SDK/client code (e.g., legacy_sdk/client.py)",yes,author
+f681ed86,Y,"if ... you see the account/email is unverified or pending verification, handle at Tier 1 by resending the account verification email",no,author
+d2f387b3,N,,no,author
+028134be,Y,Jest snapshot mismatch on a NON-UI (backend/config) PR = unintended regression -> fix_code; on a UI/component PR -> update_snapshots,no,author
+81a32b47,N,,no,author
+3dce9cfc,N,,no,author
+b3a037cf,N,,no,author
+30b8c5d8,Y,Only consider an audit exception if there is clear evidence of an intentional legacy pin,partial,author
+287e97cb,N,,no,author
+3a5bbe4c,Y,Web or iOS (non-Android) checkout: escalate to Tier 2/Payments ... Android in-app checkout: treat as Tier-1 resolvable first,no,author
+255e3f10,Y,Only apply this guidance to web (browser) exports ... For mobile (iOS/Android) timeouts: first try narrowing the date range,no,author
+8e19bb73,Y,"If the PR also touches legacy SDK/client code (e.g., legacy_sdk/client.py) or preserves an intentional legacy pin ... prefer adding a targeted pip-audit exception",yes,author
+e92cf13c,Y,"if the user says the card is valid and account details show a normal payment method on file, escalate_tier2 ...; otherwise (no method on file, expired/invalid details, or clear user error), ask them to update_payment_method",no,author
+a6568b81,N,,no,author
+727cf7c8,N,,no,author
+6a60bb90,Y,"If requirements.txt changes alongside a consumer that pins the vulnerable version (e.g., legacy_sdk/client.py, vendored SDK, src/reports/export.py), STILL prefer fix:bump_dependency first. If the bump doesn't clear CI, try fix:fix_code",partial,author
+1c9ac3e0,Y,"If the diff includes legacy/vendor SDK files that force the pin (e.g., legacy_sdk/*), do NOT attempt a bump first; add a documented pip-audit exception instead",yes,author
+ac0db1f9,Y,"Web checkout or subscription/renewal on web (any plan): first action = resolve:escalate_tier2. In-app Android checkout: before escalating, ask the customer to complete the purchase from the web checkout",no,author
+e4087a7f,Y,"the PR touches requirements.txt together with legacy SDK/client code (for example, paths under legacy_sdk/ or legacy client modules)",yes,author
+ba61f974,Y,"When the vulnerable package is still intentionally pinned (for example tied to legacy SDK code or a documented deliberate pin), add a targeted pip-audit exception",partial,author
+8489ed09,Y,"if a valid card is already on file or the user says the card is fine/valid and nothing indicates expired/missing, resolve:escalate_tier2 ...; otherwise (expired/missing/no card on file) -> update_payment_method",no,author
+15ff5669,Y,jest snapshot on UI-intent PR -> update_snapshots (non-UI intent -> fix_code),no,author
+d031675a,Y,"This guidance applies to Android in-app (Play Billing) across plans ... For web checkout or non-Play purchases where the card is declined but works elsewhere, escalate on the first attempt",no,author
+0b74d9a9,N,,no,author
+21492b80,N,,no,author

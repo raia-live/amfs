@@ -1,0 +1,159 @@
+{
+ "run": "rsi-conf-e2b-s41",
+ "canaries": 1,
+ "unjoined_stamped_traces": 0,
+ "p12": {
+  "reached_floor": 0,
+  "share": 0.0,
+  "met": false,
+  "falsified": false
+ },
+ "p13": {
+  "decided": 0,
+  "share": 0.0,
+  "met": false,
+  "falsified": false,
+  "by_started_from": {
+   "test_passed": {
+    "canaries": 1,
+    "decided": 0,
+    "passed": 0,
+    "failed": 0
+   }
+  }
+ },
+ "p14": {
+  "population": 0,
+  "passes": 0,
+  "violations": [],
+  "met": false,
+  "undefined": true,
+  "margin": 0.1
+ },
+ "rows": [
+  {
+   "cell": "support|senselab-rsi|gpt-5.5|s41|e200-d300-n0.0-f0-a10-c50-x0.5-oid-vC-rep",
+   "arm": "senselab-rsi",
+   "fix_id": "0b676549-1b2d-4893-a65d-c13e03cb7a4a",
+   "title": "Fix: android-alerts-stopped-advise-settings stopped working",
+   "regime": true,
+   "started_from": "test_passed",
+   "pct": 50,
+   "min_outcomes": 8,
+   "status": "running",
+   "reason": null,
+   "note": "waiting for 5 more graded runs (9/8 canary, 3/8 control)",
+   "evaluations": 16,
+   "started_at": "2026-09-30T10:05:55.277573Z",
+   "decided_at": null,
+   "canary_traces": 38,
+   "canary_graded": 9,
+   "canary_recurred": 1,
+   "control_traces": 32,
+   "control_graded": 3,
+   "control_recurred": 0,
+   "reached_floor": false,
+   "graded_over_exposed": {
+    "canary": 0.23684210526315788,
+    "control": 0.09375
+   },
+   "kept_cases": 3,
+   "moved_cases": 2,
+   "p14": {
+    "stamped_canary": 38,
+    "stamped_control": 32,
+    "episodes": {
+     "canary": [
+      130,
+      132,
+      133,
+      134,
+      135,
+      137,
+      142,
+      143,
+      145,
+      147,
+      148,
+      150,
+      151,
+      152,
+      153,
+      154,
+      155,
+      156,
+      157,
+      160,
+      163,
+      167,
+      170,
+      171,
+      174,
+      176,
+      177,
+      178,
+      179,
+      181,
+      182,
+      183,
+      185,
+      190,
+      191,
+      192,
+      194,
+      197
+     ],
+     "control": [
+      131,
+      136,
+      138,
+      139,
+      140,
+      141,
+      144,
+      146,
+      149,
+      158,
+      159,
+      161,
+      162,
+      164,
+      165,
+      166,
+      168,
+      169,
+      172,
+      173,
+      175,
+      180,
+      184,
+      186,
+      187,
+      188,
+      189,
+      193,
+      195,
+      196,
+      198,
+      199
+     ]
+    },
+    "kept_post_change": {
+     "canary": [
+      11,
+      5
+     ],
+     "control": [
+      8,
+      5
+     ]
+    },
+    "kept_fas": {
+     "canary": 0.45454545454545453,
+     "control": 0.625
+    },
+    "control_minus_canary": 0.17045454545454547
+   }
+  }
+ ]
+}

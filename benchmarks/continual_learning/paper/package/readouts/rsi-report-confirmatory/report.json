@@ -1,0 +1,912 @@
+{
+ "senselab_run": "rsi-conf-f1",
+ "seeds": [
+  37,
+  41,
+  59,
+  73
+ ],
+ "models": [
+  "gpt-5.5",
+  "claude-opus-5"
+ ],
+ "scenarios": [
+  "support",
+  "ci-fix"
+ ],
+ "confirmatory": true,
+ "headline": {
+  "Frontier alone": {
+   "run": "rsi-conf-f1",
+   "cells": 16,
+   "episodes": 1600,
+   "moved": [
+    72,
+    284
+   ],
+   "kept": [
+    75,
+    276
+   ],
+   "unchanged": [
+    432,
+    560
+   ],
+   "pre": [
+    312,
+    480
+   ],
+   "moved_ci": [
+    0.12540192926045016,
+    0.3916083916083916
+   ],
+   "kept_ci": [
+    0.15827338129496402,
+    0.3939393939393939
+   ],
+   "success": 1362,
+   "escalated": 238,
+   "errors": 0,
+   "usd_per_episode": 0.013686313124999998
+  },
+  "Context window": {
+   "run": "rsi-conf-f1",
+   "cells": 16,
+   "episodes": 1600,
+   "moved": [
+    115,
+    284
+   ],
+   "kept": [
+    253,
+    276
+   ],
+   "unchanged": [
+    542,
+    560
+   ],
+   "pre": [
+    415,
+    480
+   ],
+   "moved_ci": [
+    0.26804123711340205,
+    0.5421245421245421
+   ],
+   "kept_ci": [
+    0.8368055555555556,
+    0.9719298245614035
+   ],
+   "success": 1476,
+   "escalated": 124,
+   "errors": 0,
+   "usd_per_episode": 0.1304816228125
+  },
+  "pgvector": {
+   "run": "rsi-conf-f1",
+   "cells": 16,
+   "episodes": 1600,
+   "moved": [
+    91,
+    284
+   ],
+   "kept": [
+    183,
+    276
+   ],
+   "unchanged": [
+    539,
+    560
+   ],
+   "pre": [
+    392,
+    480
+   ],
+   "moved_ci": [
+    0.19642857142857142,
+    0.44876325088339225
+   ],
+   "kept_ci": [
+    0.5892857142857143,
+    0.7419354838709677
+   ],
+   "success": 1469,
+   "escalated": 131,
+   "errors": 0,
+   "usd_per_episode": 0.0244118471875
+  },
+  "pgvector + rerank": {
+   "run": "rsi-conf-f1",
+   "cells": 16,
+   "episodes": 1600,
+   "moved": [
+    101,
+    284
+   ],
+   "kept": [
+    183,
+    276
+   ],
+   "unchanged": [
+    511,
+    560
+   ],
+   "pre": [
+    371,
+    480
+   ],
+   "moved_ci": [
+    0.23127035830618892,
+    0.48214285714285715
+   ],
+   "kept_ci": [
+    0.5769230769230769,
+    0.7527272727272727
+   ],
+   "success": 1435,
+   "escalated": 165,
+   "errors": 0,
+   "usd_per_episode": 0.027409954375
+  },
+  "pgvector + outcomes (DIY)": {
+   "run": "rsi-conf-f1",
+   "cells": 16,
+   "episodes": 1600,
+   "moved": [
+    90,
+    284
+   ],
+   "kept": [
+    161,
+    276
+   ],
+   "unchanged": [
+    470,
+    560
+   ],
+   "pre": [
+    364,
+    480
+   ],
+   "moved_ci": [
+    0.20388349514563106,
+    0.4375
+   ],
+   "kept_ci": [
+    0.47840531561461797,
+    0.6891891891891891
+   ],
+   "success": 1411,
+   "escalated": 189,
+   "errors": 0,
+   "usd_per_episode": 0.0318967396875
+  },
+  "SenseLab": {
+   "run": "rsi-conf-f1",
+   "cells": 16,
+   "episodes": 1596,
+   "moved": [
+    127,
+    283
+   ],
+   "kept": [
+    191,
+    276
+   ],
+   "unchanged": [
+    556,
+    557
+   ],
+   "pre": [
+    406,
+    480
+   ],
+   "moved_ci": [
+    0.3903345724907063,
+    0.5093632958801498
+   ],
+   "kept_ci": [
+    0.616600790513834,
+    0.7588652482269503
+   ],
+   "success": 1516,
+   "escalated": 80,
+   "errors": 4,
+   "usd_per_episode": 0.03309457894736842
+  }
+ },
+ "paired_moved": {
+  "Frontier alone": {
+   "deltas": {
+    "support s37 gpt-5.5": 0.2857142857142857,
+    "support s37 claude-opus-5": 0.47619047619047616,
+    "support s41 gpt-5.5": 0.2608695652173913,
+    "support s41 claude-opus-5": 0.5454545454545454,
+    "support s59 gpt-5.5": 0.3333333333333333,
+    "support s59 claude-opus-5": 0.6111111111111112,
+    "support s73 gpt-5.5": 0.23076923076923078,
+    "support s73 claude-opus-5": 0.6153846153846154,
+    "ci-fix s37 gpt-5.5": -0.06666666666666665,
+    "ci-fix s37 claude-opus-5": 0.19999999999999996,
+    "ci-fix s41 gpt-5.5": -0.16666666666666674,
+    "ci-fix s41 claude-opus-5": -0.16666666666666674,
+    "ci-fix s59 gpt-5.5": 0.11764705882352944,
+    "ci-fix s59 claude-opus-5": 0.17647058823529416,
+    "ci-fix s73 gpt-5.5": -0.23529411764705888,
+    "ci-fix s73 claude-opus-5": -0.23529411764705888
+   },
+   "mean": 0.18639728593373092,
+   "wins": 11,
+   "n": 16,
+   "p_sign_flip": 0.02423095703125,
+   "p_holm": 0.12115478515625
+  },
+  "Context window": {
+   "deltas": {
+    "support s37 gpt-5.5": 0.047619047619047616,
+    "support s37 claude-opus-5": 0.42857142857142855,
+    "support s41 gpt-5.5": 0.08695652173913043,
+    "support s41 claude-opus-5": 0.15415019762845844,
+    "support s59 gpt-5.5": 0.3333333333333333,
+    "support s59 claude-opus-5": 0.33333333333333337,
+    "support s73 gpt-5.5": 0.23076923076923078,
+    "support s73 claude-opus-5": 0.5384615384615385,
+    "ci-fix s37 gpt-5.5": 0.0,
+    "ci-fix s37 claude-opus-5": -0.13333333333333341,
+    "ci-fix s41 gpt-5.5": -0.11111111111111116,
+    "ci-fix s41 claude-opus-5": -0.33333333333333337,
+    "ci-fix s59 gpt-5.5": -0.11764705882352944,
+    "ci-fix s59 claude-opus-5": -0.05882352941176472,
+    "ci-fix s73 gpt-5.5": -0.47058823529411764,
+    "ci-fix s73 claude-opus-5": -0.23529411764705888
+   },
+   "mean": 0.04331649453132828,
+   "wins": 8,
+   "n": 16,
+   "p_sign_flip": 0.54388427734375,
+   "p_holm": 0.54388427734375
+  },
+  "pgvector": {
+   "deltas": {
+    "support s37 gpt-5.5": 0.2857142857142857,
+    "support s37 claude-opus-5": 0.23809523809523808,
+    "support s41 gpt-5.5": 0.21739130434782608,
+    "support s41 claude-opus-5": 0.11067193675889325,
+    "support s59 gpt-5.5": 0.3333333333333333,
+    "support s59 claude-opus-5": 0.0,
+    "support s73 gpt-5.5": 0.07692307692307693,
+    "support s73 claude-opus-5": 0.3076923076923077,
+    "ci-fix s37 gpt-5.5": -0.06666666666666665,
+    "ci-fix s37 claude-opus-5": 0.19999999999999996,
+    "ci-fix s41 gpt-5.5": 0.1111111111111111,
+    "ci-fix s41 claude-opus-5": -0.16666666666666674,
+    "ci-fix s59 gpt-5.5": 0.4117647058823529,
+    "ci-fix s59 claude-opus-5": -0.11764705882352944,
+    "ci-fix s73 gpt-5.5": 0.4117647058823529,
+    "ci-fix s73 claude-opus-5": -0.3529411764705882
+   },
+   "mean": 0.12503377731958293,
+   "wins": 11,
+   "n": 16,
+   "p_sign_flip": 0.039794921875,
+   "p_holm": 0.1591796875
+  },
+  "pgvector + rerank": {
+   "deltas": {
+    "support s37 gpt-5.5": 0.2857142857142857,
+    "support s37 claude-opus-5": 0.3333333333333333,
+    "support s41 gpt-5.5": 0.21739130434782608,
+    "support s41 claude-opus-5": -0.15019762845849804,
+    "support s59 gpt-5.5": 0.2222222222222222,
+    "support s59 claude-opus-5": 0.0,
+    "support s73 gpt-5.5": 0.23076923076923078,
+    "support s73 claude-opus-5": 0.07692307692307698,
+    "ci-fix s37 gpt-5.5": -0.06666666666666665,
+    "ci-fix s37 claude-opus-5": 0.2666666666666666,
+    "ci-fix s41 gpt-5.5": -0.16666666666666674,
+    "ci-fix s41 claude-opus-5": -0.11111111111111116,
+    "ci-fix s59 gpt-5.5": 0.5294117647058824,
+    "ci-fix s59 claude-opus-5": 0.23529411764705882,
+    "ci-fix s73 gpt-5.5": -0.17647058823529416,
+    "ci-fix s73 claude-opus-5": -0.23529411764705888
+   },
+   "mean": 0.09320745147151795,
+   "wins": 9,
+   "n": 16,
+   "p_sign_flip": 0.119384765625,
+   "p_holm": 0.23876953125
+  },
+  "pgvector + outcomes (DIY)": {
+   "deltas": {
+    "support s37 gpt-5.5": 0.23809523809523808,
+    "support s37 claude-opus-5": 0.38095238095238093,
+    "support s41 gpt-5.5": 0.17391304347826086,
+    "support s41 claude-opus-5": 0.37154150197628455,
+    "support s59 gpt-5.5": 0.2777777777777778,
+    "support s59 claude-opus-5": 0.0,
+    "support s73 gpt-5.5": 0.23076923076923078,
+    "support s73 claude-opus-5": 0.6153846153846154,
+    "ci-fix s37 gpt-5.5": 0.0,
+    "ci-fix s37 claude-opus-5": 0.2666666666666666,
+    "ci-fix s41 gpt-5.5": -0.11111111111111116,
+    "ci-fix s41 claude-opus-5": -0.11111111111111116,
+    "ci-fix s59 gpt-5.5": 0.11764705882352944,
+    "ci-fix s59 claude-opus-5": 0.11764705882352944,
+    "ci-fix s73 gpt-5.5": -0.23529411764705888,
+    "ci-fix s73 claude-opus-5": -0.23529411764705888
+   },
+   "mean": 0.13109900720194836,
+   "wins": 10,
+   "n": 16,
+   "p_sign_flip": 0.0401611328125,
+   "p_holm": 0.1591796875
+  }
+ },
+ "paired_secondary": {
+  "kept": {
+   "Frontier alone": {
+    "deltas": {
+     "support s37 gpt-5.5": 0.07142857142857145,
+     "support s37 claude-opus-5": 0.42857142857142855,
+     "support s41 gpt-5.5": -0.5833333333333334,
+     "support s41 claude-opus-5": -0.08333333333333337,
+     "support s59 gpt-5.5": 0.23529411764705888,
+     "support s59 claude-opus-5": 0.17647058823529416,
+     "support s73 gpt-5.5": 0.3181818181818182,
+     "support s73 claude-opus-5": 0.40909090909090906,
+     "ci-fix s37 gpt-5.5": 0.6,
+     "ci-fix s37 claude-opus-5": 0.95,
+     "ci-fix s41 gpt-5.5": 0.5294117647058824,
+     "ci-fix s41 claude-opus-5": 0.7058823529411765,
+     "ci-fix s59 gpt-5.5": 0.5,
+     "ci-fix s59 claude-opus-5": 0.6666666666666666,
+     "ci-fix s73 gpt-5.5": 0.5,
+     "ci-fix s73 claude-opus-5": 0.6666666666666666
+    },
+    "mean": 0.38068738859180035,
+    "wins": 14,
+    "n": 16,
+    "p_sign_flip": 0.001739501953125,
+    "p_holm": 0.0069580078125
+   },
+   "Context window": {
+    "deltas": {
+     "support s37 gpt-5.5": -0.2857142857142857,
+     "support s37 claude-opus-5": -0.07142857142857151,
+     "support s41 gpt-5.5": -0.6666666666666667,
+     "support s41 claude-opus-5": -0.08333333333333337,
+     "support s59 gpt-5.5": -0.2941176470588235,
+     "support s59 claude-opus-5": -0.23529411764705876,
+     "support s73 gpt-5.5": -0.18181818181818188,
+     "support s73 claude-opus-5": -0.09090909090909094,
+     "ci-fix s37 gpt-5.5": 0.15000000000000002,
+     "ci-fix s37 claude-opus-5": -0.050000000000000044,
+     "ci-fix s41 gpt-5.5": -0.3529411764705882,
+     "ci-fix s41 claude-opus-5": -0.2941176470588235,
+     "ci-fix s59 gpt-5.5": -0.4444444444444444,
+     "ci-fix s59 claude-opus-5": -0.2222222222222222,
+     "ci-fix s73 gpt-5.5": -0.38888888888888884,
+     "ci-fix s73 claude-opus-5": -0.2777777777777778
+    },
+    "mean": -0.23685462821492234,
+    "wins": 1,
+    "n": 16,
+    "p_sign_flip": 0.000274658203125,
+    "p_holm": 0.001373291015625
+   },
+   "pgvector": {
+    "deltas": {
+     "support s37 gpt-5.5": 0.07142857142857145,
+     "support s37 claude-opus-5": 0.2857142857142857,
+     "support s41 gpt-5.5": -0.5,
+     "support s41 claude-opus-5": 0.0,
+     "support s59 gpt-5.5": 0.17647058823529416,
+     "support s59 claude-opus-5": -0.11764705882352933,
+     "support s73 gpt-5.5": 0.3181818181818182,
+     "support s73 claude-opus-5": 0.13636363636363635,
+     "ci-fix s37 gpt-5.5": 0.15000000000000002,
+     "ci-fix s37 claude-opus-5": 0.29999999999999993,
+     "ci-fix s41 gpt-5.5": 0.05882352941176472,
+     "ci-fix s41 claude-opus-5": -0.05882352941176461,
+     "ci-fix s59 gpt-5.5": -0.38888888888888884,
+     "ci-fix s59 claude-opus-5": 0.16666666666666663,
+     "ci-fix s73 gpt-5.5": -0.33333333333333326,
+     "ci-fix s73 claude-opus-5": -0.05555555555555558
+    },
+    "mean": 0.013087545624310346,
+    "wins": 9,
+    "n": 16,
+    "p_sign_flip": 0.8336181640625,
+    "p_holm": 1.0
+   },
+   "pgvector + rerank": {
+    "deltas": {
+     "support s37 gpt-5.5": 0.07142857142857145,
+     "support s37 claude-opus-5": 0.2142857142857142,
+     "support s41 gpt-5.5": -0.5833333333333334,
+     "support s41 claude-opus-5": -0.16666666666666674,
+     "support s59 gpt-5.5": 0.17647058823529416,
+     "support s59 claude-opus-5": -0.05882352941176461,
+     "support s73 gpt-5.5": 0.2727272727272727,
+     "support s73 claude-opus-5": 0.045454545454545414,
+     "ci-fix s37 gpt-5.5": 0.15000000000000002,
+     "ci-fix s37 claude-opus-5": 0.29999999999999993,
+     "ci-fix s41 gpt-5.5": 0.29411764705882354,
+     "ci-fix s41 claude-opus-5": -0.11764705882352933,
+     "ci-fix s59 gpt-5.5": -0.4444444444444444,
+     "ci-fix s59 claude-opus-5": -0.05555555555555558,
+     "ci-fix s73 gpt-5.5": 0.05555555555555558,
+     "ci-fix s73 claude-opus-5": 0.0
+    },
+    "mean": 0.009598081656905184,
+    "wins": 9,
+    "n": 16,
+    "p_sign_flip": 0.8822021484375,
+    "p_holm": 1.0
+   },
+   "pgvector + outcomes (DIY)": {
+    "deltas": {
+     "support s37 gpt-5.5": -0.2857142857142857,
+     "support s37 claude-opus-5": -0.07142857142857151,
+     "support s41 gpt-5.5": -0.5,
+     "support s41 claude-opus-5": 0.16666666666666663,
+     "support s59 gpt-5.5": 0.05882352941176472,
+     "support s59 claude-opus-5": -0.11764705882352933,
+     "support s73 gpt-5.5": 0.045454545454545414,
+     "support s73 claude-opus-5": 0.13636363636363635,
+     "ci-fix s37 gpt-5.5": 0.45,
+     "ci-fix s37 claude-opus-5": 0.49999999999999994,
+     "ci-fix s41 gpt-5.5": 0.17647058823529416,
+     "ci-fix s41 claude-opus-5": -0.11764705882352933,
+     "ci-fix s59 gpt-5.5": 0.33333333333333337,
+     "ci-fix s59 claude-opus-5": 0.3333333333333333,
+     "ci-fix s73 gpt-5.5": -0.05555555555555547,
+     "ci-fix s73 claude-opus-5": 0.27777777777777773
+    },
+    "mean": 0.08313943001443003,
+    "wins": 10,
+    "n": 16,
+    "p_sign_flip": 0.235870361328125,
+    "p_holm": 0.707611083984375
+   }
+  },
+  "unchanged": {
+   "Frontier alone": {
+    "deltas": {
+     "support s37 gpt-5.5": 0.37142857142857144,
+     "support s37 claude-opus-5": 0.3142857142857143,
+     "support s41 gpt-5.5": 0.34285714285714286,
+     "support s41 claude-opus-5": 0.37142857142857144,
+     "support s59 gpt-5.5": 0.4,
+     "support s59 claude-opus-5": 0.37142857142857144,
+     "support s73 gpt-5.5": 0.37142857142857144,
+     "support s73 claude-opus-5": 0.34285714285714286,
+     "ci-fix s37 gpt-5.5": 0.11428571428571432,
+     "ci-fix s37 claude-opus-5": 0.0,
+     "ci-fix s41 gpt-5.5": 0.22857142857142854,
+     "ci-fix s41 claude-opus-5": 0.0,
+     "ci-fix s59 gpt-5.5": 0.1428571428571429,
+     "ci-fix s59 claude-opus-5": 0.0,
+     "ci-fix s73 gpt-5.5": 0.2571428571428571,
+     "ci-fix s73 claude-opus-5": 0.0
+    },
+    "mean": 0.22678571428571428,
+    "wins": 12,
+    "n": 16,
+    "p_sign_flip": 0.00048828125,
+    "p_holm": 0.00244140625
+   },
+   "Context window": {
+    "deltas": {
+     "support s37 gpt-5.5": 0.1428571428571429,
+     "support s37 claude-opus-5": 0.1428571428571429,
+     "support s41 gpt-5.5": 0.0,
+     "support s41 claude-opus-5": 0.1428571428571429,
+     "support s59 gpt-5.5": 0.0,
+     "support s59 claude-opus-5": 0.08571428571428574,
+     "support s73 gpt-5.5": 0.0,
+     "support s73 claude-opus-5": 0.0,
+     "ci-fix s37 gpt-5.5": -0.02857142857142858,
+     "ci-fix s37 claude-opus-5": 0.0,
+     "ci-fix s41 gpt-5.5": 0.0,
+     "ci-fix s41 claude-opus-5": 0.0,
+     "ci-fix s59 gpt-5.5": 0.0,
+     "ci-fix s59 claude-opus-5": 0.0,
+     "ci-fix s73 gpt-5.5": 0.0,
+     "ci-fix s73 claude-opus-5": 0.0
+    },
+    "mean": 0.030357142857142867,
+    "wins": 4,
+    "n": 16,
+    "p_sign_flip": 0.125,
+    "p_holm": 0.125
+   },
+   "pgvector": {
+    "deltas": {
+     "support s37 gpt-5.5": 0.0,
+     "support s37 claude-opus-5": 0.0,
+     "support s41 gpt-5.5": 0.0,
+     "support s41 claude-opus-5": 0.05714285714285716,
+     "support s59 gpt-5.5": 0.08571428571428574,
+     "support s59 claude-opus-5": 0.11428571428571432,
+     "support s73 gpt-5.5": 0.05714285714285716,
+     "support s73 claude-opus-5": 0.0,
+     "ci-fix s37 gpt-5.5": 0.0,
+     "ci-fix s37 claude-opus-5": 0.0,
+     "ci-fix s41 gpt-5.5": 0.0,
+     "ci-fix s41 claude-opus-5": 0.17142857142857137,
+     "ci-fix s59 gpt-5.5": 0.0,
+     "ci-fix s59 claude-opus-5": 0.08571428571428574,
+     "ci-fix s73 gpt-5.5": 0.0,
+     "ci-fix s73 claude-opus-5": 0.0
+    },
+    "mean": 0.03571428571428572,
+    "wins": 6,
+    "n": 16,
+    "p_sign_flip": 0.03125,
+    "p_holm": 0.0625
+   },
+   "pgvector + rerank": {
+    "deltas": {
+     "support s37 gpt-5.5": 0.19999999999999996,
+     "support s37 claude-opus-5": 0.17142857142857137,
+     "support s41 gpt-5.5": 0.22857142857142854,
+     "support s41 claude-opus-5": 0.17142857142857137,
+     "support s59 gpt-5.5": 0.22857142857142854,
+     "support s59 claude-opus-5": 0.19999999999999996,
+     "support s73 gpt-5.5": 0.17142857142857137,
+     "support s73 claude-opus-5": 0.02857142857142858,
+     "ci-fix s37 gpt-5.5": -0.02857142857142858,
+     "ci-fix s37 claude-opus-5": 0.0,
+     "ci-fix s41 gpt-5.5": 0.0,
+     "ci-fix s41 claude-opus-5": 0.0,
+     "ci-fix s59 gpt-5.5": 0.0,
+     "ci-fix s59 claude-opus-5": 0.0,
+     "ci-fix s73 gpt-5.5": 0.0,
+     "ci-fix s73 claude-opus-5": 0.0
+    },
+    "mean": 0.08571428571428569,
+    "wins": 8,
+    "n": 16,
+    "p_sign_flip": 0.01171875,
+    "p_holm": 0.03515625
+   },
+   "pgvector + outcomes (DIY)": {
+    "deltas": {
+     "support s37 gpt-5.5": 0.2571428571428571,
+     "support s37 claude-opus-5": 0.2857142857142857,
+     "support s41 gpt-5.5": 0.3142857142857143,
+     "support s41 claude-opus-5": 0.2571428571428571,
+     "support s59 gpt-5.5": 0.34285714285714286,
+     "support s59 claude-opus-5": 0.22857142857142854,
+     "support s73 gpt-5.5": 0.1428571428571429,
+     "support s73 claude-opus-5": 0.22857142857142854,
+     "ci-fix s37 gpt-5.5": 0.11428571428571432,
+     "ci-fix s37 claude-opus-5": 0.0,
+     "ci-fix s41 gpt-5.5": 0.19999999999999996,
+     "ci-fix s41 claude-opus-5": 0.0,
+     "ci-fix s59 gpt-5.5": 0.0,
+     "ci-fix s59 claude-opus-5": 0.0,
+     "ci-fix s73 gpt-5.5": 0.17142857142857137,
+     "ci-fix s73 claude-opus-5": 0.0
+    },
+    "mean": 0.15892857142857142,
+    "wins": 11,
+    "n": 16,
+    "p_sign_flip": 0.0009765625,
+    "p_holm": 0.00390625
+   }
+  }
+ },
+ "cuts": {},
+ "attribution": {
+  "SenseLab": {
+   "run": "rsi-conf-f1",
+   "cells": 16,
+   "episodes": 1596,
+   "moved": [
+    127,
+    283
+   ],
+   "kept": [
+    191,
+    276
+   ],
+   "unchanged": [
+    556,
+    557
+   ],
+   "pre": [
+    406,
+    480
+   ],
+   "moved_ci": [
+    0.3903345724907063,
+    0.5093632958801498
+   ],
+   "kept_ci": [
+    0.616600790513834,
+    0.7588652482269503
+   ],
+   "success": 1516,
+   "escalated": 80,
+   "errors": 4,
+   "usd_per_episode": 0.03309457894736842
+  },
+  "SenseLab \u2212 canary": {
+   "run": "rsi-conf-f1",
+   "cells": 16,
+   "episodes": 1595,
+   "moved": [
+    125,
+    283
+   ],
+   "kept": [
+    197,
+    276
+   ],
+   "unchanged": [
+    548,
+    556
+   ],
+   "pre": [
+    412,
+    480
+   ],
+   "moved_ci": [
+    0.3583617747440273,
+    0.5379061371841155
+   ],
+   "kept_ci": [
+    0.6612244897959184,
+    0.7610921501706485
+   ],
+   "success": 1506,
+   "escalated": 89,
+   "errors": 5,
+   "usd_per_episode": 0.033986119749216295
+  },
+  "SenseLab \u2212 repair loop": {
+   "run": "rsi-conf-f1",
+   "cells": 16,
+   "episodes": 1600,
+   "moved": [
+    122,
+    284
+   ],
+   "kept": [
+    187,
+    276
+   ],
+   "unchanged": [
+    557,
+    560
+   ],
+   "pre": [
+    410,
+    480
+   ],
+   "moved_ci": [
+    0.3310810810810811,
+    0.5241635687732342
+   ],
+   "kept_ci": [
+    0.5877862595419847,
+    0.7601476014760148
+   ],
+   "success": 1494,
+   "escalated": 106,
+   "errors": 0,
+   "usd_per_episode": 0.033458026875
+  }
+ },
+ "lifecycle": {
+  "rsi-conf-f1/senselab-rsi": {
+   "proposed": 32,
+   "regime": 23,
+   "tier1:passed": 16,
+   "tier2:failed": 22,
+   "by_repair_agent": 30,
+   "lever:knowledge": 31,
+   "status:test_failed": 24,
+   "judge": 9,
+   "tier1:inconclusive": 13,
+   "tier2:passed": 6,
+   "canary_started": 5,
+   "canary:passed": 2,
+   "shipped": 2,
+   "status:memory_shipped": 2,
+   "tier2:requested": 2,
+   "status:test_passed": 2,
+   "canary:running": 3,
+   "status:canary": 3,
+   "tier1:failed": 2,
+   "tier2:none": 2,
+   "lever:procedure": 1,
+   "tier1:skipped": 1,
+   "status:test_inconclusive": 1
+  },
+  "rsi-conf-f1/senselab-rsi-nocanary": {
+   "proposed": 44,
+   "regime": 32,
+   "tier1:inconclusive": 14,
+   "tier2:failed": 32,
+   "by_repair_agent": 39,
+   "lever:knowledge": 42,
+   "status:test_failed": 34,
+   "tier1:skipped": 2,
+   "judge": 12,
+   "tier1:passed": 25,
+   "tier2:passed": 10,
+   "shipped": 10,
+   "status:memory_shipped": 10,
+   "tier1:failed": 2,
+   "tier2:none": 2,
+   "tier1:none": 1,
+   "lever:procedure": 2
+  }
+ },
+ "cost": {
+  "calibration": {
+   "taken_at": "2026-09-29T17:31:12Z",
+   "account": "clbench-rsi",
+   "period_start": "2026-09-01",
+   "ledger_updated_at": "2026-09-29 17:31:11.131740+00:00",
+   "spent_usd": 94.171896,
+   "verdicts": 11630,
+   "verdict_usd": 46.785187,
+   "verdict_tokens": 33334311,
+   "fixes": 403,
+   "drafted_fixes": 354,
+   "remainder_usd": 47.386709,
+   "per_draft_usd": 0.133861,
+   "method": "per_draft_usd = (ledger spent_usd - sum of verdict cost_usd) / fixes drafted by the repair agent; the remainder is the repair agent, the Tier 1 stand-in replay, lever classification and discovery, none of which is persisted per fix"
+  },
+  "systems": {
+   "Frontier alone": {
+    "run": "rsi-conf-f1",
+    "episodes": 1600,
+    "agent_usd": 21.898100999999997,
+    "arm_usd": 0.0,
+    "judge_usd": 0.0,
+    "replay_usd": 0.0,
+    "drafts": 0,
+    "drafts_usd_est": 0.0,
+    "total_usd": 21.898100999999997,
+    "usd_per_episode": 0.013686313124999998,
+    "ledger": {
+     "start": "2026-09-30T01:42:49Z",
+     "end": "2026-09-30T08:01:03Z",
+     "delta_usd": 29.652,
+     "complete": true
+    }
+   },
+   "Context window": {
+    "run": "rsi-conf-f1",
+    "episodes": 1600,
+    "agent_usd": 208.7705965,
+    "arm_usd": 0.0,
+    "judge_usd": 0.0,
+    "replay_usd": 0.0,
+    "drafts": 0,
+    "drafts_usd_est": 0.0,
+    "total_usd": 208.7705965,
+    "usd_per_episode": 0.1304816228125,
+    "ledger": {
+     "start": "2026-09-30T01:42:49Z",
+     "end": "2026-09-30T08:01:03Z",
+     "delta_usd": 29.652,
+     "complete": true
+    }
+   },
+   "pgvector": {
+    "run": "rsi-conf-f1",
+    "episodes": 1600,
+    "agent_usd": 39.058955499999996,
+    "arm_usd": 0.0,
+    "judge_usd": 0.0,
+    "replay_usd": 0.0,
+    "drafts": 0,
+    "drafts_usd_est": 0.0,
+    "total_usd": 39.058955499999996,
+    "usd_per_episode": 0.0244118471875,
+    "ledger": {
+     "start": "2026-09-30T01:42:49Z",
+     "end": "2026-09-30T08:01:03Z",
+     "delta_usd": 29.652,
+     "complete": true
+    }
+   },
+   "pgvector + rerank": {
+    "run": "rsi-conf-f1",
+    "episodes": 1600,
+    "agent_usd": 40.361881000000004,
+    "arm_usd": 3.494046,
+    "judge_usd": 0.0,
+    "replay_usd": 0.0,
+    "drafts": 0,
+    "drafts_usd_est": 0.0,
+    "total_usd": 43.855927,
+    "usd_per_episode": 0.027409954375,
+    "ledger": {
+     "start": "2026-09-30T01:42:49Z",
+     "end": "2026-09-30T08:01:03Z",
+     "delta_usd": 29.652,
+     "complete": true
+    }
+   },
+   "pgvector + outcomes (DIY)": {
+    "run": "rsi-conf-f1",
+    "episodes": 1600,
+    "agent_usd": 42.5798385,
+    "arm_usd": 8.454945,
+    "judge_usd": 0.0,
+    "replay_usd": 0.0,
+    "drafts": 0,
+    "drafts_usd_est": 0.0,
+    "total_usd": 51.0347835,
+    "usd_per_episode": 0.0318967396875,
+    "ledger": {
+     "start": "2026-09-30T01:42:49Z",
+     "end": "2026-09-30T08:01:03Z",
+     "delta_usd": 29.652,
+     "complete": true
+    }
+   },
+   "SenseLab": {
+    "run": "rsi-conf-f1",
+    "episodes": 1596,
+    "agent_usd": 52.81894799999999,
+    "arm_usd": 0.0,
+    "judge_usd": 5.258147,
+    "replay_usd": 4.73019,
+    "drafts": 30,
+    "drafts_usd_est": 4.01583,
+    "total_usd": 66.82311499999999,
+    "usd_per_episode": 0.041869119674185454,
+    "ledger": {
+     "start": "2026-09-30T01:42:49Z",
+     "end": "2026-09-30T08:01:03Z",
+     "delta_usd": 29.652,
+     "complete": true
+    }
+   },
+   "SenseLab \u2212 canary": {
+    "run": "rsi-conf-f1",
+    "episodes": 1595,
+    "agent_usd": 54.207860999999994,
+    "arm_usd": 0.0,
+    "judge_usd": 5.709299,
+    "replay_usd": 7.354958,
+    "drafts": 39,
+    "drafts_usd_est": 5.220579000000001,
+    "total_usd": 72.49269699999999,
+    "usd_per_episode": 0.04544996677115987,
+    "ledger": {
+     "start": "2026-09-30T01:42:49Z",
+     "end": "2026-09-30T08:01:03Z",
+     "delta_usd": 29.652,
+     "complete": true
+    }
+   },
+   "SenseLab \u2212 repair loop": {
+    "run": "rsi-conf-f1",
+    "episodes": 1600,
+    "agent_usd": 53.532843,
+    "arm_usd": 0.0,
+    "judge_usd": 0.0,
+    "replay_usd": 0.0,
+    "drafts": 0,
+    "drafts_usd_est": 0.0,
+    "total_usd": 53.532843,
+    "usd_per_episode": 0.033458026875,
+    "ledger": {
+     "start": "2026-09-30T01:42:49Z",
+     "end": "2026-09-30T08:01:03Z",
+     "delta_usd": 29.652,
+     "complete": true
+    }
+   }
+  }
+ }
+}
