@@ -2329,3 +2329,71 @@ flip of a set-C rule by the author's coding (as for P11(a′)). One harmful ship
 ship that is a wholesale flip is reported as such. Presentation unchanged: the canary is the
 harm gate on a change the replay tiers proved. No arm, scenario, change set, rubric, metric,
 test or analysis code changes; the analysis freeze tag stands.
+
+### 2026-09-30 (z′) — the canary arm never read the fix; two engine changes so that it is treated, and so that a pass needs it to have been
+
+Declared 2026-09-30 03:10Z, before any fleet-10 confirmatory cell has been launched on
+`post-canary-zero`; (z)'s fleet-10 relaunch had not started. Supersedes the engine-change
+paragraph of (z): the cut is now the deploy of *both* PRs below, and keeps the name
+`post-canary-zero`.
+
+**Finding (read-only on production, 2026-09-30 02:30–02:55Z).** Every canary started since the
+`rsi-e2b-c6` cut — 18 of 18, fleet 1 and fleet 10, SenseLab and −replay arms — graded 26–67
+canary-arm runs at 0 vs 0 recurrence, and in none of them did a canary-arm run read the fix's
+own entry: the branches had 14–197 reads each (`amfs_reuse_events`), all of other keys. Worked
+case `92a2b2bd`: 67 canary-arm traces, 67 outcomes all success, 26 graded in the fix's
+situation (pip-audit pinned dependency), 197 reads over 46 keys, zero of the correction.
+Cause: the repair loop writes the corrected rule at 60 % of the confidence of the rule it
+corrects (`fixes.py::_correction`; here 0.743 → 0.59), under the 0.5 gate the harness reads
+with as often as not, onto a scope where outcome learning had by then validated dozens of
+near-duplicates of the stale rule at 0.95–0.97; retrieval ranks on confidence and has no branch
+awareness. Both arms therefore read the same stale rules, every canary compared two untreated
+populations, and 0 vs 0 said nothing about the fix. Consequences for what has been reported:
+(i) the 6 fixes `SenseLab −canary` shipped straight from replay did no harm because nobody read
+them, not because they were harmless; (ii) level 1 being flat on the headline is a consequence
+of its output not being retrieved, not evidence about level 1's rules; (iii) (z)'s rule 4b as
+first written would have passed unexercised fixes. The finding, its cause and (i)–(iii) are
+reported in the paper's headroom section and in §gating, whatever the relaunch shows.
+
+**Engine change 1 (OSS `raia-live/amfs` PR #454; the owner approves and merges; production
+redeploys from OSS `main`).** `retrieve` on a repair branch leads with the entries the branch
+changed *that the query is about* (semantic pool on the branch with no confidence gate, or a
+lexical hit where there are no vectors), flagged `_pinned`; the rest of the ranking is
+unchanged; main reads are untouched; discredited entries and procedures whose preconditions
+contradict the run's environment are not pinned. This is what puts the fix in front of the
+canary arm at all.
+
+**Engine change 2 (amfs-internal PR #800, folded into the same PR as (z)'s rule 4b).** The
+canary counts, per arm, the runs that read what the fix wrote (`CanaryArm.read`: causal
+entries or recorded attempts naming the rewritten key or the corrective entry). A pass — by
+significant improvement or by the non-inferiority bound — needs `canary.read ≥ min_outcomes`;
+short of it the pass is held as running ("not yet read"), and a canary that is futile, out of
+window or out of time without it closes *inconclusive, unexercised* rather than as no effect.
+A failing verdict is not gated; a fix that writes no memory has no gate. Futility, the success
+guard, adherence and the window are unchanged.
+
+**What the relaunched fleet-10 must show for the canary to have value, and how it is read.**
+P13′ and P15 stand as in (z), with these additions. **P13″:** among canaries in the relaunch,
+the median canary-arm `read` at the time of the verdict (or at close) is ≥ `min_outcomes`; a
+relaunch in which no canary's arm reaches the read floor falsifies the retrieve change as a
+treatment mechanism and is reported as such (the pass gate then correctly holds every canary,
+and the run's canary count is zero by construction, not by evidence). Canaries are reported in
+three classes: decided on a treated arm (`read ≥ floor`), closed unexercised, and other; only
+the first class bears on P13′. **P15′:** P15's kept-class comparison is made over canary-arm
+sessions that *read* the fix (the treated population), against control-arm sessions in the same
+situation; a comparison with fewer than 8 treated sessions is reported as underpowered, not as
+a pass. **P16 (the correction is used):** in canary-arm sessions in the fix's situation after
+the retrieve change, the fix's own key appears in the top-5 retrieve hits in ≥ 50 % of sessions
+(from `amfs_reuse_events` and the arm reports' cited keys); below 20 % falsifies the mechanism.
+
+**Effect on the fleet-1 confirmatory, which spans the deploy.** Change 1 alters what a
+canary-arm run *reads* in every fleet-1 cell whose canaries are open at deploy time, and change
+2 alters how their verdicts close (a canary that would have timed out "inconclusive" now times
+out "unexercised" when unread). Neither can produce a pass that (z)'s arithmetic would not
+(a 100-episode canary cannot reach ~25 graded runs), and neither touches main reads, the
+scenarios, the change sets or the scoring. The deploy time is recorded here when known; the
+fleet-1 readout lists, per cell, the episodes completed before and after it, reports canary
+verdicts and reads for the two periods separately, and the fleet-1 headline is checked with the
+post-deploy episodes of each cell excluded (a difference in P12 direction between the two reads
+is reported, not resolved). No arm, scenario, change set, rubric, metric, test or analysis code
+changes; the analysis freeze tag stands.
