@@ -2610,3 +2610,43 @@ agent's own tunnel and the forwarder's hold two of the five slots — the arrang
 predecessor ran to 400/400 on). The dry-run `plan` had created empty `-r2` directories
 (`manifest.json` only, fleet 1 included); they were removed before launch, so no `rsi-conf-f1-r2-*`
 exists.
+
+**Read record (added 16:30Z).** All four `-r2` runs finished 400/400 (`-s37` 15:45Z, `-s41`,
+`-s73` ~16:05Z, `-s59` 16:08Z), no infra errors. Read with the frozen tools
+(`rsi_canary_readout --run rsi-conf-e2b-r2-s<seed>` ×4, the supplementary three-class script with
+`CL_CUT=2026-09-30T12:52:04Z`, the supplementary block-rate script over `analysis.rsi`'s frozen
+population rule with `SEEDS`/`CELL_EPISODES` set as the CLI sets them). Lifecycle from the run
+records (`rsi.fix_rows`/`rsi.lifecycle`, pooled over the eight cells): 48 proposed (39 regime,
+9 judge; 44 repair agent, 4 template), Tier 1 23 passed / 23 inconclusive / 0 failed, Tier 2 6
+passed / 38 failed, 6 canaries (one per cell in six cells), 1 decided, 0 shipped, 0 reverted.
+**P16 met:** the fix's own key was a version-exact read in 57 of 76 graded canary-arm sessions
+(75 %; per canary 5/10, 13/13, 15/20, 14/14, 8/17, 2/2), 0 of 54 graded control sessions;
+engine `read` counts 5, 12, 18, 14, 8, 2 agree with the join within three sessions. **P13″
+met:** reads at close 2/5/8/12/14/18, median 10 ≥ floor 8; 4 of 6 arms at or above the floor.
+**P12 met** on the floor clause: 4 of 6 canaries graded ≥ 8 on both arms (10/10, 20/8, 14/10,
+17/14); the graded/exposed clause (≥ 0.8) is not met — 0.23–0.36 on five canaries, 1.0 on the
+decided one — for the structural reason of finding 12 (exposure counts routing, grading counts the
+situation). **P13′ not met:** 1 of 6 decided — `8a908156` (support s37, "android free push
+notifications stopped", knowledge lever, corrective entries only, no rewritten key) *failed* at
+10/10 graded on the zero-count bound (control 0 recurrences), with the arm having read the fix's
+writes in 5 of its 10 graded sessions, below the read floor: class `decided_untreated` by the (z″)
+rule, so it does not bear on P13′; the falsifier (0 verdicts in ≥ 6) is not triggered by the
+letter and is by the class rule (0 treated verdicts) — both readings reported. Five canaries
+open at the cells' end: three with both arms above the floor (20/8, 14/10, 17/14), undecided —
+at these counts the non-inferiority margin cannot be closed either way; two with an arm below
+the floor. **P14, P15, P15′:** no population (0 passes); the treated kept-class comparisons
+(1.00 (6) vs 0.88 (17); 1.00 (6) vs 0.77 (22); 0.33 (6) vs 0.40 (25); 0.00 (3) vs 0.70 (10)) are
+all under the 8-session floor, reported as underpowered. **Replay evidence after the cut:** 209
+replays sealed, 0 of 1,600 outcome rows from them, 0 `lesson-contrast-replay-*` written since
+12:52:04Z — the #455 rule holds in production. **Live evidence on the corrections** (five fixes
+wrote one): at close 14/0 (0.82), 12/2 (0.65), 8/2 (0.47, discredited 14:33Z at the second
+failure, still pinned), and the two rewrites of the agent's own entries, born at 0.37 and 0.30
+under the 0.8× rule, 7/26 and 1/3, discredited 76 s and ~2 min after their first read. Open
+engine question, proposal only: whether the discredit threshold should apply to a correction
+under canary test. **Long horizon** (descriptive, per (x)): moved half 37 % (40/109) in episodes
+50–99, 55 % (60/110) in 100–149, 75 % (67/89) in 150–199 (88 % in 190–199); kept 66/76/72 %;
+unchanged 100 % in every post-change block (594/595). The (z″) run of the same cells read
+32/59/67 % on the moved half. **P11(a′) confirmatory (fleet 1):** 27 of 39 kept-case regime
+drafts state a condition (author-coded; `results/rsi-coding-confirmatory/`), ci-fix 20/28 (17 on
+the PR's files), support 7/11 (none on the true variable) — met. Paper: `paper/rsi-engine`
+commits 75acb2f1, 0e0d735f, 501e6455, fe5788d2.
