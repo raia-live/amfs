@@ -1575,3 +1575,28 @@ P12–P14, ledger rows split).** The grading defect is closed and re-measured; w
 shows is that at this horizon the canary's evidence arrives after the fleet has recovered on
 its own. The confirmatory fleet-10 cells keep the same read (P12–P14 as pre-specified); no
 protocol change.
+
+## 2026-09-30 — P11(a′) author-coded (amendment (y)); freeze tagged; confirmatory launched
+
+**Coding.** 37 regime fixes with a kept case in their proof set (`rsi-c6` 12, `rsi-e2b-c6` 25),
+coded by the author against `results/rsi-coding/INSTRUCTIONS.md`; answers in
+`results/rsi-coding/answers_author.csv` (with a second column, `matches_true_condition`, against
+the set-C rules), score in `score.json`. **Conditional 21/37 = 57 % → P11(a′) met** (SenseLab
+12/19, − canary 9/18). By class: audit-pinned 11/14 conditional, all 11 on `legacy_sdk/` (4 exact,
+7 "try the bump first, then exception"); export-timeout 5/7 conditional, plan named by 2 (1 exact,
+1 with an iOS scope); card-declined 4/8 conditional, all on platform/plan, issuer country 0/8;
+android-notifications 0/6 conditional — all retry ladders (settings → cache → reinstall), app
+version 0/6 (item a004a4a3 names "Android 8.6"/"9.6" in its evidence and still branches on
+failure). Tier 2 passers among the 37: 5; the 2 conditional ones both name the true variable; the
+3 unconditional are the flips/ladders read on 2026-09-29. Second clause: kept-case rejections
+4/17 (c6) and 11/39 (e2b-c6) vs 5/23 (c5) — count down, share not.
+
+**Freeze.** `analysis-freeze-rsi` → 1fba1d36 (01:42:28Z), carrying amendment (y).
+
+**Launch (01:42–01:47Z).** `rsi-conf-f1-s{37,41,59,73}` (PIDs 69763/69823/69866/69984; 3,200
+eps each) and `rsi-conf-e2b-s{37,41,59,73}` (SenseLab, gpt-5.5; 400 eps each; PIDs
+71451/71512/71573/71626). Tunnel arrangement: f1 hubs start lazily (first `senselab-rsi` cell)
+and will take 8787 (agent's own tunnel) + 8791–8793; a standalone forwarder hub
+(`/tmp/cl_forwarder.py`, :8788, own tunnel, PID 71219) holds the pooled domain from minute 0; the
+e2b hubs run on the pooled URL with no tunnel of their own. 5 = cap. Forwarder handed the e2b
+registration pings to :8795–8797 with 200.
