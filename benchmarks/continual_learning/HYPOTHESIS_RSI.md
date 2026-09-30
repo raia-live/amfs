@@ -2597,3 +2597,16 @@ supplementary script is unchanged. **Disposition of the (z″) cells:** `rsi-con
 in place and reported as measured — the read above is the paper's finding 13 (a development-phase
 self-diagnosis through the per-arm read instrumentation), not the fleet-10 confirmatory read; the
 confirmatory read is the `-r2` run. The reader is told both.
+**Deploy and launch record (added 13:05Z).** #455 merged 12:40:56Z (`55bb4866`); the OSS merge
+dispatched amfs-internal's production deploy (`oss-updated`, run 36716359099, completed
+12:55Z); revision `amfs-api-02147-52t` Ready 2026-09-30T12:52:04Z, 100 % of traffic, `/health`
+reports http-server 0.3.53. **The `post-replay-evidence` cut is 2026-09-30T12:52:04Z.** Verified
+through the live API with the benchmark key (agent id `diag-branch-treatment`, disclosed as
+before) at 13:03Z: on `repair/b2b656c5`, `repair/2ae2f0e0` and `repair/3be3ede8` the correction is
+the first hit, `_pinned`, `evidence_status: discredited`, not in the avoid list; on `main` the
+same queries return no pin. Launches, all after the cut: `rsi-conf-e2b-r2-s37` 12:59:17Z, `-s41`
+12:59:34Z, `-s59` 12:59:51Z, `-s73` 13:00:09Z (hubs 8794–8797; `-s73` on the pooled URL — the
+agent's own tunnel and the forwarder's hold two of the five slots — the arrangement its (z″)
+predecessor ran to 400/400 on). The dry-run `plan` had created empty `-r2` directories
+(`manifest.json` only, fleet 1 included); they were removed before launch, so no `rsi-conf-f1-r2-*`
+exists.
