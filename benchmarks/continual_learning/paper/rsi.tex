@@ -404,7 +404,24 @@ SenseLab $-$ canary, post-canary-ni & 14 & 10 / 4 & 4 / 9 / 1 & 0 / 13 / 0 & 0 /
 \end{table}
 
 
-On the current cut the loop proposed 13 fixes in the four SenseLab cells, 8 of them from regime
+\subsection{What level 1 did: the gating record}
+\label{sec:gating}
+
+The repair loop did not add to the outcome endpoints on these seeds. What it did instead is the
+result we think matters for an engine that changes its own behaviour in production: it
+\emph{refused}. Every fix it drafted went through the proof set and, if that passed, the live
+canary, and on the current cut nothing shipped --- not because the loop was idle (it proposed 13
+fixes in four cells) but because the proof rejected the drafts that restated or flipped the rule
+wholesale, and the canary held the rest because the failure they were written for was no longer
+live. The ablation that removes the canary shipped six wrong-conditioned rules on the fleet-10
+run and none of them broke the kept half (\S\ref{sec:posthoc}); the ablation that removes the
+proof lets everything a stand-in replay cannot refute reach the canary. A self-improvement loop
+that ships only what it can prove and only against a failure it can still observe is slower than
+one that ships what looks right, and the record below is what that slowness bought and cost on
+the development seeds. It does not need more runs to state; the confirmatory seeds re-measure it
+on the same protocol (\S\ref{sec:confirmatory}).
+
+\paragraph{What the loop did in the cells.} On the current cut the loop proposed 13 fixes in the four SenseLab cells, 8 of them from regime
 shifts; 4 passed Tier~1 (8 inconclusive), \textbf{4 passed Tier~2 and 7 failed it} (one still
 open), and none shipped: no canary decided before the cell ended. The three canaries that started
 were running at episode 100. Two, on regime fixes, had 2/8 and 4/8 canary-arm runs graded
@@ -423,7 +440,7 @@ the previous cut the ablation shipped 2 of 17; on this cut it shipped \textbf{no
 episodes per half per family none of these is a difference, and the confirmatory run is powered for
 one where this one is not.
 
-What the proof-passing fixes \emph{say} is not in doubt, and what the proof now rejects is the
+\paragraph{What the proof rejects.} What the proof-passing fixes \emph{say} is not in doubt, and what the proof now rejects is the
 result of findings 9 and 10. Three cuts earlier, hand-coding the fix text against the true
 change, 20 of the 24 regime fixes that passed their proof set encoded an unconditional flip
 (``always $Y$'') where the change was conditional (``$Y$ when $a$, else $X$''); on \code{ci-fix},
@@ -447,8 +464,25 @@ it into the wrong action. A proof pass is therefore now necessary but cannot by 
 conditional when the agent's compliance with an entry is partial; that is what the live canary
 and the judge's followed-memory criterion are for, and the confirmatory analysis reads the
 criterion per episode to separate ``the rule was wrong'' from ``the rule was wrong and followed''.
-Whether the drafts now state their condition (P11(a$'$)) is read by two coders blind to arm and
-verdict over every regime fix whose proof set holds a kept case --- 12 on this cut --- not by us.
+\paragraph{What the drafts say now.} Amendment (v) also changed the draft: the repair agent is
+shown the situation's passing runs and asked for the condition that separates them from the
+failing ones. P11(a$'$) asks whether at least half of the regime drafts whose proof set holds a
+kept case state a condition at all. Coded by the author against the written instructions
+(amendment (y): not two blind coders; every text, the coding and the key are in the
+reproducibility package), over the 37 such drafts of the two runs on this cut: \textbf{21 of 37
+(57\,\%) state an input-dependent branch} --- met. The split by class is the finding. On the
+CI family 11 of 14 drafts are conditional and every one of the 11 names the true variable
+(whether the PR touches \code{legacy\_sdk/}): 4 state the rule exactly, 7 hedge it with a
+``try the bump first'' step. On \code{support}, 9 of 23 are conditional, and the variable they
+branch on is the one visible in the ticket --- platform (Android, iOS, web) or plan --- not the
+one the world changed on: the plan is named by 2 of 7 export-timeout drafts, the issuer country
+by 0 of 8 card-declined drafts, the app version by 0 of 6 notification drafts (all six are retry
+ladders). So the drafter now writes conditions where the evidence makes the variable legible
+(file paths in a diff) and writes the salient attribute where it does not (a ticket), and the
+proof set is what separates the two: of the five drafts that passed Tier~2, the two that are
+conditional both name the true variable, and the three that are not are the flips and ladders
+above. Kept-case rejections, the second clause, were 4 of 17 on fleet 1 and 11 of 39 on fleet
+10 --- fewer than the 5 of 23 of the previous cut in count, not in share.
 
 \subsection{What the replay gate alone let through (exploratory)}
 \label{sec:posthoc}
@@ -710,11 +744,14 @@ prediction, whether it was met.
 \textcolor{red}{[pending: the confirmatory seeds have not run; this table is filled from \code{results/rsi-report-confirmatory} --- ``3. Attribution''.]}
 \textcolor{red}{[pending: the confirmatory seeds have not run; this table is filled from \code{results/rsi-report-confirmatory} --- ``4. Fix lifecycle''.]}
 
-\paragraph{Where canaries can decide: fleet 10, 200 episodes.} The E2b protocol on the four
-confirmatory seeds (SenseLab, $-$canary, $-$replay; 4,800 episodes per seed) is read with the
-canary readout of amendment~(v): P12 (canaries reach the graded floor on both arms), P13
-(canaries decide), P14 (no pass harms the kept class by more than the margin, joined to the
-sealed traces' arm stamps) and P11(a$'$) (drafts state their condition, two blind coders).
+\paragraph{The long horizon: fleet 10, 200 episodes.} The E2b protocol on the four
+confirmatory seeds runs SenseLab alone on GPT-5.5 (amendment~(y): 400 episodes per seed; the
+two gate ablations and the Opus cells are not run, since two development runs already read them
+the same way --- arms indistinguishable, no canary decides). It supplies the learning curve on
+held-out seeds, descriptively, and the canary readout of amendment~(v) on whatever canaries
+SenseLab starts: P12 (canaries reach the graded floor on both arms), P13 (canaries decide), P14
+(no pass harms the kept class by more than the margin, joined to the sealed traces' arm stamps),
+and P11(a$'$) (drafts state their condition; author-coded as in \S\ref{sec:gating}).
 \textcolor{red}{[pending: the fleet-10 confirmatory cells have not run.]}
 
 \paragraph{Cost.}
@@ -848,7 +885,7 @@ P11 & (t) c5 & non-conditional share $< 50\,\%$; a \code{ci-fix} kept-case failu
 P12 & (v) c6 & $\geq 1$ in 2 canaries reach the graded floor on both arms; graded/exposed $\geq 0.8$ & not met: 4 of 9; graded/exposed 0.12--0.55 (from 0--0.27) \\
 P13 & (v) c6 & $\geq 1$ in 3 canaries decide & falsified: 0 of 9 (7 from Tier~1 pass, 2 from inconclusive); 3 of 4 at the floor had 0 recurrence in both arms \\
 P14 & (v) c6 & no pass harms the kept class by $> 10$ pp (trace-joined) & undefined: no verdict \\
-P11(a$'$) & (v) c6 & $\geq 50\,\%$ of kept-case regime drafts state a condition (two blind coders); kept-case rejections $< 5$ of 23 & coding pending (37 items over \code{rsi-c6}, \code{rsi-e2b-c6}); rejections 4 of 17 and 11 of 39 --- the count fell, the share did not \\
+P11(a$'$) & (v) c6 & $\geq 50\,\%$ of kept-case regime drafts state a condition; kept-case rejections $< 5$ of 23 & met, 21 of 37 (author-coded, (y)); CI 11/14 all on the true variable, support 9/23 none on it; rejections 4 of 17 and 11 of 39 --- the count fell, the share did not \\
 \bottomrule
 \end{tabular}
 \caption{The predictions ledger. Every preregistered prediction on the engine so far, with the
@@ -878,12 +915,11 @@ the live canary, which grades what agents actually do with the entry, and the fo
 criterion, which separates a wrong rule from a wrong rule that was followed. The drafting change
 that followed (amendment (v): state the condition that separates the failing runs from the
 passing ones, with the passing runs in hand) is live on the current cut, and P11(a$'$) reads it: of
-the regime fixes whose proof set holds a kept case, at least half state a condition, judged by two
-coders blind to arm and verdict. On \code{rsi-c6} that population is 12 fixes; the sheet is
-drawn and the coding is pending. Our own reading of the two proof passers (\S\ref{sec:results})
-is not that count. The second clause of P11(a$'$) --- kept-case proof rejections fall below 5 of
-23 --- reads 4 of 17 on this cut and 11 of 39 on the fleet-10 rerun: fewer in number where the
-run is the same size, the same or a higher share.
+the regime fixes whose proof set holds a kept case, at least half state a condition. Coded by
+the author (amendment (y)) over the 37 such fixes of \code{rsi-c6} and \code{rsi-e2b-c6}: 21 of
+37 --- \emph{met}, with the split by class reported in \S\ref{sec:gating}. The second clause
+--- kept-case proof rejections fall below 5 of 23 --- reads 4 of 17 on this cut and 11 of 39 on
+the fleet-10 rerun: fewer in number where the run is the same size, the same or a higher share.
 
 \textbf{P12--P14} are read on the fleet-10 rerun (\code{rsi-e2b-c6}, \S\ref{sec:posthoc}).
 P12: 4 of 9 canaries reached the graded floor on both arms (not met at $\geq 1$ in 2; not
@@ -904,7 +940,12 @@ paper's claims rest on: seeds 37/41/59/73 on the two set-C families (\code{suppo
 \code{ci-fix}), both agent models (GPT-5.5 and Claude Opus~5), fleet~1 on the C protocol with
 every system in Table~\ref{tab:headline} and both ablations, and fleet~10 on the E2b protocol
 (200 episodes, change at 50) with SenseLab and its two gate ablations --- 22,400 episodes on the
-\code{post-canary-ni} cut. The loop has not been run on the remaining eight families: they appear
+\code{post-canary-ni} cut. Amendment (y), declared the morning the runs launched and before any
+confirmatory cell, cut the fleet-10 part to SenseLab alone on GPT-5.5 (1,600 episodes; 14,400 in
+all) after the second development fleet-10 run read the ablations the same way as the first, and
+replaced the two blind coders with the author (\S\ref{sec:gating}); the fleet-10 paired
+ablation comparison therefore has no confirmatory read and is labelled development-only wherever
+it appears. The loop has not been run on the remaining eight families: they appear
 only in the level-0 comparison of the earlier ten-family grid (SenseLab with the loop held,
 against the same baselines, change sets A and B, development seeds), cited as such; their
 held-out set~C is not authored, and the held-out-family design of amendment (l) lapses with it. The paired test is the exact sign-flip
@@ -976,8 +1017,11 @@ charged exactly per cell; the repair agent's spend is the account ledger's remai
 every draft on the account (\S\ref{sec:cost}), so a cell that drafted long fixes is under-charged
 and one that drafted short ones over-charged. The confirmatory runs snapshot the ledger per cell
 and report the difference directly.
-\item \textbf{Hand-coding.} The ``non-conditional'' share (P9(b), P11) is a reading of the shipped
-text against the known change by one coder; the confirmatory run will use two, blind to arm.
+\item \textbf{Hand-coding.} The ``conditional'' share (P9(b), P11, P11(a$'$)) is a reading of
+the draft text against written instructions by one coder, the author, who is not blind to arm
+or verdict (amendment (y)). Every draft, the instructions, the coding and the key are published
+so the reading can be redone; the class split in \S\ref{sec:gating} is the part a second coder
+is least likely to move.
 \item \textbf{The harness routes the canary.} The production router runs in the MCP gateway; the
 harness applies the same hash itself (parity-tested in CI) because it talks to the HTTP API.
 \item \textbf{The context window is a strong baseline where it fits.} On \code{ci-fix} the whole
@@ -1017,7 +1061,8 @@ this document from the report and \code{analysis.rsi\_figures} draws the figures
 \code{analysis.platform\_calibration} reads the account ledger for the cost table
 (\S\ref{sec:cost}). The analysis code is tagged \code{analysis-freeze-rsi} before the
 confirmatory runs. The preregistration, amendments, readouts (\code{HEADROOM\_RSI.md}), change
-sets, run records and the two blind coders' sheets are published with the paper.
+sets, run records and the coding sheets (drafts, instructions, author's coding, key) are
+published with the paper.
 
 \begin{thebibliography}{99}\small
 \bibitem{senselab-cl} SenseLab Research. From memory to recursive self-improvement: agents that
