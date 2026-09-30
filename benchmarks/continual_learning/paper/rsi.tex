@@ -764,7 +764,13 @@ under \code{--runs}, and the lifecycle table iterated the development cut list. 
 metric, endpoint, test statistic or population rule; the development read was written to disk
 before and after and is byte-identical. The correction is commit \code{e04f78cf} on the paper
 branch, the one post-freeze change to analysis code, and the preregistration's read record names
-it.
+it. One engine cut fell inside the fleet-1 window: \code{post-canary-zero} (OSS \#454,
+amfs-internal \#800/\#801, 03:40:19Z), which pins a fix branch's correction at retrieval and moves
+failed entries to the avoid list. 4,867 of the 12,791 episodes ran before it and 7,924 after; the
+moved-half difference between SenseLab and every other system has the same sign on the pre-cut
+episodes alone as on the full read ($+28/{+}11/{+}6/{+}18/{+}23$ pp against the five baselines,
+on 75 SenseLab episodes, against $+19/{+}4/{+}13/{+}9/{+}13$ on all), so the cut did not make
+the result; the split is in the package.
 
 \paragraph{Primary endpoint: the moved half.}
 \begin{table}[H]
