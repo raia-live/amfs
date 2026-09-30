@@ -2325,7 +2325,7 @@ zero-count bound are counted and reported separately from those that decide with
 recurring. **P15 (what ships is not harmful):** every fix that passes its canary and ships has
 kept-class post-change first-attempt success in canary-arm sessions not below control-arm
 sessions by more than 10 pp (the P14 read, now with a population), and none is a wholesale
-flip of a set-C rule by the author's coding (\S P11(a′)). One harmful ship falsifies P15; a
+flip of a set-C rule by the author's coding (as for P11(a′)). One harmful ship falsifies P15; a
 ship that is a wholesale flip is reported as such. Presentation unchanged: the canary is the
 harm gate on a change the replay tiers proved. No arm, scenario, change set, rubric, metric,
 test or analysis code changes; the analysis freeze tag stands.
