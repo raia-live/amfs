@@ -48,23 +48,24 @@ no worse than the rule they replace before they ship, reversibly (level~1); the 
 never its parts against each other --- on a continual benchmark in which the correct action for
 a task class changes \emph{conditionally} at episode 30 of 100, so that half of the class needs
 the new rule and half still needs the old one, and no amount of retrying the old action can
-recover the first attempt. On the development seeds SenseLab takes the new action first in
-33\,\% of moved-half episodes against 5--19\,\% for a frontier model alone and three vector-store
-baselines, holding unchanged work at 96\,\%; a context window carrying every prior note reaches
-the same 33\,\% at 1.5$\times$ the all-in cost (2.1$\times$ the agent's own). Level~1 has not yet added to level~0 on these seeds, and the
-tables say why: no canary has decided inside a 100-episode cell, nor in 200 with ten agents ---
-and the loop's own read record then showed that no canary arm had ever received the correction
-it was grading: the platform's writes fell outside the per-user visibility rule, so the canary
-compared two untreated arms --- and until the last engine cuts what the proof tiers passed was
-the unconditional rule --- on the current cut the proof rejects 15 of 17 regime fixes, and the
-two it passes are a wholesale flip and a retry ladder, neither of which states the condition the
-world changed on. The paper's main contribution is the record of how a preregistered benchmark
-found twelve things about the loop's evidence path --- ten defects, all fixed in production
-between runs and re-measured on the same protocol --- and what each says about building
-self-improving systems that can be trusted: what counts as a regime shift, how a situation is
-identified, what a fix must be proved against, who grades the proof, what counts as traffic,
-which runs a canary can grade, and whether the agents can read what the loop wrote. Every number
-here is from development seeds; the confirmatory seeds run once, after the analysis is frozen.
+recover the first attempt. On four held-out seeds, both agent models and two task families
+(12,800 episodes; analysis frozen before the run) SenseLab takes the new action first in
+45\,\% of moved-half episodes against 25\,\% for a frontier model alone, 32--36\,\% for three
+pgvector baselines and 40\,\% for a context window carrying every prior note, and holds unchanged
+work at 100\,\%. The difference is in SenseLab's favour in 8--11 of 16 cells against every
+baseline; none of the five paired comparisons survives the Holm correction at 16 cells. Where the
+context window fits, it wins the half of the class whose rule did not change, by 24 points at
+three times the cost. Level~1 has not yet added to level~0 inside a 100-episode cell (45 against
+43\,\%), and the record says why: of the 32 fixes the loop proposed in those cells the replay
+tiers rejected 22 and passed 6, and no canary decided inside a cell --- the confirmatory
+ten-agent, 200-episode cells are this version's read of whether one can. The paper's main contribution is the record of how a
+preregistered benchmark found thirteen things about the loop's evidence path --- eleven defects,
+all fixed in production between runs and re-measured on the same protocol --- and what each
+says about building self-improving systems that can be trusted: what counts as a regime shift,
+how a situation is identified, what a fix must be proved against, who grades the proof, what
+counts as traffic, which runs a canary can grade, whether the agents can read what the loop
+wrote, and whether the loop's own tests may be allowed to grade its fixes. The development-seed
+tables are kept as the record of that development; the confirmatory section is the frozen read.
 \end{abstract}
 
 \section{Introduction}
@@ -113,16 +114,18 @@ whether it damages what still worked; what it ships; and what it costs. We call 
 are what the engine delivers, and the ablations that switch parts of it off appear in one
 attribution table and nowhere else.
 
-\paragraph{What this version is.} This is a development-seed report (seeds 11 and 23 of six),
-written while the confirmatory seeds are still to run. It exists because the preregistration
+\paragraph{What this version is.} This is the first version with the confirmatory read: seeds
+37, 41, 59 and 73, both agent models, run once after the analysis code was tagged, with every
+endpoint and its test fixed beforehand (\S\ref{sec:confirmatory}). The development-seed
+sections (\S\ref{sec:results}) are kept as they were written, because the preregistration
 (\S\ref{sec:prereg}) committed to reporting every prediction, met or falsified, and most of the
 predictions so far were falsified --- by defects in the loop's evidence path that the benchmark
 found and that were fixed in production between runs. Section~\ref{sec:findings} is the record
 of that, and we think it is the paper's main contribution: a self-improving system is only as
 trustworthy as its evidence path, and every one of these defects would have been invisible to
-a benchmark that measured retrieval. The headline tables (\S\ref{sec:results}) are the state of
-the engine on its current cut; the confirmatory numbers will differ, and the direction they
-differ in is itself predicted (\S\ref{sec:pending}).
+a benchmark that measured retrieval. The two families of confirmatory cells stand differently:
+the fleet-1 cells are read and final; the ten-agent fleet-10 cells ran twice, because the first
+run exposed the last of the findings, and their second run is the read reported here.
 
 \section{The engine under test}
 \label{sec:engine}
@@ -1001,11 +1004,12 @@ SenseLab $-$ repair loop & 7,983 & 0.033 & 0.000 & 0.000 & 0.000 & 0.0 & 0.000 &
 
 The preregistration promised to report every prediction. Table~\ref{tab:ledger} is that report,
 and the findings below are the record of what a benchmark that knows the true rule found in a
-shipped self-improvement loop --- ten defects and two properties of the problem --- none of
-which a retrieval benchmark could have seen. All ten were fixed in production between runs, with
-their deploy cuts recorded, and re-measured on the same protocol; the last two were found in the
-fleet-10 runs, the tenth by the loop's own read record after the confirmatory fleet-10 cells had
-started, and the confirmatory fleet-10 read (\S\ref{sec:confirmatory}) is their re-measurement.
+shipped self-improvement loop --- eleven defects and two properties of the problem --- none of
+which a retrieval benchmark could have seen. All eleven were fixed in production between runs,
+with their deploy cuts recorded, and re-measured on the same protocol; the last three were found
+in the fleet-10 runs, the last two by the loop's own read record while the confirmatory fleet-10
+cells were running, and the confirmatory fleet-10 read (\S\ref{sec:confirmatory}) is their
+re-measurement.
 We think this section is the paper's main contribution; the loop's evidence path is where such
 systems fail, and none of these failures is specific to ours.
 
@@ -1341,8 +1345,9 @@ cell is model-aware.
 solved within three attempts; that is what the customer reports, and it hid finding 9 from the
 proof set for two runs. The clean-success rule reads the attempts the agent already records; a
 customer whose agent never records attempts sees no change and gets no protection.
-\item \textbf{The engine changed between runs.} Nine defects were fixed in production during the
-study (amfs-internal \#780--\#799). Every result carries its cut; latency claims are within one cut
+\item \textbf{The engine changed between runs.} Eleven defects were fixed in production during the
+study (amfs-internal \#780--\#802, OSS \#454--\#455), one of them inside the fleet-1
+confirmatory window and two between the two fleet-10 confirmatory runs. Every result carries its cut; latency claims are within one cut
 only; and the changes are to the loop's evidence path, not to any threshold constant, which the
 preregistration forbids. The one gate rule that changed --- the canary's primary, from
 superiority to non-inferiority (finding 11) --- was preregistered with its falsifier before the
