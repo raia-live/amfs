@@ -35,6 +35,10 @@ SEEDS_ALL="37 41 59 73"
 F1_ARMS="none raw-traces pgvector pgvector+rerank pgvector-diy+outcomes senselab senselab-rsi senselab-rsi-nocanary"
 E2B_ARMS="${CL_CONF_E2B_ARMS:-senselab-rsi}"   # amendment (y): fleet 10 runs SenseLab only
 E2B_MODELS="${CL_CONF_E2B_MODELS:-gpt-5.5}"   # amendment (y): fleet 10 on gpt-5.5 only
+# Amendment (aa), 2026-09-30: a tag in the run name, so a protocol relaunched on a later engine cut
+# gets its own run (rsi-conf-e2b-<tag>-s<seed>) and the cells already run keep theirs. Empty = the
+# original names.
+RUN_TAG="${CL_CONF_RUN_TAG:+-$CL_CONF_RUN_TAG}"
 
 port_for() {  # a distinct hub port per (protocol, seed): f1 8787 (the agent's own tunnel), 8791-8793; e2b 8794-8797
   local proto="$1" seed="$2" i=0
@@ -103,11 +107,11 @@ PY
 runner_cmd() {  # proto seed -> the runner argv (without env)
   local proto="$1" seed="$2"
   if [[ "$proto" == "f1" ]]; then
-    echo "-m continual_learning.runner --run rsi-conf-f1-s$seed --scenarios support ci-fix --arms $F1_ARMS" \
+    echo "-m continual_learning.runner --run rsi-conf-f1$RUN_TAG-s$seed --scenarios support ci-fix --arms $F1_ARMS" \
          "--models $MODELS --seeds $seed --fleet 1 --episodes 100 --change-at 30 --change-focus 0.5" \
          "--change-variant C --opaque-ids --workers ${CL_CONF_WORKERS_F1:-3}"
   else
-    echo "-m continual_learning.runner --run rsi-conf-e2b-s$seed --scenarios support ci-fix --arms $E2B_ARMS" \
+    echo "-m continual_learning.runner --run rsi-conf-e2b$RUN_TAG-s$seed --scenarios support ci-fix --arms $E2B_ARMS" \
          "--models $E2B_MODELS --seeds $seed --fleet 10 --episodes 200 --change-at 50 --change-focus 0.5" \
          "--change-variant C --opaque-ids --workers ${CL_CONF_WORKERS_E2B:-3}"
   fi
@@ -126,7 +130,7 @@ case "$cmd" in
   launch)
     proto="${2:?f1|e2b}"; seed="${3:?seed}"
     [[ " $SEEDS_ALL " == *" $seed "* ]] || { echo "seed must be one of: $SEEDS_ALL"; exit 1; }
-    run="rsi-conf-$proto-s$seed"
+    run="rsi-conf-$proto$RUN_TAG-s$seed"
     cd "$BENCH"; mkdir -p "continual_learning/results/$run"
     if pgrep -f -- "--run $run " > /dev/null; then echo "$run is already running"; exit 1; fi
     horizon=100; [[ "$proto" == "e2b" ]] && horizon=200

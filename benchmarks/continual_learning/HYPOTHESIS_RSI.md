@@ -2533,3 +2533,67 @@ proposed (23 regime / 9 judge), Tier 1 16 / 13 / 3, Tier 2 6 / 22 / 2 open, 5 ca
 undecided at cell end, 2 shipped, 0 reverted; − canary: 44 proposed, 10 shipped. These numbers
 are read from complete cells and are final for fleet 1; the prose of §Confirmatory is written
 from them.
+
+### 2026-09-30 (aa) — fleet 10 read on `post-canary-visible`: the arm reads the fix, and the loop's own replays discredit it first; OSS #455; cut `post-replay-evidence`; fleet-10 relaunched as `rsi-conf-e2b-r2`
+
+Declared 2026-09-30 12:10Z, after the four `rsi-conf-e2b-s{37,41,59,73}` cells finished (400/400
+each, last episode 11:21Z) and were read, before any cell on the new cut. Supersedes (z″)'s
+relaunch paragraph as the operative fleet-10 confirmatory run. Bruno chose this over writing v1.0
+from the (z″) cells ("do the PR, lets go with 2"), knowing it moves the fleet-10 read to Thursday.
+
+**Fleet-10 result on `post-canary-visible`, read 11:25Z (frozen `rsi_canary_readout` + the
+supplementary script).** Six canaries, all after the 08:21:05Z cut. Canary-arm reads of the fix
+(engine `read`, reproduced exactly by the version-exact trace join: 17 = 17, 1 = 1, 0 = 0) /
+graded / exposed: `3be3ede8` (ci-fix s59, rewritten key `repo-readme-ci`) 17/23/95, recurred 2,
+control 15/94 recurred 0, running; `b2b656c5` (support s59, new key
+`procedure-data-export-timeout-triage`) 0/63/63 vs 77/77, running; `2ae2f0e0` (support s73, new
+key) 0/8/8 recurred 2 vs 22/22 recurred 0 — **failed** at 09:49Z on an arm that never read it
+(failing verdicts are not read-gated); `0b676549` 1/9/38 vs 3/32; `30ff29d9` 1/4/36 vs 2/24;
+`f5241329` 1/1/6 vs 1/4 (cell ended). Classes: 0 decided-treated, 1 decided-untreated (the false
+failure), 0 unexercised (none closed by cell end), 5 other. P13″ median canary-arm read per run
+1 / 1 / 8.5 / 0.5 — falsified. P16 pooled 20/108 = 19.8 % — under the 20 % falsification line;
+74 % on the one correction that survived (`3be3ede8`). P13′ 1 verdict of 6, untreated — not met,
+not falsified. P15′: no pass, no population. Frozen P12: s59 2/2 reached the floor, s73 1/2.
+
+**Finding 13 (read-only on production, 11:30–12:00Z).** Five of the six corrections were
+discredited by outcome evidence within 1–24 minutes of being written — two before their canary's
+first session. `b2b656c5`: written 09:00:09Z at 0.78; three Tier 2 replays of its cases ran
+09:00–09:01Z, all sealed `success` (Tier 2 *passed*), two carrying two recorded attempts each;
+each failed attempt charged the correction a failure (v2 0.41, v3 0.32, v4 0.47, v5 0.37, v6 0.49;
+success 2 / failure 3), the posterior crossed `DISCREDIT_THRESHOLD` and `discredited_at` was set
+09:01:14Z; the canary started 09:02:28Z. Step 9b of #454 drops discredited entries ("a fix the
+record has already failed is the avoid list's"), and ranking pins them to −1, so the arm was never
+served the entry: `diff_branch` finds it, the branch semantic pool holds it at rank 9 (sim 0.778),
+and 9b returns nothing (in-process run of origin/main's `_branch_treatment` against production
+rows, real visibility filter). `2ae2f0e0` the same (written 09:16:40Z, discredited 09:17:50Z,
+canary 09:23:21Z); `3be3ede8` was read 17 times over 23 minutes and never again after its discredit
+at 08:58:51Z. Before #802, 0 of the 30 development and fleet-1 canary corrections was ever
+discredited — nobody could read them. The same replays wrote 425 `lesson-contrast-replay-*`
+entries onto `main` (2026-09-26 → 30), each naming a correction under test as the entry to avoid.
+So the treatment now arrives and the outcome record removes it: a correction at n = 0 loses half
+its confidence to one charged attempt, and the charges come from the loop's own test of it.
+
+**Engine change (OSS amfs PR #455, branch `fix/canary-treatment-survives-evidence`, commit
+`a4ae34fe`; core 0.3.44, sdk-python 0.5.36, http-server 0.3.53; opened 12:00Z, awaiting Bruno's
+approval and deploy).** (1) *A replay's outcome is not evidence.* A record whose session
+attributes carry `origin = repair` (Tier 1) or `replay_delivery_id` (Tier 2) — the two marks the
+hosted loop already grades by (`fix_store._NOT_REPLAY_SQL`) — writes no outcome row where the
+propagator learns locally: no evidence on the entries it read, no local evidence, no action prior,
+and no contrast lesson. The HTTP adapter still forwards it (the server applies the rule); the trace
+is built as before. (2) *A discredited entry is pinned on its own branch all the same*, evidence
+status on the row, and not handed back a second time in the avoid list. Main reads untouched.
+Verified in-process against the production rows of `b2b656c5`, `2ae2f0e0`, `3be3ede8`: 9b returns
+each correction (0.778 / 0.749 / 0.668). Through the real trigger (Postgres integration test): a
+replay commit adds no `amfs_outcomes` row; a served failure discredits the correction; the branch
+read pins it. **The `post-replay-evidence` cut is the deploy time of the hosted API built from OSS
+main containing #455**, recorded below when Bruno reports it. No arm, scenario, change set,
+rubric, metric, test or analysis-code change.
+
+**Relaunch.** The E2b protocol as in (y)/(z″), run names `rsi-conf-e2b-r2-s<seed>` (launcher
+amendment: `CL_CONF_RUN_TAG=r2`, a tag in the run name and nothing else, so the (z″) cells keep
+their directories). All four launched after the cut with their own tunnels (the fleet-1 hubs are
+gone, so the cap is not reached). Predictions P12–P16 stand exactly as written in (z)/(z′); the
+supplementary script is unchanged. **Disposition of the (z″) cells:** `rsi-conf-e2b-s*` are kept
+in place and reported as measured — the read above is the paper's finding 13 (a development-phase
+self-diagnosis through the per-arm read instrumentation), not the fleet-10 confirmatory read; the
+confirmatory read is the `-r2` run. The reader is told both.
