@@ -107,6 +107,49 @@ def test_branch_read_leads_with_the_correction_under_the_gate(client) -> None:
     assert "pip-audit-add-exception" in [h["key"] for h in hits[1:]]
 
 
+def test_a_replay_leaves_the_correction_untouched_and_a_discredited_one_is_still_pinned(
+    client, mem,
+) -> None:
+    """Through the real trigger. A Tier 2 replay of the fix's case that fails
+    once before it succeeds writes no outcome row, so the correction keeps its
+    evidence (on clbench this shape discredited it 65 s after the write). A
+    served session with the same shape does discredit it — and the branch read
+    pins it all the same, evidence on the row, absent from the avoid list."""
+    from amfs_core.models import OutcomeType
+
+    def fail_then_succeed(ref: str) -> None:
+        mem.read(SCOPE, "pip-audit-corrected", branch=BRANCH)
+        mem.record_attempt(summary="first try did nothing")
+        mem.read(SCOPE, "jest-snapshot-ui")
+        mem.commit_outcome(ref, OutcomeType.SUCCESS, task_input="pip audit pinned dependency")
+        mem._read_tracker.clear()
+
+    before = mem._adapter.count_outcomes()
+    mem.set_session_attributes({"replay_delivery_id": "d-1", "fix_id": "itest"})
+    fail_then_succeed("replay:itest:case-1")
+    assert mem._adapter.count_outcomes() == before
+    entry = mem.read(SCOPE, "pip-audit-corrected", branch=BRANCH)
+    assert entry.failure_count == 0 and entry.discredited_at is None
+    assert abs(entry.confidence - 0.45) < 1e-9
+    mem._read_tracker.clear()
+
+    fail_then_succeed("ticket-1")
+    assert mem._adapter.count_outcomes() == before + 1
+    entry = mem.read(SCOPE, "pip-audit-corrected", branch=BRANCH)
+    assert entry.failure_count == 1 and entry.discredited_at is not None
+    mem._read_tracker.clear()
+
+    resp = client.post("/api/v1/retrieve", json={
+        "query": "pip audit pinned dependency", "entity_path": SCOPE,
+        "min_confidence": 0.5, "limit": 5, "branch": BRANCH, "include_avoid": True,
+    })
+    assert resp.status_code == 200, resp.text
+    hits = _hits(resp)
+    assert hits[0]["key"] == "pip-audit-corrected" and hits[0]["_pinned"] is True
+    assert hits[0]["_breakdown"]["evidence_status"] == "discredited"
+    assert "pip-audit-corrected" not in [e["key"] for e in resp.json() if e.get("_avoid")]
+
+
 def test_an_unrelated_query_on_the_branch_is_not_pinned(client) -> None:
     resp = client.post("/api/v1/retrieve", json={
         "query": "jest snapshot", "entity_path": SCOPE,

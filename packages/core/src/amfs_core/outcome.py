@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from amfs_core.abc import AdapterABC
+from amfs_core.evidence import is_replay_outcome
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
     MemoryEntry,
@@ -42,7 +43,25 @@ class OutcomeBackPropagator:
         it delegates to the adapter but adds logging and validation.
 
         Returns the list of entries whose confidence was updated.
+
+        A replay's outcome (:func:`amfs_core.evidence.is_replay_outcome`) is
+        not applied where this propagator is the one that learns: no outcome
+        row, so no evidence on the entries it read, no local evidence, no
+        action prior. The repair loop's test of a fix is graded by the tier
+        that asked for it; it is not a served session, and the entries it
+        read — the fix under test first among them — must not carry its
+        retries as failures. An adapter that learns remotely
+        (``remote_learning``) still receives the record: the server it
+        forwards to applies this rule on its own handle, and the client's
+        trace is sealed from that call.
         """
+        if is_replay_outcome(record) and not getattr(self._adapter, "remote_learning", False):
+            logger.info(
+                "Outcome %s (%s) is a replay; no evidence applied",
+                record.outcome_ref,
+                record.outcome_type.value,
+            )
+            return []
         logger.info(
             "Propagating outcome %s (%s) to %d causal entries",
             record.outcome_ref,

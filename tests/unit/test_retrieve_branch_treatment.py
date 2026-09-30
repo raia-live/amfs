@@ -150,6 +150,41 @@ def test_compact_rows_carry_the_flag(client) -> None:
     assert hits[0]["key"] == "pip-audit-corrected" and hits[0]["_pinned"] is True
 
 
+def test_a_discredited_correction_is_still_the_treatment(client, mem) -> None:
+    """The record has failed the correction — one failed attempt from 0.45
+    takes it under the discredit threshold. On its own branch it is pinned
+    all the same, evidence on the row, and not handed back a second time in
+    the avoid list: the canary is the test of the fix, and it can only test
+    what the arm read (clbench 2026-09-30, fleet 10: five of six corrections
+    discredited within minutes of the write, two before the canary's first
+    session; 0 reads in 74 treated sessions)."""
+    from amfs_core.models import OutcomeType
+
+    mem.read(SCOPE, "pip-audit-corrected")
+    mem.record_attempt(summary="the corrected rule did not apply here")
+    mem.commit_outcome("case-1", OutcomeType.FAILURE)
+    mem._read_tracker.clear()
+    entry = mem.read(SCOPE, "pip-audit-corrected")
+    assert entry is not None and entry.discredited_at is not None
+    assert entry.evidence_status == "discredited"
+    mem._read_tracker.clear()
+
+    body = {"query": "pip audit pinned dependency", "entity_path": SCOPE,
+            "min_confidence": 0.5, "limit": 5, "branch": BRANCH, "include_avoid": True}
+    resp = client.post("/api/v1/retrieve", json=body)
+    assert resp.status_code == 200, resp.text
+    hits = _hits(resp)
+    assert hits[0]["key"] == "pip-audit-corrected" and hits[0]["_pinned"] is True
+    assert hits[0]["_breakdown"]["evidence_status"] == "discredited"
+    avoided = [e["key"] for e in resp.json() if e.get("_avoid")]
+    assert "pip-audit-corrected" not in avoided
+
+    # On main the record's verdict stands: the discredited entry is not a hit.
+    resp = client.post("/api/v1/retrieve", json={**body, "branch": None})
+    assert resp.status_code == 200, resp.text
+    assert "pip-audit-corrected" not in [h["key"] for h in _hits(resp)]
+
+
 def test_a_pinned_procedure_still_answers_to_the_environment(client, mem) -> None:
     """The branch's change is a procedure that wants python3.12. Pinning is
     not a way around environment scoping: for a python3.9 run it is dropped

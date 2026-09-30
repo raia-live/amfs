@@ -979,11 +979,11 @@ async def _branch_treatment(
     Retrieve's step 9b: what a read routed to a repair branch exists to put in
     front of the agent. Returns ``(entry, similarity, keyword)`` triples for
     the branch's added or modified entries that the query's semantic pool on
-    the branch holds (no confidence gate), or that a lexical read on the
-    branch returns where there are no vectors. Empty on ``main``, with no
-    scope, on an adapter without branches, when the branch changed nothing
-    under the scope, or when the query is about none of it. Never raises:
-    a failure here leaves the ranking as it was.
+    the branch holds (no confidence gate, no evidence gate), or that a lexical
+    read on the branch returns where there are no vectors. Empty on ``main``,
+    with no scope, on an adapter without branches, when the branch changed
+    nothing under the scope, or when the query is about none of it. Never
+    raises: a failure here leaves the ranking as it was.
     """
     if not isinstance(branch, str) or branch.strip() in ("", "main") or not entity_path:
         return []
@@ -1048,10 +1048,19 @@ async def _branch_treatment(
         slot = found.get(ref)
         found[ref] = (entry, slot[1], 1.0) if slot else (entry, 0.0, 1.0)
 
+    # Discredited or not: the branch's own changes are pinned whatever their
+    # evidence says. The pin exists so the arm under test is *treated*; the
+    # canary is what decides whether the treatment is good, and it can only
+    # decide if the arm read it. Dropping a discredited entry here handed the
+    # verdict to whatever had discredited it first — on clbench (2026-09-30,
+    # fleet 10) the loop's own replays, within minutes of the write, before
+    # the canary's first session in two of six cases; the arm then read its
+    # fix in 0 of 74 sessions and one canary *failed* on an arm that had never
+    # seen the treatment. The row keeps its ``evidence_status``, so the agent
+    # sees the record; it is not hidden from the arm on the record's account.
     out = [
         t for t in found.values()
-        if getattr(t[0], "discredited_at", None) is None
-        and (include_artifacts or not is_artifact(t[0]))
+        if include_artifacts or not is_artifact(t[0])
     ]
     if out and vis is not None and vis.should_filter():
         allowed = {e.entry_key for e in vis.filter_entries([t[0] for t in out])}
@@ -3442,11 +3451,17 @@ async def retrieve_entries(
     #     business, not a reason to hide the treatment from its own arm), or
     #     a lexical hit where there are no vectors; an entry the query is not
     #     about stays where it is — a fix to the CI rule is not pinned onto a
-    #     support ticket. Discredited entries are not pinned: a fix the record
-    #     has already failed is the avoid list's, not the head's; nor is a
-    #     procedure whose preconditions contradict the run's environment —
-    #     it is named in ``_meta.not_applicable`` like any other. Main reads
-    #     are untouched.
+    #     support ticket. A discredited entry is pinned all the same, with its
+    #     evidence on the row: the canary is the test of the fix, and it can
+    #     only test what the arm read. The first version of this step left
+    #     discredited entries to the avoid list; measured on clbench
+    #     (2026-09-30, fleet 10, six canaries), five corrections were
+    #     discredited within 1-24 minutes of being written — by the loop's
+    #     own replays, two before the canary's first session — and the arm
+    #     they were meant to treat read them in 0 of 74 sessions. What is not
+    #     pinned is a procedure whose preconditions contradict the run's
+    #     environment — it is named in ``_meta.not_applicable`` like any
+    #     other. Main reads are untouched.
     pinned = await _branch_treatment(
         branch=branch,
         entity_path=req.entity_path,
@@ -3509,6 +3524,9 @@ async def retrieve_entries(
         pinned_scored.sort(key=lambda t: t[1], reverse=True)
         pinned_keys = {e.entry_key for e, _, _ in pinned_scored}
         scored = pinned_scored + [t for t in scored if t[0].entry_key not in pinned_keys]
+        # Once, at the head: a pinned entry the record has discredited is not
+        # also handed back in the avoid list. The row carries its evidence.
+        avoided = [e for e in avoided if e.entry_key not in pinned_keys]
 
     # 10. Reuse accounting. Semantic retrieval is the primary way memories
     #     (e.g. browser-extension clips) get surfaced and used, but it

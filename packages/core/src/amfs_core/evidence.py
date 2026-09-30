@@ -616,6 +616,48 @@ def cited_entries(record: OutcomeRecord) -> list[tuple[str, str]]:
     return list(seen)
 
 
+#: Session attributes that mark an outcome as a **replay**: a run the repair
+#: loop made to test a fix, not a session anyone served. A Tier 1 replay
+#: carries ``attributes.origin`` in :data:`REPLAY_ORIGINS`; a Tier 2 customer
+#: replay carries ``attributes.replay_delivery_id`` (the SDK's
+#: ``ReplayReceiver`` stamps it). The hosted loop applies the same two marks
+#: when it grades: a replay is graded by the tier that asked for it and by
+#: nothing else — it does not vote in a canary, fill its window or count as
+#: exposure. This is the memory-side half of that rule (see
+#: :func:`is_replay_outcome`).
+REPLAY_ORIGINS: tuple[str, ...] = ("repair",)
+REPLAY_DELIVERY_ATTRIBUTE = "replay_delivery_id"
+
+
+def is_replay_outcome(record: OutcomeRecord) -> bool:
+    """Whether *record* is a replay's outcome (``REPLAY_ORIGINS`` /
+    ``REPLAY_DELIVERY_ATTRIBUTE`` on ``session_metadata["attributes"]``).
+
+    A replay's outcome is the loop's verdict on the fix, not evidence about the
+    entries the run read — least of all about the fix itself. Measured on
+    clbench (2026-09-30, fleet 10, six canaries): a correction written at 0.78
+    was discredited 65 seconds later, before its canary had started, by the
+    failed attempts inside two Tier 2 replays that both *passed* — each
+    attempt handed the correction a failure (0.78 → 0.41 after the first), the
+    posterior crossed ``DISCREDIT_THRESHOLD`` and the canary arm could no
+    longer be served the entry it existed to test. Five of the six corrections
+    went that way, two before their canary's first session; the treated arm
+    read its fix in 0 of 74 sessions. The same runs had written 425
+    ``lesson-contrast-replay-*`` entries onto ``main``, each naming a
+    correction under test as the thing to avoid. A record with no attributes,
+    or attributes that are not a mapping, is not a replay.
+    """
+    meta = getattr(record, "session_metadata", None)
+    if not isinstance(meta, dict):
+        return False
+    attrs = meta.get("attributes")
+    if not isinstance(attrs, dict):
+        return False
+    if str(attrs.get("origin") or "") in REPLAY_ORIGINS:
+        return True
+    return REPLAY_DELIVERY_ATTRIBUTE in attrs
+
+
 def contrast_lesson(record: OutcomeRecord) -> dict[str, Any] | None:
     """The auto-written lesson for a fail-then-succeed record, or ``None``.
 
@@ -815,12 +857,15 @@ __all__ = [
     "DISCREDIT_THRESHOLD",
     "EVIDENCE_DECAY",
     "PRIOR_STRENGTH",
+    "REPLAY_DELIVERY_ATTRIBUTE",
+    "REPLAY_ORIGINS",
     "SEVERITY",
     "SUCCESS_TYPES",
     "SYNTHETIC_KEY_PREFIXES",
     "EvidenceUpdate",
     "apply_outcome",
     "is_known",
+    "is_replay_outcome",
     "apply_outcome_multiplicative",
     "apply_record_to_entry",
     "cited_entries",
