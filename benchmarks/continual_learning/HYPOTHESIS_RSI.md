@@ -2290,3 +2290,42 @@ generated and coded the same way.
 proof rejecting drafts that restate or flip the rule wholesale, and the canary holding fixes
 whose failure is no longer live — as the engine's gating record, stated once, without further
 runs. Nothing else in the protocol, arms, change sets, rubric, metrics or tests changes.
+
+### 2026-09-30 (z) — the canary's non-inferiority pass no longer requires control to have recurred; fleet-10 confirmatory relaunched on the new cut
+
+Declared 2026-09-30 02:15Z, before any fleet-10 confirmatory cell on the new cut; the four
+fleet-10 processes launched at 01:47Z on `post-canary-ni` were stopped at 02:03Z after 41–46
+episodes each (their partial records are kept as `results/rsi-conf-e2b-s<seed>-aborted-precut/`
+and are not read). The fleet-1 confirmatory launched at 01:42Z keeps running.
+
+**Engine change (amfs-internal PR #800; the owner approves, merges and deploys).** Rule 4b of
+the canary drops the precondition that control has recurred at least once. The pass is the
+one-sided 95 % Newcombe bound on (canary − control) recurrence under the 10-point margin, with
+the futility ceiling, the success guard, adherence, futility and the window unchanged. A canary
+arm with zero recurrence is priced by its own Wilson upper limit (25 points at 8 graded runs,
+under the margin only past ~25 graded), so a zero-count pass is bought with graded runs.
+Reason, from `rsi-e2b-c6`: three canaries reached the floor with zero recurrence in both arms
+and were held as "nothing to fix live" (0/26 vs 0/11, bound 9.4; 0/27 vs 0/22, 9.1; 0/15 vs
+0/12, 15). On a fleet that recovers at level 0 before the canary is readable the failure is
+never live in control, and the gate could not decide by construction (0 of 9; 0 of 20 on the
+cut before). The (v) presentation rule already reads "benefit proven by replay, no harm on
+live traffic"; the dropped precondition contradicted it. Cut name: `post-canary-zero` (deploy
+time recorded below when known).
+
+**Effect on the fleet-1 confirmatory, which spans the cut.** No 100-episode canary can reach
+~25 graded canary-arm runs, so no fleet-1 verdict can differ between the two cuts; verified
+post hoc by listing every fleet-1 canary that reached the floor with zero control recurrence
+(expected: none) in the confirmatory readout. Cells that completed before and after the
+deploy are listed there.
+
+**Predictions on the relaunched fleet-10 (SenseLab only, gpt-5.5, 4 seeds × 2 families, 200
+episodes, change at 50).** P12 and P14 as in (v). **P13′:** ≥ 1 canary in 3 reaches a verdict
+within the cell; falsified by 0 verdicts in ≥ 6 canaries; canaries that decide on the
+zero-count bound are counted and reported separately from those that decide with control
+recurring. **P15 (what ships is not harmful):** every fix that passes its canary and ships has
+kept-class post-change first-attempt success in canary-arm sessions not below control-arm
+sessions by more than 10 pp (the P14 read, now with a population), and none is a wholesale
+flip of a set-C rule by the author's coding (\S P11(a′)). One harmful ship falsifies P15; a
+ship that is a wholesale flip is reported as such. Presentation unchanged: the canary is the
+harm gate on a change the replay tiers proved. No arm, scenario, change set, rubric, metric,
+test or analysis code changes; the analysis freeze tag stands.
