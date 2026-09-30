@@ -30,7 +30,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, timezone
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import uvicorn
@@ -50,7 +50,7 @@ from amfs_core.aggregates import (
 )
 from amfs_core.ranking import composite_score
 from amfs_core.ranking import entry_text as _entry_text
-from amfs_core.scope import SqlScope
+from amfs_core.scope import SqlScope, covers
 from amfs_core.ranking import keyword_coverage as _keyword_coverage
 from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
@@ -960,6 +960,103 @@ def _search_sync(adapter: Any, query: SearchQuery, branch: Any) -> list[MemoryEn
         return adapter.search(query, branch=branch)
     except TypeError:
         return adapter.search(query)
+
+
+async def _branch_treatment(
+    *,
+    branch: str,
+    entity_path: str | None,
+    topical: str,
+    query_vector: list[float] | None,
+    embedder: Any,
+    pool: int,
+    vis: Any,
+    include_artifacts: bool,
+    is_artifact: Callable[[MemoryEntry], bool],
+) -> list[tuple[MemoryEntry, float, float]]:
+    """The entries *branch* changed under *entity_path* that are about *topical*.
+
+    Retrieve's step 9b: what a read routed to a repair branch exists to put in
+    front of the agent. Returns ``(entry, similarity, keyword)`` triples for
+    the branch's added or modified entries that the query's semantic pool on
+    the branch holds (no confidence gate), or that a lexical read on the
+    branch returns where there are no vectors. Empty on ``main``, with no
+    scope, on an adapter without branches, when the branch changed nothing
+    under the scope, or when the query is about none of it. Never raises:
+    a failure here leaves the ranking as it was.
+    """
+    if not isinstance(branch, str) or branch.strip() in ("", "main") or not entity_path:
+        return []
+    mem = _get_memory()
+    diff_fn = getattr(mem._adapter, "diff_branch", None)
+    if not callable(diff_fn):
+        return []
+    namespace = getattr(mem._adapter, "_namespace", None) or "default"
+    try:
+        diff = await _offload(_db_executor, diff_fn, branch, namespace=namespace)
+    except Exception:  # noqa: BLE001 - best-effort
+        logger.debug("branch diff for retrieve failed", exc_info=True)
+        return []
+    changed: set[tuple[str, str]] = {
+        (d.entity_path, d.key)
+        for d in diff or []
+        if getattr(d, "diff_type", "") in ("added", "modified")
+        and covers(entity_path, d.entity_path)
+        and not _is_synthetic_key(d.key)
+        and not _is_excluded_entity(d.entity_path)
+    }
+    if not changed:
+        return []
+
+    # Which of them the query is about, read on the branch with no gate: the
+    # semantic pool where vectors exist, the lexical channel where they do not.
+    found: dict[tuple[str, str], tuple[MemoryEntry, float, float]] = {}
+    if embedder is not None and _async_adapter is not None:
+        try:
+            pairs = await _async_adapter.semantic_search(
+                SemanticQuery(
+                    text=topical, entity_path=entity_path, min_confidence=0.0,
+                    limit=pool, embedding=query_vector,
+                ),
+                embedder,
+                branch=branch,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("branch semantic read for retrieve failed", exc_info=True)
+            pairs = []
+        floor = _retrieve_min_semantic()
+        for entry, sim in pairs:
+            ref = (entry.entity_path, entry.key)
+            if ref in changed and float(sim) > 0.0 and float(sim) >= floor:
+                found[ref] = (entry, float(sim), 0.0)
+    lex = SearchQuery(
+        query=topical, entity_path=entity_path, min_confidence=0.0, limit=pool,
+        sort_by="confidence", depth=3, include_artifacts=include_artifacts,
+    )
+    try:
+        if _async_adapter is not None:
+            rows = await _async_adapter.search(lex, branch=branch)
+        else:
+            rows = await _offload(_db_executor, _search_sync, mem._adapter, lex, branch)
+    except Exception:  # noqa: BLE001
+        logger.debug("branch lexical read for retrieve failed", exc_info=True)
+        rows = []
+    for entry in rows:
+        ref = (entry.entity_path, entry.key)
+        if ref not in changed:
+            continue
+        slot = found.get(ref)
+        found[ref] = (entry, slot[1], 1.0) if slot else (entry, 0.0, 1.0)
+
+    out = [
+        t for t in found.values()
+        if getattr(t[0], "discredited_at", None) is None
+        and (include_artifacts or not is_artifact(t[0]))
+    ]
+    if out and vis is not None and vis.should_filter():
+        allowed = {e.entry_key for e in vis.filter_entries([t[0] for t in out])}
+        out = [t for t in out if t[0].entry_key in allowed]
+    return out
 
 
 async def _discredited_below_gate(
@@ -3325,6 +3422,94 @@ async def retrieve_entries(
             kept.append((entry, score, bd))
         scored = kept
 
+    # 9b. The branch under test. A read routed to a repair branch is the
+    #     canary arm of a fix: the branch exists to put that fix in front of
+    #     the agent, and the entries it changed are the treatment. Ranked
+    #     like any other entry they do not arrive. The repair loop writes a
+    #     correction at 60% of the confidence of the rule it corrects — under
+    #     the caller's gate as often as not — onto a scope where outcome
+    #     learning has already written dozens of validated near-duplicates
+    #     of the stale rule, and confidence is a ranking term. Measured on
+    #     clbench (2026-09-30): 18 canaries, 14-197 branch reads each, zero
+    #     reads of the fix's own entry. Both arms read the same rules, the
+    #     canary compared two untreated populations, and 0 vs 0 recurrence
+    #     said nothing about the fix.
+    #
+    #     So the branch's changed entries that are *about this query* lead
+    #     the list, in their own order, marked ``_pinned`` so the client can
+    #     see why. "About this query" is the semantic pool on the branch with
+    #     no confidence gate (the fix's confidence is the repair loop's
+    #     business, not a reason to hide the treatment from its own arm), or
+    #     a lexical hit where there are no vectors; an entry the query is not
+    #     about stays where it is — a fix to the CI rule is not pinned onto a
+    #     support ticket. Discredited entries are not pinned: a fix the record
+    #     has already failed is the avoid list's, not the head's; nor is a
+    #     procedure whose preconditions contradict the run's environment —
+    #     it is named in ``_meta.not_applicable`` like any other. Main reads
+    #     are untouched.
+    pinned = await _branch_treatment(
+        branch=branch,
+        entity_path=req.entity_path,
+        topical=topical,
+        query_vector=query_vectors.get(topical),
+        embedder=embedder,
+        pool=pool,
+        vis=vis,
+        include_artifacts=req.include_artifacts,
+        is_artifact=_is_artifact,
+    )
+    if pinned:
+        if environment:
+            from amfs_core.models import preconditions_status as _preconditions_status
+
+            # Named once: a pinned procedure above the caller's gate was a
+            # candidate too, and step 9 has already recorded it.
+            named = {(row["entity_path"], row["key"]) for row in not_applicable}
+            applicable: list[tuple[MemoryEntry, float, float]] = []
+            for entry, sim, keyword in pinned:
+                if _is_procedure(entry):
+                    status, detail = _preconditions_status(entry.value, environment)
+                    if status == "not_applicable":
+                        if (entry.entity_path, entry.key) not in named:
+                            not_applicable.append({
+                                "entity_path": entry.entity_path, "key": entry.key, "why": detail,
+                            })
+                        continue
+                applicable.append((entry, sim, keyword))
+            pinned = applicable
+    if pinned:
+        pinned_scored: list[tuple[MemoryEntry, float, dict[str, Any]]] = []
+        for entry, sim, keyword in pinned:
+            written = getattr(entry.provenance, "written_at", None)
+            if written is not None:
+                if written.tzinfo is None:
+                    written = written.replace(tzinfo=UTC)
+                recency = 0.5 ** (max(0.0, (now - written).total_seconds() / 86400.0) / half_life)
+            else:
+                recency = 0.0
+            artifact = _is_artifact(entry)
+            procedure = _is_procedure(entry)
+            evidence = _evidence_signal(entry)
+            bd = {
+                "semantic": sim,
+                "relevance": req.semantic_weight * sim + keyword_weight * keyword,
+                "recency": recency,
+                "confidence": float(entry.confidence),
+                "keyword": keyword,
+                "evidence": evidence,
+                "evidence_status": entry.evidence_status,
+                "is_artifact": artifact,
+                "is_procedure": procedure,
+                "pinned": branch,
+            }
+            conf = float(entry.confidence)
+            pinned_scored.append((
+                entry, _composite(sim, recency, conf, keyword, artifact, evidence, procedure), bd,
+            ))
+        pinned_scored.sort(key=lambda t: t[1], reverse=True)
+        pinned_keys = {e.entry_key for e, _, _ in pinned_scored}
+        scored = pinned_scored + [t for t in scored if t[0].entry_key not in pinned_keys]
+
     # 10. Reuse accounting. Semantic retrieval is the primary way memories
     #     (e.g. browser-extension clips) get surfaced and used, but it
     #     historically incremented no counter — so value metrics (rework
@@ -3620,6 +3805,10 @@ async def retrieve_entries(
             # agent reads the top-level field.
             data["evidence_status"] = breakdown.get("evidence_status")
             data["_rescued"] = True
+        if breakdown.get("pinned"):
+            # Changed on the branch this read was routed to (step 9b): the
+            # treatment of the canary arm, ahead of the ranking on purpose.
+            data["_pinned"] = True
         if req.compact:
             data["_breakdown"] = {"evidence_status": breakdown.get("evidence_status")}
         else:
