@@ -53,17 +53,18 @@ recover the first attempt. On the development seeds SenseLab takes the new actio
 baselines, holding unchanged work at 96\,\%; a context window carrying every prior note reaches
 the same 33\,\% at 1.5$\times$ the all-in cost (2.1$\times$ the agent's own). Level~1 has not yet added to level~0 on these seeds, and the
 tables say why: no canary has decided inside a 100-episode cell, nor in 200 with ten agents ---
-where one reaches its floor the failure has already stopped recurring in control, so there is
-nothing live to gate --- and until the last engine cuts what the proof tiers passed was the
-unconditional rule --- on the current cut the proof rejects 15 of
-17 regime fixes, and the two it passes are a wholesale flip and a retry ladder, neither of which
-states the condition the world changed on. The paper's main contribution is the record of how a
-preregistered benchmark found eleven things about the loop's evidence path --- nine defects, all
-fixed in production between runs and re-measured on the same protocol --- and what each
-says about building self-improving systems that can be trusted: what counts as a regime shift,
-how a situation is identified, what a fix must be proved against, who grades the proof, what
-counts as traffic, and which runs a canary can grade. Every number here is from development seeds; the confirmatory seeds run once,
-after the analysis is frozen.
+and the loop's own read record then showed that no canary arm had ever received the correction
+it was grading: the platform's writes fell outside the per-user visibility rule, so the canary
+compared two untreated arms --- and until the last engine cuts what the proof tiers passed was
+the unconditional rule --- on the current cut the proof rejects 15 of 17 regime fixes, and the
+two it passes are a wholesale flip and a retry ladder, neither of which states the condition the
+world changed on. The paper's main contribution is the record of how a preregistered benchmark
+found twelve things about the loop's evidence path --- ten defects, all fixed in production
+between runs and re-measured on the same protocol --- and what each says about building
+self-improving systems that can be trusted: what counts as a regime shift, how a situation is
+identified, what a fix must be proved against, who grades the proof, what counts as traffic,
+which runs a canary can grade, and whether the agents can read what the loop wrote. Every number
+here is from development seeds; the confirmatory seeds run once, after the analysis is frozen.
 \end{abstract}
 
 \section{Introduction}
@@ -475,6 +476,17 @@ first-attempt success in canary-arm against control-arm sessions on the two proo
 24 higher on the other (23/23 against 13/17): the sign the harm gate exists for, at a sample
 where it is noise.
 
+\paragraph{What this read could not see.} The paragraph above is kept as written on the day,
+because it is the reading the record supported until finding 12 (\S\ref{sec:findings}) was made
+the following morning from the loop's own read record: no canary-arm run in any of these nine
+canaries had read the fix's entry, and on the branch the arm had in fact \emph{lost} the key.
+The recurrence the canaries compared was therefore that of two untreated arms, and ``the fleet
+had stopped making the mistake before the gate could measure it'' describes the agents'
+recovery without the correction, not the correction's timing. The bottleneck had not moved from
+grading to recurrence; it had moved from grading to a seam the canary sits behind. The
+confirmatory fleet-10 cells (\S\ref{sec:confirmatory}) are the first run in which a canary arm
+holds the correction it is grading.
+
 \begin{figure}[H]
 \centering
 \includegraphics[width=\textwidth]{figures/fig_canary.png}
@@ -616,12 +628,13 @@ and P11(a$'$) (drafts state their condition; author-coded as in \S\ref{sec:gatin
 
 The preregistration promised to report every prediction. Table~\ref{tab:ledger} is that report,
 and the findings below are the record of what a benchmark that knows the true rule found in a
-shipped self-improvement loop --- nine defects and two properties of the problem --- none of
-which a retrieval benchmark could have seen. All nine were fixed in production between runs, with
-their deploy cuts recorded, and all nine re-measured on the same protocol in the fleet-1 run the
-headline tables report; the ninth was found in the fleet-10 run, and its fleet-10 re-measurement
-is the run this version reports as open. We think this section is the paper's main contribution; the loop's evidence path
-is where such systems fail, and none of these failures is specific to ours.
+shipped self-improvement loop --- ten defects and two properties of the problem --- none of
+which a retrieval benchmark could have seen. All ten were fixed in production between runs, with
+their deploy cuts recorded, and re-measured on the same protocol; the last two were found in the
+fleet-10 runs, the tenth by the loop's own read record after the confirmatory fleet-10 cells had
+started, and the confirmatory fleet-10 read (\S\ref{sec:confirmatory}) is their re-measurement.
+We think this section is the paper's main contribution; the loop's evidence path is where such
+systems fail, and none of these failures is specific to ours.
 
 \begin{enumerate}[leftmargin=1.6em, itemsep=0.35em]
 \item \textbf{The loop was never reached.} (Pilots 5b--5g.) Incidents open at three failing
@@ -683,8 +696,8 @@ on that cut (\S\ref{sec:pending}), and Table~\ref{tab:cuts} carries it as a row.
 \item \textbf{The canary grades by canonical situation, and the agent's declarations fragment.}
 (Found in the fleet-10, 200-episode run of \S\ref{sec:posthoc}; fixed in \#799 and re-measured
 on both protocols.) A canary counts
-exposure --- runs that read the fix's entry --- but grades only runs whose canonical situation
-equals the fix's. The agent declares its situation per run in its own words, often carrying the
+exposure --- sessions the router stamped to its arm --- but grades only runs whose canonical
+situation equals the fix's. The agent declares its situation per run in its own words, often carrying the
 very condition the change turns on (``pip audit requests pin with legacy sdk'', ``pip audit
 requirements plus nonclient code''); situation identity folds one agent's 56 declarations to 10
 canonicals, the pip-audit ones to ``pip audit failure'' --- while the fixes carry ``pip audit
@@ -704,9 +717,43 @@ harms the kept class) and P11(a$'$) (drafts state their condition; the regime dr
 situation's passing runs). Re-measured (\S\ref{sec:posthoc}): graded runs rose from 0--27\,\% of
 exposure to 12--55\,\%, four of nine canaries reached the floor, and none decided --- three
 because the failure had stopped recurring in control by the time the canary could measure it.
-The grading defect is closed; what the rerun shows is that the canary's evidence arrives after
-the fleet has recovered on its own, which is a property of the problem at this horizon rather
-than a defect.
+The grading defect is closed. What we read into the rerun at the time --- that the canary's
+evidence arrives after the fleet has recovered on its own --- was a reading of two untreated
+arms, and finding 12 supersedes it.
+\item \textbf{The fix was written where no agent could read it.} (Found 2026-09-30 in the
+loop's own read record, after the confirmatory fleet-10 cells had run half their length with
+canary-arm reads of the fix still at zero; fixed in amfs-internal \#802, cut
+\code{post-canary-visible}; the confirmatory fleet-10 cells re-run on it.) Every write the
+repair loop makes --- the correction on the fix's branch, the corrective entry, the merged
+version once a fix ships, and the contrast lessons the outcome loop writes at every
+\code{commit\_outcome} --- is authored by the platform itself, as \code{amfs-server}. The
+per-user visibility rule that keeps one customer's agents from reading another's admitted an
+entry only when its author was one of the caller's own agents, or a room member or the platform
+on a room's shared path. The platform's own writes on an agent's ordinary path matched neither
+clause, so for every user-scoped API key --- which is every key the hosted service issues to an
+agent --- they did not exist. The engine's instrumentation is what made this visible: the reuse
+record stores, for every retrieve, read and search, which entry \emph{version} the session was
+served, and joining it version-exactly to the arm stamps on the sealed traces gave the count. Of
+25,875 reuse events over the two days before the fix, none was on a platform-authored entry; of
+every causal entry and read in every canary arm since the \code{rsi-e2b-c6} cut, none was the
+fix's; the 230 contrast lessons on \code{main} had never been read either. (A first count of 14
+such reads joined to the entry's \emph{latest} version and was wrong; the version-exact join
+gives zero.) On a canary branch the effect was worse than absence: the corrected key's branch
+version, being the platform's, replaced the agent's version of the key and was then dropped, so
+what the canary arm received was the key's \emph{deletion}. Every canary in
+\S\ref{sec:posthoc} therefore compared an arm that had lost the entry with an arm that still had
+the old one; the pin of \#454 and the read gate of \#801 had nothing to act on, and the three
+canaries that found no recurrence in either arm were reading two arms that had received no
+correction. The rule now admits a platform-authored entry on a path where, in the entry's
+namespace, one of the caller's own agents has written --- never account-wide, so a member who
+owns no agents still reads nothing beyond their rooms --- which on the benchmark account covers
+318 of 318 corrections and 168 of 168 corrective entries. One limitation survives the fix and is
+reported rather than changed: the loop writes a correction at $0.8\times$ the confidence of the
+version it replaces (floor 0.3) while the benchmark's agents read at a confidence gate of 0.5, so
+of the 31 shipped fixes that carry a correction, 20 sit below the gate on \code{main} --- visible
+now, but not read there --- while every corrective entry (0.7 or 0.75) is above it; on the canary
+branch the pin carries the correction to the head regardless.
+%% FILL-AFTER-READ: the fleet-10 re-measurement on post-canary-visible (P13'', P15', P16).
 \end{enumerate}
 
 \paragraph{The canary inside a cell (see also \S\ref{sec:posthoc}).} Separately from the defects, no canary reached a decision
@@ -783,10 +830,13 @@ falsification of P13 is the informative one. Three of the four canaries at the f
 recurrence in both arms: the harm gate had nothing to gate because the fleet had stopped making
 the mistake before the gate could measure it. Whether a fix for a failure that no longer recurs
 should ship anyway --- as a written condition for the next agent, rather than a live correction
---- is an engine question we put to the owner and do not answer here; the confirmatory fleet-10
-cells are read with P12--P14 as pre-specified. Why a canary grades only a third to a half of the
-runs that read its entry, after the correction that was meant to close that gap, is not
-diagnosed in this version.
+--- was an engine question we put to the owner; finding 12 answered it differently: the
+failure had stopped recurring in two arms neither of which had received the fix, so the question
+did not arise. Why a canary graded only a third to a half of the runs stamped to its arm is the
+same finding: the arm's runs read the branch's other keys (14--197 reads per canary), never the
+fix's, so ``exposure'' counted routing, not treatment. The confirmatory fleet-10 cells are read
+on the \code{post-canary-visible} cut with P12--P14 and the read-count predictions of
+amendments~(z) and~(z$'$) as pre-specified.
 
 \paragraph{The confirmatory scope, reduced before it ran.} Amendment (w), declared before any
 confirmatory-seed cell and before the analysis freeze, reduces the confirmatory grid to what the
@@ -904,7 +954,9 @@ with \code{CL\_RSI\_TIER2=1} and a Tier~2 replay receiver reachable from the ser
 \paragraph{Engine cuts.} \code{pre-seam4}: amfs-internal \#787/\#788. \code{post-seam5}: \#793
 (07:00:22Z), \#794 (08:27:24Z, 2026-09-27). \code{post-seam5b}: \#795 (12:50:24Z), \#796
 (13:39:13Z). \code{post-seam8}: \#797 (09:14:17Z, 2026-09-28). \code{post-clean-success}: \#798.
-\code{post-canary-ni}: \#799 (11:35:32Z, 2026-09-29). Each cut's Cloud Run revision is in
+\code{post-canary-ni}: \#799 (11:35:32Z, 2026-09-29). \code{post-canary-zero}: OSS \#454,
+amfs-internal \#800/\#801 (03:40:19Z, 2026-09-30). \code{post-canary-visible}: \#802
+(08:21:05Z, 2026-09-30; the confirmatory fleet-10 cut). Each cut's Cloud Run revision is in
 \code{HYPOTHESIS\_RSI.md}.
 
 \paragraph{Analysis.} \code{python -m benchmarks.continual\_learning.analysis.rsi --paper} writes

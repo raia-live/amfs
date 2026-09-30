@@ -2404,3 +2404,132 @@ verdicts and reads for the two periods separately, and the fleet-1 headline is c
 post-deploy episodes of each cell excluded (a difference in P12 direction between the two reads
 is reported, not resolved). No arm, scenario, change set, rubric, metric, test or analysis code
 changes; the analysis freeze tag stands.
+
+### 2026-09-30 (z″) — the fix was written where no user-scoped key could read it; the visibility seam corrected (amfs-internal #802); cut `post-canary-visible`; fleet-10 relaunched
+
+Declared 2026-09-30 08:25Z, before any fleet-10 confirmatory cell on the new cut. Supersedes the
+deploy-record paragraph of (z′) as the operative cut for fleet-10; (z′)'s two engine changes stand
+and are part of this cut. Supersedes (z′)'s explanation of the unread fix (its confidence) as the
+primary cause; the confidence limitation remains and is disclosed below.
+
+**Finding (read-only on production, 2026-09-30 04:10–06:40Z).** The four fleet-10 cells of (z′)
+ran 03:43–05:01Z (195–218 episode records each, about half of 400) with canary-arm reads of the
+fix still at zero, so every seam between a shipped fix and a canary-arm read was audited on
+production data, version-exact. One seam was broken. `UserVisibilityFilter` (amfs-internal,
+`amfs_rooms/visibility.py`) admitted an entry only when its author was one of the user's own agents,
+or a room member / system author on a room's entity path; `_load_user_agents` excludes the system
+authors by name. Every write the repair loop makes — the correction on `repair/<fix>`, the
+corrective entry, the merged version on `main` once a fix ships, and `commit_outcome`'s
+`lesson-contrast-*` entries — is authored `amfs-server` through the server's own `AgentMemory`
+(`amfs_branching.get_memory()`). The benchmark account has one API key, user-scoped (`created_by`
+set), so the filter applied to every read. Consequences, measured: of all canary-arm causal entries
+and `amfs_reuse_events` since the `rsi-e2b-c6` cut, 0 are platform-authored; 25,875
+retrieve/read/search reuse events over two days, none on a system-authored entry; the 230
+`lesson-contrast-*` entries on `main` were never read either. On a canary branch the corrected
+key's branch version (`amfs-server`) replaced `main`'s and was then dropped by the filter, so the
+pin of #454 and the read gate of #801 had nothing to act on: every canary so far measured "delete
+the key", not "correct the key". (An earlier count of 14 `amfs-server` reads was an artefact of
+joining to the latest version; the version-exact join gives 0.)
+
+Every other seam was verified on production and is unchanged: routing stamps `canary_fix_id` /
+`canary_arm` / `memory_branch` on `amfs_immutable_traces` (arm sizes at audit: `f9b0b0dc` 55/57,
+`cdff63b2` 24/18, `22f86b7e` 24/16, `49962c5c` 12/14, `c323b123` 0/0); every canary-arm trace
+graded, with causal entries (1.3–1.7 per trace); the retrieve order (blend → rerank → abstain floor
+→ pin → reuse → adaptive-k → priors), the pin prepending on the branch; the SDK recording
+`results[0]` as the causal read; `_READ_IMPLICATED_SQL`; `BranchAccessMiddleware` admitting
+platform-owned branches.
+
+**Engine change (amfs-internal #802, merged `44a6c8bc`; deploy `amfs-api-02139-5rk` ready
+2026-09-30 08:21:05Z).** Rule 3 of the filter: a system-authored entry is visible on an entity path
+where, in the entry's namespace, one of the user's own agents has written any version. Not
+account-wide — a member with no agents sees nothing beyond their rooms; a user whose agents work on
+one path does not see the platform's notes on another. On the account it covers 318/318 corrections
+and 168/168 corrective entries. Verified through the live API with the benchmark key at 08:24Z:
+`repo-readme-ci` v8 (`amfs-server`, `repair/f9b0b0dc`, confidence 0.36) is returned on the branch
+and the corrective entry `lesson-fix-ci-pip-audit-bump-fixed-version` (0.7) on `main`; both were
+filtered before. **The `post-canary-visible` cut is 2026-09-30 08:21:05Z.** No fleet-10 cell ran
+between 05:01Z and this cut.
+
+**Disclosures.** (i) The four (z′) fleet-10 cells were stopped at 05:01Z and are kept as
+`results/rsi-conf-e2b-s<seed>-aborted-vis-0501Z/`; they are read for no table. (ii) Read-only
+diagnostic probes with agent id `diag-branch-treatment` wrote reuse events on branch
+`repair/c3d516a1`; they are excluded from every read count in the readout. (iii) The four canary
+passes dated 02:55–03:28Z under the pre-#801 rule remain listed apart, as (z′) says. (iv) A
+limitation that #802 does not change and that no code before v1.0 will: the repair loop writes a
+correction at `round(max(0.3, 0.8 × current), 2)` (`repair/agent.py`) and corrective entries at
+0.7 / 0.75, while the harness gate is `min_confidence_gate = 0.5`. Of the 43 `memory_shipped`
+fixes at audit, 31 carry a correction and 20 of those sit below 0.5 on `main`; the 12 corrective
+entries are all ≥ 0.5. The pin applies only on the branch, so a shipped correction below the gate
+is visible now but not read on `main`; this is reported as headroom, with the count. (v) The
+fleet-1 cells do not span this cut: their last episode completed 08:19Z (first 01:42Z), before
+08:21:05Z. They span (z′)'s cut only, and the fleet-1 readout splits there as (z′) says.
+
+**Relaunch.** The four fleet-10 cells (`rsi-conf-e2b-s{37,41,59,73}`) are launched after the cut
+with the same command (`./confirm_rsi.sh launch e2b <seed>`); launch times are recorded below. No
+arm, scenario, change set, rubric, metric, test or analysis code changes; the analysis freeze tag
+stands.
+**Launch record (added 08:27Z).** `rsi-conf-e2b-s37` 08:26:41Z, `-s41` 08:26:43Z, `-s59`
+08:26:45Z, `-s73` 08:26:47Z — all after the cut, hubs 8794–8797.
+The first `-s73` launch (08:26:47Z) failed before its first episode: launched two seconds after
+`-s59`, it saw four tunnels, took its own, and the ngrok cap (five) refused the sixth; both cells
+errored on the hub and the process exited. Its directory is kept as
+`results/rsi-conf-e2b-s73-failed-launch-0827Z/` (zero episodes) and `-s73` was relaunched at
+08:29:17Z on the pooled URL, as the other three would have been past the cap. Same command, same
+cut.
+**Housekeeping (08:36Z).** The readout discovers runs as `results/rsi-conf-*`, so the set-aside
+directories — (z)'s `-aborted-precut`, (z″)'s `-aborted-vis-0501Z` and `-failed-launch-0827Z` —
+are moved unchanged under `results/excluded/`; a first read at 08:33Z had taken
+`rsi-conf-e2b-s37-aborted-vis-0501Z` as the SenseLab run and is discarded. No code change.
+
+### 2026-09-30 — confirmatory read record, fleet 1 (read 08:50–09:00Z; fleet 10 still running)
+
+**Two wiring defects in the frozen reader, found at the first read of complete data; corrected and
+disclosed.** `analysis/rsi.py` (tagged `analysis-freeze-rsi`) resolves *one run per system*
+(`resolve()` returns the first listed run holding finished cells of the arm), while
+`confirm_rsi.sh` launched fleet 1 as four per-seed runs (`rsi-conf-f1-s{37,41,59,73}`). The first
+read therefore took seed 37 alone (4 cells) for every system. Two further tables ignored `--runs`
+altogether: the paired sign-flip tables (the primary endpoint's test) were wired to `BASELINES` —
+the development run names — so with `--runs` they compared SenseLab's confirmatory cells with
+baseline cells that exist only at seeds 11/23 and came out empty; and the fix-lifecycle table
+iterated the development cut list `CUTS`, which holds no confirmatory run. Neither is visible on
+the development seeds, where the development runs *are* the resolved runs. Corrections, all made
+before any confirmatory number was read from a complete table and none touching a metric,
+endpoint, test statistic or population rule: (1) **data staging, no code** — the four per-seed
+directories are concatenated file-by-file (`episodes.jsonl`, `arm_reports.jsonl`,
+`budget_snapshots.jsonl`, `confidence_traces.jsonl`; `cells.json` and `manifest.json` merged with
+`staged_from` recorded) into `results/rsi-conf-f1`, and the read is invoked with `--runs
+rsi-conf-f1`; (2) **`rsi.py`, paired tables** take the resolved systems restricted to the baseline
+names instead of `BASELINES`; (3) **`rsi.py`, lifecycle table** iterates the resolved SenseLab run
+when `--runs` is given, the cut list otherwise. Check: the development read (`python -m
+…analysis.rsi --paper`) was written to disk before and after (2) and (3); `REPORT.md` and
+`report.json` are byte-identical, so no development table in the paper moves. The corrections are
+committed on the paper branch with this record; the freeze tag stays where it is and the paper's
+reproducibility section names the commit as the one post-freeze change to analysis code.
+
+**Read invocation (fleet 1).** `python -m benchmarks.continual_learning.analysis.rsi --seeds 37 41
+59 73 --models gpt-5.5 claude-opus-5 --runs rsi-conf-f1 --report-dir
+benchmarks/continual_learning/results/rsi-report-confirmatory --paper`, then
+`rsi_canary_readout --run rsi-conf-f1-s<seed>` per seed (verdicts and reads; all fleet-1 episodes
+precede the 08:21:05Z cut, so every fleet-1 canary arm is untreated by construction), the coding
+sheet over all eight confirmatory runs, `fill_rsi_paper`. The fleet-10 read follows when its four
+cells finish and uses the frozen `rsi_canary_readout` (P12–P14) plus a supplementary script for
+the post-freeze predictions of (z)/(z′) — three classes, P13′, P13″, P15′, P16 — which imports the
+frozen module's functions and adds only the class assignment, the version-exact read test (a
+session is *treated* when its sealed trace's causal reads name a platform-authored version on the
+fix branch) and the `amfs_reuse_events` count; it is shipped with the reproducibility package.
+
+**Fleet-1 result, primary endpoint (16 cells, moved half, SenseLab minus baseline, pp; cells
+won; exact sign-flip p; Holm over the five baselines):** Frontier alone +19, 11/16, 0.024, 0.121;
+Context window +4, 8/16, 0.544, 0.544; pgvector +13, 11/16, 0.040, 0.159; pgvector+rerank +9,
+9/16, 0.119, 0.239; pgvector+outcomes (DIY) +13, 10/16, 0.040, 0.159. Every mean paired delta is
+positive; none survives Holm at 0.05. Pooled moved-half first-attempt success: SenseLab 45 %
+(127/283) [39, 51] against 25–40 % for the baselines. Secondary, kept half (Holm within
+endpoint): SenseLab above Frontier alone (+38, 0.007) and *below the context window* (−24 pp,
+1/16 cells, Holm 0.001); level with the pgvector arms. Unchanged classes: SenseLab above Frontier
+(+23, 0.002), pgvector+rerank (+9, 0.035) and DIY (+16, 0.004); not distinguishable from the
+context window or plain pgvector. Attribution (same 16 cells): SenseLab 45 % moved / 69 % kept /
+100 % unchanged; − canary 44 / 71 / 99; − repair loop 43 / 68 / 99. Lifecycle, SenseLab: 32
+proposed (23 regime / 9 judge), Tier 1 16 / 13 / 3, Tier 2 6 / 22 / 2 open, 5 canaries run, 3
+undecided at cell end, 2 shipped, 0 reverted; − canary: 44 proposed, 10 shipped. These numbers
+are read from complete cells and are final for fleet 1; the prose of §Confirmatory is written
+from them.

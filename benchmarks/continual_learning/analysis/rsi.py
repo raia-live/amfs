@@ -601,17 +601,23 @@ def main() -> None:
            "the systems in this table. "
            + ("Four cells cannot reach p < 0.125; the dev read carries no significance claim."
               if n_cells <= 4 else f"{n_cells} cells; the smallest attainable p is {2 / 2 ** n_cells:.4f}."), ""]
-    head, rows, d = paired_rows(BASELINES, senselab, "moved")
+    # Post-freeze correction (2026-09-30, HYPOTHESIS_RSI.md, confirmatory read record): the paired
+    # tables were wired to BASELINES — the development run names — so with ``--runs`` they compared
+    # SenseLab's confirmatory cells with baseline cells that only exist at the development seeds and
+    # came out empty. They now take the resolved systems; on the development read the two are the
+    # same runs and the tables are bit-identical (checked against the pre-fix report).
+    baselines = {k: v for k, v in systems.items() if k in BASELINES}
+    head, rows, d = paired_rows(baselines, senselab, "moved")
     md += md_table(head, rows) + [""]
     data["paired_moved"] = d
     secondary: dict[str, Any] = {}
     for p in ("kept", "unchanged"):
-        _, _, dd = paired_rows(BASELINES, senselab, p)
+        _, _, dd = paired_rows(baselines, senselab, p)
         secondary[p] = dd
     data["paired_secondary"] = secondary
     if confirmatory:
         for p, title in (("kept", "kept half"), ("unchanged", "unchanged classes")):
-            head, rows, _ = paired_rows(BASELINES, senselab, p)
+            head, rows, _ = paired_rows(baselines, senselab, p)
             md += [f"### 1b-{p}. Secondary endpoint, paired: {title}", "",
                    "Holm within this endpoint.", ""] + md_table(head, rows) + [""]
 
@@ -658,7 +664,11 @@ def main() -> None:
            "grades live exposure over the sessions after it starts. `open` Tier 2 replays were still awaited "
            "when the cell ended; no canary reached a decision inside a cell (HEADROOM K1–K4).", ""]
     rows, d = [], {}
-    for run, cut, _ in CUTS:
+    # Post-freeze correction (2026-09-30, with the paired-table one above): with ``--runs`` the
+    # lifecycle is read from the resolved SenseLab run, not the development cut list, which holds
+    # no confirmatory run and left the confirmatory table empty. The development read is unchanged.
+    lifecycle_runs = [(sl_run, "confirmatory", "")] if args.runs else CUTS
+    for run, cut, _ in lifecycle_runs:
         for arm, label in ((SENSELAB_ARM, "SenseLab"), ("senselab-rsi-nocanary", "SenseLab − canary")):
             if not fix_rows(run, arm):
                 continue
