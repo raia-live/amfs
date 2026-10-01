@@ -46,6 +46,15 @@ Run from the repository root with `PYTHONPATH=. .venv/bin/python <script> <runs.
   not measured after episode 50 there, so that block is empty).
 - `f1_cut_split.txt` — see above.
 
+## The companion paper, `rsi_position.pdf`
+
+`rsi_position.tex` is a standalone paper on what recursive self-improvement is, the problem it
+solves and how it differs from giving an agent a memory. Every number in it is quoted from
+`rsi.pdf` and from `readouts/rsi-report-confirmatory/report.json`; it has no filler markers.
+Its two figures (`figures/pos_headline.png`, `figures/pos_curve.png`) are drawn from
+`report.json` (headline block, with its cell-level intervals) and from
+`readouts/fleet10_curve_post-replay-evidence.txt`. Build: `tectonic -X compile rsi_position.tex`.
+
 ## coding/ — P11(a′)
 
 `rsi-coding-dev/` (37 drafts of `rsi-c6` and `rsi-e2b-c6`) and `rsi-coding-confirmatory/`
