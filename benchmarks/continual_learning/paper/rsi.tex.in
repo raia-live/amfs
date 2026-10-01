@@ -449,7 +449,9 @@ same notes are in both stores; what the joiner inherits is the outcome record.
 \paragraph{A student trained on the record (E7 at rung 0).} Two Managed Models
 (\code{senselab-s1}) were trained on the dev-seed \code{support} traces of SenseLab and of the
 ablation without the repair loop (200 traces each), and evaluated on held-out seeds 101/113/127
-(1,500 episodes). Alone, neither student takes the new action first (9\,\% and 0\,\% on the moved
+(1,500 episodes). Both were served under a relaxed promotion gate; the default gate would have
+rejected both on exact agreement with their teacher (0.00 against a floor of 0.45), as
+amendment~(o) requires us to state. Alone, neither student takes the new action first (9\,\% and 0\,\% on the moved
 half). With SenseLab's outcome loop as its memory each does (33\,\% and 30\,\%), at 1/23 of the
 frontier model's cost per episode, and beats GPT-5.5 with the same memory (22\,\%) on the moved
 half at this rung. That is the contamination the evaluation ladder exists to expose: rung 0 uses

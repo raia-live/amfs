@@ -44,11 +44,17 @@ preregistered continual benchmark in which the correct action for a task class c
 through, for half of that class only. On four held-out seeds, two agent models and two task
 families (1,600 episodes per system), the engine takes the new action first in 45\,\% of the
 episodes whose rule moved, against 25\,\% for the frontier model alone, 32--36\,\% for three
-pgvector variants and 40\,\% for a 24k-token context window, while holding unchanged work at
-100\,\% and costing a third of the context window. With ten agents sharing one engine over 200
-episodes, the moved half rises from 37\,\% to 75\,\%. The gate held every correction it could not
-grade, shipped four it could, and stopped one wrong correction at 88\,\% recurrence against
-10\,\% before it reached the shared record. We also report what did not separate: the engine's
+pgvector variants and 40\,\% for a 24k-token context window. It holds unchanged work at
+100\,\% (one miss in 557, against 77\,\% for the model alone), escalates 5\,\% of episodes
+against 8--15\,\% for the others, has the highest episode success of any system, and costs a
+third of the context window. With ten agents sharing one engine over 200 episodes, the moved
+half rises from 37\,\% to 75\,\%. On development seeds, an agent joining a team on the engine
+took the correct action on every one of 122 first exposures (the strongest retrieval baseline:
+68--75\,\%), and a small model SenseLab fine-tuned on the agents' own traces and served with the
+record matched a frontier model with the same record at 1/23 of the cost. The gate held every
+correction it could not grade, shipped four it could, and stopped one wrong correction at
+88\,\% recurrence against 10\,\% before it reached the shared record. We also report what did
+not separate: the engine's
 replay and canary gates add nothing measurable to outcome learning inside a 100-episode cell,
 and the context window keeps an unchanged rule better than the engine does. The case for
 recursive self-improvement rests on what memory cannot do, and the evidence here is the first
@@ -252,20 +258,21 @@ first-attempt success on the kept half and on the unchanged classes.
 \centering\footnotesize
 \caption{Confirmatory read, sixteen cells per system (4 seeds $\times$ 2 families $\times$ 2
 models), 1,600 episodes per system. First-attempt success before the change and, after it, on
-the three populations; escalations are episodes the agent handed off; cost is the all-in dollar
-cost per episode, including for SenseLab the loop's judges, replays and drafts.}
+the three populations; episode success counts an episode solved within the retry budget of
+three; escalated is the share of episodes the agent handed off; cost is the all-in dollar cost
+per episode, including for SenseLab the loop's judges, replays and drafts.}
 \label{tab:headline}
-\setlength{\tabcolsep}{3pt}
-\begin{tabular}{@{}lrrrrrr@{}}
+\setlength{\tabcolsep}{2.6pt}
+\begin{tabular}{@{}lrrrrrrr@{}}
 \toprule
-system & pre-change & moved half & kept half & unchanged & escalated & \$/episode\\
+system & pre-change & moved half & kept half & unchanged & episode & escalated & \$/ep.\\
 \midrule
-Frontier alone            & 65\,\% & 25\,\% (72/284)  & 27\,\% (75/276)  & 77\,\% (432/560)  & 238 & 0.014\\
-Context window (24k)      & 86\,\% & 40\,\% (115/284) & 92\,\% (253/276) & 97\,\% (542/560)  & 124 & 0.130\\
-pgvector                  & 82\,\% & 32\,\% (91/284)  & 66\,\% (183/276) & 96\,\% (539/560)  & 131 & 0.024\\
-pgvector + rerank         & 77\,\% & 36\,\% (101/284) & 66\,\% (183/276) & 91\,\% (511/560)  & 165 & 0.027\\
-pgvector + outcomes (DIY) & 76\,\% & 32\,\% (90/284)  & 58\,\% (161/276) & 84\,\% (470/560)  & 189 & 0.032\\
-SenseLab                  & 85\,\% & 45\,\% (127/283) & 69\,\% (191/276) & 100\,\% (556/557) &  80 & 0.042\\
+Frontier alone            & 65\,\% & 25\,\% (72/284)  & 27\,\% (75/276)  & 77\,\% (432/560)  & 85.1\,\% & 14.9\,\% & 0.014\\
+Context window (24k)      & 86\,\% & 40\,\% (115/284) & 92\,\% (253/276) & 97\,\% (542/560)  & 92.2\,\% &  7.7\,\% & 0.130\\
+pgvector                  & 82\,\% & 32\,\% (91/284)  & 66\,\% (183/276) & 96\,\% (539/560)  & 91.8\,\% &  8.2\,\% & 0.024\\
+pgvector + rerank         & 77\,\% & 36\,\% (101/284) & 66\,\% (183/276) & 91\,\% (511/560)  & 89.7\,\% & 10.3\,\% & 0.027\\
+pgvector + outcomes (DIY) & 76\,\% & 32\,\% (90/284)  & 58\,\% (161/276) & 84\,\% (470/560)  & 88.2\,\% & 11.8\,\% & 0.032\\
+SenseLab                  & 85\,\% & 45\,\% (127/283) & 69\,\% (191/276) & 100\,\% (556/557) & 95.2\,\% &  5.0\,\% & 0.042\\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -305,6 +312,48 @@ indistinguishable from the context window and plain pgvector. On the kept half i
 model alone by 38 points (14 of 16 cells, Holm $0.007$), level with the three pgvector arms, and
 24 points below the context window (1 of 16 cells, Holm $0.001$). That last number is a real
 cost of the approach and we return to it in \S\ref{sec:limits}.
+
+\paragraph{Where the gap is large.} The moved half is the primary endpoint because it is the
+hardest population, and there the engine's lead is modest. On the other endpoints the lead is
+not modest, and Table~\ref{tab:gaps} collects the ones a reader deciding what to deploy should
+weigh. One miss in 557 on the classes whose rule did not change: 100\,\% against 77\,\% for the
+model alone, 84\,\% for the DIY outcome store and 91\,\% for the reranker, all three
+separations surviving Holm. Forty-two points over the model alone on the \code{support} moved
+half, where every system without an outcome record is at 27\,\% or less and the model alone
+never takes the new action. A third fewer escalations than the next-best system and a third as
+many as the model alone: 80 hand-offs in 1,592 episodes against 124 for the context window and
+238 for the model alone. The highest episode success of any system, 95.2\,\%, with a retry budget of three.
+Twenty points over the model alone before any rule changes, because the engine's record teaches
+the house rules an agent is deployed into. And on Claude Opus~5 the moved-half lead over the
+context window is nine points, where on GPT-5.5 the two are level.
+
+\begin{table}[t]
+\centering\footnotesize
+\caption{Where the confirmatory gaps are large. Rates over the sixteen cells; Holm-corrected
+$p$ from the preregistered paired sign-flip test where the comparison is one of the registered
+secondary endpoints, blank otherwise.}
+\label{tab:gaps}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+endpoint & SenseLab & against & gap & Holm $p$\\
+\midrule
+unchanged classes, first attempt    & 100\,\% (556/557) & Frontier alone 77\,\%          & $+23$ pts & 0.002\\
+                                    &                     & pgvector + outcomes 84\,\%     & $+16$ pts & 0.004\\
+                                    &                     & pgvector + rerank 91\,\%       & $+9$ pts  & 0.035\\
+kept half, first attempt            & 69\,\% (191/276)  & Frontier alone 27\,\%          & $+38$ pts & 0.007\\
+\code{support} moved half           & 42\,\% (62/149)   & Frontier alone 0\,\% (0/150)   & $+42$ pts & \\
+                                    &                     & best other (rerank) 27\,\%     & $+15$ pts & \\
+moved half, Claude Opus~5           & 54\,\% (76/141)   & Context window 45\,\%          & $+9$ pts  & \\
+pre-change first attempt            & 85\,\% (406/480)  & Frontier alone 65\,\%          & $+20$ pts & \\
+episode success (retry budget 3)    & 95.2\,\%          & Context window 92.2\,\%        & $+3$ pts  & \\
+                                    &                     & Frontier alone 85.1\,\%        & $+10$ pts & \\
+escalations                         & 5.0\,\% (80)      & Context window 7.7\,\% (124)   & $-35\,\%$ & \\
+                                    &                     & Frontier alone 14.9\,\% (238)  & $-66\,\%$ & \\
+cost per episode, all in            & \$0.042            & Context window \$0.130          & $3.1\times$ cheaper & \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \paragraph{Where the gain comes from.} The moved-half result is a \code{support} result. There
 SenseLab is at 42\,\% (62/149) against 0--27\,\% for every other system, with the model alone at
@@ -382,33 +431,140 @@ of the ten-agent curve; it is not visible in the single-agent aggregate. We say 
 case for the loop has to rest on what it prevents as much as on what it adds, and the former is
 only measurable where it has traffic.
 
-\subsection{Two development-seed probes}
+\subsection{When the team grows}
+\label{sec:team}
 
-Two probes from the development seeds bear directly on why a shared, outcome-attributed record
-matters for a fleet, and on level~3. Both ran on an earlier, unconditional change set and are
-development results.
+No operation runs one agent for long. A second instance is added for load. Another team points
+its own agent at the same tools and the same customers. A new use case is built over the same
+systems, by people who were not there when the first agent learned the house rules. Every one of
+these agents arrives with the same question on its first day: of everything written down about
+this operation, what still holds? With a vector store the answer is whatever the retriever
+returns, and the new agent has no way to tell a note that was right last quarter from one that is
+right now. With the engine the answer is attached to each entry, because the entries carry the
+outcomes of every agent that acted on them.
 
-\paragraph{A new agent joins.} Six agents share one store. In one protocol one agent works alone
-for 60 episodes and five join; in the other, five work and a sixth joins at 60. A joining agent on
-SenseLab takes the post-change action on its first exposure to a changed class in 36 of 36 and
-10 of 10 cases, with no stale picks. A joining agent on pgvector with a reranker does so in
-31\,\% and 40\,\% of cases, with 17\,\% and 0\,\% stale picks and 16--20\,\% escalations. The same
-notes are in both stores. What the joiner inherits from the engine is the outcome record: which
-of those notes still works.
+A development-seed probe measured what a joining agent inherits. Six agents share one record on
+the \code{support} and \code{ci-fix} families, two seeds, with an unconditional rule change at
+episode 20. In the \emph{pioneer} protocol one agent works alone for 60 episodes and five join;
+in the \emph{newcomer} protocol five work from the start and a sixth joins at 60. The joiner is
+a new identity; it has none of the veterans' sessions. Table~\ref{tab:join} is the read.
 
-\paragraph{A small model trained on the record.} Two small models were distilled from the
-development-seed \code{support} traces (200 traces each) and evaluated on three further held-out
-seeds (1,500 episodes). Alone, neither takes the new action first (9\,\% and 0\,\% on the moved
-half). Served with the engine's outcome record as their memory, both do (33\,\% and 30\,\%), at
-1/23 of the frontier model's cost per episode, and ahead of GPT-5.5 with the same memory
-(22\,\%) at this rung. This is the first rung of an evaluation ladder and it uses the training
-classes; nothing is claimed from it beyond the direction. The point for this paper is that the
-record is model-independent: it was produced by one model's outcomes and lifted another.
+\begin{table}[t]
+\centering\footnotesize
+\caption{A joining agent's first exposure to each task class after it joins (development seeds,
+set~A, six agents; pgvector + rerank is the strongest retrieval baseline). \emph{Poisoned}: a
+failed first attempt with an untested peer note in context and nothing validated. \emph{Parity}:
+the joiner's success reaches the veterans' late rate. Tokens are per task the joiner solved.}
+\label{tab:join}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}llrrrrrrr@{}}
+\toprule
+protocol & system & \multicolumn{2}{c}{first exposure} & poisoned & escal. & parity & ep.\ to & tokens /\\
+ & & changed & all & & & reached & parity & solved\\
+\midrule
+pioneer  & SenseLab          & 36/36 (100\,\%) & 90/90 (100\,\%) & 0/90 (0\,\%)  & 0\,\%  & 20/20 & 5    & 4,331\\
+         & pgvector + rerank & 11/36 (31\,\%)  & 61/90 (68\,\%)  & 29/90 (32\,\%) & 20\,\% & 16/20 & 5    & 7,556\\
+newcomer & SenseLab          & 10/10 (100\,\%) & 32/32 (100\,\%) & 0/32 (0\,\%)  & 0\,\%  & 4/4   & 5    & 4,230\\
+         & pgvector + rerank & 4/10 (40\,\%)   & 24/32 (75\,\%)  & 8/32 (25\,\%)  & 16\,\% & 4/4   & 11.5 & 6,836\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A joiner on the engine took the post-change action on its first exposure to a changed class in
+36 of 36 and 10 of 10 cases, and the correct action on every first exposure of any kind, 122 of
+122, with no stale picks and no escalations. Over all of its episodes after joining it was at
+100\,\% first-attempt success (136/136 and 160/160). A joiner on pgvector with a reranker was at
+31\,\% and 40\,\% on the changed classes, 68\,\% and 75\,\% over all first exposures, and 62\,\%
+over all of its episodes, with 17\,\% stale picks in the pioneer protocol and 16--20\,\% of first
+exposures escalated. The record each joiner read explains the difference. The engine's joiner had
+a validated entry in context on every first exposure and was never poisoned. The retrieval
+joiner had no evidence status on anything it read, and on 32\,\% and 25\,\% of its first
+exposures it failed with an untested note from a veteran in its context; on the changed classes,
+69\,\% and 60\,\%. The same notes were in both stores. What the engine's joiner inherited was the
+part the store cannot hold: which notes had worked since they were written. Onboarding cost
+follows: the engine's joiners all reached the veterans' late success rate, in a median of five
+episodes in both protocols; four of the twenty retrieval joiners in the pioneer protocol never
+did, and in the newcomer protocol the median was 11.5 episodes and 55k tokens against 22k. Per
+task solved, the engine's joiner spent 43\,\% and 38\,\% fewer tokens.
+
+This is a development probe on an unconditional change with six agents and one hundred
+episodes, and we report it as such. Its direction is the one the organisation case needs. The
+cost of learning a changed rule is paid once, by whichever agent meets it first, and every agent
+that joins afterwards, on the same team or another, starts from the validated record instead of
+from the veterans' unverified notes.
+
+\subsection{Models trained on the record}
+\label{sec:models}
+
+The record a team's agents produce is also a training set, and this is level~3 of the engine.
+SenseLab builds \emph{Managed Models}: smaller models that SenseLab fine-tunes on a team's own
+sealed traces, what the agents read, what they did, what came of it, and the repair
+trajectories and pinned cases the loop produced along the way. The trained model is then served
+with the same evidence record as its memory. Three things follow for the team. It owns the
+intelligence: the record was produced by its agents on its operation, and the model trained on
+that record belongs to it, on no vendor's roadmap. It can retrain as the record grows, so a
+rule the fleet learned this month is in the next model, and a rule the loop corrected is in it
+too. And the model it runs on is a fraction of the cost of the frontier model it learned from.
+
+The first rung of this was measured on the development seeds. Two \code{senselab-s1} students
+were trained on 200 sealed \code{support} traces each from the development cells, one on the
+whole engine's traces and one on traces from the ablation with the repair loop switched off,
+and evaluated on three further held-out seeds (1,500 episodes) in three conditions: the student
+alone, the student served with the engine's record, and GPT-5.5 served with the same record.
+Table~\ref{tab:student} is the read.
+
+\begin{table}[t]
+\centering\footnotesize
+\caption{Managed Models at the first rung of the evaluation ladder (development seeds 11 and 23
+for training; seeds 101, 113 and 127 for evaluation; \code{support}, set~C, 300 episodes per
+condition and model). First-attempt success by population, post-change episodes pooled over the
+three seeds ($n$ = 54 moved, 51 kept, 105 unchanged, 90 pre-change per row); cost is agent cost
+per episode.}
+\label{tab:student}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llrrrrr@{}}
+\toprule
+model & memory & moved half & kept half & unchanged & pre-change & \$/episode\\
+\midrule
+student (engine traces)   & none     & 9\,\%  & 88\,\%  & 69\,\% & 80\,\% & 0.0007\\
+student (ablation traces) & none     & 0\,\%  & 100\,\% & 90\,\% & 94\,\% & 0.0007\\
+student (engine traces)   & SenseLab & 33\,\% & 69\,\%  & 98\,\% & 71\,\% & 0.0015\\
+student (ablation traces) & SenseLab & 30\,\% & 65\,\%  & 97\,\% & 84\,\% & 0.0017\\
+GPT-5.5                   & SenseLab & 22\,\% & 69\,\%  & 99\,\% & 80\,\% & 0.0348\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Alone, the students have learned the house rules and nothing usable about the change: 88\,\%
+and 100\,\% on the kept half, 9\,\% and 0\,\% on the moved half. (The engine-trained student
+alone does reach the right answer on 96\,\% of moved-half episodes, in 2.1 attempts on average:
+it has learned its teacher's recovery path, the stale action first and then the one the
+environment accepted, and replays it.) A fine-tuned model is a snapshot of the record at
+training time, and a snapshot cannot follow a rule that moves after it was taken. Served with
+the engine's record, the same students take the new action first in 33\,\% and 30\,\% of
+moved-half episodes, 24 and 30 points above themselves alone in every seed, and hold the
+unchanged classes at 98\,\% and 97\,\%. Against GPT-5.5 served with the same record they are
+8 to 11 points ahead on the moved half, level on the kept half (69 against 69) and on the
+unchanged classes (98 against 99), at \$0.0015 against \$0.0348 per episode: 1/23 of the cost. The record
+is what moves with the world; the model is what makes acting on it cheap. The record was produced
+by one model's outcomes and lifted another, which is the property an organisation needs if it is
+to change models without starting over.
+
+Two disclosures belong next to these numbers. This is rung~0 of the ladder: the evaluation seeds
+are new but the task classes and wordings are the ones the students trained on, so a student
+ahead of the frontier model here is expected and is not yet evidence of generalisation; rungs
+1--3, on classes and wordings the students never saw, are registered and not yet run. And both
+students were promoted to serving under a relaxed gate; the default promotion gate would have
+rejected both on exact agreement with their teacher (0.00 against a floor of 0.45). The difference between the two students, $-7/0/{+}18$ points across the three seeds, is
+small and reported as such. What the rung does show is the shape of the offer: a model the team
+owns, trained on what its agents learned, that with the record behind it matches a frontier
+model on the house rules and the unchanged work and beats it where the rule moved, at a
+twenty-third of the cost.
 
 \section{What this means for building agents}
 \label{sec:implications}
 
-The measurements support five statements about how to build agents for long-running work.
+The measurements support six statements about how to build agents for long-running work.
 
 \paragraph{The unit of improvement is the operating rule.}
 What goes stale is a rule of the form ``in this situation, take this action''. Retraining the
@@ -430,10 +586,20 @@ most of them. The canary rejected one that the replay had passed and that would 
 nine sessions in ten. A system whose corrections are gated by outcomes it did not write itself
 can be left running. One that ships on a model's say-so has to be watched.
 
-\paragraph{A fleet learns once.} A new agent on the engine took the new action on its first
-exposure in every case measured. The curve in Figure~\ref{fig:curve} is ten agents reaching
-75\,\% on a rule most of them never saw fail. The cost of learning a changed rule is paid once
-per operation, and the record that pays it is the same record that trains the next model.
+\paragraph{An organisation learns once.} Agents multiply: more instances on the same team,
+other teams on the same tools, new use cases over the same systems. A new agent on the engine
+took the correct action on every first exposure measured, 122 of 122, where the strongest
+retrieval baseline failed on a quarter to a third of them with a veteran's unverified note in
+its context. The curve in Figure~\ref{fig:curve} is ten agents reaching 75\,\% on a rule that
+most of them met for the first time after it had already been learned. The cost of learning a
+changed rule is paid once per operation, by whichever agent meets it first.
+
+\paragraph{The team owns the intelligence, and can run it on its own model.} The record is
+produced by the team's agents on the team's operation, and the Managed Models SenseLab trains
+from it are the team's own, retrainable as the record grows. At the first rung measured, a
+student served with the record was level with a frontier model on the house rules and the
+unchanged work, ahead where the rule moved, and 23 times cheaper. Accuracy comes from the
+record, which keeps moving with the world; cost comes from the model, which the team controls.
 
 \paragraph{Self-diagnosis is an output.} The study that produced these numbers found fourteen
 things about the engine's own evidence path, twelve of them defects, during the runs: a regime
@@ -467,6 +633,10 @@ The four ships and the one failure come from an exploratory run on development s
 traffic concentrated on the changed classes, and three of the four ships were on a class that
 was already at ceiling.
 
+The joiner and Managed Model results are development-seed probes: six agents on an
+unconditional change for the first, and rung~0 of a four-rung ladder, under a relaxed promotion
+gate, for the second. Their confirmatory versions are registered and not yet run.
+
 The benchmark is two families of synthetic tasks with oracle grading and a rule change the
 authors wrote. It knows the truth before and after every change, which is what makes the
 measurement possible and what makes it an approximation of an operation whose truth nobody
@@ -482,7 +652,7 @@ evidence. That process is recursive self-improvement in the sense this paper use
 measurements here are the first of an engine doing it in production code against baselines that
 only store and recall. The engine is ahead on the population the change created, level or ahead
 on what did not change, three times cheaper than the strongest baseline, and able to hand what it
-learned to a new agent or a smaller model intact. It also records what it refused to ship, which
+learned to a new agent intact, or to a model the team owns at a twenty-third of the cost. It also records what it refused to ship, which
 is the part of a self-improving system that lets you trust the rest.
 
 \begin{thebibliography}{9}\small

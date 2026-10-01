@@ -53,7 +53,11 @@ solves and how it differs from giving an agent a memory. Every number in it is q
 `rsi.pdf` and from `readouts/rsi-report-confirmatory/report.json`; it has no filler markers.
 Its two figures (`figures/pos_headline.png`, `figures/pos_curve.png`) are drawn from
 `report.json` (headline block, with its cell-level intervals) and from
-`readouts/fleet10_curve_post-replay-evidence.txt`. Build: `tectonic -X compile rsi_position.tex`.
+`readouts/fleet10_curve_post-replay-evidence.txt`. Its joiner table is quoted from
+`readouts/team_grows_dev.md` (the `rsi-teamgrows-dev` readout; the `.json` beside it in the run
+directory carries scope ids and is not included), and its Managed Model table from the "E7 at
+L0" read in `benchmarks/continual_learning/HEADROOM_RSI.md`. Build: `tectonic -X compile
+rsi_position.tex`.
 
 ## coding/ — P11(a′)
 
