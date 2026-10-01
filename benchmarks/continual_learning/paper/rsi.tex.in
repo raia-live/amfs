@@ -434,34 +434,6 @@ numbers. The loop went from 9 proposals and 2 Tier~2 passes on the first cut to 
 third as its evidence path was repaired, then to 16 and 3, and 13 and 4, as the proof learned to
 reject a recovered success. The outcome endpoints moved within noise throughout.
 
-\subsection{Cost}
-\label{sec:cost}
-
-%%TAB_COST%%
-
-
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.62\textwidth]{figures/fig_cost.png}
-\caption{Recovery on the moved half against all-in cost per episode, the loop's own spend
-included (Table~\ref{tab:cost}); vertical bars are the cell-level bootstrap intervals.}
-\label{fig:cost}
-\end{figure}
-
-Every call is charged to the system that caused it. The agent's own calls are in the episode
-records; the loop's platform-side calls are on the benchmark account's evaluation ledger. Judge
-verdicts and Tier~2 replays are in the run record per cell, so those columns are exact. The
-repair agent's spend is not persisted per fix; it is recovered as the ledger's remainder (what
-the account spent minus what its judges cost, over every draft on the account: USD~0.135 per
-draft, from USD~77.6 spent, 39.1 of it judges, over 285 drafts) and applied per cell as drafts
-$\times$ that rate, which is why the column says \emph{est.} The confirmatory runs snapshot the
-ledger per cell and report the difference directly. On these seeds SenseLab costs USD~0.046 per
-episode all in: 4.2$\times$ the frontier model alone (0.011), 1.3--1.7$\times$ the pgvector
-memories (0.027--0.035), and 0.66$\times$ the context window (0.070). A quarter of it is the
-loop (judges 0.004, Tier~2 replays 0.004, drafts 0.004 per episode); the rest is the agent
-reading a longer briefing than a top-5 retrieval. Memory time is 15\,s per episode against the
-production API under the harness's rate pacing.
-
 \subsection{Two probes on the earlier change set}
 
 \paragraph{When the team grows.} On the unconditional change (set A, change at 20), with a
@@ -535,7 +507,9 @@ above Frontier alone by 38 pp (14/16 cells, Holm 0.007), level with the three pg
 (deltas $+1$, $+1$, $+8$; none distinguishable), and below the context window by 24 pp (1/16
 cells, Holm 0.001). The context window carries every prior note and outcome of the cell in the
 prompt. On a rule that did not change, replaying the whole record is the right policy and it
-wins, at \$0.130 per episode against SenseLab's \$0.042. This is the cost of the moved-half gain
+wins, at \$0.130 per episode against SenseLab's \$0.042 all in (Frontier alone \$0.014, the
+pgvector arms \$0.024--0.032; SenseLab's figure includes the loop's judges, replays and
+drafts). This is the cost of the moved-half gain
 on this protocol: SenseLab's memory is selective and outcome-weighted, and on the kept half
 selection loses to exhaustive recall. On the unchanged classes SenseLab is at 100\,\% (556/557),
 above Frontier alone ($+23$, Holm 0.002), the reranker ($+9$, 0.035) and the DIY store ($+16$,
@@ -723,8 +697,6 @@ fixes, holds an untreated one until it is read, and fails a wrong one before it 
 \code{main}. What it certifies is the absence of harm in the situation; the fleet-level benefit
 of a ship is still to be separated from the fleet's own recovery.
 
-\paragraph{Cost.}
-%%CONF_TAB_COST%%
 
 \section{What the loop taught us about itself}
 \label{sec:findings}
@@ -1015,9 +987,6 @@ cut. The changes are to the loop's evidence path, not to any threshold constant,
 preregistration forbids. The one gate rule that changed, the canary's primary from superiority
 to non-inferiority (finding 11), was preregistered with its falsifier before the run that tests
 it.
-\item \textbf{The loop's drafting cost is an estimate on the development seeds.} The repair
-agent's spend is the account ledger's remainder spread over every draft (\S\ref{sec:cost}). The
-confirmatory runs snapshot the ledger per cell and report the difference directly.
 \item \textbf{Hand-coding.} The ``conditional'' share (P9(b), P11, P11(a$'$)) is one coder's
 reading of the draft text against written instructions, and the coder is the author, not blind
 to arm or verdict (amendment (y)). Every draft, the instructions, the coding and the key are
@@ -1072,8 +1041,7 @@ in the package). \code{analysis.rsi\_canary\_readout --run <run>} is the per-can
 of findings~12--13 is a supplementary script in the package that reads the same tables.
 \code{analysis.rsi\_coding\_sheet make --runs <runs>} and \code{score --answers} produce and
 score the P11(a$'$) sheets. \code{analysis.fill\_rsi\_paper} fills this document from the
-report and \code{analysis.rsi\_figures} draws the figures. \code{analysis.platform\_calibration}
-reads the account ledger for the cost table. The analysis code is tagged
+report and \code{analysis.rsi\_figures} draws the figures. The analysis code is tagged
 \code{analysis-freeze-rsi} before the confirmatory runs. The preregistration, amendments,
 readouts (\code{HEADROOM\_RSI.md}), change sets, run records and coding sheets (drafts,
 instructions, author's coding, key) are published with the paper; the supplementary scripts,
