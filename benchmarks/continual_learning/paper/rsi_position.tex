@@ -44,21 +44,25 @@ preregistered continual benchmark in which the correct action for a task class c
 through, for half of that class only. On four held-out seeds, two agent models and two task
 families (1,600 episodes per system), the engine takes the new action first in 45\,\% of the
 episodes whose rule moved, against 25\,\% for the frontier model alone, 32--36\,\% for three
-pgvector variants and 40\,\% for a 24k-token context window. It holds unchanged work at
+pgvector variants and 40\,\% for a 24k-token context window; it wins 8 to 11 of the 16 paired
+cells against each baseline, no pairing survives Holm correction, and the gain is concentrated
+in the \code{support} family. It holds unchanged work at
 100\,\% (one miss in 557, against 77\,\% for the model alone), escalates 5\,\% of episodes
 against 8--15\,\% for the others, has the highest episode success of any system, and costs a
 third of the context window. With ten agents sharing one engine over 200 episodes, the moved
 half rises from 37\,\% to 75\,\%. On development seeds, an agent joining a team on the engine
 took the correct action on every one of 122 first exposures (the strongest retrieval baseline:
 68--75\,\%), and a small model SenseLab fine-tuned on the agents' own traces and served with the
-record matched a frontier model with the same record at 1/23 of the cost. The gate held every
+record matched a frontier model with the same record at 1/23 of the cost, at the first rung of
+its evaluation ladder. The gate held every
 correction it could not grade, shipped four it could, and stopped one wrong correction at
 88\,\% recurrence against 10\,\% before it reached the shared record. We also report what did
-not separate: the engine's
-replay and canary gates add nothing measurable to outcome learning inside a 100-episode cell,
-and the context window keeps an unchanged rule better than the engine does. The case for
-recursive self-improvement rests on what memory cannot do, and the evidence here is the first
-measurement of an engine doing it.
+not separate: inside a 100-episode cell the engine's replay and canary gates add nothing
+measurable to its first level, outcome attribution, and the context window keeps an unchanged
+rule better than the engine does (92\,\% against 69\,\%). The four levels are one loop, and
+the first is the turn the others feed on, so the result is the engine's; where we know which
+level carried a number, we say so. The case for recursive self-improvement rests on what memory
+cannot do, and the evidence here is the first measurement of an engine doing it.
 \end{abstract}
 
 \section{The problem}
@@ -122,7 +126,7 @@ invisible to the next agent until it is copied there.
 
 \paragraph{Retrieve from a vector store.} The agent writes notes after each task, embeds them,
 and retrieves the nearest ones before the next task. This is what most ``agent memory'' systems
-are~\cite{reflexion,mem0}, with variations: a cross-encoder reranker to sharpen retrieval, or a per-entry win/loss
+are~\cite{reflexion,expel,awm}, with variations: a cross-encoder reranker to sharpen retrieval, or a per-entry win/loss
 counter so the agent can see how often a note led to success. We ran all three. Plain pgvector
 retrieval takes the new action first in 32\,\% of moved-half episodes; with a reranker, 36\,\%;
 with the win/loss counter, 32\,\%. All three keep an unchanged non-standard rule at 58--66\,\%,
@@ -131,8 +135,9 @@ answers ``what did I write that looks like this?''. It does not answer ``is what
 true?''. A reranker makes the first answer sharper and leaves the second unasked. A win/loss
 counter is a step toward the second answer, and in our run it did not help on the moved half and
 cost 12 points on the unchanged classes (84\,\% against 96\,\% for plain retrieval). A counter on
-an entry says how often it worked. It does not say when, or what to do instead. Mem0 and Zep
-were not run here; an earlier grid covers them~\cite{senselab-cl}.
+an entry says how often it worked. It does not say when, or what to do instead. Hosted memory
+products were not run here; an earlier grid on the same benchmark family ran
+Mem0~\cite{senselab-cl}.
 
 The common thread is that all three treat knowledge as something to store and recall. What they
 leave out is a process: something that watches whether recalled knowledge still works, writes
@@ -148,6 +153,12 @@ before they take effect, and the machinery that makes the changes is subject to 
 evidence as the knowledge it changes. The word ``recursive'' points at the last clause: the
 corrections apply to the thing that produces corrections, and the record the loop keeps is also
 what trains its next version.
+
+The term is also used for systems that rewrite their own code or training toward open-ended
+capability gain~\cite{godel,dgm}. Nothing here does that. The engine changes the operating
+knowledge its agents act on, and the prompts and models that produce corrections to it; every
+change is tested against outcomes it did not write, exposed to a share of live traffic before
+all of it, reversible, and logged. The gate is the design.
 
 SenseLab's engine implements this as four levels. Everything below is production code; the
 benchmark calls the public API and the engine's own scheduler does the rest.
@@ -228,6 +239,18 @@ The numbers in this section come from a preregistered study of the whole engine
 first run; two seeds were used for development and four held-out seeds ran once after the
 analysis code was frozen. This paper quotes the confirmatory read, and labels the two
 development-seed probes and the one exploratory run as such.
+
+The analysis was frozen; the engine was not. Defects in the loop's evidence path that the study
+found were fixed in production between runs, and every run carries the engine cut it ran on.
+Table~\ref{tab:headline} is the fleet-1 confirmatory read: sixteen cells per system, run
+01:42--08:19Z on 2026-09-30. One engine cut fell inside that window (\code{post-canary-zero},
+03:40Z), with 4,867 of the 12,791 episodes before it; the moved-half difference between
+SenseLab and every other system has the same sign on the pre-cut episodes alone
+($+28/{+}11/{+}6/{+}18/{+}23$ points) as on the full read ($+19/{+}4/{+}13/{+}9/{+}13$), so the
+cut did not make the result. The ten-agent cells of Figure~\ref{fig:curve} and the
+exploratory run both ran on the later \code{post-replay-evidence} cut, after the last defect
+was fixed. The cut of every run is listed in the companion paper's reproducibility
+section~\cite{rsi-paper}.
 
 \paragraph{The benchmark.} Two task families with tool-using agents and oracle-graded outcomes:
 \code{support} (a helpdesk agent with account, order and export tools; 15 issue classes) and
@@ -372,7 +395,11 @@ engine's effect does not depend on which model reads it.
 A 100-episode cell with one agent is short for a loop whose gates need graded live traffic. The
 second protocol runs ten agents against one shared engine for 200 episodes, with the change at
 episode 50, on the same four held-out seeds, both families, GPT-5.5 (eight cells, 1,600
-episodes). It is reported descriptively, as registered.
+episodes). It is reported descriptively, as registered, and it has no baseline: no pgvector or
+context-window fleet ran under this protocol, so the curve compares the engine with its own
+earlier episodes, and a shared store of any kind might climb as evidence accumulates. What the
+protocol adds that the single-agent cells cannot is the gate's behaviour with ten agents' traffic,
+reported next.
 
 \begin{figure}[t]
 \centering
@@ -380,7 +407,7 @@ episodes). It is reported descriptively, as registered.
 \caption{Fleet of ten agents sharing one engine, 200 episodes, change at episode 50; eight
 confirmatory cells pooled. First-attempt success per ten-episode block on the moved and kept
 halves, with cell-level bootstrap bands; dotted lines are the pooled moved-half rate over each
-fifty-episode window.}
+fifty-episode window. No baseline system ran under this protocol; the curve is descriptive.}
 \label{fig:curve}
 \end{figure}
 
@@ -429,7 +456,12 @@ the outcome record, does most of the measurable work at this horizon. The repair
 contribution is visible in its lifecycle counts and in the exploratory canary, and in the shape
 of the ten-agent curve; it is not visible in the single-agent aggregate. We say so because the
 case for the loop has to rest on what it prevents as much as on what it adds, and the former is
-only measurable where it has traffic.
+only measurable where it has traffic. None of this makes the result something other than an
+RSI result. Level~0 is the loop's first level, the one in which outcomes change what the agent
+acts on, and the levels above it exist for the case level~0 cannot see: a rule that is still
+right half the time, which demotion cannot separate from a rule that works. The gain in
+Table~\ref{tab:headline} is the engine's. Which level carried each number is stated wherever
+we can tell.
 
 \subsection{When the team grows}
 \label{sec:team}
@@ -611,6 +643,37 @@ protocol \cite{rsi-paper}. A retrieval benchmark would have seen none of them, b
 them is about retrieval. A system that improves itself has to be inspectable in exactly this way,
 and the record it keeps for its own gates is what makes it so.
 
+\section{Related work}
+\label{sec:related}
+
+\paragraph{Agents that improve from experience.} Self-Refine~\cite{selfrefine} and
+STaR~\cite{star} improve a model's outputs or its training data within a task or a training run.
+Reflexion~\cite{reflexion} writes a verbal reflection after a failed trial for the next trial on
+the same task. ExpeL~\cite{expel} distils cross-task insights from past trajectories into text
+the agent reads later; Voyager~\cite{voyager} keeps a library of verified skills; Agent Workflow
+Memory~\cite{awm} induces reusable workflows from past successes. All of them write something
+after an episode that a later episode reads. None attributes later outcomes back to what was
+written, none detects that a written rule has stopped holding, and none tests a correction on the
+failing cases and on live traffic before every later episode reads it. Those three steps are the
+engine.
+
+\paragraph{Self-modifying systems.} Gödel machines~\cite{godel}, the Darwin Gödel
+Machine~\cite{dgm} and AlphaEvolve~\cite{alphaevolve} change their own code under a proof or a
+benchmark gate. The gate is the shared idea. The object differs: the engine changes operating
+knowledge and the prompts and models that produce corrections to it, each change is measured
+against a live control arm, and each is reversible.
+
+\paragraph{Release engineering and bandits.} Tier~3 is a canary release with a non-inferiority
+bound, in the tradition of controlled online experiments~\cite{kohavi}. The act, explore and
+escalate recommendation that level~0 returns with each retrieval is a bandit over actions within
+a situation~\cite{bandits}, with exploration assigned per agent; the engine's contribution is
+the attribution that feeds it, not the policy.
+
+\paragraph{Benchmarks.} $\tau$-bench and $\tau^2$-bench~\cite{taubench,tau2bench} evaluate
+tool-using agents against fixed rules, and LongMemEval~\cite{longmemeval} evaluates recall over
+long histories. Neither changes a rule under the agent and grades what it does next, which is
+the measurement this paper rests on.
+
 \section{Limits}
 \label{sec:limits}
 
@@ -631,7 +694,9 @@ claim it does. In the eight confirmatory ten-agent cells nothing shipped at all,
 canary's rule needs more graded traffic per arm than 200 episodes across ten agents supplied.
 The four ships and the one failure come from an exploratory run on development seeds with the
 traffic concentrated on the changed classes, and three of the four ships were on a class that
-was already at ceiling.
+was already at ceiling. The ten-agent curve has no baseline fleet under its protocol, so it
+shows that the engine keeps learning over 200 episodes and not that a store without the engine
+would not.
 
 The joiner and Managed Model results are development-seed probes: six agents on an
 unconditional change for the first, and rung~0 of a four-rung ladder, under a relaxed promotion
@@ -655,7 +720,7 @@ on what did not change, three times cheaper than the strongest baseline, and abl
 learned to a new agent intact, or to a model the team owns at a twenty-third of the cost. It also records what it refused to ship, which
 is the part of a self-improving system that lets you trust the rest.
 
-\begin{thebibliography}{9}\small
+\begin{thebibliography}{99}\small
 \bibitem{rsi-paper} SenseLab Research. Recursive self-improvement, gated by evidence: an engine
 that lets deployed agents propose, test, canary and ship corrections to their own operating
 knowledge, measured where the world changes under them. Preprint v0.3, October 2026. Companion
@@ -663,12 +728,34 @@ paper; preregistration \code{HYPOTHESIS\_RSI.md}, analysis tag \code{analysis-fr
 \bibitem{senselab-cl} SenseLab Research. From memory to recursive self-improvement: agents that
 learn from outcomes, agents that only remember, and a model trained on what they learned, when
 the tasks never repeat and the rules change. Preprint, 2026.
-\bibitem{kohavi} R.~Kohavi, D.~Tang, Y.~Xu. \emph{Trustworthy Online Controlled Experiments: A
-Practical Guide to A/B Testing}. Cambridge University Press, 2020.
 \bibitem{reflexion} N.~Shinn, F.~Cassano, A.~Gopinath, K.~Narasimhan, S.~Yao. Reflexion: Language
 agents with verbal reinforcement learning. NeurIPS 2023.
-\bibitem{mem0} P.~Chhikara et al. Mem0: Building production-ready AI agents with scalable long-term
-memory. arXiv:2504.19413, 2025.
+\bibitem{expel} A.~Zhao, D.~Huang, Q.~Xu, M.~Lin, Y.-J.~Liu, G.~Huang. ExpeL: LLM agents are
+experiential learners. AAAI 2024 (arXiv:2308.10144).
+\bibitem{voyager} G.~Wang et al. Voyager: An open-ended embodied agent with large language models.
+TMLR 2024 (arXiv:2305.16291).
+\bibitem{awm} Z.~Z.~Wang, J.~Mao, D.~Fried, G.~Neubig. Agent Workflow Memory. arXiv:2409.07429,
+2024.
+\bibitem{selfrefine} A.~Madaan et al. Self-Refine: Iterative refinement with self-feedback.
+NeurIPS 2023.
+\bibitem{star} E.~Zelikman, Y.~Wu, J.~Mu, N.~D.~Goodman. STaR: Bootstrapping reasoning with
+reasoning. NeurIPS 2022.
+\bibitem{godel} J.~Schmidhuber. Gödel machines: Fully self-referential optimal universal
+self-improvers. In \emph{Artificial General Intelligence}, Springer, 2007.
+\bibitem{dgm} J.~Zhang, S.~Hu, C.~Lu, R.~Lange, J.~Clune. Darwin Gödel Machine: Open-ended
+evolution of self-improving agents. arXiv:2505.22954, 2025.
+\bibitem{alphaevolve} A.~Novikov et al. AlphaEvolve: A coding agent for scientific and algorithmic
+discovery. arXiv:2506.13131, 2025.
+\bibitem{kohavi} R.~Kohavi, D.~Tang, Y.~Xu. \emph{Trustworthy Online Controlled Experiments: A
+Practical Guide to A/B Testing}. Cambridge University Press, 2020.
+\bibitem{bandits} T.~Lattimore, C.~Szepesv\'ari. \emph{Bandit Algorithms}. Cambridge University
+Press, 2020.
+\bibitem{taubench} S.~Yao, N.~Shinn, P.~Razavi, K.~Narasimhan. $\tau$-bench: A benchmark for
+tool-agent-user interaction in real-world domains. arXiv:2406.12045, 2024.
+\bibitem{tau2bench} V.~Barres et al. $\tau^2$-bench: Evaluating conversational agents in a
+dual-control environment. arXiv:2506.07982, 2025.
+\bibitem{longmemeval} D.~Wu et al. LongMemEval: Benchmarking chat assistants on long-term interactive
+memory. ICLR 2025.
 \end{thebibliography}
 
 \end{document}
