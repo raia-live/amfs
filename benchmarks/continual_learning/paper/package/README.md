@@ -45,6 +45,10 @@ Run from the repository root with `PYTHONPATH=. .venv/bin/python <script> <runs.
   `fleet10_curve_exploratory_ab.txt` on the exploratory run (focus 1.0; unchanged classes are
   not measured after episode 50 there, so that block is empty).
 - `f1_cut_split.txt` — see above.
+- `context_window_fill.txt` — the context-window arm (`raw-traces`) in `rsi-conf-f1`: prompt
+  tokens per episode by 20-episode block and, per cell, the episode at which the 24k-token window
+  filled (the harness's `memory.retrieved_bytes` plateau) and its fill in episodes 90–99. Quoted
+  in `rsi_position.pdf`'s reading of the context-window comparison. Descriptive; no metric.
 
 ## The companion paper, `rsi_position.pdf`
 

@@ -107,10 +107,12 @@ run, the best of any system by a wide margin. It fails on the thing this paper i
 rule has changed, the record contradicts itself, old successes against new failures, and the
 model has to work out from raw history which half is current. It does so in 40\,\% of moved-half
 episodes. The approach also has two structural limits. The record grows without bound and must
-be truncated (24k tokens here), so the oldest evidence is the first to go, and every episode
-pays to re-read everything: \$0.130 per episode, three times the cost of the engine and nine
-times the cost of the model alone. And it does not transfer: what one agent has in its prompt is
-invisible to the next agent until it is copied there.
+be truncated (24k tokens here), so the oldest evidence is the first to go; in our run the window
+filled inside the 100-episode cell, in every \code{support} cell between episodes 77 and 93,
+and dropped its oldest episodes from then on (\S\ref{sec:cw}). Every episode pays to re-read
+everything: \$0.130 per episode, three times the cost of the engine and nine times the cost of
+the model alone. And it does not transfer: what one agent has in its prompt is invisible to the
+next agent until it is copied there.
 
 \paragraph{Retrieve from a vector store.} The agent writes notes after each task, embeds them,
 and retrieves the nearest ones before the next task. This is what most ``agent memory'' systems
@@ -382,6 +384,27 @@ half, where a house rule it never learned still applies. By model, SenseLab is l
 the context window on GPT-5.5 (36\,\% both) and ahead on Claude Opus~5 (54\,\% against 45\,\%);
 the pgvector arms swap order between the models (13--27\,\% on GPT-5.5, 37--51\,\% on Opus). The
 engine's effect does not depend on which model reads it.
+
+\paragraph{Reading the context-window comparison.}
+\label{sec:cw}
+The context window is the strongest baseline by construction. It reads every note and outcome
+the cell has produced, on every call, and it is the ceiling of what recall alone can do. The
+engine reads three to five entries per call and matches it on the moved half, is ahead on the
+unchanged classes (100 against 97\,\%), on escalations (5.0 against 7.7\,\%) and on episode
+success (95.2 against 92.2\,\%), and costs a third as much. The 4-point moved-half difference is
+also the average of two different results: on \code{support}, where the model alone is at 0\,\%,
+the engine is 25 points ahead (42 against 17); on \code{ci-fix}, where the post-change action is
+close to the model's default, replaying the record wins (67 against 49). Three further facts
+belong next to the number. The window is not free: the arm's prompt grew from a mean of 7k
+tokens per episode in the first twenty episodes to 49k in the last twenty, and the episode costs
+\$0.130 against \$0.042. The window ran out of room inside the experiment: its 24k-token budget
+holds about 80 kB of transcript, every \code{support} cell reached that ceiling between episode
+77 and 93 and dropped its oldest episodes for the rest of the cell, and the \code{ci-fix} cells
+ended at 56--64 kB. That is one agent and 100 episodes; ten agents write a shared history ten
+times as fast. And the window does not transfer: it is one agent's prompt, a joining agent's is
+empty, and handing the veterans' transcripts to each joiner is the same window filling ten
+times faster. The kept-half loss is the one place the context window is ahead on a population,
+and \S\ref{sec:limits} says what it costs and what the engine can do about it.
 
 \subsection{The long horizon: ten agents, 200 episodes}
 
@@ -691,7 +714,9 @@ each can do for a second agent; this number does not. The kept-half loss to the 
 (24 points, Holm $0.001$) is the price of a selective, outcome-weighted record on a rule that
 did not move: the engine revises what the context window replays. Whether that trade is
 right depends on how often an operation's rules change, which is an empirical question about the
-operation.
+operation. The engine can also close part of the gap by returning more of a situation's record
+when that record holds no contradiction, which is what the context window does by default and
+at full cost; that is a retrieval-policy question for the engine and is not measured here.
 
 Inside a 100-episode single-agent cell, the repair loop and the canary add nothing measurable
 to outcome learning. The loop's value is in the ten-agent curve, in what it refused, and in the

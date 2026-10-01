@@ -1,0 +1,29 @@
+Context-window arm (raw-traces) in the fleet-1 confirmatory run rsi-conf-f1: how full the
+24k-token window was. retrieved_bytes = bytes of prior-episode transcript handed to the agent
+per episode (harness field memory.retrieved_bytes); the arm keeps whole episodes, newest first,
+up to CL_RAW_TRACES_TOKENS=24000, so a plateau is the window dropping its oldest episodes.
+
+== prompt tokens per episode (agent usage), all 16 cells
+  ep   0- 19: mean     7325  max   70944  n=320
+  ep  20- 39: mean    18293  max   60957  n=320
+  ep  40- 59: mean    32580  max   94969  n=320
+  ep  60- 79: mean    41470  max  121045  n=320
+  ep  80- 99: mean    48580  max  127358  n=320
+
+== per cell: first episode with >= 79,000 bytes handed over; mean bytes in episodes 90-99; max bytes
+  ci-fix   claude-opus-5  s37  first ep >= 79 kB: None  mean ep90-99:   55991  max:  58557
+  ci-fix   claude-opus-5  s41  first ep >= 79 kB: None  mean ep90-99:   56707  max:  59439
+  ci-fix   claude-opus-5  s59  first ep >= 79 kB: None  mean ep90-99:   55847  max:  58442
+  ci-fix   claude-opus-5  s73  first ep >= 79 kB: None  mean ep90-99:   56935  max:  59408
+  ci-fix   gpt-5.5        s37  first ep >= 79 kB: None  mean ep90-99:   64245  max:  67068
+  ci-fix   gpt-5.5        s41  first ep >= 79 kB: None  mean ep90-99:   61414  max:  65917
+  ci-fix   gpt-5.5        s59  first ep >= 79 kB: None  mean ep90-99:   60256  max:  62941
+  ci-fix   gpt-5.5        s73  first ep >= 79 kB: None  mean ep90-99:   62015  max:  64938
+  support  claude-opus-5  s37  first ep >= 79 kB: 78    mean ep90-99:   79793  max:  80345
+  support  claude-opus-5  s41  first ep >= 79 kB: 77    mean ep90-99:   79877  max:  80365
+  support  claude-opus-5  s59  first ep >= 79 kB: 86    mean ep90-99:   79576  max:  80100
+  support  claude-opus-5  s73  first ep >= 79 kB: 85    mean ep90-99:   80046  max:  80292
+  support  gpt-5.5        s37  first ep >= 79 kB: 83    mean ep90-99:   79898  max:  80355
+  support  gpt-5.5        s41  first ep >= 79 kB: 84    mean ep90-99:   79806  max:  80255
+  support  gpt-5.5        s59  first ep >= 79 kB: 86    mean ep90-99:   80051  max:  80244
+  support  gpt-5.5        s73  first ep >= 79 kB: 93    mean ep90-99:   79103  max:  80019
