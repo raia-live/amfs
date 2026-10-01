@@ -2704,3 +2704,13 @@ reached are reported as they are.
 **Not run.** Probe (b) (adversarial: a plausible wrong fix injected as a proposal). The harness
 has no injection path; building one is harness code with its own run and its own read, and its
 failing verdict needs the same graded counts this run is for. It stays in the paper's Pending.
+
+**Cut inside the run (added 03:25Z).** Finding 14 (below, read record) was fixed in amfs-internal
+#803 and merged by Bruno at 03:08:00Z, before the cells closed; the production deploy landed as
+revision `amfs-api-02155-ssh`, Ready **2026-10-01T03:17:37Z = cut `post-branch-cap`**. The change
+touches only how a *new* proposal is staged (`open_branch_count`); grading, routing, running
+canaries and shipped fixes are untouched. The two ci cells had finished their 400 episodes
+before the cut; the two support cells ran their last ~30–40 episodes on it. The read splits the
+lifecycle counts at the cut: fixes proposed and canaries started after 03:17:37Z are reported
+separately and excluded from the pre-cut lifecycle numbers, as the `post-canary-zero` cut was in
+the fleet-1 window.
