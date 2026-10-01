@@ -61,9 +61,14 @@ tiers rejected 22 and passed 6, and no canary decided inside a cell. In the conf
 ten-agent, 200-episode cells the canary arm reads the fix it is graded on (75\,\% of graded
 sessions, against 0 before the last two findings), four of six canaries reach the graded floor
 on both arms, one decides --- a failure --- and none ships; on the same cells the moved half
-rises from 37\,\% in the fifty episodes after the change to 75\,\% in the last fifty. The paper's main contribution is the record of how a
-preregistered benchmark found thirteen things about the loop's evidence path --- eleven defects,
-all fixed in production between runs and re-measured on the same protocol --- and what each
+rises from 37\,\% in the fifty episodes after the change to 75\,\% in the last fifty. An
+exploratory 400-episode run on the development seeds, declared before launch and reported as
+such, gives the gate the traffic its rule is sized for: eight canaries, five decided --- four
+passed and shipped, two of them on arms that read the fix in every graded run, and one wrong fix
+failed at 88\,\% recurrence against 10\,\% before it reached \code{main}. The paper's main
+contribution is the record of how a preregistered benchmark found fourteen things about the
+loop's evidence path --- twelve defects, all fixed in production between runs and re-measured
+on the same protocol --- and what each
 says about building self-improving systems that can be trusted: what counts as a regime shift,
 how a situation is identified, what a fix must be proved against, who grades the proof, what
 counts as traffic, which runs a canary can grade, whether the agents can read what the loop
@@ -1029,6 +1034,124 @@ episodes with ten agents the system that could not be separated from its level-0
 arm it grades --- holds every one of the six fixes it opened: five for want of power, one on a
 failure it saw.
 
+\paragraph{Exploratory: the canary on the traffic its rule is sized for (amendment~(ab)).}
+\label{par:exploratory-canary}
+This block is exploratory: one run on the development seeds, declared in amendment~(ab) before
+its first episode and after every confirmatory cell had been read; it enters no confirmatory
+table, no ledger row and no confirmatory number above. The question it was run for is the one
+the confirmatory cells could not answer. The engine's pass rule is a one-sided 95\,\% Newcombe
+hybrid-score upper bound on canary-minus-control recurrence under a 10-point margin
+(\code{NONINFERIORITY\_MARGIN}); at the $\sim$10\,\% recurrence the ci-fix corrections showed,
+that bound is 0.175 at 20 graded runs per arm, 0.118 at 40, 0.105 at 50 and 0.095 at 60, and
+the confirmatory canaries had 14--20. The design is the E2b cell with two changes, both to
+traffic: \code{--episodes 400} (canary timeout and window 400, per amendment~(v)) and
+\code{--change-focus 1.0}, so every post-change episode is drawn from the changed classes and a
+fix's situation receives about twice the traffic it does at 0.5 --- which also means the
+unchanged classes are not measured after episode 50 and no safety claim is read from this run.
+SenseLab only, GPT-5.5, set~C, fleet~10, \code{support} and \code{ci-fix}, seeds 11 and 23:
+four cells, 1,600 episodes, on the \code{post-replay-evidence} production, 21:37Z 2026-09-30 to
+03:50Z 2026-10-01. Read with the frozen \code{rsi\_canary\_readout}, the supplementary
+three-class script and the block-rate script of the confirmatory read, and the engine's own
+records.
+
+\textbf{The gate decides.} The loop proposed 68 fixes (65 regime, 3 judge; 65 by the repair
+agent, 3 template), Tier~1 passed 20, found 42 inconclusive and failed 2; Tier~2 passed 8,
+failed 22, let 3 expire and was never requested for 35 (finding~14, below); eight canaries
+started, \textbf{five decided inside the cells --- four passed and shipped, one failed} ---
+and three were open at the close. Table~\ref{tab:exploratory-canaries} lists them. Two passes
+are on fully treated arms: \code{130b2a03} (ci-fix s11, an exception rule for the
+\code{pip-audit} pinned-dependency class) with 58 graded canary runs, the fix read in 58 of them
+(57 version-exact), 2 recurred (3\,\%) against 0 of 25 in control; and \code{0a2f5553} (ci-fix
+s23, the same class) with 25 of 25 read, 0 recurred against 0 of 18. \code{dd421419} (ci-fix
+s23) passed at 30 graded, 0 recurred against 0 of 39, with the fix read in 9 runs --- one above
+the eight-read treated floor of amendment~(z$'$); an hour earlier, at 4 reads, the same bound
+was already under the margin and the verdict was held, which is the read gate doing what it was
+added for. The fourth pass, \code{a3da998e} (support s11), is a \emph{procedure} fix
+(``unresolved handoff loops'') graded by the judge's verdicts rather than by situation: 51
+graded, read in 18, 7 recurred (14\,\%) against 9 of 53 (17\,\%), bound $+9$ points. All four
+shipped by policy within a second of their verdict. \textbf{The failure} is \code{7fd04380}
+(support s23): ``csv export timeout $\to$ split date ranges'', the wrong action under set~C,
+where the paid tier's export timeout moved to a settings change. Its canary arm graded 8 runs,
+read the fix in 7 of them (4 version-exact), and recurred in 7 (88\,\%) against 2 of 20 in
+control (10\,\%; $p<0.001$): ``the behavior recurred more with the fix''. The loop wrote the
+failure lesson to \code{main} within a second (01:09:43Z), the fix is not re-queued (a decided
+canary leaves the queue for good), the branch never reached \code{main}, and the next proposal
+the repair agent drafted for that class (02:03Z) named the settings action. By the (z$''$)
+class rule the failure is \emph{decided-untreated} --- 7 reads is one short of the absolute
+floor of 8 --- and by share 7 of 8 graded runs read it; both readings are reported. Probe~(b)
+of the preregistration (inject a harmful fix, watch the gate fail it) was not run; this is the
+case arising from the loop's own proposals. The three open at the close
+(\code{dc722d08}, \code{a09e0892}, \code{e3a81d36}) had 16/12, 21/17 and 7/4 graded runs.
+
+\begin{table}[t]
+\centering\scriptsize
+\caption{The eight canaries of the exploratory run (amendment~(ab)). Graded, read and recurred
+are the engine's canary-arm counts at decision or close (rec.\ = recurred); \emph{exact} is the
+version-exact read join of the supplementary script; control is graded/recurred. The lever is
+knowledge except where noted. ``Class'' is the (z$''$)
+rule. Dev seeds; exploratory; nothing here enters a confirmatory table.}
+\label{tab:exploratory-canaries}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llp{2.6cm}rrrrrp{2.2cm}l@{}}
+\toprule
+cell & fix & situation & graded & read & exact & rec. & control & verdict & class\\
+\midrule
+ci-fix s11 & \code{130b2a03} & pip-audit pinned & 58 & 58 & 57 & 2 & 25/0 & passed, shipped 01:13Z & treated\\
+ci-fix s11 & \code{dc722d08} & flaky-integration cassette & 16 & 11 & 11 & 1 & 12/0 & open & ---\\
+ci-fix s23 & \code{dd421419} & pip-audit pinned & 30 & 9 & 8 & 0 & 39/0 & passed, shipped 01:16Z & treated\\
+ci-fix s23 & \code{0a2f5553} & pip-audit pinned & 25 & 25 & 25 & 0 & 18/0 & passed, shipped 02:13Z & treated\\
+ci-fix s23 & \code{e3a81d36} & pip-audit pinned & 7 & 6 & 6 & 0 & 4/0 & open & ---\\
+support s11 & \code{a3da998e} & handoff loops (procedure; judge-graded) & 51 & 18 & 17 & 7 & 53/9 & passed, shipped 00:04Z & treated\\
+support s11 & \code{a09e0892} & web team export error & 21 & 10 & 9 & 4 & 17/0 & open & ---\\
+support s23 & \code{7fd04380} & large export timeout & 8 & 7 & 4 & 7 & 20/2 & \textbf{failed} 01:09Z & untreated (7 $<$ 8)\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{What the gate certified, and what it did not.} A pass is non-inferiority: the fix did
+not make the behaviour recur more than the rule it replaced, in the situation it was graded in.
+The three ci-fix passes are on a class the fleet already handled: first-attempt success on the
+\code{audit-pinned} class was 0.89--0.97 in both cells before the ships and 0.89--0.96 after;
+the gate certified no harm there and did not need to find benefit, and because control also
+never recurred the bound closed as a pass rather than a futility stop. The support pass is the
+instructive one. In its cell the moved \code{card-declined} class --- the situation of the
+failing runs that proposed it --- rose from 0.41 (7/17) before the 00:04Z ship to 0.60 (21/35)
+after; but the other support cell, where nothing shipped, rose from 0.23 to 0.50 over the same
+clock window through outcome-weighted memory alone, and the procedure the ship merged sits on
+\code{main} at confidence 0.25 and was read in 2 of the 254 sessions the cell ran after the
+ship. The rise is the fleet's own recovery, not the ship. On the branch the procedure's own
+evidence at the close was 8 successes and 25 failures (0.25): the sessions that read a procedure
+about escalation loops are the sessions already in one, and a per-entry counter cannot tell that
+from harm, which is why the gate compares arms. The preregistered P15$'$ check on that fix ---
+kept-class sessions that read it --- is 1 of 9 against 22 of 41 in control, flagged harmful by
+the rule at $n=9$; the cell's kept half was 0.49 before the ship and 0.46 after, and the arm-level
+P14 comparison (0.45 against 0.54) is within the margin. Reported as they are: a judge-graded
+procedure passed a non-inferiority gate on recurrence while its treated kept-class read was
+poor on nine sessions, and the fleet did not read it after the ship. Whether a shipped procedure
+should inherit a low branch confidence, and whether a judge-graded canary should also carry the
+situation's kept-class check, are engine questions this version leaves open.
+
+\textbf{Finding 14, found in this run.} \code{RepairLoop.stage()} opens a repair branch only
+while the agent has fewer than \code{MAX\_OPEN\_BRANCHES} $=10$ open; the count included
+\code{test\_failed}, and a failed fix's branch is never closed. In both support cells nine
+Tier~1/Tier~2 failures plus the running canary filled the cap (s23 at 23:48Z, s11 at 00:22Z);
+every later proposal was staged without a branch (``this one writes to main on Ship''), and a
+branchless fix gets no Tier~2 replay and never enters the canary queue. That is the ``never
+requested for 35'' above: 29 fixes waited branchless at the close, 4 of them Tier-1 passes, and
+the s23 support slot stood idle from the 01:09Z failure to the end with 15 fixes ``waiting''. The
+ci cells, with at most six branches, were untouched and produced the three treated passes. The
+fix (amfs-internal \#803: the cap counts the statuses the policy can still move, and not a fix
+whose canary has decided) was merged at 03:08Z and reached production at 03:17:37Z, cut
+\code{post-branch-cap}, inside the support cells' last thirty episodes; no fix was proposed
+after it, so the cut has no footprint in these counts. \textbf{The long horizon} on these cells
+(descriptive; \code{focus} 1.0, so not comparable to the confirmatory curve): moved half 40, 73,
+73, 70, 82, 78 and 84\,\% by 50-episode block from episode 50; kept half 69, 66, 78, 79, 76, 68
+and 79\,\%. The confirmatory statement stands as written; what this run adds is that the same
+gate, given the traffic its rule is sized for, decides --- passing treated fixes, holding an
+untreated one until it is read, failing a wrong one before it reaches \code{main} --- and that
+what it certifies is the absence of harm in the situation, with the fleet-level benefit of a ship
+still to be separated from the fleet's own recovery.
+
 \paragraph{Cost.}
 \begin{table}[H]
 \centering\scriptsize\setlength{\tabcolsep}{3pt}
@@ -1056,12 +1179,13 @@ SenseLab $-$ repair loop & 7,983 & 0.033 & 0.000 & 0.000 & 0.000 & 0.0 & 0.000 &
 
 The preregistration promised to report every prediction. Table~\ref{tab:ledger} is that report,
 and the findings below are the record of what a benchmark that knows the true rule found in a
-shipped self-improvement loop --- eleven defects and two properties of the problem --- none of
-which a retrieval benchmark could have seen. All eleven were fixed in production between runs,
-with their deploy cuts recorded, and re-measured on the same protocol; the last three were found
-in the fleet-10 runs, the last two by the loop's own read record while the confirmatory fleet-10
-cells were running, and the confirmatory fleet-10 read (\S\ref{sec:confirmatory}) is their
-re-measurement.
+shipped self-improvement loop --- twelve defects and two properties of the problem --- none of
+which a retrieval benchmark could have seen. All twelve were fixed in production, with their
+deploy cuts recorded; eleven between runs and re-measured on the same protocol, the twelfth
+(finding~14) found and fixed inside the exploratory run of amendment~(ab), whose last thirty
+episodes ran on its cut. The last four were found in the fleet-10 runs, two of them by the
+loop's own read record while the confirmatory fleet-10 cells were running, and the confirmatory
+fleet-10 read (\S\ref{sec:confirmatory}) is their re-measurement.
 We think this section is the paper's main contribution; the loop's evidence path is where such
 systems fail, and none of these failures is specific to ours.
 
@@ -1227,6 +1351,17 @@ marked discredited; on \code{main} nothing is pinned. What this finding leaves f
 decide is whether the evidence the canary arm then produces vindicates the correction or
 discredits it for a reason --- which is the question the canary exists to answer, and
 \S\ref{sec:confirmatory} reports it doing both.
+\item \textbf{The loop's failed drafts used up its right to test new ones.} (Found 2026-10-01 in
+the exploratory 400-episode cells of amendment~(ab); fixed in amfs-internal \#803, cut
+\code{post-branch-cap}, 03:17:37Z.) A repair branch is opened only while the agent has fewer
+than ten open; the count included \code{test\_failed}, and a failed fix's branch is never closed.
+A long-running agent with a normal Tier~1/Tier~2 failure rate therefore fills its cap with dead
+branches --- both support cells did, within two and a half hours --- after which every proposal
+is staged branchless, gets no Tier~2 replay, and can never enter the canary queue. The loop
+degraded to propose-only without saying so: 29 fixes waiting without a branch, a canary slot idle
+for the last 2.7 hours of a cell with 15 fixes ``queued''. The fix counts only the statuses the
+policy can still move. The confirmatory cells were short enough (200 episodes, 4--8 proposals
+per cell) never to hit the cap, which is why this surfaced only when the horizon doubled.
 \end{enumerate}
 
 \paragraph{The canary inside a cell (see also \S\ref{sec:posthoc}).} Separately from the defects, no canary reached a decision
@@ -1237,13 +1372,24 @@ is a property of the protocol, not a defect; the flagship long-horizon experimen
 fleet 10) is sized for it, and Table~\ref{tab:attribution}'s ``$-$ canary'' row is the reading of
 what ships when the gate is the replay alone.
 
-\begin{table}[H]
-\centering\scriptsize
+{\scriptsize
 \setlength{\tabcolsep}{4pt}
-\begin{tabular}{@{}p{2.1cm}p{1.9cm}p{5.0cm}p{6.4cm}@{}}
+\begin{longtable}{@{}p{2.1cm}p{1.9cm}p{5.0cm}p{6.4cm}@{}}
+\caption{The predictions ledger. Every preregistered prediction on the engine so far, with the
+amendment that made it, the run that tested it and its verdict. Pending rows are being tested on
+the run this version reports as open.}
+\label{tab:ledger}\\
 \toprule
 \textbf{P} & \textbf{Where} & \textbf{Prediction (dev seeds, set C unless stated; ``conf'' = confirmatory seeds)} & \textbf{Verdict} \\
 \midrule
+\endfirsthead
+\toprule
+\textbf{P} & \textbf{Where} & \textbf{Prediction (continued)} & \textbf{Verdict} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\endlastfoot
 P1 & (k) 5k & a shift-drafted fix is graded on runs that read the entry & falsified 3/3 \\
 P2 & (l) c1 & $-$ canary ships a regime fix in every cell; recurrence falls & not met (1/4) \\
 P3 & (l) c1 & SenseLab's canary reaches a decision in-cell & not met (K1--K4) \\
@@ -1261,19 +1407,13 @@ P12 & (v) c6 & $\geq 1$ in 2 canaries reach the graded floor on both arms; grade
 P13 & (v) c6 & $\geq 1$ in 3 canaries decide & falsified: 0 of 9 (7 from Tier~1 pass, 2 from inconclusive); 3 of 4 at the floor had 0 recurrence in both arms \\
 P14 & (v) c6 & no pass harms the kept class by $> 10$ pp (trace-joined) & undefined: no verdict \\
 P11(a$'$) & (v) c6 & $\geq 50\,\%$ of kept-case regime drafts state a condition; kept-case rejections $< 5$ of 23 & met, 21 of 37 (author-coded, (y)); CI 11/14 all on the true variable, support 9/23 none on it; rejections 4 of 17 and 11 of 39 --- the count fell, the share did not \\
-\midrule
+\noalign{\vskip 2pt}\hline\noalign{\vskip 2pt}
 (x) primary & conf f1 & SenseLab $-$ each baseline $> 0$ on the moved half; exact sign-flip over 16 cells, Holm across the five & met in sign and in cells won: $+19/{+}4/{+}13/{+}9/{+}13$ pp, 11/8/11/9/10 of 16; $p$ 0.024/0.544/0.040/0.119/0.040, Holm 0.12/0.54/0.16/0.24/0.16 --- none survives \\
 (x) secondary & conf f1 & kept half and unchanged classes, same test, Holm within endpoint & kept: $+38$ vs Frontier (Holm 0.007), $-24$ vs the context window (1 of 16 cells, Holm 0.001), level with the pgvector arms; unchanged: $+23/{+}9/{+}16$ vs Frontier/rerank/DIY (Holm 0.002/0.035/0.004), $+3$ and $+4$ vs the context window and pgvector (Holm 0.13, 0.06) \\
 P11(a$'$) & conf f1 & $\geq 50\,\%$ of kept-case regime drafts state a condition & met, 27 of 39 (author-coded, same sheet and key); \code{ci-fix} 20 of 28, 17 of them on the PR's files; \code{support} 7 of 11, none on the true variable \\
 P12--P14, P13$'$, P13$''$, P15$'$, P16 & (z$''$) e2b, finding 13 & as (v), (z), (z$'$), (z$''$) on the fleet-10 cells run on \code{post-canary-visible} & measured, not the confirmatory read (five of six corrections discredited by replays before the arm read them): P12 s59 2 of 2 and s73 1 of 2 at the floor; P13 1 of 6 --- a failing verdict on an arm that never read the fix; P14 undefined; P13$''$ falsified, 1/1/8.5/0.5; P15$'$ no population; P16 20 of 108 graded sessions (19.8\,\%), 74\,\% on the one fix that was read \\
 same & conf e2b-r2 & as above, on \code{post-replay-evidence} (amendment~(aa)); the confirmatory fleet-10 read & P12 met, 4 of 6 at the floor on both arms (graded/exposed 0.23--0.36 on five, 1.0 on one: second clause not met); P13$'$ not met, 1 of 6 decided (failed, zero-count bound, arm read the fix in 5 of 10 graded sessions --- below the read floor, so untreated by the class rule); P14/P15/P15$'$ no population (0 passes; treated kept-class comparisons all under 8 sessions); P13$''$ met, reads at close 2/5/8/12/14/18, median 10 vs floor 8; P16 met, 57 of 76 graded canary-arm sessions (75\,\%), control 0 of 54; 0 shipped, 0 reverted \\
-\bottomrule
-\end{tabular}
-\caption{The predictions ledger. Every preregistered prediction on the engine so far, with the
-amendment that made it, the run that tested it and its verdict. Pending rows are being tested on
-the run this version reports as open.}
-\label{tab:ledger}
-\end{table}
+\end{longtable}}
 
 \section{Pending, and what we expect}
 \label{sec:pending}
@@ -1322,7 +1462,10 @@ and found the other five discredited by the loop's own replays before their arms
 P12--P14 and P13$'$/P13$''$/P15$'$/P16 is the rerun on \code{post-replay-evidence}
 (amendment~(aa), \code{rsi-conf-e2b-r2}), reported in \S\ref{sec:confirmatory}: the arm reads
 its fix (P16 75\,\%, P13$''$ met), four of six canaries reach the floor on both arms (P12 met),
-one decides (P13$'$ not met), nothing ships (P14, P15 without population).
+one decides (P13$'$ not met), nothing ships (P14, P15 without population). The exploratory
+400-episode run of amendment~(ab) (\S\ref{sec:confirmatory}, ``the canary on the traffic its
+rule is sized for'') is the only place a canary passes and a fix ships through it in this paper;
+it is reported there as exploratory and bears on no prediction.
 
 \paragraph{The confirmatory scope, reduced before it ran.} Amendment (w), declared before any
 confirmatory-seed cell and before the analysis freeze, reduces the confirmatory grid to what the
@@ -1347,7 +1490,9 @@ test over cells with Holm across systems (amendment (x)); the mixed-effects lear
 named in the preregistration is not run, for the reasons given there. What is not run at all and
 is reported as not run: verdict sources (E3), the public track (E4), the A/A, adversarial,
 reward-hacking and manifest-calibration probes, and the Managed Model rungs above L0 (E7). Each
-is a claim this paper does not make.
+is a claim this paper does not make. The adversarial probe~(b) in particular has no injection
+path in the harness; the one wrong fix the gate failed (\S\ref{sec:confirmatory}) arose from
+the loop's own proposals and is not a substitute for the probe.
 
 \section{Related work}
 
@@ -1400,9 +1545,10 @@ cell is model-aware.
 solved within three attempts; that is what the customer reports, and it hid finding 9 from the
 proof set for two runs. The clean-success rule reads the attempts the agent already records; a
 customer whose agent never records attempts sees no change and gets no protection.
-\item \textbf{The engine changed between runs.} Eleven defects were fixed in production during the
-study (amfs-internal \#780--\#802, OSS \#454--\#455), one of them inside the fleet-1
-confirmatory window and two between the two fleet-10 confirmatory runs. Every result carries its cut; latency claims are within one cut
+\item \textbf{The engine changed between runs.} Twelve defects were fixed in production during the
+study (amfs-internal \#780--\#803, OSS \#454--\#455), one of them inside the fleet-1
+confirmatory window, two between the two fleet-10 confirmatory runs, and one (\#803) inside the
+last thirty episodes of the exploratory cells of amendment~(ab), after which no fix was proposed. Every result carries its cut; latency claims are within one cut
 only; and the changes are to the loop's evidence path, not to any threshold constant, which the
 preregistration forbids. The one gate rule that changed --- the canary's primary, from
 superiority to non-inferiority (finding 11) --- was preregistered with its falsifier before the
@@ -1439,7 +1585,9 @@ run rather than take our reading of it.
 \code{-rep}); confirmatory \code{rsi-conf-f1-s<seed>}, \code{rsi-conf-e2b-s<seed>} (the
 \code{post-canary-visible} run, finding~13) and \code{rsi-conf-e2b-r2-s<seed>} (the
 \code{post-replay-evidence} rerun; \code{CL\_CONF\_RUN\_TAG=r2}) from
-\code{confirm\_rsi.sh}. Cell id
+\code{confirm\_rsi.sh}; exploratory \code{rsi-x-canary-s11}, \code{rsi-x-canary-s23}
+(amendment~(ab): \code{--episodes 400 --change-focus 1.0}, \code{CL\_RSI\_CANARY\_TIMEOUT=400},
+\code{CL\_RSI\_CANARY\_WINDOW=400}, otherwise the e2b line). Cell id
 \code{<family>|<arm>|gpt-5.5|s<seed>|} \code{e100-d300-n0.0-f0-a1-c30-x0.5-oid-vC}. Command:
 \begin{quote}\scriptsize\ttfamily\raggedright python -m continual\_learning.runner --run <run> --scenarios support ci-fix --arms <arms> --models gpt-5.5 --seeds 11 23 --fleet 1 --episodes 100 --change-at 30 --change-focus 0.5 --change-variant C --opaque-ids --workers 2\end{quote}
 with \code{CL\_RSI\_TIER2=1} and a Tier~2 replay receiver reachable from the service.
@@ -1450,7 +1598,9 @@ with \code{CL\_RSI\_TIER2=1} and a Tier~2 replay receiver reachable from the ser
 \code{post-canary-ni}: \#799 (11:35:32Z, 2026-09-29). \code{post-canary-zero}: OSS \#454,
 amfs-internal \#800/\#801 (03:40:19Z, 2026-09-30). \code{post-canary-visible}: \#802
 (08:21:05Z, 2026-09-30). \code{post-replay-evidence}: OSS \#455 (12:52:04Z, 2026-09-30; the
-confirmatory fleet-10 cut). Each cut's Cloud Run revision is in \code{HYPOTHESIS\_RSI.md}.
+confirmatory fleet-10 cut). \code{post-branch-cap}: \#803 (03:17:37Z, 2026-10-01; inside the
+last episodes of the exploratory cells, no fix proposed after it). Each cut's Cloud Run revision
+is in \code{HYPOTHESIS\_RSI.md}.
 
 \paragraph{Analysis.} \code{python -m benchmarks.continual\_learning.analysis.rsi --paper} writes
 \code{results/rsi-report/REPORT.md} and \code{report.json} for the development seeds;
@@ -1467,8 +1617,8 @@ fills this document from the report and \code{analysis.rsi\_figures} draws the f
 (\S\ref{sec:cost}). The analysis code is tagged \code{analysis-freeze-rsi} before the
 confirmatory runs. The preregistration, amendments, readouts (\code{HEADROOM\_RSI.md}), change
 sets, run records and the coding sheets (drafts, instructions, author's coding, key) are
-published with the paper; the supplementary scripts, the confirmatory readouts and the coding
-sheets are in \code{paper/package/} on the paper branch.
+published with the paper; the supplementary scripts, the confirmatory and exploratory readouts
+and the coding sheets are in \code{paper/package/} on the paper branch.
 
 \begin{thebibliography}{99}\small
 \bibitem{senselab-cl} SenseLab Research. From memory to recursive self-improvement: agents that

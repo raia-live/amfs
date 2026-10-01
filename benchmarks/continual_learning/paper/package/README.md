@@ -21,7 +21,8 @@ post-freeze wiring correction is commit `e04f78cf`) or in the preregistration
 - `fleet10_curve.py` — the long-horizon learning curve of the fleet-10 cells: first-attempt
   success per 10-episode block, pooled over the cells of several runs, cell-level bootstrap,
   using the frozen reader's population rule (`analysis.rsi.population`) with `SEEDS` and
-  `CELL_EPISODES` set as the reader's CLI sets them for the confirmatory seeds.
+  `CELL_EPISODES` set as the reader's CLI sets them for the confirmatory seeds; `CL_SEEDS=11,23
+  CL_CELL_EPISODES=400` for the exploratory cells of amendment (ab). Defaults unchanged.
 
 Run from the repository root with `PYTHONPATH=. .venv/bin/python <script> <runs...>`.
 
@@ -34,8 +35,15 @@ Run from the repository root with `PYTHONPATH=. .venv/bin/python <script> <runs.
 - `canary/<run>/canary_readout.json` — `analysis.rsi_canary_readout --run <run>` for the fleet-10
   cells on `post-canary-visible` (`rsi-conf-e2b-s*`, finding 13, reported as measured) and on
   `post-replay-evidence` (`rsi-conf-e2b-r2-s*`, the confirmatory fleet-10 read).
-- `canary/classes_*.md` — the three-class read on each of the two fleet-10 runs.
-- `fleet10_curve_*.txt` — the long-horizon curve on each of the two fleet-10 runs.
+- `canary/classes_*.md` — the three-class read on each of the two fleet-10 runs, and
+  `classes_exploratory_ab.md` on the exploratory run (`CL_CUT=2026-09-30T12:52:04Z`).
+- `canary/rsi-x-canary-s{11,23}/` — the exploratory 400-episode run of amendment (ab)
+  (`--episodes 400 --change-focus 1.0`, development seeds): `canary_readout.json` and
+  `readout.md` from the frozen `rsi_canary_readout`, `canary_classes.json` from the harness.
+  Exploratory; enters no confirmatory table.
+- `fleet10_curve_*.txt` — the long-horizon curve on each of the two fleet-10 runs, and
+  `fleet10_curve_exploratory_ab.txt` on the exploratory run (focus 1.0; unchanged classes are
+  not measured after episode 50 there, so that block is empty).
 - `f1_cut_split.txt` — see above.
 
 ## coding/ — P11(a′)

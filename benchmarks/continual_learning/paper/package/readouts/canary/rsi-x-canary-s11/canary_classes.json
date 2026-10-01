@@ -1,0 +1,375 @@
+{
+ "run": "rsi-x-canary-s11",
+ "canaries": 4,
+ "cut": "2026-09-30T12:52:04Z",
+ "classes": {
+  "decided_treated": 2,
+  "unexercised": 0,
+  "decided_untreated": 0,
+  "other": 2
+ },
+ "p13prime": {
+  "decided": 2,
+  "share": 0.5,
+  "met": true,
+  "falsified": false,
+  "zero_count_bound": 1,
+  "control_recurring": 1
+ },
+ "p13doubleprime": {
+  "median_read": 14.5,
+  "reads": [
+   10,
+   11,
+   18,
+   58
+  ],
+  "floors": [
+   8
+  ],
+  "any_reached_floor": true
+ },
+ "p15prime": {
+  "passed": 2,
+  "harmful": [
+   "a3da998e-c748-4c5b-a1f1-641e900e0258"
+  ],
+  "underpowered": []
+ },
+ "p16": {
+  "canaries_with_graded_canary_sessions": 4,
+  "share_exact_of_graded_pooled": 0.6438356164383562,
+  "per_canary": {
+   "dc722d08": 0.6875,
+   "130b2a03": 0.9827586206896551,
+   "a09e0892": 0.42857142857142855,
+   "a3da998e": 0.3333333333333333
+  },
+  "exact_vs_engine_read": {
+   "dc722d08": [
+    11,
+    11
+   ],
+   "130b2a03": [
+    57,
+    58
+   ],
+   "a09e0892": [
+    9,
+    10
+   ],
+   "a3da998e": [
+    17,
+    18
+   ]
+  },
+  "met": true,
+  "falsified": false
+ },
+ "rows": [
+  {
+   "cell": "ci-fix|senselab-rsi|gpt-5.5|s11|e400-d300-n0.0-f0-a10-c50-x1.0-oid-vC-rep",
+   "fix_id": "dc722d08-2414-4e91-8421-ce707f667531",
+   "title": "Fix: ci-flaky-integration-timeout-cassette-changed-edit-after-rerun-fails stopped working",
+   "situation": "flaky integration timeout cassette",
+   "lever": "knowledge",
+   "keys": [
+    "ci-flaky-integration-timeout-cassette-changed-edit-after-rerun-fails"
+   ],
+   "fix_status": "canary",
+   "shipped_at": null,
+   "reverted_at": null,
+   "canary_status": "running",
+   "reason": "",
+   "note": "no significant difference yet: 6% of canary runs recurred against 0% in control (p=0.378); at most 24% more with the fix (one-sided 95% bound) against a margin of 10%; control did not recur, so the bound is the canary arm's own; the fix was read in 11 of 63 canary-arm runs",
+   "started_at": "2026-10-01T01:13:06.812745Z",
+   "decided_at": null,
+   "min_outcomes": 8,
+   "canary": {
+    "traces": 63,
+    "outcomes": 63,
+    "graded": 16,
+    "read": 11,
+    "recurred": 1,
+    "succeeded": 63
+   },
+   "control": {
+    "traces": 56,
+    "outcomes": 56,
+    "graded": 12,
+    "read": 0,
+    "recurred": 0,
+    "succeeded": 56
+   },
+   "class": "other",
+   "zero_count_bound": false,
+   "kept_cases": 2,
+   "moved_cases": 2,
+   "stamped": {
+    "canary": 66,
+    "control": 61
+   },
+   "p16": {
+    "canary_sessions": 66,
+    "engine_read": 11,
+    "engine_graded": 16,
+    "top5_name": 59,
+    "cited_name": 11,
+    "exact": 11,
+    "share_exact_of_graded": 0.6875,
+    "share_exact_of_sessions": 0.16666666666666666
+   },
+   "branch_platform_versions": 13,
+   "p15prime": {
+    "treated_sessions": 11,
+    "kept": {
+     "treated": [
+      7,
+      7
+     ],
+     "control": [
+      30,
+      30
+     ]
+    },
+    "fas": {
+     "treated": 1.0,
+     "control": 1.0
+    },
+    "control_minus_treated": 0.0,
+    "underpowered": false
+   },
+   "reuse_events": {
+    "ci-flaky-integration-timeout-cassette-changed-edit-after-rerun-fails": 95
+   }
+  },
+  {
+   "cell": "ci-fix|senselab-rsi|gpt-5.5|s11|e400-d300-n0.0-f0-a10-c50-x1.0-oid-vC-rep",
+   "fix_id": "130b2a03-59d0-454e-ac98-717a1dc2a676",
+   "title": "Fix: ci-pip-audit-legacy-pin-exception-audit-related-pr stopped working",
+   "situation": "pip audit pinned dependency",
+   "lever": "knowledge",
+   "keys": [
+    "ci-pip-audit-legacy-pin-exception-audit-related-pr"
+   ],
+   "fix_status": "memory_shipped",
+   "shipped_at": "2026-10-01 01:13:06.384116+00:00",
+   "reverted_at": null,
+   "canary_status": "passed",
+   "reason": "",
+   "note": "the fix is no worse than the rule it replaces: the behavior recurred in 3% of canary runs against 0% in control, at most 10% more (one-sided 95% bound) against a margin of 10%",
+   "started_at": "2026-09-30T22:29:04.320929Z",
+   "decided_at": "2026-10-01T01:13:06.285465Z",
+   "min_outcomes": 8,
+   "canary": {
+    "traces": 102,
+    "outcomes": 102,
+    "graded": 58,
+    "read": 58,
+    "recurred": 2,
+    "succeeded": 102
+   },
+   "control": {
+    "traces": 107,
+    "outcomes": 107,
+    "graded": 25,
+    "read": 0,
+    "recurred": 0,
+    "succeeded": 107
+   },
+   "class": "decided_treated",
+   "zero_count_bound": true,
+   "kept_cases": 1,
+   "moved_cases": 3,
+   "stamped": {
+    "canary": 106,
+    "control": 111
+   },
+   "p16": {
+    "canary_sessions": 106,
+    "engine_read": 58,
+    "engine_graded": 58,
+    "top5_name": 104,
+    "cited_name": 58,
+    "exact": 57,
+    "share_exact_of_graded": 0.9827586206896551,
+    "share_exact_of_sessions": 0.5377358490566038
+   },
+   "branch_platform_versions": 60,
+   "p15prime": {
+    "treated_sessions": 57,
+    "kept": {
+     "treated": [
+      32,
+      31
+     ],
+     "control": [
+      49,
+      41
+     ]
+    },
+    "fas": {
+     "treated": 0.96875,
+     "control": 0.8367346938775511
+    },
+    "control_minus_treated": -0.13201530612244894,
+    "underpowered": false
+   },
+   "reuse_events": {
+    "ci-pip-audit-legacy-pin-exception-audit-related-pr": 174
+   }
+  },
+  {
+   "cell": "support|senselab-rsi|gpt-5.5|s11|e400-d300-n0.0-f0-a10-c50-x1.0-oid-vC-rep",
+   "fix_id": "a09e0892-2596-4701-86e9-85020c256b2f",
+   "title": "Fix: ios-team-full-data-export-browser-network-filter-fix-after-web-fails stopped working",
+   "situation": "web team data export error",
+   "lever": "knowledge",
+   "keys": [
+    "ios-team-full-data-export-browser-network-filter-fix-after-web-fails"
+   ],
+   "fix_status": "canary",
+   "shipped_at": null,
+   "reverted_at": null,
+   "canary_status": "running",
+   "reason": "",
+   "note": "no significant difference yet: 19% of canary runs recurred against 0% in control (p=0.057); at most 36% more with the fix (one-sided 95% bound) against a margin of 10%; control did not recur, so the bound is the canary arm's own; the fix was read in 10 of 116 canary-arm runs",
+   "started_at": "2026-10-01T00:04:23.297165Z",
+   "decided_at": null,
+   "min_outcomes": 8,
+   "canary": {
+    "traces": 116,
+    "outcomes": 116,
+    "graded": 21,
+    "read": 10,
+    "recurred": 4,
+    "succeeded": 108
+   },
+   "control": {
+    "traces": 124,
+    "outcomes": 124,
+    "graded": 17,
+    "read": 0,
+    "recurred": 0,
+    "succeeded": 112
+   },
+   "class": "other",
+   "zero_count_bound": false,
+   "kept_cases": 1,
+   "moved_cases": 4,
+   "stamped": {
+    "canary": 120,
+    "control": 132
+   },
+   "p16": {
+    "canary_sessions": 120,
+    "engine_read": 10,
+    "engine_graded": 21,
+    "top5_name": 69,
+    "cited_name": 0,
+    "exact": 9,
+    "share_exact_of_graded": 0.42857142857142855,
+    "share_exact_of_sessions": 0.075
+   },
+   "branch_platform_versions": 15,
+   "p15prime": {
+    "treated_sessions": 9,
+    "kept": {
+     "treated": [
+      7,
+      4
+     ],
+     "control": [
+      62,
+      29
+     ]
+    },
+    "fas": {
+     "treated": 0.5714285714285714,
+     "control": 0.46774193548387094
+    },
+    "control_minus_treated": -0.10368663594470046,
+    "underpowered": false
+   },
+   "reuse_events": {
+    "ios-team-full-data-export-browser-network-filter-fix-after-web-fails": 89
+   }
+  },
+  {
+   "cell": "support|senselab-rsi|gpt-5.5|s11|e400-d300-n0.0-f0-a10-c50-x1.0-oid-vC-rep",
+   "fix_id": "a3da998e-c748-4c5b-a1f1-641e900e0258",
+   "title": "Fix: Unresolved handoff loops",
+   "situation": "ios team payment declined",
+   "lever": "procedure",
+   "keys": [
+    "procedure-unresolved-handoff-loops"
+   ],
+   "fix_status": "memory_shipped",
+   "shipped_at": "2026-10-01 00:04:22.697659+00:00",
+   "reverted_at": null,
+   "canary_status": "passed",
+   "reason": "",
+   "note": "the fix is no worse than the rule it replaces: the behavior recurred in 14% of canary runs against 17% in control, at most 9% more (one-sided 95% bound) against a margin of 10%",
+   "started_at": "2026-09-30T22:14:08.024265Z",
+   "decided_at": "2026-10-01T00:04:22.585821Z",
+   "min_outcomes": 8,
+   "canary": {
+    "traces": 51,
+    "outcomes": 51,
+    "graded": 51,
+    "read": 18,
+    "recurred": 7,
+    "succeeded": 43
+   },
+   "control": {
+    "traces": 53,
+    "outcomes": 53,
+    "graded": 53,
+    "read": 0,
+    "recurred": 9,
+    "succeeded": 44
+   },
+   "class": "decided_treated",
+   "zero_count_bound": false,
+   "kept_cases": 0,
+   "moved_cases": 1,
+   "stamped": {
+    "canary": 69,
+    "control": 76
+   },
+   "p16": {
+    "canary_sessions": 69,
+    "engine_read": 18,
+    "engine_graded": 51,
+    "top5_name": 55,
+    "cited_name": 6,
+    "exact": 17,
+    "share_exact_of_graded": 0.3333333333333333,
+    "share_exact_of_sessions": 0.2463768115942029
+   },
+   "branch_platform_versions": 34,
+   "p15prime": {
+    "treated_sessions": 17,
+    "kept": {
+     "treated": [
+      9,
+      1
+     ],
+     "control": [
+      41,
+      22
+     ]
+    },
+    "fas": {
+     "treated": 0.1111111111111111,
+     "control": 0.5365853658536586
+    },
+    "control_minus_treated": 0.42547425474254746,
+    "underpowered": false
+   },
+   "reuse_events": {
+    "procedure-unresolved-handoff-loops": 99
+   }
+  }
+ ]
+}

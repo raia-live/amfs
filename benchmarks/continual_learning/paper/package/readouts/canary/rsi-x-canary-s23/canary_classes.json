@@ -1,0 +1,373 @@
+{
+ "run": "rsi-x-canary-s23",
+ "canaries": 4,
+ "cut": "2026-09-30T12:52:04Z",
+ "classes": {
+  "decided_treated": 2,
+  "unexercised": 0,
+  "decided_untreated": 1,
+  "other": 1
+ },
+ "p13prime": {
+  "decided": 3,
+  "share": 0.75,
+  "met": true,
+  "falsified": false,
+  "zero_count_bound": 2,
+  "control_recurring": 1
+ },
+ "p13doubleprime": {
+  "median_read": 8.0,
+  "reads": [
+   6,
+   7,
+   9,
+   25
+  ],
+  "floors": [
+   8
+  ],
+  "any_reached_floor": true
+ },
+ "p15prime": {
+  "passed": 2,
+  "harmful": [],
+  "underpowered": []
+ },
+ "p16": {
+  "canaries_with_graded_canary_sessions": 4,
+  "share_exact_of_graded_pooled": 0.6142857142857143,
+  "per_canary": {
+   "e3a81d36": 0.8571428571428571,
+   "0a2f5553": 1.0,
+   "dd421419": 0.26666666666666666,
+   "7fd04380": 0.5
+  },
+  "exact_vs_engine_read": {
+   "e3a81d36": [
+    6,
+    6
+   ],
+   "0a2f5553": [
+    25,
+    25
+   ],
+   "dd421419": [
+    8,
+    9
+   ],
+   "7fd04380": [
+    4,
+    7
+   ]
+  },
+  "met": true,
+  "falsified": false
+ },
+ "rows": [
+  {
+   "cell": "ci-fix|senselab-rsi|gpt-5.5|s23|e400-d300-n0.0-f0-a10-c50-x1.0-oid-vC-rep",
+   "fix_id": "e3a81d36-861b-413e-b41e-13837df6cdea",
+   "title": "Fix: pip-audit-requests-legacy-sdk-client-pinned-related-add-exception stopped working",
+   "situation": "pip audit requests reports export pinned related",
+   "lever": "knowledge",
+   "keys": [
+    "risk-legacy-sdk-audit-exception-precedence"
+   ],
+   "fix_status": "canary",
+   "shipped_at": null,
+   "reverted_at": null,
+   "canary_status": "running",
+   "reason": "",
+   "note": "waiting for 4 more graded runs (7/8 canary, 4/8 control)",
+   "started_at": "2026-10-01T02:13:21.725755Z",
+   "decided_at": null,
+   "min_outcomes": 8,
+   "canary": {
+    "traces": 14,
+    "outcomes": 14,
+    "graded": 7,
+    "read": 6,
+    "recurred": 0,
+    "succeeded": 14
+   },
+   "control": {
+    "traces": 16,
+    "outcomes": 16,
+    "graded": 4,
+    "read": 0,
+    "recurred": 0,
+    "succeeded": 16
+   },
+   "class": "other",
+   "zero_count_bound": false,
+   "kept_cases": 2,
+   "moved_cases": 2,
+   "stamped": {
+    "canary": 17,
+    "control": 17
+   },
+   "p16": {
+    "canary_sessions": 17,
+    "engine_read": 6,
+    "engine_graded": 7,
+    "top5_name": 7,
+    "cited_name": 6,
+    "exact": 6,
+    "share_exact_of_graded": 0.8571428571428571,
+    "share_exact_of_sessions": 0.35294117647058826
+   },
+   "branch_platform_versions": 7,
+   "p15prime": {
+    "treated_sessions": 6,
+    "kept": {
+     "treated": [
+      4,
+      4
+     ],
+     "control": [
+      10,
+      10
+     ]
+    },
+    "fas": {
+     "treated": 1.0,
+     "control": 1.0
+    },
+    "control_minus_treated": 0.0,
+    "underpowered": true
+   },
+   "reuse_events": {
+    "risk-legacy-sdk-audit-exception-precedence": 23
+   }
+  },
+  {
+   "cell": "ci-fix|senselab-rsi|gpt-5.5|s23|e400-d300-n0.0-f0-a10-c50-x1.0-oid-vC-rep",
+   "fix_id": "0a2f5553-783c-42af-8d25-0466726f757b",
+   "title": "Fix: pip-audit-requests-legacy-sdk-pinned-related-exception-pr7075 stopped working",
+   "situation": "pip audit pinned related exception",
+   "lever": "knowledge",
+   "keys": [
+    "pip-audit-requests-legacy-sdk-pinned-related-exception-pr7075"
+   ],
+   "fix_status": "memory_shipped",
+   "shipped_at": "2026-10-01 02:13:21.217343+00:00",
+   "reverted_at": null,
+   "canary_status": "passed",
+   "reason": "",
+   "note": "the fix is no worse than the rule it replaces: the behavior recurred in 0% of canary runs against 0% in control, at most 10% more (one-sided 95% bound) against a margin of 10%",
+   "started_at": "2026-10-01T01:16:05.493812Z",
+   "decided_at": "2026-10-01T02:13:21.094320Z",
+   "min_outcomes": 8,
+   "canary": {
+    "traces": 38,
+    "outcomes": 38,
+    "graded": 25,
+    "read": 25,
+    "recurred": 0,
+    "succeeded": 38
+   },
+   "control": {
+    "traces": 42,
+    "outcomes": 42,
+    "graded": 18,
+    "read": 0,
+    "recurred": 0,
+    "succeeded": 42
+   },
+   "class": "decided_treated",
+   "zero_count_bound": true,
+   "kept_cases": 2,
+   "moved_cases": 2,
+   "stamped": {
+    "canary": 41,
+    "control": 43
+   },
+   "p16": {
+    "canary_sessions": 41,
+    "engine_read": 25,
+    "engine_graded": 25,
+    "top5_name": 33,
+    "cited_name": 26,
+    "exact": 25,
+    "share_exact_of_graded": 1.0,
+    "share_exact_of_sessions": 0.6097560975609756
+   },
+   "branch_platform_versions": 27,
+   "p15prime": {
+    "treated_sessions": 25,
+    "kept": {
+     "treated": [
+      12,
+      11
+     ],
+     "control": [
+      26,
+      23
+     ]
+    },
+    "fas": {
+     "treated": 0.9166666666666666,
+     "control": 0.8846153846153846
+    },
+    "control_minus_treated": -0.03205128205128205,
+    "underpowered": false
+   },
+   "reuse_events": {
+    "pip-audit-requests-legacy-sdk-pinned-related-exception-pr7075": 69
+   }
+  },
+  {
+   "cell": "ci-fix|senselab-rsi|gpt-5.5|s23|e400-d300-n0.0-f0-a10-c50-x1.0-oid-vC-rep",
+   "fix_id": "dd421419-d21e-435d-9cf6-174228044d0b",
+   "title": "Fix: pip-audit-pinned-related-pr-add-exception stopped working",
+   "situation": "pip audit requests export compatibility",
+   "lever": "knowledge",
+   "keys": [
+    "pip-audit-pinned-related-pr-add-exception"
+   ],
+   "fix_status": "memory_shipped",
+   "shipped_at": "2026-10-01 01:16:04.931224+00:00",
+   "reverted_at": null,
+   "canary_status": "passed",
+   "reason": "",
+   "note": "the fix is no worse than the rule it replaces: the behavior recurred in 0% of canary runs against 0% in control, at most 8% more (one-sided 95% bound) against a margin of 10%",
+   "started_at": "2026-09-30T23:42:20.362782Z",
+   "decided_at": "2026-10-01T01:16:04.809609Z",
+   "min_outcomes": 8,
+   "canary": {
+    "traces": 69,
+    "outcomes": 69,
+    "graded": 30,
+    "read": 9,
+    "recurred": 0,
+    "succeeded": 69
+   },
+   "control": {
+    "traces": 65,
+    "outcomes": 65,
+    "graded": 39,
+    "read": 0,
+    "recurred": 0,
+    "succeeded": 65
+   },
+   "class": "decided_treated",
+   "zero_count_bound": true,
+   "kept_cases": 1,
+   "moved_cases": 3,
+   "stamped": {
+    "canary": 70,
+    "control": 68
+   },
+   "p16": {
+    "canary_sessions": 69,
+    "engine_read": 9,
+    "engine_graded": 30,
+    "top5_name": 69,
+    "cited_name": 9,
+    "exact": 8,
+    "share_exact_of_graded": 0.26666666666666666,
+    "share_exact_of_sessions": 0.11594202898550725
+   },
+   "branch_platform_versions": 10,
+   "p15prime": {
+    "treated_sessions": 8,
+    "kept": {
+     "treated": [
+      1,
+      1
+     ],
+     "control": [
+      39,
+      38
+     ]
+    },
+    "fas": {
+     "treated": 1.0,
+     "control": 0.9743589743589743
+    },
+    "control_minus_treated": -0.02564102564102566,
+    "underpowered": false
+   },
+   "reuse_events": {
+    "pip-audit-pinned-related-pr-add-exception": 138
+   }
+  },
+  {
+   "cell": "support|senselab-rsi|gpt-5.5|s23|e400-d300-n0.0-f0-a10-c50-x1.0-oid-vC-rep",
+   "fix_id": "7fd04380-3980-4c7f-b1ed-40b503dfcfb7",
+   "title": "Fix: csv-export-timeout-split-date-ranges stopped working",
+   "situation": "large data export timeout",
+   "lever": "knowledge",
+   "keys": [
+    "csv-export-timeout-split-date-ranges"
+   ],
+   "fix_status": "test_inconclusive",
+   "shipped_at": null,
+   "reverted_at": null,
+   "canary_status": "failed",
+   "reason": "",
+   "note": "the behavior recurred more with the fix: 88% of canary runs against 10% in control (p=0.000)",
+   "started_at": "2026-09-30T23:20:13.708840Z",
+   "decided_at": "2026-10-01T01:09:42.984704Z",
+   "min_outcomes": 8,
+   "canary": {
+    "traces": 12,
+    "outcomes": 12,
+    "graded": 8,
+    "read": 7,
+    "recurred": 7,
+    "succeeded": 10
+   },
+   "control": {
+    "traces": 101,
+    "outcomes": 101,
+    "graded": 20,
+    "read": 0,
+    "recurred": 2,
+    "succeeded": 80
+   },
+   "class": "decided_untreated",
+   "zero_count_bound": false,
+   "kept_cases": 2,
+   "moved_cases": 2,
+   "stamped": {
+    "canary": 12,
+    "control": 115
+   },
+   "p16": {
+    "canary_sessions": 12,
+    "engine_read": 7,
+    "engine_graded": 8,
+    "top5_name": 12,
+    "cited_name": 0,
+    "exact": 4,
+    "share_exact_of_graded": 0.5,
+    "share_exact_of_sessions": 0.3333333333333333
+   },
+   "branch_platform_versions": 13,
+   "p15prime": {
+    "treated_sessions": 4,
+    "kept": {
+     "treated": [
+      2,
+      0
+     ],
+     "control": [
+      54,
+      36
+     ]
+    },
+    "fas": {
+     "treated": 0.0,
+     "control": 0.6666666666666666
+    },
+    "control_minus_treated": 0.6666666666666666,
+    "underpowered": true
+   },
+   "reuse_events": {
+    "csv-export-timeout-split-date-ranges": 33
+   }
+  }
+ ]
+}
