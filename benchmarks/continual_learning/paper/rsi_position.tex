@@ -30,39 +30,26 @@
 
 \begin{abstract}
 \noindent
-An agent deployed into an operation that runs for months acts on knowledge that goes stale.
-Policies change, dependencies get re-pinned, a workflow is rewritten, and nobody tells the
-agent. The common answers are to trust the model, to put the agent's own history in its prompt,
-or to retrieve past notes from a vector store. Each of these can tell the agent what it did
-before. None of them can tell it that what it did before has stopped working, write down the
-corrected rule, prove the correction on the cases it failed, release it to a small share of
-traffic, and take it back if it does harm. That loop is what we mean by recursive
-self-improvement: a system whose own outcomes change the knowledge it acts on, under an
-evidence gate, with the loop itself subject to the same evidence. This paper explains the
-problem, states what such an engine has to do, and reports what SenseLab's engine measured on a
-preregistered continual benchmark in which the correct action for a task class changes part way
-through, for half of that class only. On four held-out seeds, two agent models and two task
-families (1,600 episodes per system), the engine takes the new action first in 45\,\% of the
-episodes whose rule moved, against 25\,\% for the frontier model alone, 32--36\,\% for three
-pgvector variants and 40\,\% for a 24k-token context window; it wins 8 to 11 of the 16 paired
-cells against each baseline, no pairing survives Holm correction, and the gain is concentrated
-in the \code{support} family. It holds unchanged work at
-100\,\% (one miss in 557, against 77\,\% for the model alone), escalates 5\,\% of episodes
-against 8--15\,\% for the others, has the highest episode success of any system, and costs a
-third of the context window. With ten agents sharing one engine over 200 episodes, the moved
-half rises from 37\,\% to 75\,\%. On development seeds, an agent joining a team on the engine
-took the correct action on every one of 122 first exposures (the strongest retrieval baseline:
-68--75\,\%), and a small model SenseLab fine-tuned on the agents' own traces and served with the
-record matched a frontier model with the same record at 1/23 of the cost, at the first rung of
-its evaluation ladder. The gate held every
-correction it could not grade, shipped four it could, and stopped one wrong correction at
-88\,\% recurrence against 10\,\% before it reached the shared record. We also report what did
-not separate: inside a 100-episode cell the engine's replay and canary gates add nothing
-measurable to its first level, outcome attribution, and the context window keeps an unchanged
-rule better than the engine does (92\,\% against 69\,\%). The four levels are one loop, and
-the first is the turn the others feed on, so the result is the engine's; where we know which
-level carried a number, we say so. The case for recursive self-improvement rests on what memory
-cannot do, and the evidence here is the first measurement of an engine doing it.
+An agent that runs for months acts on knowledge that goes stale, and nobody tells it. A model,
+a prompt full of its own history, or a vector store can tell the agent what it did before. None
+can tell it that this has stopped working, write the corrected rule, prove it on the failing
+cases, release it to a share of traffic and take it back if it does harm. That loop is what we
+mean by recursive self-improvement. SenseLab's engine implements it in four levels, and this
+paper reports what it measured on a preregistered benchmark in which the correct action for a
+task class changes part way through, for half of the class only. On four held-out seeds, two
+agent models and two task families (1,600 episodes per system), the engine takes the new
+action first in 45\,\% of the episodes whose rule moved, against 25\,\% for the model alone,
+32--36\,\% for three pgvector variants and 40\,\% for a 24k-token context window; it wins 8 to
+11 of 16 paired cells against each, no pairing survives Holm correction, and the gain is
+concentrated in \code{support}. It holds unchanged work at 100\,\% against 77\,\% for the model
+alone, at a third of the cost of the context window, which keeps an unchanged rule better than
+the engine does (92\,\% against 69\,\%). On development seeds, a joining agent was right on 122
+of 122 first exposures (strongest retrieval baseline 68--75\,\%), and in an exploratory run the
+gate shipped four corrections and stopped a wrong one at 88\,\% recurrence against 10\,\%.
+Inside a 100-episode cell the gates add nothing measurable to the engine's first level, outcome
+attribution; that level is more than a win/loss count, since the engine beats a DIY outcome
+counter by 13 points on the moved half and 16 on the unchanged classes. The four levels are one
+loop; where we know which level carried a number, we say so.
 \end{abstract}
 
 \section{The problem}
@@ -246,8 +233,13 @@ Table~\ref{tab:headline} is the fleet-1 confirmatory read: sixteen cells per sys
 01:42--08:19Z on 2026-09-30. One engine cut fell inside that window (\code{post-canary-zero},
 03:40Z), with 4,867 of the 12,791 episodes before it; the moved-half difference between
 SenseLab and every other system has the same sign on the pre-cut episodes alone
-($+28/{+}11/{+}6/{+}18/{+}23$ points) as on the full read ($+19/{+}4/{+}13/{+}9/{+}13$), so the
-cut did not make the result. The ten-agent cells of Figure~\ref{fig:curve} and the
+($+28/{+}11/{+}6/{+}18/{+}23$ points) as on the full read ($+19/{+}4/{+}13/{+}9/{+}13$). The two
+sets of deltas differ in composition, not in engine: the runs executed the \code{support} cells
+on GPT-5.5 first, so the pre-cut episodes are exactly those cells (no SenseLab cell straddles
+the cut), and every \code{ci-fix} cell and every Claude Opus~5 cell ran after it. The pre-cut
+deltas are the \code{support}/GPT-5.5 slice, where the model alone is at 0\,\% and the context
+window at 17\,\%; the full read adds \code{ci-fix}, where the context window leads. The cut did
+not make the result. The ten-agent cells of Figure~\ref{fig:curve} and the
 exploratory run both ran on the later \code{post-replay-evidence} cut, after the last defect
 was fixed. The cut of every run is listed in the companion paper's reproducibility
 section~\cite{rsi-paper}.
@@ -456,12 +448,25 @@ the outcome record, does most of the measurable work at this horizon. The repair
 contribution is visible in its lifecycle counts and in the exploratory canary, and in the shape
 of the ten-agent curve; it is not visible in the single-agent aggregate. We say so because the
 case for the loop has to rest on what it prevents as much as on what it adds, and the former is
-only measurable where it has traffic. None of this makes the result something other than an
-RSI result. Level~0 is the loop's first level, the one in which outcomes change what the agent
-acts on, and the levels above it exist for the case level~0 cannot see: a rule that is still
-right half the time, which demotion cannot separate from a rule that works. The gain in
-Table~\ref{tab:headline} is the engine's. Which level carried each number is stated wherever
-we can tell.
+only measurable where it has traffic.
+
+Level~0 is not a win/loss counter. The DIY outcome arm is the naive version of it: notes,
+periodic consolidation, and a per-entry success count shown to the agent. The engine beats
+that arm by 13 points on the moved half (10 of 16 cells, $p = 0.040$ before correction), by 16
+on the unchanged classes (Holm $0.004$) and by 8 on the kept half, and escalates less than half
+as often (5.0\,\% against 11.8\,\%); the ablation with the repair loop switched off, which is
+level~0 by itself, is at 43 / 68 / 99\,\% against the DIY arm's 32 / 58 / 84. The difference is
+what happens between an outcome and the next retrieval. The engine attributes each outcome to the exact entries the
+session read and the attempts it recorded, so a failure charges the rule that was followed and
+not every note that happened to be retrieved. It keeps an evidence status per entry, with a
+threshold for discrediting and a regime-shift rule (validated at least three times, now
+failing) that distinguishes a rule the world moved from a rule that never worked. It scopes all
+of that to a situation, so a rule broken for one tier is not demoted for another. And it returns
+a recommendation with the hits, act, explore or escalate, with exploration assigned per agent
+so a fleet does not repeat one agent's mistake. That machinery is the loop's first level, and
+the levels above it exist for the case it cannot see: a rule still right half of the time, which
+demotion cannot separate from a rule that works. Which level carried each number is stated
+wherever we can tell.
 
 \subsection{When the team grows}
 \label{sec:team}
