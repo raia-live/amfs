@@ -2714,3 +2714,75 @@ before the cut; the two support cells ran their last ~30–40 episodes on it. Th
 lifecycle counts at the cut: fixes proposed and canaries started after 03:17:37Z are reported
 separately and excluded from the pre-cut lifecycle numbers, as the `post-canary-zero` cut was in
 the fleet-1 window.
+
+**Read record (ab) — 2026-10-01, read 06:05–06:40Z after both runs closed (s23 03:30Z, s11
+03:50Z).** Exploratory; nothing here enters a confirmatory table, the ledger or the abstract's
+confirmatory numbers. 1,600 episodes, 4 errors (API read timeouts / one 500 on reflection).
+
+*Lifecycle (harness `rsi.fix_rows`/`rsi.lifecycle`, SEEDS 11,23, CELL_EPISODES 400, pooled 4
+cells):* proposed 68 (regime 65, judge 3; repair_agent 65, template 3); Tier 1 passed 20 /
+inconclusive 42 / failed 2 / skipped 2 / none 2; Tier 2 passed 8 / failed 22 / expired 3 / none
+35; canaries started 8; decided 5 (passed 4, failed 1), running at close 3; shipped 4; reverted 0.
+Cut split: every one of the 68 was proposed before `post-branch-cap` (03:17:37Z); 33 had a
+branch, 8 canaried, 4 shipped; **0 fixes proposed after the cut** (the cut has no footprint).
+
+*Canaries (engine canary-arm graded/read/recurred vs control graded/recurred; `exact` = the
+supplementary script's version-exact read join):*
+- `130b2a03` ci-fix s11, pip-audit pinned: 58/58/2 vs 25/0 (exact 57) — **passed, shipped 01:13Z**.
+- `dc722d08` ci-fix s11, flaky-integration cassette: 16/11/1 vs 12/0 (exact 11) — running.
+- `dd421419` ci-fix s23, pip-audit pinned: 30/9/0 vs 39/0 (exact 8; held unexercised at 4 reads an
+  hour earlier) — **passed, shipped 01:16Z**.
+- `0a2f5553` ci-fix s23, pip-audit pinned: 25/25/0 vs 18/0 (exact 25) — **passed, shipped 02:13Z**.
+- `e3a81d36` ci-fix s23, pip-audit pinned: 7/6/0 vs 4/0 (exact 6) — running.
+- `a3da998e` support s11, procedure `procedure-unresolved-handoff-loops` (lever procedure, graded
+  by verdicts of judge `cl-task-failure`): 51/18/7 (14 %) vs 53/9 (17 %), bound +9 % — **passed,
+  shipped 00:04Z** (merged_entries 1, expected_prevention 0.7).
+- `a09e0892` support s11, web-team data-export error: 21/10/4 vs 17/0 (exact 9) — running.
+- `7fd04380` support s23, correction `csv-export-timeout-split-date-ranges` (the wrong action for
+  a paid export-timeout under set C): 8/7/7 (88 %) vs 20/2 (10 %), p < 0.001 — **failed
+  01:09:42Z**; `lesson-fix-csv-export-timeout-split-date-ranges` written on `main` at 01:09:43Z
+  (0.70); class `decided_untreated` under the (z″) rule (7 reads < floor 8; exact 4 of 8). A
+  same-key duplicate (`51b0e5aa`, 00:27Z) was proposed branchless.
+
+*(z″) classes (`canary_classes.py`, CL_CUT 2026-09-30T12:52:04Z):* s11 decided_treated 2 /
+other 2; s23 decided_treated 2 / decided_untreated 1 / other 1. P16 pooled 0.644 (s11), 0.614
+(s23). P13″ reads at decision/close [10, 11, 18, 58] median 14.5 (s11), [6, 7, 9, 25] median 8
+(s23). Frozen readout: s11 P12 4/4, P13 2/4 decided, P14 population 1 / pass 1; s23 P12 3/4,
+P13 3/4, P14 population 3 / passes 2. **P15′ flags `a3da998e`**: treated kept-class first-attempt
+success 1/9 (0.11) vs control 22/41 (0.54); the ci passes 0.97 (32) vs 0.84 (49), 0.92 (12) vs
+0.88 (26), 1.00 (1). None of P12–P16 is a confirmatory prediction on this run.
+
+*What the passes certify.* The three ci passes are on a class already at ceiling (kept
+pip-audit 0.89–0.91 before the ships, 0.89–0.96 after): a no-harm certificate on a treated arm,
+not an improvement. The support pass is confounded with fleet recovery: s11 moved card-declined
+0.41 → 0.60 across the 00:04Z ship, but s23, with no ship, rose 0.23 → 0.50 on the same clock
+split; s11 kept half 0.49 → 0.46. After the ship the procedure sits on `main` at confidence 0.25
+(the only `main` version, written 22:11:18Z, same value hash as branch v34), was read in 2 of 254
+later sessions of that agent, and its branch evidence closed at 8 successes / 25 failures,
+102 reads. The P15′ flag (n = 9) is reported, its mechanism not established. Open engine
+questions, proposal only, not for this paper: a shipped procedure inheriting branch confidence; a
+judge-graded canary carrying the situation's kept-class check; a discredit threshold on
+corrections under canary test; read-gating failing verdicts.
+
+*Long horizon (focus 1.0; descriptive; not comparable to the confirmatory curve):* moved half by
+50-episode block from 50: 42/104 = 0.40, 74/101 = 0.73, 70/96 = 0.73, 76/109 = 0.70, 99/121 =
+0.82, 84/108 = 0.78, 87/103 = 0.84; kept half 64/93 = 0.69, 65/98 = 0.66, 81/104 = 0.78,
+71/90 = 0.79, 60/79 = 0.76, 63/92 = 0.68, 77/97 = 0.79.
+
+*Finding 14 (found in this run, 02:45Z).* `RepairLoop.stage()` opens a repair branch only while
+`open_branch_count(agent) < MAX_OPEN_BRANCHES` (10); the count included `test_failed`, and a
+failed fix's branch is never closed, so after ten failures every later proposal was staged
+branchless ("writes to main on Ship"), got no Tier 2 and could never enter the canary queue.
+Support s23 (`support-agent-865803543`) branchless from 23:48Z, s11 (`support-agent-752288323`)
+from 00:22Z; the ci cells held at most six branches and were untouched. 29 fixes waited
+branchless (s11 14, s23 15). Fix: amfs-internal #803 (`BRANCH_CAP_STATUSES`: the cap counts the
+statuses the policy can still move and not a fix whose canary has decided), merged 03:08:00Z,
+production 03:17:37Z (`post-branch-cap`, above). Integration test on a fresh DB 25/25, unit
+848/848.
+
+*Reporting.* Written into the paper as the labelled exploratory paragraph of §Confirmatory
+(`par:exploratory-canary`, table of the eight canaries), finding 14 in the findings list,
+Pending (probe (b) still not run; this is the only place a canary passes and a fix ships through
+it), Reproducibility (runs, cut) and the package (`readouts/canary/rsi-x-canary-s{11,23}/`,
+`classes_exploratory_ab.md`, `fleet10_curve_exploratory_ab.txt`). Diagnostic agent
+`diag-branch-treatment` excluded from every read.
