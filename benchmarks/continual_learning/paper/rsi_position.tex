@@ -41,9 +41,10 @@ agent models and two task families (1,600 episodes per system), the engine takes
 action first in 45\,\% of the episodes whose rule moved, against 25\,\% for the model alone,
 32--36\,\% for three pgvector variants and 40\,\% for a 24k-token context window; it wins 8 to
 11 of 16 paired cells against each, no pairing survives Holm correction, and the gain is
-concentrated in \code{support}. It holds unchanged work at 100\,\% against 77\,\% for the model
-alone, at a third of the cost of the context window, which keeps an unchanged rule better than
-the engine does (92\,\% against 69\,\%). On development seeds, a joining agent was right on 122
+concentrated in \code{support}. It holds the classes that did not change at 100\,\% against
+77\,\% for the model alone, at a third of the cost of the context window; on the kept half,
+the rule that did not move within a changed class, the context window is ahead of the engine
+(92\,\% against 69\,\%). On development seeds, a joining agent was right on 122
 of 122 first exposures (strongest retrieval baseline 68--75\,\%), and in an exploratory run the
 gate shipped four corrections and stopped a wrong one at 88\,\% recurrence against 10\,\%.
 Inside a 100-episode cell the gates add nothing measurable to the engine's first level, outcome
@@ -231,15 +232,15 @@ The analysis was frozen; the engine was not. Defects in the loop's evidence path
 found were fixed in production between runs, and every run carries the engine cut it ran on.
 Table~\ref{tab:headline} is the fleet-1 confirmatory read: sixteen cells per system, run
 01:42--08:19Z on 2026-09-30. One engine cut fell inside that window (\code{post-canary-zero},
-03:40Z), with 4,867 of the 12,791 episodes before it; the moved-half difference between
-SenseLab and every other system has the same sign on the pre-cut episodes alone
-($+28/{+}11/{+}6/{+}18/{+}23$ points) as on the full read ($+19/{+}4/{+}13/{+}9/{+}13$). The two
-sets of deltas differ in composition, not in engine: the runs executed the \code{support} cells
-on GPT-5.5 first, so the pre-cut episodes are exactly those cells (no SenseLab cell straddles
-the cut), and every \code{ci-fix} cell and every Claude Opus~5 cell ran after it. The pre-cut
-deltas are the \code{support}/GPT-5.5 slice, where the model alone is at 0\,\% and the context
-window at 17\,\%; the full read adds \code{ci-fix}, where the context window leads. The cut did
-not make the result. The ten-agent cells of Figure~\ref{fig:curve} and the
+03:40Z), with 4,867 of the 12,791 episodes before it. No SenseLab cell straddles the cut: the
+\code{support} cells on GPT-5.5 ran on the earlier cut, and every \code{ci-fix} cell and every
+Claude Opus~5 cell ran on the later one. Because no cell ran on both, the two engine versions
+cannot be compared on the same cells; what can be said is which cells ran on which. On the
+earlier-cut cells alone the moved-half difference between SenseLab and every other system is
+$+28/{+}11/{+}6/{+}18/{+}23$ points, against $+19/{+}4/{+}13/{+}9/{+}13$ on the full read; the
+two differ in composition, since the earlier-cut cells are the \code{support}/GPT-5.5 slice,
+where the model alone is at 0\,\% and the context window at 17\,\%, and the full read adds
+\code{ci-fix}, where the context window leads. The ten-agent cells of Figure~\ref{fig:curve} and the
 exploratory run both ran on the later \code{post-replay-evidence} cut, after the last defect
 was fixed. The cut of every run is listed in the companion paper's reproducibility
 section~\cite{rsi-paper}.
@@ -668,8 +669,8 @@ benchmark gate. The gate is the shared idea. The object differs: the engine chan
 knowledge and the prompts and models that produce corrections to it, each change is measured
 against a live control arm, and each is reversible.
 
-\paragraph{Release engineering and bandits.} Tier~3 is a canary release with a non-inferiority
-bound, in the tradition of controlled online experiments~\cite{kohavi}. The act, explore and
+\paragraph{Release engineering and bandits.} The engine's third gate is a canary release with a
+non-inferiority bound, in the tradition of controlled online experiments~\cite{kohavi}. The act, explore and
 escalate recommendation that level~0 returns with each retrieval is a bandit over actions within
 a situation~\cite{bandits}, with exploration assigned per agent; the engine's contribution is
 the attribution that feeds it, not the policy.
@@ -719,7 +720,8 @@ An agent that runs for a long time needs more than a place to put what it learne
 process that notices when what it learned has stopped being true, writes the correction, proves
 it on the cases that failed, exposes it to a little live traffic, and keeps or reverts it on the
 evidence. That process is recursive self-improvement in the sense this paper uses, and the
-measurements here are the first of an engine doing it in production code against baselines that
+measurements here are, to our knowledge, the first of an engine doing it in production code
+against baselines that
 only store and recall. The engine is ahead on the population the change created, level or ahead
 on what did not change, three times cheaper than the strongest baseline, and able to hand what it
 learned to a new agent intact, or to a model the team owns at a twenty-third of the cost. It also records what it refused to ship, which
