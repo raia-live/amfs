@@ -39,7 +39,8 @@ to be true and every later session that reads the same thing fails the same way.
 agents is a self-improvement problem: the system has to notice that its knowledge is wrong,
 draft a correction, test it, release it to a small share of traffic first, and keep a record,
 without a person in every loop. SenseLab is an engine built for that. Outcome evidence changes
-what agents act on (level~0); a repair agent drafts corrections that must pass a stand-in
+what agents act on (level~0); a repair agent built into the engine drafts corrections that must
+pass a stand-in
 replay, the customer's own replay and a live canary before they ship, reversibly (level~1); the
 loop reads its own history when it drafts again (level~2); and its record trains the next model
 and the repair prompt (level~3). This paper is the first measurement of such a loop. We evaluate
@@ -81,7 +82,7 @@ trail throughout.
 SenseLab is an engine built on that discipline, and this paper measures it. Its loop has four
 levels (\S\ref{sec:engine}). At level~0, every session's outcome is attributed to exactly what
 the agent read and did, and that evidence changes what the next session acts on. At level~1, an
-entry that was validated and now fails is a \emph{regime shift}; a repair agent drafts a
+entry that was validated and now fails is a \emph{regime shift}; the engine's repair agent drafts a
 correction on a branch, with a manifest of the runs it claims to repair and the runs it must not
 break, and the correction must pass a stand-in replay (Tier~1), the customer's own agent
 replaying the case set (Tier~2) and a live canary on a hashed share of sessions (Tier~3) before
@@ -138,8 +139,8 @@ situation (a stemmed-token rule, Jaccard $\geq 0.5$, with an embedding second st
 $\geq 0.75$). The shift, the proof set and the canary are all scoped to the situation. A shift
 proposes a fix automatically (\code{auto\_propose}, per agent).
 
-\paragraph{Level 1: proposal.} The repair agent (GPT-5-class, 50k-token budget) reads the
-failing runs, the entry and the loop's history on that entry, and writes either a corrective
+\paragraph{Level 1: proposal.} SenseLab's repair agent, a platform-side component of the engine
+with a 50k-token budget per draft, reads the failing runs, the entry and the loop's history on that entry, and writes either a corrective
 entry (lever \code{knowledge}) or a conditional procedure with conditions, steps and a verify
 (lever \code{procedure}) on memory branch \code{repair/<fix>}. It attaches a manifest: the runs it
 predicts it repairs, the runs it must not break, and an expected prevention (0.5 by default). A
