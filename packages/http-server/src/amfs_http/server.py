@@ -9436,11 +9436,18 @@ def _start_embedded_cortex() -> None:
         # adapter grew list_scopes(), but the knob stays: 0 disables it on
         # deployments where the event path is trusted to compile every scope.
         catchup_s = float(os.environ.get("AMFS_CORTEX_CATCHUP_INTERVAL_S", "300"))
+        # Tier A consolidation walks every tenant entity by entity. One instance
+        # of the fleet runs it per interval (advisory lock inside the worker);
+        # 0 disables it on deployments that consolidate on demand instead.
+        consolidation_s = float(
+            os.environ.get("AMFS_CORTEX_CONSOLIDATION_INTERVAL_S", "21600")
+        )
         worker = CortexWorker(
             dsn=dsn,
             compiler=compiler,
             use_advisory_lock=False,
             catchup_interval_s=catchup_s,
+            consolidation_interval_s=consolidation_s,
             tenant_provider=tenant_provider,
         )
 

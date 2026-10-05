@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 
 _ACTIVITY_LOG_MAX = 200
 
+#: Session advisory lock held by whichever instance runs the consolidation pass,
+#: so a fleet of embedded workers runs it once per interval rather than once per
+#: instance. Distinct from ``amfs_cortex_worker``, the active/standby lock,
+#: which embedded deployments do not take (every instance must compile).
+_CONSOLIDATION_LOCK_NAME = "amfs_cortex_consolidation"
+
 
 class CortexWorker:
     """Event-driven streaming worker that keeps digests warm.
@@ -58,6 +64,13 @@ class CortexWorker:
         self._tenant_provider = tenant_provider
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        # Held by whichever store-wide scan is running — catch-up (with its TTL
+        # sweep) or consolidation. Both read every tenant through the worker's
+        # own small pool; two at once is how that pool ran out of connections.
+        # Taken non-blocking: a scan that finds it held skips and lets the
+        # timer try again.
+        self._scan_lock = threading.Lock()
+        self._consolidation_thread: threading.Thread | None = None
         self._events_processed = 0
         self._digests_compiled = 0
         self._drift_skipped = 0
@@ -327,7 +340,23 @@ class CortexWorker:
 
         When a ``tenant_provider`` is configured, iterates per-tenant so that
         RLS-protected entries are visible.
+
+        Skipped when another store-wide scan holds the scan lock. The startup
+        thread and the first ``_maybe_catchup`` tick used to run this twice at
+        once; now the second finds the lock held and returns. The scan clock is
+        advanced whether the scan succeeded or failed — a failed scan is retried
+        on the next interval, not on the next 5-second tick.
         """
+        if not self._scan_lock.acquire(blocking=False):
+            logger.debug("Catchup scan skipped — another store scan is running")
+            return
+        try:
+            self._catchup_missing_digests_locked()
+        finally:
+            self._last_catchup = time.monotonic()
+            self._scan_lock.release()
+
+    def _catchup_missing_digests_locked(self) -> None:
         try:
             tenant_ids = self._tenant_provider() if self._tenant_provider else [None]
             total_queued = 0
@@ -348,8 +377,6 @@ class CortexWorker:
                     self._set_tenant_context(None)
             if total_expired:
                 logger.info("Catchup: archived %d expired entries", total_expired)
-
-            self._last_catchup = time.monotonic()
 
             if total_queued > 0:
                 logger.info("Catchup: queued %d missing digests for compilation", total_queued)
@@ -464,16 +491,84 @@ class CortexWorker:
         self._catchup_missing_digests()
 
     def _maybe_consolidate(self) -> None:
-        """Periodically run Tier A consolidation (auto-safe operations)."""
+        """Periodically run Tier A consolidation (auto-safe operations).
+
+        The pass runs on its own thread so the LISTEN loop keeps handling
+        notifications while it works; one pass at a time per process.
+        """
         if self._consolidation_interval_s <= 0:
             return
         elapsed = time.monotonic() - self._last_consolidation
         if elapsed < self._consolidation_interval_s:
             return
-        self._run_consolidation()
+        if self._consolidation_thread is not None and self._consolidation_thread.is_alive():
+            return
+        self._consolidation_thread = threading.Thread(
+            target=self._run_consolidation, daemon=True, name="cortex-consolidation",
+        )
+        self._consolidation_thread.start()
 
     def _run_consolidation(self) -> None:
-        """Execute Tier A consolidation across all tenants."""
+        """Execute Tier A consolidation across all tenants.
+
+        Runs only when no other store-wide scan is in flight on this process
+        and this instance wins the fleet-wide ``amfs_cortex_consolidation``
+        advisory lock; otherwise it skips. Before the lock every instance ran
+        the pass independently on the same interval. The consolidation clock
+        is advanced on every outcome — a pass that failed, or lost the lock to
+        another instance, waits a full interval rather than retrying every
+        5-second tick.
+        """
+        if not self._scan_lock.acquire(blocking=False):
+            logger.debug("Consolidation skipped — another store scan is running")
+            return
+        try:
+            lock_conn = self._acquire_fleet_lock(_CONSOLIDATION_LOCK_NAME)
+            if lock_conn is None:
+                logger.info("Consolidation skipped — another instance holds the fleet lock")
+                self._activity_log.append({
+                    "type": "consolidation_skipped",
+                    "reason": "fleet_lock_held",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+                return
+            try:
+                self._run_consolidation_locked()
+            finally:
+                lock_conn.close()
+        finally:
+            self._last_consolidation = time.monotonic()
+            self._scan_lock.release()
+
+    def _acquire_fleet_lock(self, name: str):
+        """A connection holding the session advisory lock ``name``, or None.
+
+        The lock is a session lock on a dedicated autocommit connection — not
+        the LISTEN connection, which another thread is reading — so closing
+        the returned connection releases it. None when another session holds
+        the lock or the connection could not be made.
+        """
+        import psycopg
+
+        try:
+            conn = psycopg.connect(self._dsn, autocommit=True)
+        except Exception:
+            logger.warning("Could not open the fleet-lock connection", exc_info=True)
+            return None
+        try:
+            row = conn.execute(
+                "SELECT pg_try_advisory_lock(hashtext(%s))", (name,)
+            ).fetchone()
+        except Exception:
+            conn.close()
+            logger.warning("Could not take the %s advisory lock", name, exc_info=True)
+            return None
+        if row and row[0]:
+            return conn
+        conn.close()
+        return None
+
+    def _run_consolidation_locked(self) -> None:
         try:
             from amfs_cortex.consolidator import ConsolidationStrategy
 
@@ -485,15 +580,20 @@ class CortexWorker:
             total_archived = 0
 
             for tid in tenant_ids:
+                if self._stop.is_set():
+                    break
                 self._set_tenant_context(tid)
                 try:
                     strategy = ConsolidationStrategy(adapter, namespace=namespace)
                     report = strategy.run(branch=branch)
                     total_archived += report.auto_archived
+                except Exception:
+                    # One tenant's failure (a statement timeout on an outsized
+                    # entity, say) should not cost the remaining tenants their pass.
+                    logger.exception("Consolidation failed for tenant %s", tid)
                 finally:
                     self._set_tenant_context(None)
 
-            self._last_consolidation = time.monotonic()
             self._consolidation_runs += 1
 
             self._activity_log.append({
