@@ -71,6 +71,10 @@ class CortexWorker:
         # timer try again.
         self._scan_lock = threading.Lock()
         self._consolidation_thread: threading.Thread | None = None
+        # Per tenant: the entity path the last consolidation pass stopped at,
+        # when it hit its ceiling before visiting every entity. The next pass
+        # resumes after it; a pass that finishes clears the cursor.
+        self._consolidation_cursor: dict[str | None, str] = {}
         self._events_processed = 0
         self._digests_compiled = 0
         self._drift_skipped = 0
@@ -585,8 +589,14 @@ class CortexWorker:
                 self._set_tenant_context(tid)
                 try:
                     strategy = ConsolidationStrategy(adapter, namespace=namespace)
-                    report = strategy.run(branch=branch)
+                    report = strategy.run(
+                        branch=branch, start_after=self._consolidation_cursor.get(tid),
+                    )
                     total_archived += report.auto_archived
+                    if strategy.pass_complete or strategy.last_entity_path is None:
+                        self._consolidation_cursor.pop(tid, None)
+                    else:
+                        self._consolidation_cursor[tid] = strategy.last_entity_path
                 except Exception:
                     # One tenant's failure (a statement timeout on an outsized
                     # entity, say) should not cost the remaining tenants their pass.

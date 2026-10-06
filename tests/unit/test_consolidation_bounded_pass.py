@@ -42,13 +42,29 @@ def _entry(key: str, *, entity_path: str, age_days: float = 0.0,
 
 
 def _store(by_entity: dict[str, list[MemoryEntry]]) -> MagicMock:
+    """A Postgres-shaped adapter: ``list_scopes`` plus a paged, per-entity ``list``.
+
+    A whole-store ``list()`` (no entity path) is the read this pass replaces,
+    so it fails loudly.
+    """
     adapter = MagicMock()
     adapter.list_scopes.return_value = (set(by_entity), {"agent-a"})
-    adapter.search.side_effect = lambda q, branch="main": list(by_entity.get(q.entity_path, []))
-    adapter.list.side_effect = AssertionError("the whole-store listing is what this replaces")
+
+    def paged_list(entity_path=None, *, branch="main", limit=None, offset=0, **_):
+        if entity_path is None:
+            raise AssertionError("the whole-store listing is what this replaces")
+        rows = sorted(by_entity.get(entity_path, []), key=lambda e: (e.key, e.version))
+        return rows[offset: offset + limit] if limit is not None else rows[offset:]
+
+    adapter.list.side_effect = paged_list
+    adapter.search.side_effect = AssertionError("the pass reads through list(), not search()")
     adapter.write.side_effect = lambda e: e
     adapter.list_branches.return_value = []
     return adapter
+
+
+def _visited(adapter) -> list[str]:
+    return [c.args[0] for c in adapter.list.call_args_list]
 
 
 # ── ConsolidationStrategy.run ───────────────────────────────────────────────
@@ -60,15 +76,43 @@ def test_pass_reads_entity_by_entity_and_never_lists_the_store() -> None:
         "acme/support": [_entry("fresh", entity_path="acme/support")],
     })
 
-    report = ConsolidationStrategy(adapter).run(branch="main")
+    strategy = ConsolidationStrategy(adapter)
+    report = strategy.run(branch="main")
 
     adapter.list_scopes.assert_called_once_with(branch="main")
-    adapter.list.assert_not_called()
-    assert [c.args[0].entity_path for c in adapter.search.call_args_list] == ["acme/billing", "acme/support"]
-    assert all(c.args[0].limit == 1000 and c.kwargs == {"branch": "main"} for c in adapter.search.call_args_list)
+    assert _visited(adapter) == ["acme/billing", "acme/support"]
+    assert all(c.kwargs == {"branch": "main", "limit": 1000, "offset": 0}
+               for c in adapter.list.call_args_list)
     assert report.entity_path == "*"
     assert report.auto_archived == 1  # the stale billing entry, as the listing pass would archive it
     assert report.compression_ratio == 2.0
+    assert strategy.pass_complete and strategy.last_entity_path == "acme/support"
+
+
+def test_an_entity_larger_than_a_page_is_read_to_the_end() -> None:
+    """Every current entry of the entity is seen, not the first page only."""
+    big = [_entry(f"k{i:04d}", entity_path="svc", age_days=60) for i in range(2500)]
+    adapter = _store({"svc": big})
+
+    report = ConsolidationStrategy(adapter).run()
+
+    offsets = [c.kwargs["offset"] for c in adapter.list.call_args_list]
+    assert offsets == [0, 1000, 2000]
+    # The report is computed over all 2500 (the tier assigner, not the page,
+    # decides how many of a flat stale set are demoted — existing behaviour).
+    assert report.auto_archived > 0
+    assert report.compression_ratio == round(2500 / (2500 - report.auto_archived), 2)
+
+
+def test_a_pathological_entity_stops_at_the_page_cap(caplog) -> None:
+    from amfs_cortex import consolidator
+
+    many = [_entry(f"k{i:05d}", entity_path="svc") for i in range(consolidator._ENTITY_PAGE * consolidator._ENTITY_MAX_PAGES + 5)]
+    adapter = _store({"svc": many})
+    with caplog.at_level("WARNING"):
+        ConsolidationStrategy(adapter).run()
+    assert adapter.list.call_count == consolidator._ENTITY_MAX_PAGES
+    assert any("more than" in r.message for r in caplog.records)
 
 
 def test_tier_a_rules_still_apply_within_an_entity() -> None:
@@ -84,36 +128,63 @@ def test_tier_a_rules_still_apply_within_an_entity() -> None:
     assert adapter.write.call_args_list[0].args[0].tier == 3
 
 
-def test_pass_stops_at_the_entity_ceiling_and_leaves_the_rest() -> None:
+def test_pass_stops_at_the_entity_ceiling_and_reports_where() -> None:
     adapter = _store({f"e{i:03d}": [_entry("k", entity_path=f"e{i:03d}")] for i in range(10)})
 
-    report = ConsolidationStrategy(adapter, max_entities=4).run()
+    strategy = ConsolidationStrategy(adapter, max_entities=4)
+    report = strategy.run()
 
-    assert adapter.search.call_count == 4
-    # Sorted order: the same first four every time until they are done, the next pass continues.
-    assert [c.args[0].entity_path for c in adapter.search.call_args_list] == ["e000", "e001", "e002", "e003"]
+    assert _visited(adapter) == ["e000", "e001", "e002", "e003"]
     assert report.entity_path == "*"
+    assert not strategy.pass_complete
+    assert strategy.last_entity_path == "e003"
+
+
+def test_consecutive_passes_cover_the_whole_store() -> None:
+    """A pass cut short hands back where it stopped; the next starts after it and wraps."""
+    paths = [f"e{i:03d}" for i in range(10)]
+    seen: list[str] = []
+    cursor = None
+    for _ in range(3):
+        adapter = _store({p: [_entry("k", entity_path=p)] for p in paths})
+        strategy = ConsolidationStrategy(adapter, max_entities=4)
+        strategy.run(start_after=cursor)
+        seen.extend(_visited(adapter))
+        cursor = None if strategy.pass_complete else strategy.last_entity_path
+
+    assert seen == paths + ["e000", "e001"], "second pass resumed after e003, third wrapped to the start"
+    assert cursor == "e001"
+
+
+def test_a_cursor_for_a_path_that_no_longer_exists_still_resumes_in_order() -> None:
+    adapter = _store({p: [_entry("k", entity_path=p)] for p in ("a", "c", "e")})
+    ConsolidationStrategy(adapter).run(start_after="b")
+    assert _visited(adapter) == ["c", "e", "a"]
 
 
 def test_pass_stops_when_the_time_budget_is_spent() -> None:
     by_entity = {f"e{i}": [_entry("k", entity_path=f"e{i}")] for i in range(5)}
     adapter = _store(by_entity)
-    slow = adapter.search.side_effect
+    paged = adapter.list.side_effect
 
-    def slow_search(q, branch="main"):
+    def slow_list(entity_path=None, **kw):
         time.sleep(0.03)
-        return slow(q, branch=branch)
+        return paged(entity_path, **kw)
 
-    adapter.search.side_effect = slow_search
-    ConsolidationStrategy(adapter, time_budget_s=0.05).run()
-    assert 1 <= adapter.search.call_count < 5
+    adapter.list.side_effect = slow_list
+    strategy = ConsolidationStrategy(adapter, time_budget_s=0.05)
+    strategy.run()
+    assert 1 <= adapter.list.call_count < 5
+    assert not strategy.pass_complete
 
 
 def test_empty_store_reports_nothing_without_reading_entries() -> None:
     adapter = _store({})
-    report = ConsolidationStrategy(adapter).run()
-    adapter.search.assert_not_called()
+    strategy = ConsolidationStrategy(adapter)
+    report = strategy.run()
+    adapter.list.assert_not_called()
     assert report.auto_archived == 0 and report.compression_ratio == 1.0
+    assert strategy.pass_complete and strategy.last_entity_path is None
 
 
 def test_adapter_without_the_aggregate_takes_the_listing_path() -> None:
@@ -147,12 +218,13 @@ def test_adapter_without_the_aggregate_takes_the_listing_path() -> None:
 
 
 def test_tier_b_detection_reuses_the_entries_in_hand() -> None:
-    """Three agents converging on a key produce a proposal from the one search, not a second one."""
+    """Three agents converging on a key produce a proposal from the one read, not a second one."""
     adapter = _store({
         "svc": [_entry("k1", entity_path="svc", agent_id=a, confidence=0.9) for a in ("a", "b", "c")],
     })
     report = ConsolidationStrategy(adapter).run()
-    assert adapter.search.call_count == 1
+    assert adapter.list.call_count == 1
+    adapter.search.assert_not_called()
     assert report.proposals_created >= 1
     adapter.create_branch.assert_called()
 
@@ -231,7 +303,7 @@ def test_consolidation_runs_under_the_fleet_lock_and_releases_it() -> None:
 def test_one_tenants_failure_does_not_cost_the_others_their_pass() -> None:
     calls: list[str | None] = []
 
-    def tenant_search(q, branch="main"):
+    def tenant_list(entity_path=None, **kw):
         from amfs_postgres.tenant_context import get_request_tenant_account_id
         tid = get_request_tenant_account_id()
         calls.append(tid)
@@ -241,7 +313,7 @@ def test_one_tenants_failure_does_not_cost_the_others_their_pass() -> None:
 
     adapter = MagicMock()
     adapter.list_scopes.return_value = ({"svc"}, set())
-    adapter.search.side_effect = tenant_search
+    adapter.list.side_effect = tenant_list
     adapter.write.side_effect = lambda e: e
     adapter.list_branches.return_value = []
 
@@ -252,6 +324,41 @@ def test_one_tenants_failure_does_not_cost_the_others_their_pass() -> None:
     assert calls == ["bad", "good"]
     assert worker.activity_log[-1]["type"] == "consolidation_run"
     assert worker.activity_log[-1]["auto_archived"] == 1
+
+
+def test_worker_resumes_each_tenant_where_its_last_pass_stopped(monkeypatch) -> None:
+    """The cursor is kept per tenant and handed back as start_after on the next pass."""
+    from amfs_cortex import consolidator
+
+    paths = ["e0", "e1", "e2", "e3", "e4"]
+    adapter = _store({p: [_entry("k", entity_path=p)] for p in paths})
+    worker = _worker(adapter, tenant_provider=lambda: ["t1"])
+    worker._acquire_fleet_lock = lambda name: MagicMock()
+
+    # The worker constructs the strategy itself; give it a two-entity ceiling.
+    orig_init = consolidator.ConsolidationStrategy.__init__
+
+    def init(self, *a, **kw):
+        kw.setdefault("max_entities", 2)
+        orig_init(self, *a, **kw)
+
+    monkeypatch.setattr(consolidator.ConsolidationStrategy, "__init__", init)
+
+    worker._run_consolidation()
+    assert worker._consolidation_cursor == {"t1": "e1"}
+    worker._run_consolidation()
+    assert worker._consolidation_cursor == {"t1": "e3"}
+    worker._run_consolidation()
+    # e4 then wraps to e0: still not everything, cursor moves on.
+    assert worker._consolidation_cursor == {"t1": "e0"}
+    assert _visited(adapter) == ["e0", "e1", "e2", "e3", "e4", "e0"]
+
+    # A pass that finishes clears the cursor.
+    small = _store({"only": [_entry("k", entity_path="only")]})
+    worker._compiler._adapter = small
+    worker._consolidation_cursor["t1"] = "zzz"
+    worker._run_consolidation()
+    assert worker._consolidation_cursor == {}
 
 
 def test_failed_passes_advance_their_clocks() -> None:
