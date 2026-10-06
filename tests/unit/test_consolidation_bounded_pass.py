@@ -67,6 +67,13 @@ def _visited(adapter) -> list[str]:
     return [c.args[0] for c in adapter.list.call_args_list]
 
 
+def _start_from_the_top(monkeypatch) -> None:
+    """Pin the random start a cursor-less pass over a large store would pick."""
+    from amfs_cortex import consolidator
+
+    monkeypatch.setattr(consolidator.random, "randrange", lambda n: 0)
+
+
 # ── ConsolidationStrategy.run ───────────────────────────────────────────────
 
 
@@ -128,7 +135,8 @@ def test_tier_a_rules_still_apply_within_an_entity() -> None:
     assert adapter.write.call_args_list[0].args[0].tier == 3
 
 
-def test_pass_stops_at_the_entity_ceiling_and_reports_where() -> None:
+def test_pass_stops_at_the_entity_ceiling_and_reports_where(monkeypatch) -> None:
+    _start_from_the_top(monkeypatch)
     adapter = _store({f"e{i:03d}": [_entry("k", entity_path=f"e{i:03d}")] for i in range(10)})
 
     strategy = ConsolidationStrategy(adapter, max_entities=4)
@@ -140,8 +148,9 @@ def test_pass_stops_at_the_entity_ceiling_and_reports_where() -> None:
     assert strategy.last_entity_path == "e003"
 
 
-def test_consecutive_passes_cover_the_whole_store() -> None:
+def test_consecutive_passes_cover_the_whole_store(monkeypatch) -> None:
     """A pass cut short hands back where it stopped; the next starts after it and wraps."""
+    _start_from_the_top(monkeypatch)
     paths = [f"e{i:03d}" for i in range(10)]
     seen: list[str] = []
     cursor = None
@@ -154,6 +163,36 @@ def test_consecutive_passes_cover_the_whole_store() -> None:
 
     assert seen == paths + ["e000", "e001"], "second pass resumed after e003, third wrapped to the start"
     assert cursor == "e001"
+
+
+def test_a_store_too_large_for_one_pass_starts_somewhere_new_each_time(monkeypatch) -> None:
+    """No cursor (a different instance won the fleet lock): the start is random,
+    so the same prefix is not re-walked every interval. The order is still the
+    sorted order from that point, wrapping."""
+    from amfs_cortex import consolidator
+
+    paths = [f"e{i:03d}" for i in range(10)]
+    monkeypatch.setattr(consolidator.random, "randrange", lambda n: 7)
+    adapter = _store({p: [_entry("k", entity_path=p)] for p in paths})
+    ConsolidationStrategy(adapter, max_entities=4).run()
+    assert _visited(adapter) == ["e007", "e008", "e009", "e000"]
+
+    # Many fresh winners between them reach every entity.
+    monkeypatch.undo()
+    seen: set[str] = set()
+    for _ in range(40):
+        adapter = _store({p: [_entry("k", entity_path=p)] for p in paths})
+        ConsolidationStrategy(adapter, max_entities=4).run()
+        seen.update(_visited(adapter))
+    assert seen == set(paths)
+
+
+def test_a_store_that_fits_in_one_pass_always_starts_from_the_top() -> None:
+    paths = [f"e{i:03d}" for i in range(10)]
+    for _ in range(5):
+        adapter = _store({p: [_entry("k", entity_path=p)] for p in paths})
+        ConsolidationStrategy(adapter, max_entities=10).run()
+        assert _visited(adapter) == paths
 
 
 def test_a_cursor_for_a_path_that_no_longer_exists_still_resumes_in_order() -> None:
@@ -330,6 +369,7 @@ def test_worker_resumes_each_tenant_where_its_last_pass_stopped(monkeypatch) -> 
     """The cursor is kept per tenant and handed back as start_after on the next pass."""
     from amfs_cortex import consolidator
 
+    _start_from_the_top(monkeypatch)
     paths = ["e0", "e1", "e2", "e3", "e4"]
     adapter = _store({p: [_entry("k", entity_path=p)] for p in paths})
     worker = _worker(adapter, tenant_provider=lambda: ["t1"])

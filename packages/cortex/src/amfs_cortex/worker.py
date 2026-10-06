@@ -73,7 +73,10 @@ class CortexWorker:
         self._consolidation_thread: threading.Thread | None = None
         # Per tenant: the entity path the last consolidation pass stopped at,
         # when it hit its ceiling before visiting every entity. The next pass
-        # resumes after it; a pass that finishes clears the cursor.
+        # on this process resumes after it; a pass that finishes clears it.
+        # In-process only — when another instance wins the fleet lock it has
+        # no cursor and the strategy starts at a random point instead, which
+        # is what keeps a large tenant covered across winners.
         self._consolidation_cursor: dict[str | None, str] = {}
         self._events_processed = 0
         self._digests_compiled = 0

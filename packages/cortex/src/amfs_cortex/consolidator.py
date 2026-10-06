@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import bisect
 import logging
+import random
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -127,6 +128,16 @@ class ConsolidationStrategy:
         rather than having the same prefix consolidated every time and the
         rest never. ``last_entity_path`` and ``pass_complete`` report where
         this pass got to.
+
+        Without ``start_after``, a store with more entities than one pass can
+        visit starts at a random point in the sorted order. Passes run under a
+        fleet-wide lock that a different instance may win each interval, and
+        the cursor is in-process; a fixed start would have every new winner
+        re-walk the same prefix. A random start is stateless and reaches every
+        entity over consecutive passes — with 2000 of 5000 per pass, the
+        chance an entity is still unvisited after ten passes is under 1% —
+        which is the right trade for housekeeping that runs every six hours.
+        A store that fits in one pass always starts from the top.
         """
         self.last_entity_path = None
         self.pass_complete = True
@@ -134,8 +145,13 @@ class ConsolidationStrategy:
         if entity_paths is None:
             return self._run_from_listing(branch)
         ordered = sorted(entity_paths)
-        if start_after is not None and ordered:
-            at = bisect.bisect_right(ordered, start_after)
+        if ordered:
+            if start_after is not None:
+                at = bisect.bisect_right(ordered, start_after)
+            elif len(ordered) > self._max_entities:
+                at = random.randrange(len(ordered))  # noqa: S311 — not security-relevant
+            else:
+                at = 0
             ordered = ordered[at:] + ordered[:at]
         return self._run_by_entity(ordered, branch)
 
