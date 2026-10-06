@@ -701,6 +701,33 @@ def _jsonb(raw: Any, default: Any) -> Any:
     return raw
 
 
+def _jsonb_safe(value: Any) -> Any:
+    """``value`` with the characters Postgres ``jsonb`` rejects removed from its strings.
+
+    ``jsonb`` is UTF-8 text: it has no representation for ``\\u0000`` and
+    rejects lone UTF-16 surrogates, and ``json.dumps`` happily emits both as
+    escapes. Either arrives in a compiled digest through an entry whose value
+    carried them (LLM output, pasted logs) and fails the upsert with
+    ``UntranslatableCharacter`` after the whole compile has been done. NULs are
+    dropped and lone surrogates replaced with U+FFFD; everything else is kept.
+    """
+    if isinstance(value, str):
+        if "\x00" in value:
+            value = value.replace("\x00", "")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            value = "".join(
+                "\ufffd" if "\ud800" <= ch <= "\udfff" else ch for ch in value
+            )
+        return value
+    if isinstance(value, dict):
+        return {_jsonb_safe(k): _jsonb_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonb_safe(v) for v in value]
+    return value
+
+
 def _inherit_from_row(entry: MemoryEntry, row: Any) -> MemoryEntry:
     """Apply ``inherit_evidence`` against the live row fetched inside the write
     transaction, so the hot paths that bypass the engine honour the same rule."""
@@ -4952,7 +4979,7 @@ class PostgresAdapter(AdapterABC):
                     branch,
                     digest.digest_type.value,
                     digest.scope,
-                    json.dumps(digest.summary),
+                    json.dumps(_jsonb_safe(digest.summary)),
                     digest.entry_count,
                     digest.source_agents,
                     digest.anticipation_score,
