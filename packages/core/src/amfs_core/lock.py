@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows fallback
+    fcntl = None  # type: ignore[assignment]
+    import msvcrt
 import time
 from pathlib import Path
 from types import TracebackType
@@ -11,7 +15,7 @@ from amfs_core.exceptions import LockTimeoutError
 
 
 class AdvisoryLock:
-    """A per-key advisory lock using flock().
+    """A per-key advisory lock using flock() on POSIX and locking() on Windows.
 
     Usage::
 
@@ -32,7 +36,10 @@ class AdvisoryLock:
         deadline = time.monotonic() + self._timeout
         while True:
             try:
-                fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if fcntl is not None:
+                    fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
                 return
             except OSError:
                 if time.monotonic() >= deadline:
@@ -46,7 +53,10 @@ class AdvisoryLock:
     def release(self) -> None:
         if hasattr(self, "_fd_obj") and self._fd_obj is not None:
             try:
-                fcntl.flock(self._fd_obj.fileno(), fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(self._fd_obj.fileno(), fcntl.LOCK_UN)
+                else:
+                    msvcrt.locking(self._fd_obj.fileno(), msvcrt.LK_UNLCK, 1)
             finally:
                 self._fd_obj.close()
                 self._fd_obj = None  # type: ignore[assignment]
