@@ -94,15 +94,15 @@ class FilesystemAdapter(AdapterABC):
                 superseded_path = old_current.with_name(
                     old_current.name.replace("_current.json", "_superseded.json")
                 )
-                old_current.rename(superseded_path)
+                os.replace(old_current, superseded_path)
 
-            # Atomic write: write to tmp, then rename
+            # Atomic write: write to tmp, then replace
             tmp_path = layout.tmp_file(entry.entity_path, entry.key, new_version)
             final_path = layout.version_file(entry.entity_path, entry.key, new_version, current=True)
 
             data = entry.model_dump(mode="json")
             tmp_path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-            os.rename(tmp_path, final_path)
+            os.replace(tmp_path, final_path)
 
         return entry
 
@@ -138,13 +138,13 @@ class FilesystemAdapter(AdapterABC):
                     superseded = old_current.with_name(
                         old_current.name.replace("_current.json", "_superseded.json")
                     )
-                    old_current.rename(superseded)
+                    os.replace(old_current, superseded)
 
                 tmp_path = layout.tmp_file(e.entity_path, e.key, new_version)
                 final_path = layout.version_file(e.entity_path, e.key, new_version, current=True)
                 data = e.model_dump(mode="json")
                 tmp_path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-                os.rename(tmp_path, final_path)
+                os.replace(tmp_path, final_path)
                 written[idx] = e
         finally:
             for lk in reversed(locks):
