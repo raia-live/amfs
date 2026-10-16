@@ -148,7 +148,13 @@ class S3Adapter(AdapterABC):
         key: str,
         *,
         min_confidence: float = 0.0,
+        branch: str = "main",
     ) -> MemoryEntry | None:
+        # ``branch`` is accepted and ignored, as the filesystem adapter does: the
+        # bucket holds a single line of history. It has to be in the signature
+        # all the same, because CoWEngine passes it on every read, write and
+        # list, and without it each of those raised TypeError before S3 was
+        # ever asked anything.
         _, current_key = self._find_current_version(entity_path, key)
         if current_key is None:
             return None
@@ -210,7 +216,9 @@ class S3Adapter(AdapterABC):
         entity_path: str | None = None,
         *,
         include_superseded: bool = False,
+        branch: str = "main",
     ) -> list[MemoryEntry]:
+        # ``branch`` is ignored for the reason given in ``read``.
         prefix = self._entity_prefix(entity_path) if entity_path else self._ns_prefix()
         objects = self._list_objects(prefix)
 
