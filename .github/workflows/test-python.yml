@@ -70,6 +70,9 @@ jobs:
           source .venv/bin/activate
           uv pip install -e packages/core -e packages/adapters/filesystem -e packages/adapters/postgres -e packages/sdk-python -e packages/cli -e packages/mcp-server -e packages/cortex -e packages/http-server
           uv pip install pytest pytest-asyncio pyyaml
+          # The webhook route answers 501 without amfs_connectors, so the tests
+          # that post through it need the package installed.
+          uv pip install -e packages/connectors
 
       - name: Run unit tests
         run: |
