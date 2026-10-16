@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import logging
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Callable
 from uuid import UUID, uuid4
@@ -19,6 +20,21 @@ from pydantic import BaseModel, Field
 from amfs_connectors.base import ConnectorConfig, IngestionResult
 
 logger = logging.getLogger(__name__)
+
+
+def _header(headers: Mapping[str, str], name: str) -> str:
+    """The value of header *name*, matched without regard to case.
+
+    HTTP field names are case-insensitive, and ASGI servers deliver them
+    lowercased: the ``dict(request.headers)`` the webhook route passes in holds
+    ``x-webhook-signature``, which an exact ``get("X-Webhook-Signature")`` never
+    finds.
+    """
+    wanted = name.lower()
+    for header, value in headers.items():
+        if header.lower() == wanted:
+            return value
+    return ""
 
 
 class WebhookConfig(ConnectorConfig):
@@ -78,7 +94,7 @@ class WebhookIngester:
         if not self._config.secret:
             return True
 
-        sig_header = headers.get(self._config.signature_header, "")
+        sig_header = _header(headers, self._config.signature_header)
         if not sig_header:
             return False
 
