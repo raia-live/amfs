@@ -159,6 +159,10 @@ class S3Adapter(AdapterABC):
             return None
         if entry.confidence < min_confidence:
             return None
+        # As on the filesystem and Postgres adapters: a TTL takes effect on
+        # read, without waiting for the lifecycle sweep to archive the entry.
+        if entry.is_expired():
+            return None
         return entry
 
     def write(self, entry: MemoryEntry) -> MemoryEntry:
