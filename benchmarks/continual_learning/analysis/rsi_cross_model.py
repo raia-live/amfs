@@ -312,14 +312,18 @@ def main(argv: list[str] | None = None) -> None:
                                                      "G3_collateral_kept", "G3_collateral_unchanged", "G4_cost_ratio"))
     g2_up = gate["G2_vs_frontier_cw_moved"]["upper"]
     complete = all(len(cells) == len(keys) for _, cells in resolved.values())
+    # Amendment (ac), in order of precedence: an interval entirely below 0 against the frontier's
+    # best setup is "no post" whatever the other gates say (G2's −5 pp margin is a non-inferiority
+    # floor, so an interval such as [−4, −1] clears it while still being worse); then the full
+    # claim; then the "matches" claim when G2's interval covers 0.
     if not complete:
         verdict = "incomplete: not every system has all cells; no verdict"
+    elif g2_up is not None and g2_up < 0:
+        verdict = "no post: below the frontier model's best setup on recovery; readout to HEADROOM_RSI.md"
     elif g1 and g2 and g3k and g3u and g4:
         verdict = "full claim: better together, better than the frontier model, cheaper"
     elif g1 and g3k and g3u and g4 and g2_up is not None and g2_up >= 0:
         verdict = "matches the frontier model's best setup at a fraction of the model cost"
-    elif g2_up is not None and g2_up < 0:
-        verdict = "no post: below the frontier model's best setup on recovery; readout to HEADROOM_RSI.md"
     else:
         verdict = "no post: gate not met"
     gate["verdict"] = verdict
