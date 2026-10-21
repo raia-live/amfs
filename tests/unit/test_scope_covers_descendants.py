@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 
-from amfs_core.models import SearchQuery
+from amfs_core.models import SearchQuery, SemanticQuery
 from amfs_core.scope import covers, descendants_sql, normalize_scope
 
 
@@ -158,3 +158,9 @@ class TestTheDefault:
     def test_a_query_matches_one_path_unless_it_asks_otherwise(self) -> None:
         """An existing caller's results must not change under this feature."""
         assert SearchQuery(entity_path="a").include_descendants is False
+        assert SemanticQuery(text="t", entity_path="a").include_descendants is False
+
+    def test_the_retrieve_request_is_exact_unless_it_asks_otherwise(self) -> None:
+        from amfs_http.models import RetrieveRequest
+
+        assert RetrieveRequest(query="q", entity_path="a").include_descendants is False

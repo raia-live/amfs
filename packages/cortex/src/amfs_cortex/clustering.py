@@ -67,7 +67,15 @@ class AgentClusterStrategy:
 
     Pairwise similarity:
       0.5 * jaccard(entity_sets) + 0.2 * cosine(type_vecs) + 0.3 * collab_overlap
+
+    Scored only for pairs that share an entity path or a learned_from edge
+    (see :meth:`candidate_pairs`); a pair with neither has no edge.
     """
+
+    #: An entity path more agents than this write to says nothing about which
+    #: two of them belong together, so it proposes no pairs. It still counts
+    #: in the Jaccard of a pair another path proposed.
+    HUB_PATH_AGENTS = 500
 
     def __init__(
         self, resolution: float = 1.0, sim_threshold: float = 0.15, scope: str = "cluster:all",
@@ -75,6 +83,54 @@ class AgentClusterStrategy:
         self._resolution = resolution
         self._sim_threshold = sim_threshold
         self._scope = scope
+
+    @classmethod
+    def candidate_pairs(
+        cls,
+        agent_ids: list[str],
+        entity_sets: dict[str, set],
+        collab_sets: dict[str, set],
+    ) -> list[tuple[str, str]]:
+        """The pairs worth scoring: two agents that share an entity path, or
+        that a learned_from edge connects.
+
+        Scoring every pair is quadratic in the fleet: 6,000 agents is 18 million
+        Jaccards in Python, measured at four to five minutes per compile on a
+        production account, nearly all of it on pairs that share nothing. Such
+        a pair can only score on the type-distribution term, and two agents
+        with nothing in common except that both mostly write facts is not a
+        cluster — it is the shape of every fleet. So those pairs get no edge,
+        and the candidates come from an inverted index over entity paths plus
+        the collaboration edges, which is linear in the data. Paths that more
+        than :attr:`HUB_PATH_AGENTS` agents write to propose nothing; the
+        rationale a cluster is shown with ("share entities", "collaboration
+        edges") is exactly what the index captures.
+
+        Ordered by position in *agent_ids*, so the graph is built the same way
+        every time and Louvain's seeded result is reproducible.
+        """
+        order = {aid: i for i, aid in enumerate(agent_ids)}
+        pairs: set[tuple[str, str]] = set()
+
+        def propose(a: str, b: str) -> None:
+            if a == b or a not in order or b not in order:
+                return
+            pairs.add((a, b) if order[a] < order[b] else (b, a))
+
+        by_path: dict[str, list[str]] = {}
+        for aid in agent_ids:
+            for ep in entity_sets.get(aid) or ():
+                by_path.setdefault(ep, []).append(aid)
+        for members in by_path.values():
+            if len(members) > cls.HUB_PATH_AGENTS:
+                continue
+            for i, a in enumerate(members):
+                for b in members[i + 1:]:
+                    propose(a, b)
+        for a, targets in collab_sets.items():
+            for b in targets:
+                propose(a, b)
+        return sorted(pairs, key=lambda p: (order[p[0]], order[p[1]]))
 
     def compute_clusters(
         self, agents: list[dict], graph_edges: list[GraphEdge],
@@ -125,20 +181,17 @@ class AgentClusterStrategy:
         G = nx.Graph()
         G.add_nodes_from(agent_ids)
 
-        for i, aid_a in enumerate(agent_ids):
-            for j in range(i + 1, len(agent_ids)):
-                aid_b = agent_ids[j]
+        for aid_a, aid_b in self.candidate_pairs(agent_ids, entity_sets, collab_sets):
+            ent_sim = jaccard(entity_sets[aid_a], entity_sets[aid_b])
+            type_sim = cosine(type_vecs[aid_a], type_vecs[aid_b])
+            collab_overlap = 1.0 if (
+                aid_b in collab_sets[aid_a] or aid_a in collab_sets[aid_b]
+            ) else 0.0
 
-                ent_sim = jaccard(entity_sets[aid_a], entity_sets[aid_b])
-                type_sim = cosine(type_vecs[aid_a], type_vecs[aid_b])
-                collab_overlap = 1.0 if (
-                    aid_b in collab_sets[aid_a] or aid_a in collab_sets[aid_b]
-                ) else 0.0
+            sim = 0.5 * ent_sim + 0.2 * type_sim + 0.3 * collab_overlap
 
-                sim = 0.5 * ent_sim + 0.2 * type_sim + 0.3 * collab_overlap
-
-                if sim > self._sim_threshold:
-                    G.add_edge(aid_a, aid_b, weight=sim)
+            if sim > self._sim_threshold:
+                G.add_edge(aid_a, aid_b, weight=sim)
 
         if G.number_of_edges() == 0:
             return self._empty_digest(agents)

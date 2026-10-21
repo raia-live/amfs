@@ -546,6 +546,8 @@ def recommend(
     hit_statuses: Sequence[str] | None = None,
     priors_are_local: bool = True,
     lessons: Sequence[Mapping[str, Any]] | None = None,
+    min_p: float = ACT_MIN_P,
+    min_n: int = ACT_MIN_N,
 ) -> dict[str, Any] | None:
     """Decide ``act`` / ``explore`` / ``escalate`` from priors and the top hit.
 
@@ -555,6 +557,12 @@ def recommend(
     ``candidate_actions`` — without knowing what could be tried, "everything
     failed" cannot be asserted, and a false escalate costs a task a retry
     would have won.
+
+    ``min_p`` / ``min_n`` are the posterior and the number of takes a record
+    needs before ``act`` names it (:func:`_is_winner`), defaulting to
+    ``ACT_MIN_P`` / ``ACT_MIN_N``. They are keywords so a caller that has
+    measured, on its own held-out outcomes, where acting stops paying can
+    pass what it found; the arithmetic that reads them does not change.
 
     With ``abstain=True`` the "nothing to say" case is spelled out instead of
     returning ``None`` when the evidence is weak: no priors at all and every
@@ -682,6 +690,7 @@ def recommend(
             plan_actions(
                 priors, rec, agent_id=agent_id, candidate_actions=candidate_actions,
                 priors_are_local=priors_are_local, lessons=lessons,
+                min_p=min_p, min_n=min_n,
             ),
         )
         return rec
@@ -692,13 +701,13 @@ def recommend(
     # REGIME_TURN_STREAK (``turned``). Those with a real record behind them
     # are what a shift looks like at the action level ("what worked here has
     # stopped working"), and they are named in the explore that follows.
-    winners = [t for t in tried if _is_winner(t)]
-    # Named in the explore when the record behind them is real: ACT_MIN_N
+    winners = [t for t in tried if _is_winner(t, min_p=min_p, min_n=min_n)]
+    # Named in the explore when the record behind them is real: ``min_n``
     # wins pooled, or any win on the situation's own record.
     stopped = [
         t for t in record_tried
         if _stopped_working(t)
-        and (int(t.get("won", 0)) >= ACT_MIN_N or (t.get("situation_exact") and int(t.get("won", 0)) >= 1))
+        and (int(t.get("won", 0)) >= min_n or (t.get("situation_exact") and int(t.get("won", 0)) >= 1))
     ]
     # Two readings of "failed". ``losers`` is the firm one — a low ratio over
     # at least EXPLORE_MIN_N takes, or a streak — and is what ``escalate``
@@ -1187,22 +1196,27 @@ def _exact_first_win(prior: Mapping[str, Any]) -> bool:
     return int(prior.get("won", 0)) >= 1 and bool(last) and last[0] == "won"
 
 
-def _is_winner(prior: Mapping[str, Any]) -> bool:
-    """A winner: a good posterior over ``ACT_MIN_N`` takes — or one win on the
+def _is_winner(
+    prior: Mapping[str, Any], *, min_p: float = ACT_MIN_P, min_n: int = ACT_MIN_N
+) -> bool:
+    """A winner: a good posterior over ``min_n`` takes — or one win on the
     situation's own record (:func:`_exact_first_win`) — and not stopped.
 
     The clean first win — one take, won, no loss — is not read through the
     posterior gate: a single win's Beta mean is at most 0.667, and the
     neighbourhood weight or a day of decay on it drops under ``ACT_MIN_P``
     for a record that says only "solved once here". With a loss on the
-    record the gate applies as everywhere else."""
+    record the gate applies as everywhere else.
+
+    *min_p* / *min_n* default to ``ACT_MIN_P`` / ``ACT_MIN_N``; a caller that
+    has calibrated them on its own outcomes passes its values."""
     if _stopped_working(prior):
         return False
     if _exact_first_win(prior) and int(prior.get("lost", 0)) == 0:
         return True
-    if float(prior.get("p", 0)) < ACT_MIN_P:
+    if float(prior.get("p", 0)) < min_p:
         return False
-    return int(prior.get("n", 0)) >= ACT_MIN_N or _exact_first_win(prior)
+    return int(prior.get("n", 0)) >= min_n or _exact_first_win(prior)
 
 
 def _lone_winner(
@@ -1231,6 +1245,8 @@ def plan_actions(
     priors_are_local: bool | None = None,
     limit: int = PLAN_MAX,
     lessons: Sequence[Mapping[str, Any]] | None = None,
+    min_p: float = ACT_MIN_P,
+    min_n: int = ACT_MIN_N,
 ) -> list[str]:
     """The order to try actions in, for an agent with more than one attempt.
 
@@ -1275,7 +1291,7 @@ def plan_actions(
     ]
     failed_now = [t for t in by_p if t in losers or int(t.get("won", 0)) == 0]
     for t in by_p:
-        if _is_winner(t):
+        if _is_winner(t, min_p=min_p, min_n=min_n):
             _add(t.get("action_key"))
     for t in by_p:
         last = list(t.get("last_3") or [])

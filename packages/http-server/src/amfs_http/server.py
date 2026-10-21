@@ -30,7 +30,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, timezone
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import uvicorn
@@ -50,7 +50,7 @@ from amfs_core.aggregates import (
 )
 from amfs_core.ranking import composite_score
 from amfs_core.ranking import entry_text as _entry_text
-from amfs_core.scope import SqlScope
+from amfs_core.scope import SqlScope, covers
 from amfs_core.ranking import keyword_coverage as _keyword_coverage
 from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
 from amfs_core.capture import scan_captured_arguments, scan_captured_text
@@ -960,6 +960,112 @@ def _search_sync(adapter: Any, query: SearchQuery, branch: Any) -> list[MemoryEn
         return adapter.search(query, branch=branch)
     except TypeError:
         return adapter.search(query)
+
+
+async def _branch_treatment(
+    *,
+    branch: str,
+    entity_path: str | None,
+    topical: str,
+    query_vector: list[float] | None,
+    embedder: Any,
+    pool: int,
+    vis: Any,
+    include_artifacts: bool,
+    is_artifact: Callable[[MemoryEntry], bool],
+) -> list[tuple[MemoryEntry, float, float]]:
+    """The entries *branch* changed under *entity_path* that are about *topical*.
+
+    Retrieve's step 9b: what a read routed to a repair branch exists to put in
+    front of the agent. Returns ``(entry, similarity, keyword)`` triples for
+    the branch's added or modified entries that the query's semantic pool on
+    the branch holds (no confidence gate, no evidence gate), or that a lexical
+    read on the branch returns where there are no vectors. Empty on ``main``,
+    with no scope, on an adapter without branches, when the branch changed
+    nothing under the scope, or when the query is about none of it. Never
+    raises: a failure here leaves the ranking as it was.
+    """
+    if not isinstance(branch, str) or branch.strip() in ("", "main") or not entity_path:
+        return []
+    mem = _get_memory()
+    diff_fn = getattr(mem._adapter, "diff_branch", None)
+    if not callable(diff_fn):
+        return []
+    namespace = getattr(mem._adapter, "_namespace", None) or "default"
+    try:
+        diff = await _offload(_db_executor, diff_fn, branch, namespace=namespace)
+    except Exception:  # noqa: BLE001 - best-effort
+        logger.debug("branch diff for retrieve failed", exc_info=True)
+        return []
+    changed: set[tuple[str, str]] = {
+        (d.entity_path, d.key)
+        for d in diff or []
+        if getattr(d, "diff_type", "") in ("added", "modified")
+        and covers(entity_path, d.entity_path)
+        and not _is_synthetic_key(d.key)
+        and not _is_excluded_entity(d.entity_path)
+    }
+    if not changed:
+        return []
+
+    # Which of them the query is about, read on the branch with no gate: the
+    # semantic pool where vectors exist, the lexical channel where they do not.
+    found: dict[tuple[str, str], tuple[MemoryEntry, float, float]] = {}
+    if embedder is not None and _async_adapter is not None:
+        try:
+            pairs = await _async_adapter.semantic_search(
+                SemanticQuery(
+                    text=topical, entity_path=entity_path, min_confidence=0.0,
+                    limit=pool, embedding=query_vector,
+                ),
+                embedder,
+                branch=branch,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("branch semantic read for retrieve failed", exc_info=True)
+            pairs = []
+        floor = _retrieve_min_semantic()
+        for entry, sim in pairs:
+            ref = (entry.entity_path, entry.key)
+            if ref in changed and float(sim) > 0.0 and float(sim) >= floor:
+                found[ref] = (entry, float(sim), 0.0)
+    lex = SearchQuery(
+        query=topical, entity_path=entity_path, min_confidence=0.0, limit=pool,
+        sort_by="confidence", depth=3, include_artifacts=include_artifacts,
+    )
+    try:
+        if _async_adapter is not None:
+            rows = await _async_adapter.search(lex, branch=branch)
+        else:
+            rows = await _offload(_db_executor, _search_sync, mem._adapter, lex, branch)
+    except Exception:  # noqa: BLE001
+        logger.debug("branch lexical read for retrieve failed", exc_info=True)
+        rows = []
+    for entry in rows:
+        ref = (entry.entity_path, entry.key)
+        if ref not in changed:
+            continue
+        slot = found.get(ref)
+        found[ref] = (entry, slot[1], 1.0) if slot else (entry, 0.0, 1.0)
+
+    # Discredited or not: the branch's own changes are pinned whatever their
+    # evidence says. The pin exists so the arm under test is *treated*; the
+    # canary is what decides whether the treatment is good, and it can only
+    # decide if the arm read it. Dropping a discredited entry here handed the
+    # verdict to whatever had discredited it first — on clbench (2026-09-30,
+    # fleet 10) the loop's own replays, within minutes of the write, before
+    # the canary's first session in two of six cases; the arm then read its
+    # fix in 0 of 74 sessions and one canary *failed* on an arm that had never
+    # seen the treatment. The row keeps its ``evidence_status``, so the agent
+    # sees the record; it is not hidden from the arm on the record's account.
+    out = [
+        t for t in found.values()
+        if include_artifacts or not is_artifact(t[0])
+    ]
+    if out and vis is not None and vis.should_filter():
+        allowed = {e.entry_key for e in vis.filter_entries([t[0] for t in out])}
+        out = [t for t in out if t[0].entry_key in allowed]
+    return out
 
 
 async def _discredited_below_gate(
@@ -1982,6 +2088,87 @@ def entry_quality(
     }
 
 
+class QualityBatchItem(BaseModel):
+    entity_path: str
+    key: str
+
+
+class QualityBatchRequest(BaseModel):
+    items: list[QualityBatchItem] = Field(..., max_length=2000)
+    branch: str | None = None
+
+
+@app.post("/api/v1/quality/batch")
+def entry_quality_batch(
+    request: Request,
+    body: QualityBatchRequest,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Quality scores for many entries in one request.
+
+    The topic and agent pages used to ask ``/quality/{path}/{key}`` once per
+    entry, and each of those listed the whole topic again to find the
+    sibling keys — on a 365-entry topic that was 365 round trips of about a
+    second each, serialised three at a time, before the page rendered. Here
+    each topic is listed once and every requested key in it is scored from
+    that one list. An entry that does not exist, or that the caller may not
+    see, comes back with a null score rather than an error, so one bad key
+    does not fail the page.
+    """
+    branch = _effective_branch(request, body.branch)
+    mem = _get_memory()
+    vis = _active_visibility_filter(request)
+    evaluator = HeuristicQualityEvaluator()
+
+    wanted: dict[str, list[str]] = {}
+    for item in body.items:
+        wanted.setdefault(item.entity_path, []).append(item.key)
+
+    scores: dict[tuple[str, str], float | None] = {}
+    for entity_path, keys in wanted.items():
+        # Straight from the adapter, as the single route reads: ``mem.list``
+        # on the server's own handle keeps only shared entries and the
+        # server's, so another agent's private keys — which the topic page
+        # already lists — would come back null. The caller's visibility
+        # rule, applied below, is the only filter that belongs here.
+        try:
+            entries = mem._adapter.list(entity_path, branch=branch)
+        except Exception:
+            logger.debug("quality batch: list failed for %s", entity_path, exc_info=True)
+            entries = []
+        if vis is not None:
+            entries = vis.filter_entries(entries)
+        by_key = {e.key: e for e in entries}
+        all_keys = list(by_key)
+        for key in keys:
+            entry = by_key.get(key)
+            if entry is None:
+                scores[(entity_path, key)] = None
+                continue
+            mt = (
+                entry.memory_type.value
+                if hasattr(entry.memory_type, "value")
+                else str(entry.memory_type)
+            )
+            report = evaluator.evaluate(
+                entry.value,
+                entity_path=entity_path,
+                key=key,
+                confidence=entry.confidence,
+                memory_type=mt,
+                pattern_refs=list(entry.provenance.pattern_refs),
+                existing_keys=[k for k in all_keys if k != key],
+            )
+            scores[(entity_path, key)] = report.score
+
+    return {
+        "results": [
+            {"entity_path": i.entity_path, "key": i.key, "score": scores[(i.entity_path, i.key)]}
+            for i in body.items
+        ]
+    }
+
+
 async def _scope_block(
     entity_path: str,
     key: str,
@@ -2164,6 +2351,7 @@ async def write_entry(
     _ns = _async_adapter._namespace if _async_adapter else mem.namespace
     _branch = entry.branch or "main"
     _confidence = entry.confidence
+    _refs = [r for r in (req.pattern_refs or []) if isinstance(r, str) and "/" in r and r != _ek]
 
     if _async_adapter is not None:
         async def _bg_async_side_effects() -> None:
@@ -2201,6 +2389,31 @@ async def write_entry(
                 )
             except Exception:
                 logger.debug("bg: Failed to materialize wrote edge", exc_info=True)
+            # ``references`` edges from pattern_refs — the graph
+            # ``propagate_failure`` walks. The sync path gets them from
+            # ``AgentMemory._materialize_pattern_ref_edges``; this path writes
+            # the entry through the adapter directly, so until here a hosted
+            # writer's pattern_refs reached the graph only on a backfill, and
+            # a failure on the parent never propagated to what cited it.
+            # Only when the async write is the one that stored the entry: on
+            # the sync fallback ``handle.write`` has already materialised them,
+            # and a second upsert would bump ``evidence_count`` for one write.
+            for _ref in _refs if _used_async else ():
+                try:
+                    await _async_adapter.upsert_graph_edge(
+                        GraphEdge(
+                            source_entity=_ek,
+                            source_type="entry",
+                            relation="references",
+                            target_entity=_ref,
+                            target_type="entry",
+                            provenance={"agent_id": _agent, "trigger": "write"},
+                        ),
+                        namespace=_ns,
+                        branch=_branch,
+                    )
+                except Exception:
+                    logger.debug("bg: Failed to materialize references edge for %s", _ref, exc_info=True)
 
         asyncio.create_task(_bg_async_side_effects())
     else:
@@ -2444,43 +2657,126 @@ async def list_entries(
     return {"entries": payload, "total": total}
 
 
+#: The most entity summaries one page may ask for.
+_ENTITY_SUMMARIES_PAGE_MAX = 500
+_ENTITY_SUMMARY_SORTS = (
+    "last_updated",
+    "entry_count",
+    "total_recalls",
+    "avg_confidence",
+    "avg_confidence_asc",
+    "entity_path",
+)
+
+
 @app.get("/api/v1/entities")
 async def list_entity_summaries(
     request: Request,
+    q: str | None = Query(None, max_length=500),
+    agent: str | None = Query(None, max_length=200),
+    min_confidence: float | None = Query(None, ge=0.0, le=1.0),
+    sort: str = Query("last_updated"),
+    limit: int | None = Query(None, ge=1, le=_ENTITY_SUMMARIES_PAGE_MAX),
+    offset: int = Query(0, ge=0),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Per-entity aggregates without entry values — a few KB instead of the
-    multi-MB /entries payload. Dashboards should prefer this endpoint."""
+    multi-MB /entries payload. Dashboards should prefer this endpoint.
+
+    With ``limit`` the response is one page of paths containing ``q`` that
+    ``agent`` has written to and whose mean confidence reaches
+    ``min_confidence``, ordered by ``sort`` (``last_updated``,
+    ``entry_count``, ``total_recalls``, ``avg_confidence``,
+    ``avg_confidence_asc``, ``entity_path``), and carries ``total``, the
+    count before paging. Filtering and paging happen in SQL alongside the
+    visibility predicate; an adapter without those parameters, or a
+    visibility rule that has to run over loaded entries, is filtered and
+    paged here after the fact.
+    """
     mem = _get_memory()
     adapter = mem._adapter
+    if sort not in _ENTITY_SUMMARY_SORTS:
+        raise HTTPException(status_code=400, detail=f"unknown sort {sort!r}")
 
     scope, py_vis = _visibility_scope(request)
+    narrowed = (
+        bool(q) or bool(agent) or min_confidence is not None
+        or limit is not None or sort != "last_updated"
+    )
 
-    def _summaries() -> list[dict[str, Any]]:
+    def _page_here(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int | None]:
+        """Filter, order and page rows that came back whole."""
+        if q:
+            needle = q.lower()
+            rows = [r for r in rows if needle in str(r.get("entity_path", "")).lower()]
+        if agent:
+            rows = [r for r in rows if agent in (r.get("agents") or [])]
+        if min_confidence is not None:
+            rows = [r for r in rows if float(r.get("avg_confidence") or 0) >= min_confidence]
+        if sort == "entity_path":
+            rows.sort(key=lambda r: str(r.get("entity_path", "")))
+        elif sort == "avg_confidence_asc":
+            rows.sort(key=lambda r: (r.get("avg_confidence") or 0, str(r.get("entity_path", ""))))
+        elif sort != "last_updated":
+            rows.sort(key=lambda r: (-(r.get(sort) or 0), str(r.get("entity_path", ""))))
+        if limit is None:
+            return rows, None
+        return rows[offset:offset + limit], len(rows)
+
+    def _summaries() -> tuple[list[dict[str, Any]], int | None]:
         """Off the event loop: one GROUP BY where the adapter and the
-        visibility rule allow it, a load-and-reduce otherwise."""
+        visibility rule allow it, a load-and-reduce otherwise. Returns the
+        rows and, when paged, the count before paging."""
         if py_vis is None:
-            try:
-                # The visibility rule travels into the GROUP BY as a
-                # predicate, so a per-user dashboard gets the same one query
-                # an admin does. Only passed when there is one: the ABC's
-                # default implementation does not take it.
-                if scope is None:
-                    return adapter.entity_summaries()
-                return adapter.entity_summaries(scope=scope)
-            except TypeError:
-                # An adapter without SQL scoping; reduce over its rows.
-                pass
+            # The visibility rule travels into the GROUP BY as a predicate,
+            # so a per-user dashboard gets the same one query an admin does.
+            # Only passed when there is one: the ABC's default implementation
+            # does not take it. Searched and paged in SQL first; an adapter
+            # without those parameters returns the whole list and is paged
+            # here.
+            kwargs: dict[str, Any] = {}
+            if scope is not None:
+                kwargs["scope"] = scope
+            paged = {
+                **kwargs,
+                "q": q or None,
+                "agent": agent or None,
+                "min_confidence": min_confidence,
+                "sort": sort,
+                "limit": limit,
+                "offset": offset,
+            }
+            for attempt in ([paged, kwargs] if narrowed else [kwargs]):
+                try:
+                    rows = adapter.entity_summaries(**attempt)
+                except TypeError:
+                    continue
+                if attempt is not paged:
+                    return _page_here(rows)  # the whole list, from an older adapter
+                if limit is None:
+                    return rows, None  # searched and ordered in SQL, unpaged
+                total = int(rows[0].pop("total", 0)) if rows else 0
+                for r in rows[1:]:
+                    r.pop("total", None)
+                if not rows and offset:
+                    # A page past the end says nothing about the count; the
+                    # first page does.
+                    first = adapter.entity_summaries(**{**paged, "limit": 1, "offset": 0})
+                    total = int(first[0].get("total", 0)) if first else 0
+                return rows, total
         from amfs_core.aggregates import entity_summaries_from_entries
 
         entries = mem.list()
         vis = py_vis if py_vis is not None else _active_visibility_filter(request)
         if vis is not None:
             entries = vis.filter_entries(entries)
-        return entity_summaries_from_entries(entries)
+        return _page_here(entity_summaries_from_entries(entries))
 
-    summaries = await _offload(_db_executor, _summaries)
-    return json.loads(json.dumps({"entities": summaries}, default=str))
+    summaries, total = await _offload(_db_executor, _summaries)
+    out: dict[str, Any] = {"entities": summaries}
+    if limit is not None:
+        out.update({"total": total, "limit": limit, "offset": offset})
+    return json.loads(json.dumps(out, default=str))
 
 
 @app.post("/api/v1/aggregate")
@@ -2843,6 +3139,7 @@ async def retrieve_entries(
             sq = SemanticQuery(
                 text=qtext,
                 entity_path=req.entity_path,
+                include_descendants=req.include_descendants,
                 min_confidence=req.min_confidence,
                 limit=pool,
                 embedding=query_vectors.get(qtext),
@@ -2863,6 +3160,7 @@ async def retrieve_entries(
     sq_lex = SearchQuery(
         query=topical,
         entity_path=req.entity_path,
+        include_descendants=req.include_descendants,
         min_confidence=req.min_confidence,
         limit=pool,
         sort_by="confidence",
@@ -3325,6 +3623,103 @@ async def retrieve_entries(
             kept.append((entry, score, bd))
         scored = kept
 
+    # 9b. The branch under test. A read routed to a repair branch is the
+    #     canary arm of a fix: the branch exists to put that fix in front of
+    #     the agent, and the entries it changed are the treatment. Ranked
+    #     like any other entry they do not arrive. The repair loop writes a
+    #     correction at 60% of the confidence of the rule it corrects — under
+    #     the caller's gate as often as not — onto a scope where outcome
+    #     learning has already written dozens of validated near-duplicates
+    #     of the stale rule, and confidence is a ranking term. Measured on
+    #     clbench (2026-09-30): 18 canaries, 14-197 branch reads each, zero
+    #     reads of the fix's own entry. Both arms read the same rules, the
+    #     canary compared two untreated populations, and 0 vs 0 recurrence
+    #     said nothing about the fix.
+    #
+    #     So the branch's changed entries that are *about this query* lead
+    #     the list, in their own order, marked ``_pinned`` so the client can
+    #     see why. "About this query" is the semantic pool on the branch with
+    #     no confidence gate (the fix's confidence is the repair loop's
+    #     business, not a reason to hide the treatment from its own arm), or
+    #     a lexical hit where there are no vectors; an entry the query is not
+    #     about stays where it is — a fix to the CI rule is not pinned onto a
+    #     support ticket. A discredited entry is pinned all the same, with its
+    #     evidence on the row: the canary is the test of the fix, and it can
+    #     only test what the arm read. The first version of this step left
+    #     discredited entries to the avoid list; measured on clbench
+    #     (2026-09-30, fleet 10, six canaries), five corrections were
+    #     discredited within 1-24 minutes of being written — by the loop's
+    #     own replays, two before the canary's first session — and the arm
+    #     they were meant to treat read them in 0 of 74 sessions. What is not
+    #     pinned is a procedure whose preconditions contradict the run's
+    #     environment — it is named in ``_meta.not_applicable`` like any
+    #     other. Main reads are untouched.
+    pinned = await _branch_treatment(
+        branch=branch,
+        entity_path=req.entity_path,
+        topical=topical,
+        query_vector=query_vectors.get(topical),
+        embedder=embedder,
+        pool=pool,
+        vis=vis,
+        include_artifacts=req.include_artifacts,
+        is_artifact=_is_artifact,
+    )
+    if pinned:
+        if environment:
+            from amfs_core.models import preconditions_status as _preconditions_status
+
+            # Named once: a pinned procedure above the caller's gate was a
+            # candidate too, and step 9 has already recorded it.
+            named = {(row["entity_path"], row["key"]) for row in not_applicable}
+            applicable: list[tuple[MemoryEntry, float, float]] = []
+            for entry, sim, keyword in pinned:
+                if _is_procedure(entry):
+                    status, detail = _preconditions_status(entry.value, environment)
+                    if status == "not_applicable":
+                        if (entry.entity_path, entry.key) not in named:
+                            not_applicable.append({
+                                "entity_path": entry.entity_path, "key": entry.key, "why": detail,
+                            })
+                        continue
+                applicable.append((entry, sim, keyword))
+            pinned = applicable
+    if pinned:
+        pinned_scored: list[tuple[MemoryEntry, float, dict[str, Any]]] = []
+        for entry, sim, keyword in pinned:
+            written = getattr(entry.provenance, "written_at", None)
+            if written is not None:
+                if written.tzinfo is None:
+                    written = written.replace(tzinfo=UTC)
+                recency = 0.5 ** (max(0.0, (now - written).total_seconds() / 86400.0) / half_life)
+            else:
+                recency = 0.0
+            artifact = _is_artifact(entry)
+            procedure = _is_procedure(entry)
+            evidence = _evidence_signal(entry)
+            bd = {
+                "semantic": sim,
+                "relevance": req.semantic_weight * sim + keyword_weight * keyword,
+                "recency": recency,
+                "confidence": float(entry.confidence),
+                "keyword": keyword,
+                "evidence": evidence,
+                "evidence_status": entry.evidence_status,
+                "is_artifact": artifact,
+                "is_procedure": procedure,
+                "pinned": branch,
+            }
+            conf = float(entry.confidence)
+            pinned_scored.append((
+                entry, _composite(sim, recency, conf, keyword, artifact, evidence, procedure), bd,
+            ))
+        pinned_scored.sort(key=lambda t: t[1], reverse=True)
+        pinned_keys = {e.entry_key for e, _, _ in pinned_scored}
+        scored = pinned_scored + [t for t in scored if t[0].entry_key not in pinned_keys]
+        # Once, at the head: a pinned entry the record has discredited is not
+        # also handed back in the avoid list. The row carries its evidence.
+        avoided = [e for e in avoided if e.entry_key not in pinned_keys]
+
     # 10. Reuse accounting. Semantic retrieval is the primary way memories
     #     (e.g. browser-extension clips) get surfaced and used, but it
     #     historically incremented no counter — so value metrics (rework
@@ -3620,6 +4015,10 @@ async def retrieve_entries(
             # agent reads the top-level field.
             data["evidence_status"] = breakdown.get("evidence_status")
             data["_rescued"] = True
+        if breakdown.get("pinned"):
+            # Changed on the branch this read was routed to (step 9b): the
+            # treatment of the canary arm, ahead of the ranking on purpose.
+            data["_pinned"] = True
         if req.compact:
             data["_breakdown"] = {"evidence_status": breakdown.get("evidence_status")}
         else:
@@ -3705,8 +4104,18 @@ async def retrieve_entries(
 @app.get("/api/v1/stats")
 async def get_stats(
     request: Request,
+    breakdown: bool = True,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
+    """Aggregate stats for the account.
+
+    ``breakdown=false`` leaves out the per-agent and per-entity count maps
+    (``agents``, ``entities``), which on a large account are most of the
+    response; ``total_agents``, ``total_entities`` and the
+    ``entity_confidence`` buckets stay, on every route to this answer — the
+    SQL aggregate and the loaded-and-filtered one alike. A dashboard hero
+    wants the totals; the health page wants the buckets.
+    """
     mem = _get_memory()
 
     scope, py_vis = _visibility_scope(request)
@@ -3719,15 +4128,24 @@ async def get_stats(
         "oldest_entry" vs "oldest_entry_at") is dropped to None. Both scoped
         routes below produce the same keys as the unscoped aggregate."""
         if py_vis is None:
-            try:
-                # The visibility rule as a predicate in the aggregate: a
-                # per-user dashboard gets the same query an admin does. Only
-                # passed when there is one; the ABC default takes no scope.
-                if scope is None:
-                    return mem._adapter.stats_extended()
-                return mem._adapter.stats_extended(scope=scope)
-            except TypeError:
-                pass  # an adapter without SQL scoping; reduce over its rows
+            # The visibility rule as a predicate in the aggregate: a
+            # per-user dashboard gets the same query an admin does. Only
+            # passed when there is one; the ABC default takes no scope.
+            kwargs: dict[str, Any] = {}
+            if scope is not None:
+                kwargs["scope"] = scope
+            # Without the maps first; then as the adapter knows the call. An
+            # adapter that takes neither keyword reduces over its rows below.
+            attempts = [kwargs] if breakdown else [{**kwargs, "breakdown": False}, kwargs]
+            for attempt in attempts:
+                try:
+                    stats = mem._adapter.stats_extended(**attempt)
+                except TypeError:
+                    continue
+                if not breakdown:
+                    stats.pop("agents", None)
+                    stats.pop("entities", None)
+                return stats
         # A filter that can only run over loaded entries: load, filter,
         # aggregate with the same shared helper the adapter defaults use.
         from amfs_core.aggregates import extended_stats_from_entries
@@ -3736,7 +4154,11 @@ async def get_stats(
         vis = py_vis if py_vis is not None else _active_visibility_filter(request)
         if vis is not None:
             entries = vis.filter_entries(entries)
-        return extended_stats_from_entries(entries)
+        stats = extended_stats_from_entries(entries)
+        if not breakdown:
+            stats.pop("agents", None)
+            stats.pop("entities", None)
+        return stats
 
     stats = await _offload(_db_executor, _stats)
     return json.loads(json.dumps(stats, default=str))
@@ -5104,7 +5526,14 @@ async def save_trace(
 ) -> dict[str, Any]:
     """Persist a decision trace (used by HttpAdapter.save_trace)."""
     body = await req.json()
-    trace = DecisionTrace.model_validate(body)
+    # The body is read raw (the seal below prefers it to the parsed model), so
+    # validation is explicit here and a malformed trace is a 422 naming the
+    # field, as it would be for a typed body — not a 500 with the detail in
+    # the server log only.
+    try:
+        trace = DecisionTrace.model_validate(body)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors(include_url=False)) from exc
     mem = _get_memory()
     if trace.agent_id:
         _link_agent_owner_once(req, trace.agent_id, mem.namespace)
@@ -5646,6 +6075,7 @@ def reuse_summary(
     days: int = 7,
     limit: int = 10,
     agent: str | None = None,
+    writer: str | None = None,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Reuse over a window: how much, of what, by which agents, and across which.
@@ -5668,6 +6098,12 @@ def reuse_summary(
     ``limit`` by reuse volume first, so a caller keeping the rows that name its
     agent would silently lose a quiet agent's reuse and could not tell that apart
     from the agent having none.
+
+    ``writer`` narrows it to one agent as WRITER — the reads of memory it wrote —
+    so ``cross_surface`` is exactly how many times other agents took from it and
+    ``by_agent`` names them. Same reasoning, other side of the handoff. Both may
+    be given. The answer echoes ``writer`` so a caller can tell this server
+    applied it from an older one that ignored the parameter.
     """
     days = max(1, min(int(days or 7), 365))
     limit = max(1, min(int(limit or 10), 100))
@@ -5685,27 +6121,32 @@ def reuse_summary(
             "reason": "reuse events need the Postgres adapter",
         }
     agent = agent or None
+    writer = writer or None
     kwargs: dict[str, Any] = {
         "since": since,
         "limit": limit,
         "visible_agents": _visible_agent_ids(request),
     }
-    if agent is not None:
-        # This server carries no dependency on the adapter package — it duck-types
-        # whatever backend it was handed — so an adapter predating the parameter is
-        # a real deployment, not a hypothetical. Passing the keyword blindly would
-        # raise TypeError and take out the whole endpoint, including the
-        # account-wide answer that still works. Refusing just the narrowed question
-        # keeps a stale pairing degraded rather than broken.
-        if "agent" not in inspect.signature(summarise).parameters:
+    # This server carries no dependency on the adapter package — it duck-types
+    # whatever backend it was handed — so an adapter predating a parameter is a
+    # real deployment, not a hypothetical. Passing the keyword blindly would
+    # raise TypeError and take out the whole endpoint, including the
+    # account-wide answer that still works. Refusing just the narrowed question
+    # keeps a stale pairing degraded rather than broken.
+    accepted = inspect.signature(summarise).parameters
+    for name, value, side in (("agent", agent, "agent"), ("writer", writer, "writer")):
+        if value is None:
+            continue
+        if name not in accepted:
             return {
                 "since": since.isoformat(),
                 "days": days,
                 "available": False,
                 "agent": agent,
-                "reason": "this backend cannot scope reuse to one agent",
+                "writer": writer,
+                "reason": f"this backend cannot scope reuse to one {side}",
             }
-        kwargs["agent"] = agent
+        kwargs[name] = value
 
     summary = summarise(**kwargs)
     return {
@@ -5713,8 +6154,62 @@ def reuse_summary(
         "days": days,
         "available": True,
         "agent": agent,
+        "writer": writer,
         **summary,
     }
+
+
+@app.get("/api/v1/learning")
+def learning_curve_endpoint(
+    request: Request,
+    days: int = 90,
+    agent: str | None = None,
+    entity_path: str | None = None,
+    window: int = 10,
+    episodes: int = 12,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """The number: success over sessions, and recovery after regime shifts.
+
+    ``amfs_core.learning.learning_curve`` over the outcomes in the window —
+    the agent's sessions in order, cut into ``episodes`` bins, with the first
+    and latest ``window`` sessions as the headline, and for every entry the
+    agent relied on that was discredited in the window, how many sessions it
+    took the rolling rate to get back to where it was. ``verified_share`` says
+    how much of the curve was decided outside the agent.
+
+    Scoped to the agents the caller may see, like ``/reuse``; ``agent`` and
+    ``entity_path`` narrow on top of that. ``days`` is clamped so a
+    hand-written URL cannot ask for an unbounded scan, and the series is the
+    newest 5000 sessions in the window: ``truncated`` says when there were
+    more, and ``span.from`` where the curve actually starts.
+    """
+    from amfs_core.learning import MAX_EPISODES, learning_curve
+
+    days = max(1, min(int(days or 90), 365))
+    window = max(3, min(int(window or 10), 100))
+    episodes = max(1, min(int(episodes or 12), MAX_EPISODES))
+    since = datetime.now(UTC) - timedelta(days=days)
+    head = {
+        "since": since.isoformat(),
+        "days": days,
+        "agent": agent or None,
+        "entity_path": entity_path or None,
+    }
+    adapter = _get_memory()._adapter
+    series = getattr(adapter, "learning_series", None)
+    if series is None:
+        return {**head, "available": False, "reason": "the learning curve needs the Postgres adapter"}
+    data = series(
+        since=since,
+        agent=agent or None,
+        entity_path=entity_path or None,
+        visible_agents=_visible_agent_ids(request),
+    )
+    curve = learning_curve(
+        data.get("sessions") or [], shifts=data.get("shifts") or [], window=window, episodes=episodes
+    )
+    return {**head, "available": True, "truncated": bool(data.get("truncated")), **curve}
 
 
 @app.get("/api/v1/agents/{agent_id:path}/memory-graph")
@@ -6264,10 +6759,19 @@ def upsert_graph_edge_endpoint(
 # ──────────────────────────────────────────────────────────────────────
 
 
+#: The most enriched agents one page may ask for.
+_ENRICHED_AGENTS_PAGE_MAX = 500
+
+
 @app.get("/api/v1/agents/enriched")
 def list_agents_enriched(
     request: Request,
     histograms: bool = True,
+    q: str | None = Query(None, max_length=200),
+    platform: str | None = Query(None, max_length=100),
+    sort: str = Query("last_active"),
+    limit: int | None = Query(None, ge=1, le=_ENRICHED_AGENTS_PAGE_MAX),
+    offset: int = Query(0, ge=0),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Return enriched agent info with activity histograms.
@@ -6275,15 +6779,58 @@ def list_agents_enriched(
     Pass histograms=false to skip the per-agent activity histogram queries —
     summary consumers (e.g. the dashboard overview's agent count) only need
     the roster, and the histograms cost up to 100 extra queries per call.
+
+    With ``limit`` the response is one page, searched by ``q``, kept to one
+    ``platform`` and ordered by ``sort`` (``last_active``,
+    ``entries_written``, ``created_at``, ``agent_id``), and carries
+    ``total`` — the number of agents the caller may see that match — and
+    ``active_7d``, how many of those were active in the last seven days.
+    Paging and visibility both happen in SQL, so a page is a page of visible
+    agents; an adapter without those parameters is filtered here, unpaged,
+    as before. Without ``limit`` the whole roster is returned, 3 MB on a
+    6,000-agent account — a directory should page.
     """
     mem = _get_memory()
-    agents = mem._adapter.list_agents_enriched(namespace=mem.namespace)
     allowed = _visible_agent_ids(request)
-    if allowed is not None:
-        agents = [
-            a for a in agents
-            if (a.get("agent_id") or a.get("agentId", "")) in allowed
-        ]
+    paged = limit is not None
+    narrowing: dict[str, Any] = {
+        "agent_ids": sorted(allowed) if allowed is not None else None,
+        "q": q or None,
+        "platform": platform or None,
+        "sort": sort,
+    }
+    try:
+        agents = mem._adapter.list_agents_enriched(
+            namespace=mem.namespace, limit=limit, offset=offset, **narrowing,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TypeError:
+        # An adapter without search or paging: the visibility rule runs here
+        # and the roster is whole.
+        paged = False
+        agents = mem._adapter.list_agents_enriched(namespace=mem.namespace)
+        if allowed is not None:
+            agents = [
+                a for a in agents
+                if (a.get("agent_id") or a.get("agentId", "")) in allowed
+            ]
+    total: int | None = None
+    active_7d: int | None = None
+    if paged:
+        total = int(agents[0].pop("total", 0)) if agents else 0
+        active_7d = int(agents[0].pop("active_7d", 0)) if agents else 0
+        for agent in agents[1:]:
+            agent.pop("total", None)
+            agent.pop("active_7d", None)
+        if not agents and offset:
+            # A page past the end says nothing about the count; the first
+            # page does.
+            first = mem._adapter.list_agents_enriched(
+                namespace=mem.namespace, limit=1, offset=0, **narrowing,
+            )
+            total = int(first[0].get("total", 0)) if first else 0
+            active_7d = int(first[0].get("active_7d", 0)) if first else 0
     if histograms:
         for agent in agents[:100]:
             aid = agent.get("agent_id") or agent.get("agentId", "")
@@ -6291,7 +6838,12 @@ def list_agents_enriched(
                 agent["activity_histogram"] = mem._adapter.get_agent_activity_histogram(
                     aid, days=7, namespace=mem.namespace,
                 )
-    return {"agents": agents}
+    out: dict[str, Any] = {"agents": agents}
+    if paged:
+        out.update({
+            "total": total, "active_7d": active_7d, "limit": limit, "offset": offset,
+        })
+    return out
 
 
 @app.get("/api/v1/agent-groups")
@@ -6530,17 +7082,45 @@ def dismiss_cluster_suggestion_endpoint(
 
 
 # The cluster compile walks every agent in the namespace and is pure Python
-# CPU — minutes on an account with thousands of agents. The dashboard's Agents
-# page POSTs it on every mount, so without a guard two tabs or one reload queue
-# a second full compile behind the first while the process is pinned at one
-# core. One compile at a time per process, and a compile that finished within
-# the window is reused rather than repeated; the caller's ``ok`` is unchanged
-# because it only ever waited for the suggestions to be refreshed.
+# CPU. The dashboard's Agents page POSTs it on every mount, so without a guard
+# two tabs or one reload queue a second compile behind the first. One compile
+# at a time per process, in the background; a compile that finished within the
+# window — on any instance, read from the stored digest — is reused rather
+# than repeated. The per-process timestamp is the fallback for an adapter
+# that cannot say when the digest was compiled.
 _CLUSTER_RECOMPUTE_MIN_INTERVAL_S = float(
     os.environ.get("AMFS_CLUSTER_RECOMPUTE_MIN_INTERVAL_S", "300"),
 )
 _cluster_recompute_lock = threading.Lock()
 _cluster_recompute_last: dict[str, float] = {}
+_cluster_recompute_inflight: set[str] = set()
+
+
+def _cluster_digest_compiled_at(adapter: Any, namespace: str) -> datetime | None:
+    """When this account's cluster digest was last compiled, or None."""
+    get = getattr(adapter, "get_digest", None)
+    if not callable(get):
+        return None
+    try:
+        from amfs_core.models import DigestType
+
+        digest = get(DigestType.AGENT_CLUSTERS, f"account:{namespace}", namespace=namespace)
+    except Exception:  # noqa: BLE001 - a failed lookup means "unknown", not "fresh"
+        logger.debug("Cluster digest lookup failed", exc_info=True)
+        return None
+    return getattr(digest, "compiled_at", None) if digest is not None else None
+
+
+def _cluster_compile_is_fresh(adapter: Any, namespace: str, window_key: str) -> bool:
+    """Whether a compile finished inside the reuse window, on any instance."""
+    compiled_at = _cluster_digest_compiled_at(adapter, namespace)
+    if compiled_at is not None:
+        if compiled_at.tzinfo is None:
+            compiled_at = compiled_at.replace(tzinfo=UTC)
+        age = (datetime.now(UTC) - compiled_at).total_seconds()
+        return age < _CLUSTER_RECOMPUTE_MIN_INTERVAL_S
+    last = _cluster_recompute_last.get(window_key)
+    return last is not None and time.monotonic() - last < _CLUSTER_RECOMPUTE_MIN_INTERVAL_S
 
 
 def _recompute_window_key(request: Request, namespace: str) -> str:
@@ -6574,13 +7154,16 @@ def recompute_clusters(
     force: bool = False,
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    """Trigger recomputation of agent clusters.
+    """Schedule a recomputation of agent clusters and return.
 
-    Runs on the threadpool (plain ``def``): the compile is CPU-bound Python and
-    used to freeze the event loop for its whole duration. ``force=true`` skips
-    the reuse window but still waits its turn behind a compile in flight. The
-    window is per tenant account; the lock is per process, because the compile
-    is what pins the core.
+    The caller reads the result through ``/agent-groups/suggestions``, which
+    is what it did after waiting here before; the compile is CPU-bound Python
+    that ran inside this request for minutes on a large account, with the
+    Agents page POSTing it on every mount. The reuse window is the stored
+    digest's ``compiled_at``, so it holds across every instance serving the
+    account — a per-process window let each of twelve instances compile the
+    same account once. ``force=true`` skips the window but still yields to a
+    compile in flight in this process.
     """
     try:
         from amfs_cortex.compiler import DigestCompiler
@@ -6600,16 +7183,27 @@ def recompute_clusters(
     ns = mem.namespace
     window_key = _recompute_window_key(request, ns)
     with _cluster_recompute_lock:
-        last = _cluster_recompute_last.get(window_key)
-        if (
-            not force
-            and last is not None
-            and time.monotonic() - last < _CLUSTER_RECOMPUTE_MIN_INTERVAL_S
-        ):
+        if window_key in _cluster_recompute_inflight:
+            return {"ok": True, "skipped": "in_progress"}
+        if not force and _cluster_compile_is_fresh(adapter, ns, window_key):
             return {"ok": True, "skipped": "recent"}
-        DigestCompiler(adapter=adapter, namespace=ns).compile(f"cluster:account:{ns}")
-        _cluster_recompute_last[window_key] = time.monotonic()
-    return {"ok": True}
+        _cluster_recompute_inflight.add(window_key)
+
+    def _compile() -> None:
+        try:
+            DigestCompiler(adapter=adapter, namespace=ns).compile(f"cluster:account:{ns}")
+            with _cluster_recompute_lock:
+                _cluster_recompute_last[window_key] = time.monotonic()
+        except Exception:
+            logger.exception("Agent cluster compile failed for %s", window_key)
+        finally:
+            with _cluster_recompute_lock:
+                _cluster_recompute_inflight.discard(window_key)
+
+    # The copied context carries the request's tenant into the thread, the
+    # way every other background write here does.
+    _bg_executor.submit(contextvars.copy_context().run, _compile)
+    return {"ok": True, "scheduled": True}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -8198,29 +8792,132 @@ def graph_backfill(
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _compute_tiers(entries: list) -> tuple[dict[str, int], dict[str, float]]:
-    """Score entries and assign HMO tiers (Hot/Warm/Archive)."""
-    from amfs_core.tiering import PriorityScorer, TierAssigner
+def _tier_bands() -> tuple[int, int]:
+    """``(hot_capacity, warm_capacity)``: the tiers are rank bands over the
+    priority order — the top ``hot`` entries are Hot, the next ``warm`` Warm,
+    the rest Archive (``amfs_core.tiering.TierAssigner``)."""
+    from amfs_core.models import TierConfig
+
+    cfg = TierConfig()
+    return int(cfg.hot_capacity), int(cfg.warm_capacity)
+
+
+def _tier_split(total: int) -> tuple[int, int, int]:
+    """How many of *total* ranked entries fall in each band."""
+    hot_cap, warm_cap = _tier_bands()
+    hot = min(hot_cap, total)
+    warm = min(warm_cap, max(0, total - hot_cap))
+    return hot, warm, max(0, total - hot_cap - warm_cap)
+
+
+def _tier_window(tier: int, limit: int) -> tuple[int, int]:
+    """``(offset, limit)`` into the priority ranking for one tier's page."""
+    hot_cap, warm_cap = _tier_bands()
+    if tier == 1:
+        return 0, min(limit, hot_cap)
+    if tier == 2:
+        return hot_cap, min(limit, warm_cap)
+    return hot_cap + warm_cap, limit
+
+
+#: Entries per round trip when the tiers have to be scored in Python.
+_TIER_SCAN_PAGE = 2000
+
+
+def _tier_scan(
+    mem: AgentMemory,
+    agent_id: str | None,
+    *,
+    scope: Any | None,
+    py_filter: Any | None,
+    vis: Any | None,
+    keep: int,
+) -> tuple[int, float, list[tuple[float, MemoryEntry]]]:
+    """Score the visible entries a page at a time, keeping only the top *keep*.
+
+    The fallback for a visibility rule that only exists in Python or an
+    adapter that cannot order by the score. Bounded in memory: a page is
+    scored, folded into the count and the running sum, and all but the top
+    *keep* are dropped before the next page is read.
+
+    The caller's visibility is ``(scope, py_filter)`` as ``_visibility_scope``
+    gave it: *scope* narrows each page in SQL, *py_filter* runs over the
+    loaded rows. An adapter that cannot take a scope or page (the in-memory
+    ones) gets one unpaged ``list()``, and then *vis* — the filter object the
+    scope was derived from — runs over it, so a rule that exists only as a
+    predicate is still applied rather than dropped. Returns
+    ``(count, score_sum, top)`` with *top* highest first. Synchronous: call
+    it via ``_offload``.
+    """
+    import heapq
+
+    from amfs_core.tiering import PriorityScorer
 
     scorer = PriorityScorer()
-    assigner = TierAssigner()
-    return assigner.assign_with_scores(entries, scorer)
+    now = datetime.now(UTC)
+    count = 0
+    score_sum = 0.0
+    # A min-heap of (score, tiebreak, entry); the smallest is evicted first.
+    top: list[tuple[float, int, MemoryEntry]] = []
+    seq = 0
+
+    def fold(entries: list[MemoryEntry], rule: Any | None) -> None:
+        nonlocal count, score_sum, seq
+        if rule is not None:
+            entries = rule.filter_entries(entries)
+        for e in entries:
+            if agent_id and e.provenance.agent_id != agent_id:
+                continue
+            s = scorer.score(e, now=now)
+            count += 1
+            score_sum += s
+            seq -= 1  # earlier rows win ties, as the stable sort did
+            item = (s, seq, e)
+            if len(top) < keep:
+                heapq.heappush(top, item)
+            elif item > top[0]:
+                heapq.heapreplace(top, item)
+
+    offset = 0
+    adapter = mem._adapter
+    while True:
+        try:
+            page = adapter.list(
+                agent_id=agent_id, scope=scope, limit=_TIER_SCAN_PAGE, offset=offset
+            )
+        except TypeError:
+            # No scope or paging in this adapter: the whole account, and the
+            # visibility rule — whichever form it took — applied here.
+            rule = py_filter if py_filter is not None else (vis if scope is not None else None)
+            fold(_entries_by_agent(mem, agent_id) if agent_id else mem.list(), rule)
+            break
+        fold(page, py_filter)
+        if len(page) < _TIER_SCAN_PAGE:
+            break
+        offset += _TIER_SCAN_PAGE
+    ranked = sorted(top, reverse=True)
+    return count, score_sum, [(s, e) for s, _, e in ranked]
 
 
-def _tiered_entries(
-    mem: AgentMemory, vis: Any | None, agent_id: str | None
-) -> tuple[list[MemoryEntry], tuple[dict[str, int], dict[str, float]]]:
-    """The entries a tiers page scores, and their tiers and scores.
+def _tiers_in_sql(adapter: Any, py_filter: Any | None) -> bool:
+    """Whether the tiers can be read as one ranked page from the database:
+    the adapter orders by the score and no Python-only visibility rule hides
+    an unknown share of the rows."""
+    return py_filter is None and callable(getattr(adapter, "list_by_priority", None))
 
-    The tiering is a Python scorer over the whole visible set, so the set has
-    to be loaded; this loads only the named agent's rows when there is one
-    and runs the load, the visibility pass and the scoring together off the
-    event loop. Synchronous: call it via ``_offload``.
-    """
-    entries = _entries_by_agent(mem, agent_id) if agent_id else mem.list()
-    if vis is not None:
-        entries = vis.filter_entries(entries)
-    return entries, _compute_tiers(entries)
+
+def _tier_entry_dict(e: MemoryEntry, tier: int, score: float) -> dict[str, Any]:
+    return {
+        "entity_path": e.entity_path,
+        "key": e.key,
+        "confidence": e.confidence,
+        "tier": tier,
+        "priority_score": round(score, 6),
+        "recall_count": getattr(e, "recall_count", 0),
+        "importance_score": getattr(e, "importance_score", None),
+        "written_at": e.provenance.written_at.isoformat(),
+        "agent_id": e.provenance.agent_id,
+    }
 
 
 @app.get("/api/v1/pro/tiers/distribution")
@@ -8229,32 +8926,36 @@ async def tiers_distribution(
     agent_id: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    """Return HMO tier distribution (Hot / Warm / Archive)."""
-    entries, (tiers, scores) = await _offload(
-        _db_executor, _tiered_entries, _get_memory(), _active_visibility_filter(request), agent_id
-    )
+    """Return HMO tier distribution (Hot / Warm / Archive).
 
-    hot = warm = archive = scored_count = 0
-    score_sum = 0.0
-    for key, tier in tiers.items():
-        if tier == 1:
-            hot += 1
-        elif tier == 2:
-            warm += 1
-        else:
-            archive += 1
-        s = scores.get(key)
-        if s is not None:
-            scored_count += 1
-            score_sum += s
+    The tiers are rank bands over the priority score, so the distribution is
+    a count and a mean: the database computes both (``priority_stats``) and
+    no entry is loaded. The previous version listed the whole account and
+    scored it in Python; on a 420K-entry account the two requests the tiers
+    page makes together exhausted an 8 GiB instance and took every other
+    request on it down with them.
+    """
+    mem = _get_memory()
+    scope, py_filter = _visibility_scope(request)
+    if _tiers_in_sql(mem._adapter, py_filter):
+        total, mean = await _offload(
+            _db_executor, mem._adapter.priority_stats, scope=scope, agent_id=agent_id
+        )
+    else:
+        total, score_sum, _top = await _offload(
+            _db_executor, _tier_scan, mem, agent_id,
+            scope=scope, py_filter=py_filter, vis=_active_visibility_filter(request), keep=1,
+        )
+        mean = score_sum / total if total else None
 
+    hot, warm, archive = _tier_split(total)
     return {
-        "total": len(entries),
+        "total": total,
         "hot": hot,
         "warm": warm,
         "archive": archive,
-        "scored": scored_count,
-        "avg_priority_score": round(score_sum / scored_count, 6) if scored_count else None,
+        "scored": total,
+        "avg_priority_score": round(mean, 6) if mean is not None else None,
     }
 
 
@@ -8266,28 +8967,28 @@ async def tiers_entries(
     agent_id: str | None = Query(None),
     _auth: str | None = Depends(verify_api_key),
 ) -> list[dict[str, Any]]:
-    """Return entries for a given HMO tier as a flat array."""
-    entries, (tier_map, score_map) = await _offload(
-        _db_executor, _tiered_entries, _get_memory(), _active_visibility_filter(request), agent_id
+    """Return entries for a given HMO tier as a flat array, highest priority
+    first. One page of the ranking, read at the tier's offset."""
+    mem = _get_memory()
+    scope, py_filter = _visibility_scope(request)
+    offset, page = _tier_window(tier, limit)
+    if _tiers_in_sql(mem._adapter, py_filter):
+        from amfs_core.tiering import PriorityScorer
+
+        now = datetime.now(UTC)
+        entries = await _offload(
+            _db_executor, mem._adapter.list_by_priority,
+            scope=scope, agent_id=agent_id, limit=page, offset=offset, now=now,
+        )
+        scorer = PriorityScorer()
+        return [_tier_entry_dict(e, tier, scorer.score(e, now=now)) for e in entries]
+
+    _count, _sum, top = await _offload(
+        _db_executor, _tier_scan, mem, agent_id,
+        scope=scope, py_filter=py_filter, vis=_active_visibility_filter(request),
+        keep=offset + page,
     )
-
-    filtered = [e for e in entries if tier_map.get(e.entry_key) == tier]
-    filtered.sort(key=lambda e: score_map.get(e.entry_key, 0.0), reverse=True)
-
-    return [
-        {
-            "entity_path": e.entity_path,
-            "key": e.key,
-            "confidence": e.confidence,
-            "tier": tier,
-            "priority_score": round(score_map.get(e.entry_key, 0.0), 6),
-            "recall_count": getattr(e, "recall_count", 0),
-            "importance_score": getattr(e, "importance_score", None),
-            "written_at": e.provenance.written_at.isoformat(),
-            "agent_id": e.provenance.agent_id,
-        }
-        for e in filtered[:limit]
-    ]
+    return [_tier_entry_dict(e, tier, s) for s, e in top[offset:offset + page]]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -8697,9 +9398,20 @@ def list_cortex_digests(
     request: Request,
     digest_type: str | None = Query(None),
     scope: str | None = Query(None),
+    written_by: str | None = Query(None, max_length=200),
+    limit: int | None = Query(None, ge=1, le=500),
     _auth: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
-    """List compiled digests, optionally filtered by type and scope."""
+    """List compiled digests, optionally filtered by type and scope.
+
+    The filters and ``limit`` (most recently compiled first) apply in SQL: a
+    page asking for one agent's brief gets that brief, not every brief on the
+    account to pick its own out of. ``written_by`` keeps the digests whose
+    scope is an entity that agent has written to — an agent page's "briefed
+    with" list without every entity digest on the account. A restricted
+    caller's visibility is applied after, so with ``limit`` such a caller may
+    receive fewer.
+    """
     try:
         from amfs_postgres.adapter import PostgresAdapter
         from amfs_core.models import DigestType
@@ -8709,9 +9421,13 @@ def list_cortex_digests(
         if isinstance(adapter, PostgresAdapter):
             dt = DigestType(digest_type) if digest_type else None
             namespace = getattr(adapter, "_namespace", "default")
-            digests = adapter.list_digests(digest_type=dt, namespace=namespace)
-            if scope:
-                digests = [d for d in digests if d.scope == scope]
+            digests = adapter.list_digests(
+                digest_type=dt,
+                namespace=namespace,
+                scope=scope or None,
+                written_by=written_by or None,
+                limit=limit,
+            )
 
             vis = _get_visibility_filter(request)
             if vis is not None and vis.should_filter():
@@ -8921,6 +9637,46 @@ def list_consolidation_proposals(
     }
 
 
+_CONSOLIDATION_READY_MIN_ENTRIES = 10
+_CONSOLIDATION_READY_LIMIT = 10
+
+
+def _consolidation_ready_entities(request: Request, adapter: Any) -> list[str]:
+    """Entity paths with enough entries to consolidate, largest first.
+
+    One GROUP BY where the adapter has it and the caller's visibility is a
+    SQL predicate (or absent); otherwise the rule runs over loaded entries,
+    which is the only correct answer for a filter SQL cannot express.
+    """
+    ready = getattr(adapter, "consolidation_ready_entities", None)
+    scope, py_vis = _visibility_scope(request)
+    if callable(ready) and py_vis is None:
+        try:
+            kwargs: dict[str, Any] = {
+                "min_entries": _CONSOLIDATION_READY_MIN_ENTRIES,
+                "limit": _CONSOLIDATION_READY_LIMIT,
+            }
+            if scope is not None:
+                kwargs["scope"] = scope
+            return list(ready(**kwargs))
+        except TypeError:
+            pass  # an adapter without SQL scoping; reduce over its rows
+    entries = adapter.list()
+    vis = py_vis if py_vis is not None else _active_visibility_filter(request)
+    if vis is not None:
+        entries = vis.filter_entries(entries)
+    entity_counts: dict[str, int] = {}
+    for e in entries:
+        entity_counts[e.entity_path] = entity_counts.get(e.entity_path, 0) + 1
+    out: list[str] = []
+    for ep, count in sorted(entity_counts.items(), key=lambda x: (-x[1], x[0])):
+        if count >= _CONSOLIDATION_READY_MIN_ENTRIES:
+            out.append(ep)
+        if len(out) >= _CONSOLIDATION_READY_LIMIT:
+            break
+    return out
+
+
 @app.get("/api/v1/cortex/consolidation/status")
 def consolidation_status(
     request: Request,
@@ -8957,17 +9713,7 @@ def consolidation_status(
 
     entities_ready: list[str] = []
     try:
-        entries = adapter.list()
-        if vis is not None:
-            entries = vis.filter_entries(entries)
-        entity_counts: dict[str, int] = {}
-        for e in entries:
-            entity_counts[e.entity_path] = entity_counts.get(e.entity_path, 0) + 1
-        for ep, count in sorted(entity_counts.items(), key=lambda x: -x[1]):
-            if count >= 10:
-                entities_ready.append(ep)
-            if len(entities_ready) >= 10:
-                break
+        entities_ready = _consolidation_ready_entities(request, adapter)
     except Exception:
         pass
 
@@ -9229,11 +9975,18 @@ def _start_embedded_cortex() -> None:
         # adapter grew list_scopes(), but the knob stays: 0 disables it on
         # deployments where the event path is trusted to compile every scope.
         catchup_s = float(os.environ.get("AMFS_CORTEX_CATCHUP_INTERVAL_S", "300"))
+        # Tier A consolidation walks every tenant entity by entity. One instance
+        # of the fleet runs it per interval (advisory lock inside the worker);
+        # 0 disables it on deployments that consolidate on demand instead.
+        consolidation_s = float(
+            os.environ.get("AMFS_CORTEX_CONSOLIDATION_INTERVAL_S", "21600")
+        )
         worker = CortexWorker(
             dsn=dsn,
             compiler=compiler,
             use_advisory_lock=False,
             catchup_interval_s=catchup_s,
+            consolidation_interval_s=consolidation_s,
             tenant_provider=tenant_provider,
         )
 

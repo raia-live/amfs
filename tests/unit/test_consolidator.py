@@ -54,6 +54,10 @@ def _entry(
 
 def _mock_adapter(entries=None):
     adapter = MagicMock()
+    # A store without the scope aggregate: run() takes the whole-store listing
+    # path these tests exercise. The entity-at-a-time path has its own tests
+    # in test_consolidation_bounded_pass.py.
+    adapter.list_scopes = None
     adapter.list.return_value = entries or []
     adapter.search.return_value = entries or []
     adapter.write.return_value = None

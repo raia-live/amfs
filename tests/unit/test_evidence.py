@@ -356,3 +356,140 @@ class TestReviewFindings:
         assert updates == []
         assert new.confidence == pytest.approx(0.9)
         assert (new.success_count, new.failure_count) == (0, 0)
+
+
+class TestVerification:
+    """``verified_by`` on the outcome is the verification factor of the weight."""
+
+    def test_an_agent_declared_outcome_keeps_the_weight_it_always_had(self) -> None:
+        assert ev.verification_weight(False) == 1.0
+        assert ev.evidence_weight("failure", current_confidence=0.7) == pytest.approx(3.4)
+
+    def test_a_verified_outcome_weighs_one_and_a_half_times_the_agents_word(self) -> None:
+        assert ev.VERIFIED_EVIDENCE_WEIGHT == 1.5
+        told = ev.evidence_weight("failure", current_confidence=0.7)
+        proven = ev.evidence_weight("failure", current_confidence=0.7, verified=True)
+        assert proven == pytest.approx(told * 1.5)
+
+    def test_verified_by_is_read_off_the_session_attributes(self) -> None:
+        plain = _record(OutcomeType.FAILURE, ["svc/mod/rule"])
+        assert ev.outcome_verified_by(plain) is None
+        plain.session_metadata = {"attributes": {"verified_by": " CI "}}
+        assert ev.outcome_verified_by(plain) == "ci"
+        plain.session_metadata = {"verified_by": "monitor:latency"}
+        assert ev.outcome_verified_by(plain) == "monitor:latency"
+        plain.session_metadata = {"attributes": {"verified_by": ""}}
+        assert ev.outcome_verified_by(plain) is None
+
+    def test_apply_record_passes_verification_through(self) -> None:
+        entry = _entry(0.7)
+        told = _record(OutcomeType.FAILURE, ["svc/mod/rule"])
+        proven = _record(OutcomeType.FAILURE, ["svc/mod/rule"])
+        proven.session_metadata = {"attributes": {"verified_by": "ci"}}
+        after_told, _ = ev.apply_record_to_entry(entry, told, model="evidence")
+        after_proven, _ = ev.apply_record_to_entry(entry, proven, model="evidence")
+        assert after_proven.evidence_failure == pytest.approx(after_told.evidence_failure * 1.5)
+        assert after_proven.confidence < after_told.confidence
+
+    def test_the_multiplicative_model_ignores_verification(self) -> None:
+        entry = _entry(0.7)
+        proven = _record(OutcomeType.FAILURE, ["svc/mod/rule"])
+        proven.session_metadata = {"attributes": {"verified_by": "ci"}}
+        a, _ = ev.apply_record_to_entry(entry, proven, model="multiplicative")
+        b, _ = ev.apply_record_to_entry(
+            entry, _record(OutcomeType.FAILURE, ["svc/mod/rule"]), model="multiplicative"
+        )
+        assert a.confidence == b.confidence
+
+
+class TestUpliftCredit:
+    """Credit by uplift: an entry's share of the split follows whether the
+    sessions that read it fared better than the ones that did not."""
+
+    def test_no_measurement_is_the_uniform_split(self) -> None:
+        assert ev.uplift_credit(None, 0, success=True) == 1.0
+        assert ev.uplift_credit(0.4, 0, success=False) == 1.0
+
+    def test_an_outcome_that_goes_the_entrys_way_keeps_the_full_share(self) -> None:
+        assert ev.uplift_credit(0.4, 20, success=True) == 1.0
+        assert ev.uplift_credit(-0.4, 20, success=False) == 1.0
+        assert ev.uplift_credit(0.0, 20, success=True) == 1.0
+        assert ev.uplift_credit(0.0, 20, success=False) == 1.0
+
+    def test_an_outcome_against_the_record_takes_less_shrunk_by_sample_size(self) -> None:
+        # uplift -0.5 on a failure-tracking entry, a success arrives:
+        # share = 1 + n/(n+10) * (-0.5)
+        assert ev.uplift_credit(-0.5, 10, success=True) == pytest.approx(0.75)
+        assert ev.uplift_credit(-0.5, 90, success=True) == pytest.approx(0.55)
+        # and the mirror image: a success-tracking entry charged for a failure.
+        assert ev.uplift_credit(0.5, 10, success=False) == pytest.approx(0.75)
+
+    def test_the_share_never_falls_below_the_floor(self) -> None:
+        assert ev.UPLIFT_FLOOR == 0.25
+        assert ev.uplift_credit(-1.0, 10_000, success=True) == pytest.approx(0.25)
+        assert ev.evidence_weight("success", current_confidence=0.5, credit=0.0) == pytest.approx(
+            ev.evidence_weight("success", current_confidence=0.5, credit=0.25)
+        )
+
+    def test_credit_scales_the_weight(self) -> None:
+        full = ev.evidence_weight("failure", current_confidence=0.7)
+        assert ev.evidence_weight("failure", current_confidence=0.7, credit=0.5) == pytest.approx(
+            full * 0.5
+        )
+
+    def test_apply_outcome_reads_credit_off_the_entry(self) -> None:
+        uniform = _entry(0.6)
+        disfavoured = _entry(0.6, uplift=-0.5, uplift_sessions=10)
+        a = ev.apply_outcome(uniform, "success")
+        b = ev.apply_outcome(disfavoured, "success")
+        assert b.evidence_success == pytest.approx(a.evidence_success * 0.75)
+        # A failure on the same entry goes its way: full share.
+        c = ev.apply_outcome(disfavoured, "failure")
+        assert c.evidence_failure == pytest.approx(ev.apply_outcome(uniform, "failure").evidence_failure)
+
+    def test_uplift_from_counts_needs_both_sides(self) -> None:
+        assert ev.uplift_from_counts(3, 4, 1, 4) == (pytest.approx(0.5), 4)
+        assert ev.uplift_from_counts(3, 4, 0, 0) == (None, 0)
+        assert ev.uplift_from_counts(0, 0, 1, 4) == (None, 0)
+        assert ev.uplift_from_counts(2, 10, 1, 3)[1] == 3
+
+    def test_uplift_counts_is_the_reference_definition(self) -> None:
+        def rec(outcome: str, keys: list[str], attempts=None) -> OutcomeRecord:
+            r = _record(OutcomeType(outcome), keys, attempts)
+            r.entity_paths = ["svc/mod"]
+            return r
+
+        history = [
+            rec("success", ["svc/mod/a"]),
+            rec("success", ["svc/mod/a", "svc/mod/b"]),
+            rec("failure", ["svc/mod/b"]),
+            # ``a`` read during a failed attempt counts as read.
+            rec(
+                "success",
+                ["svc/mod/c"],
+                [AttemptRecord(attempt=1, outcome_type="minor_failure", causal_entry_keys=["svc/mod/a"])],
+            ),
+            # Another entity's outcome is not in this entity's sample.
+            OutcomeRecord(
+                outcome_ref="x",
+                outcome_type=OutcomeType.FAILURE,
+                committed_at=datetime.now(UTC),
+                causal_entry_keys=["other/thing/k"],
+                agent_id="a",
+                entity_paths=["other/thing"],
+            ),
+        ]
+        got = ev.uplift_counts(history, "svc/mod", ["a", "b", "c", "never"])
+        # a: read in 3 of 4 sessions, all successes; unread 1 (failure) -> 1.0 - 0.0
+        assert got["a"] == (pytest.approx(1.0), 1)
+        # b: read 2 (1 success), unread 2 (2 successes) -> 0.5 - 1.0
+        assert got["b"] == (pytest.approx(-0.5), 2)
+        # c: read 1 (success), unread 3 (2 successes) -> 1.0 - 2/3
+        assert got["c"] == (pytest.approx(1 / 3), 1)
+        assert got["never"] == (None, 0)
+
+    def test_uplift_counts_finds_the_entity_by_cited_key_when_paths_are_missing(self) -> None:
+        history = [_record(OutcomeType.SUCCESS, ["svc/mod/a"]), _record(OutcomeType.FAILURE, ["svc/mod/b"])]
+        assert history[0].entity_paths == []
+        got = ev.uplift_counts(history, "svc/mod", ["a"])
+        assert got["a"] == (pytest.approx(1.0), 1)

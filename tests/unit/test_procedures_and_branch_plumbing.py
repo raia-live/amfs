@@ -24,6 +24,7 @@ from amfs import AgentMemory
 from amfs_core import evidence as ev
 from amfs_core.models import (
     MEMORY_TYPE_DECAY_MULTIPLIERS,
+    PROCEDURE_OPTIONAL_FIELDS,
     Digest,
     DigestType,
     MemoryEntry,
@@ -34,7 +35,9 @@ from amfs_core.models import (
     environment_of,
     preconditions_status,
     procedure_action_keys,
+    procedure_call_order,
     procedure_issues,
+    procedure_roles,
 )
 from amfs_core.quality import HeuristicQualityEvaluator
 from amfs_cortex.briefing import BriefingService
@@ -46,6 +49,15 @@ PROCEDURE = {
     "steps": ["issue new key", "deploy readers with both", "revoke old key"],
     "on_failure": "re-enable the old key; it stays valid for 24h",
     "verify": "no 401s in the gateway log for 10 minutes",
+}
+
+WORKFLOW = {
+    "goal": "Triage a support ticket across the planner and the executor",
+    "steps": ["planner drafts the plan", "executor runs it", "executor reports back"],
+    "verify": "the ticket carries a resolution note",
+    "roles": {"planner": "drafts the plan", "executor": "runs it one tool per step"},
+    "call_order": ["planner", "executor"],
+    "output_contracts": {"planner": "a numbered plan, one tool per step"},
 }
 
 
@@ -99,10 +111,72 @@ class TestProcedureType:
             ({"goal": "x", "steps": [{"action": "run tests", "action_key": "shell:pytest"}]}, []),
             ({"goal": "x", "steps": [{"action": "run tests", "action_key": " "}]},
              ["malformed_step"]),
+            # A workflow: roles, the order they are called in, what each hands on.
+            ({**WORKFLOW}, []),
+            ({**PROCEDURE, "roles": ["planner", "executor"]}, []),
+            ({**PROCEDURE, "roles": {}}, ["malformed_roles"]),
+            ({**PROCEDURE, "roles": ["planner", ""]}, ["malformed_roles"]),
+            ({**PROCEDURE, "roles": {"planner": 3}}, ["malformed_roles"]),
+            ({**PROCEDURE, "call_order": "planner then executor"}, ["malformed_call_order"]),
+            ({**PROCEDURE, "call_order": []}, ["malformed_call_order"]),
+            # An order that calls a role the workflow never defined.
+            ({**WORKFLOW, "call_order": ["planner", "reviewer"]},
+             ["unknown_role_in_call_order"]),
+            # Without roles the order names action keys; nothing to check it against.
+            ({**PROCEDURE, "call_order": ["shell:pytest", "edit:requirements"]}, []),
+            ({**PROCEDURE, "output_contracts": "a plan"}, ["malformed_output_contracts"]),
+            ({**PROCEDURE, "output_contracts": {"planner": ""}}, ["malformed_output_contracts"]),
+            ({**PROCEDURE, "output_contracts": {"planner": {"steps": "list"}}}, []),
         ],
     )
     def test_procedure_issues(self, value: Any, expected: list[str]) -> None:
         assert procedure_issues(value) == expected
+
+    def test_workflow_fields_are_optional_procedure_fields(self) -> None:
+        for field in ("roles", "call_order", "output_contracts"):
+            assert field in PROCEDURE_OPTIONAL_FIELDS
+
+    def test_procedure_roles_and_call_order_read_the_one_way(self) -> None:
+        assert procedure_roles(WORKFLOW) == {
+            "planner": "drafts the plan", "executor": "runs it one tool per step",
+        }
+        assert procedure_roles({**PROCEDURE, "roles": ["a", " b "]}) == {"a": "", "b": ""}
+        described = {"a": None, " b ": "runs"}
+        assert procedure_roles({**PROCEDURE, "roles": described}) == {"a": "", "b": "runs"}
+        assert procedure_roles({**PROCEDURE, "roles": "planner"}) == {}
+        assert procedure_roles(PROCEDURE) == {}
+        # A ``roles`` the linter flags reads as empty — the dict form too: a
+        # non-string description, a blank or non-string name, or a mix of good
+        # and bad keys is not a well-shaped workflow, not a partial name map.
+        malformed = (
+            {"a": 1}, {"a": "ok", "": "blank"}, {"a": "ok", 2: "num"}, {"a": ["x"]}, {}, [],
+        )
+        for bad in malformed:
+            assert "malformed_roles" in procedure_issues({**PROCEDURE, "roles": bad}), bad
+            assert procedure_roles({**PROCEDURE, "roles": bad}) == {}, bad
+        assert procedure_call_order(WORKFLOW) == ["planner", "executor"]
+        assert procedure_call_order({**PROCEDURE, "call_order": [" a ", "b"]}) == ["a", "b"]
+        assert procedure_call_order({**PROCEDURE, "call_order": []}) == []
+        assert procedure_call_order("1. a\n2. b") == []
+
+    def test_workflow_renders_inside_the_procedure_block(self) -> None:
+        from amfs_core.render import ContextEntry, render_procedures, workflow_parts
+
+        entry = ContextEntry(
+            entity_path="acme/support", key="workflow-triage", value=WORKFLOW,
+            confidence=0.9, memory_type="procedure",
+        )
+        text = render_procedures([entry])
+        assert "  roles: planner: drafts the plan; executor: runs it one tool per step" in text
+        assert "  call_order: planner → executor" in text
+        assert "  output_contracts: planner → a numbered plan, one tool per step" in text
+        # The workflow lines follow verify / on_failure, so a plain procedure
+        # renders byte-identically to v5.
+        assert text.index("verify:") < text.index("roles:")
+        assert workflow_parts(PROCEDURE) == []
+        assert workflow_parts("1. a\n2. b") == []
+        # Listed without descriptions, roles render as their names.
+        assert workflow_parts({"roles": ["a", "b"]}) == [("roles", "a; b")]
 
     def test_procedure_action_keys_in_step_order(self) -> None:
         value = {"goal": "x", "steps": [

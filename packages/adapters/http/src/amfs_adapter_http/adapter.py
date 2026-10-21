@@ -129,6 +129,13 @@ AGENT_ID_HEADER = "X-AMFS-Agent-Id"
 #: live repair canary, so every request of one session lands on the same arm; a
 #: session that does not send it is never routed.
 SESSION_HEADER = "X-AMFS-Session"
+#: Request header carrying the situation the session declared — the kind of
+#: task it is on, as ``Run.begin(situation=...)`` names it. A hosted server
+#: running a canary on a fix for one situation routes only the sessions that
+#: declare it; a session that declares another, or none, reads main. Set per
+#: handle by :meth:`HttpAdapter.declare_situation`; ``AgentMemory`` keeps it
+#: in step with the ``situation`` session attribute.
+SITUATION_HEADER = "X-AMFS-Situation"
 
 _HEADER_UNSAFE = re.compile(r"[^\x20-\x7e]")
 
@@ -213,6 +220,24 @@ class HttpAdapter(AdapterABC):
     def identity_headers(self) -> dict[str, str]:
         """The identity headers this handle adds to every request (a copy)."""
         return dict(self._identity_headers)
+
+    def declare_situation(self, situation: str | None) -> None:
+        """Send *situation* as :data:`SITUATION_HEADER` on this handle's requests
+        from now on; ``None`` or blank stops sending it.
+
+        The situation is the kind of task the session is on, in the agent's
+        words (``Run.begin(situation="spend summary")``). A server running a
+        canary on a fix for that situation puts the session in an arm only
+        when it declares it, so it has to be declared *before the first read*
+        — a session that names its situation only at commit read main. The
+        header is this handle's alone, as the identity headers are: another
+        handle on the same connection keeps its own.
+        """
+        headers = {k: v for k, v in self._identity_headers.items() if k != SITUATION_HEADER}
+        value = _header_value(situation)
+        if value:
+            headers[SITUATION_HEADER] = value[:200]
+        self._identity_headers = headers
 
     # ── helpers ────────────────────────────────────────────────────────
 

@@ -2,11 +2,15 @@
   <img src="docs/assets/senselab-logo.png" alt="SenseLab" width="360">
 </p>
 
-<h3 align="center">The recursive self-improvement engine for AI agents</h3>
+<h3 align="center">The <a href="https://raia-live.github.io/amfs/recursive-self-improvement/">recursive self-improvement</a> engine for AI agents</h3>
 
 <p align="center">
   Every run your agent makes teaches the next one. SenseLab scores what the agent relied on<br>
   against how the work turned out, and hands the next run a recommendation instead of a guess.
+</p>
+
+<p align="center">
+  <sub><em>Recursive</em> in the operational sense <a href="https://raia-live.github.io/amfs/recursive-self-improvement/">defined here</a>: corrections are gated by outcomes they did not produce, reversible and logged, and the loop's own machinery is under the same evidence. Not open-ended capability gain.</sub>
 </p>
 
 <p align="center">

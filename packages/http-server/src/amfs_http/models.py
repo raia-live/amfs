@@ -135,6 +135,13 @@ class RetrieveRequest(BaseModel):
 
     query: str
     entity_path: str | None = None
+    # Widens entity_path to that path and everything beneath it, on both the
+    # semantic and the lexical channel (see SearchRequest.include_descendants
+    # and amfs_core.scope). Off by default so an exact-match caller keeps
+    # getting exactly what it asked for. For a caller whose scope is a prefix
+    # rather than an entity — a served model trained on `research/*` with no
+    # path on the request — an exact match on the prefix finds nothing.
+    include_descendants: bool = False
     min_confidence: float = 0.0
     limit: int = 10
     semantic_weight: float = 0.5

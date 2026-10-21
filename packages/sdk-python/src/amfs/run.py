@@ -122,7 +122,12 @@ class Run:
         comparison can hold them stable. *unit* is the assignment unit for a
         canary (a customer id, a repo), passed to the hook if one was given.
         *candidate_actions* are the ``tool:action`` keys the agent could take,
-        so the priors can name the untried ones.
+        so the priors can name the untried ones. *situation* is the kind of
+        task this run is on, in the agent's words (``"spend summary"``): it
+        scopes the retrieve, is stamped on the trace, and is declared to the
+        server on every request from here on — a canary on a fix for that
+        situation routes only the sessions that declare it, which is why it
+        is given at ``begin`` and not at commit.
         """
         self.entity_path = entity_path
         self.task_input = task if isinstance(task, str) else json.dumps(task, default=str)

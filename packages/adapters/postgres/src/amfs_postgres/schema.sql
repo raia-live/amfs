@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS amfs_memory_entries (
     last_outcome_at TIMESTAMPTZ,
     discredited_at TIMESTAMPTZ,
     validators JSONB NOT NULL DEFAULT '[]',
+    uplift DOUBLE PRECISION,
+    uplift_sessions INTEGER NOT NULL DEFAULT 0,
     recall_count INTEGER DEFAULT 0,
     priority_score NUMERIC(10,6),
     tier SMALLINT DEFAULT 3,
@@ -63,7 +65,8 @@ CREATE TABLE IF NOT EXISTS amfs_outcomes (
     final_action_index INTEGER,
     actions_taken JSONB NOT NULL DEFAULT '[]',
     entity_paths TEXT[] NOT NULL DEFAULT '{}',
-    situation TEXT
+    situation TEXT,
+    verified_by TEXT
 );
 
 -- Range-partitioned by month on created_at. Traces are append-only and read by
@@ -487,6 +490,114 @@ $$ LANGUAGE sql IMMUTABLE;
 -- attempt and once for the terminal outcome.
 DROP FUNCTION IF EXISTS amfs_apply_outcome_step(TEXT, UUID, TEXT[], TEXT, NUMERIC, TEXT);
 DROP FUNCTION IF EXISTS amfs_apply_outcome_step(TEXT, UUID, TEXT[], TEXT, NUMERIC, TEXT, JSONB);
+DROP FUNCTION IF EXISTS amfs_apply_outcome_step(TEXT, UUID, TEXT[], TEXT, NUMERIC, TEXT, JSONB, TEXT);
+
+-- amfs_core.evidence.uplift_credit: the entry's share of a split, in
+-- [UPLIFT_FLOOR, 1]. Full share when the outcome went the way the entry's
+-- record says it goes; otherwise it falls with the uplift's size, shrunk
+-- toward 1 while the sample is small. Computed in double precision, as the
+-- Python model computes it, and handed to the NUMERIC weight.
+CREATE OR REPLACE FUNCTION amfs_uplift_credit(
+    uplift DOUBLE PRECISION, sessions INTEGER, success BOOLEAN
+) RETURNS NUMERIC AS $$
+    SELECT CASE
+        WHEN uplift IS NULL OR COALESCE(sessions, 0) <= 0 THEN 1.0
+        WHEN (CASE WHEN success THEN uplift ELSE -uplift END) >= 0 THEN 1.0
+        ELSE GREATEST(0.25, LEAST(1.0, (
+            1.0 + (sessions::DOUBLE PRECISION / (sessions + 10))
+                * (CASE WHEN success THEN uplift ELSE -uplift END)
+        )::NUMERIC))
+    END;
+$$ LANGUAGE sql IMMUTABLE;
+
+-- amfs_core.evidence.uplift_counts: refresh uplift / uplift_sessions on the
+-- current row of each cited key from the entity's newest UPLIFT_WINDOW known
+-- outcomes of the last UPLIFT_WINDOW_DAYS. A session read a key when any of
+-- its steps cited it (terminal keys or a failed attempt's). Only the cited
+-- keys are refreshed: credit is read at citation time, so an entry no outcome
+-- cites has no use for it, and the refresh costs one window per entity
+-- rather than one per entry on it.
+CREATE OR REPLACE FUNCTION amfs_refresh_uplift(
+    p_namespace TEXT,
+    p_account UUID,
+    p_keys TEXT[]
+) RETURNS INTEGER AS $$
+DECLARE
+    keys TEXT[];
+    entry_key TEXT;
+    ep TEXT;
+    k TEXT;
+    paths TEXT[];
+    read_n INTEGER;
+    read_s INTEGER;
+    unread_n INTEGER;
+    unread_s INTEGER;
+    touched INTEGER := 0;
+    c_window CONSTANT INTEGER := 500;
+    c_window_days CONSTANT INTEGER := 90;
+BEGIN
+    SELECT COALESCE(array_agg(DISTINCT x), '{}') INTO keys
+    FROM unnest(COALESCE(p_keys, '{}')) AS x
+    WHERE position('/' in x) > 0;
+    IF cardinality(keys) = 0 THEN
+        RETURN 0;
+    END IF;
+    SELECT COALESCE(array_agg(DISTINCT left(x, length(x) - length(substring(x from '([^/]+)$')) - 1)), '{}')
+    INTO paths FROM unnest(keys) AS x;
+
+    FOREACH ep IN ARRAY paths
+    LOOP
+        CREATE TEMP TABLE IF NOT EXISTS amfs_uplift_window (
+            ok BOOLEAN, read_keys TEXT[]
+        ) ON COMMIT DROP;
+        TRUNCATE amfs_uplift_window;
+        INSERT INTO amfs_uplift_window (ok, read_keys)
+        SELECT amfs_outcome_is_success(o.outcome_type),
+               (SELECT COALESCE(array_agg(DISTINCT x), '{}') FROM (
+                    SELECT unnest(COALESCE(o.causal_entry_keys, '{}')) AS x
+                    UNION ALL
+                    SELECT jsonb_array_elements_text(COALESCE(a->'causal_entry_keys', '[]'::jsonb))
+                    FROM jsonb_array_elements(COALESCE(o.attempts, '[]'::jsonb)) AS a
+                ) s)
+        FROM amfs_outcomes o
+        WHERE o.namespace = p_namespace
+          AND o.account_id IS NOT DISTINCT FROM p_account
+          AND o.entity_paths @> ARRAY[ep]
+          AND o.committed_at >= NOW() - make_interval(days => c_window_days)
+          AND amfs_outcome_is_known(o.outcome_type)
+        ORDER BY o.committed_at DESC, o.id DESC
+        LIMIT c_window;
+
+        FOREACH entry_key IN ARRAY keys
+        LOOP
+            k := substring(entry_key from '([^/]+)$');
+            IF left(entry_key, length(entry_key) - length(k) - 1) <> ep THEN
+                CONTINUE;
+            END IF;
+            SELECT COUNT(*) FILTER (WHERE entry_key = ANY(read_keys)),
+                   COUNT(*) FILTER (WHERE entry_key = ANY(read_keys) AND ok),
+                   COUNT(*) FILTER (WHERE NOT (entry_key = ANY(read_keys))),
+                   COUNT(*) FILTER (WHERE NOT (entry_key = ANY(read_keys)) AND ok)
+            INTO read_n, read_s, unread_n, unread_s
+            FROM amfs_uplift_window;
+
+            UPDATE amfs_memory_entries
+            SET uplift = CASE WHEN read_n > 0 AND unread_n > 0
+                    THEN read_s::DOUBLE PRECISION / read_n - unread_s::DOUBLE PRECISION / unread_n
+                    ELSE NULL END,
+                uplift_sessions = CASE WHEN read_n > 0 AND unread_n > 0
+                    THEN LEAST(read_n, unread_n) ELSE 0 END
+            WHERE namespace = p_namespace
+              AND entity_path = ep
+              AND key = k
+              AND superseded_at IS NULL
+              AND account_id IS NOT DISTINCT FROM p_account;
+            touched := touched + 1;
+        END LOOP;
+    END LOOP;
+    RETURN touched;
+END;
+$$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION amfs_apply_outcome_step(
     p_namespace TEXT,
@@ -496,7 +607,8 @@ CREATE OR REPLACE FUNCTION amfs_apply_outcome_step(
     p_causal_confidence NUMERIC,
     p_model TEXT,
     p_versions JSONB,
-    p_agent TEXT
+    p_agent TEXT,
+    p_verified BOOLEAN
 ) RETURNS INTEGER AS $$
 DECLARE
     keys TEXT[];
@@ -518,6 +630,13 @@ DECLARE
     surprise NUMERIC;
     vals JSONB;
     touched INTEGER := 0;
+    -- amfs_core.evidence, rendered:
+    c_decay CONSTANT NUMERIC := 0.8;
+    c_prior_strength CONSTANT NUMERIC := 2.0;
+    c_discredit CONSTANT NUMERIC := 0.5;
+    c_first_strike_wins CONSTANT INTEGER := 3;
+    c_max_validators CONSTANT INTEGER := 10;
+    c_verified CONSTANT NUMERIC := 1.5;
 BEGIN
     -- Distinct, well-formed specs only; a key cited twice is one citation.
     SELECT COALESCE(array_agg(DISTINCT x), '{}') INTO keys
@@ -579,42 +698,47 @@ BEGIN
             e_f := COALESCE(cur.evidence_failure, 0) + CASE WHEN is_ok THEN 0 ELSE 1 END;
         ELSE
             -- First strike: the first failure of an entry with a clean record
-            -- of at least three successes is weighed without the surprise
-            -- term (amfs_core.evidence.first_strike). One slip on a validated
-            -- rule leaves it contested; the second still discredits it.
+            -- of at least c_first_strike_wins successes is weighed without the
+            -- surprise term (amfs_core.evidence.first_strike). One slip on a
+            -- validated rule leaves it contested; the second still discredits it.
             surprise := 1.0 + abs(target - LEAST(1.0, GREATEST(0.0, cur.confidence)));
             IF NOT is_ok AND COALESCE(cur.failure_count, 0) = 0
-               AND COALESCE(cur.success_count, 0) >= 3 THEN
+               AND COALESCE(cur.success_count, 0) >= c_first_strike_wins THEN
                 surprise := 1.0;
             END IF;
+            -- severity * causal_confidence * credit / n_causal * surprise
+            -- * verification (amfs_core.evidence.evidence_weight).
             w := amfs_outcome_severity(p_outcome_type)
                  * GREATEST(0.0, p_causal_confidence)
+                 * amfs_uplift_credit(cur.uplift, cur.uplift_sessions, is_ok)
                  / n_keys
-                 * surprise;
-            e_s := COALESCE(cur.evidence_success, 0) * 0.8 + CASE WHEN is_ok THEN w ELSE 0 END;
-            e_f := COALESCE(cur.evidence_failure, 0) * 0.8 + CASE WHEN is_ok THEN 0 ELSE w END;
-            new_conf := LEAST(1.0, GREATEST(0.0, (2.0 * prior + e_s) / (2.0 + e_s + e_f)));
+                 * surprise
+                 * CASE WHEN COALESCE(p_verified, FALSE) THEN c_verified ELSE 1.0 END;
+            e_s := COALESCE(cur.evidence_success, 0) * c_decay + CASE WHEN is_ok THEN w ELSE 0 END;
+            e_f := COALESCE(cur.evidence_failure, 0) * c_decay + CASE WHEN is_ok THEN 0 ELSE w END;
+            new_conf := LEAST(1.0, GREATEST(0.0,
+                (c_prior_strength * prior + e_s) / (c_prior_strength + e_s + e_f)));
         END IF;
 
-        IF new_conf < 0.5 AND NOT is_ok THEN
+        IF new_conf < c_discredit AND NOT is_ok THEN
             disc := COALESCE(cur.discredited_at, NOW());
-        ELSIF new_conf >= 0.5 THEN
+        ELSIF new_conf >= c_discredit THEN
             disc := NULL;
         ELSE
             disc := cur.discredited_at;
         END IF;
 
         -- Validators: distinct agents whose successes credited this claim,
-        -- most recent last, capped at ten (amfs_core.evidence.validators_after).
+        -- most recent last, capped (amfs_core.evidence.validators_after).
         vals := COALESCE(cur.validators, '[]'::jsonb);
         IF is_ok AND COALESCE(p_agent, '') <> '' THEN
             vals := vals - p_agent;
             vals := vals || to_jsonb(ARRAY[p_agent]);
-            IF jsonb_array_length(vals) > 10 THEN
+            IF jsonb_array_length(vals) > c_max_validators THEN
                 SELECT COALESCE(jsonb_agg(v), '[]'::jsonb) INTO vals
                 FROM (
                     SELECT v FROM jsonb_array_elements(vals) WITH ORDINALITY AS t(v, ord)
-                    ORDER BY ord OFFSET jsonb_array_length(vals) - 10
+                    ORDER BY ord OFFSET jsonb_array_length(vals) - c_max_validators
                 ) s;
             END IF;
         END IF;
@@ -655,8 +779,12 @@ DECLARE
     model TEXT;
     att JSONB;
     att_keys TEXT[];
+    all_keys TEXT[];
+    verified BOOLEAN;
 BEGIN
     model := COALESCE(NULLIF(current_setting('amfs.outcome_model', true), ''), 'evidence');
+    verified := NULLIF(btrim(COALESCE(NEW.verified_by, '')), '') IS NOT NULL;
+    all_keys := COALESCE(NEW.causal_entry_keys, '{}');
 
     -- Failed attempts first, oldest to newest: each hands its own failure to
     -- the entries that attempt relied on.
@@ -666,12 +794,13 @@ BEGIN
     LOOP
         SELECT COALESCE(array_agg(x), '{}') INTO att_keys
         FROM jsonb_array_elements_text(COALESCE(att->'causal_entry_keys', '[]'::jsonb)) AS x;
+        all_keys := all_keys || att_keys;
         PERFORM amfs_apply_outcome_step(
             NEW.namespace, NEW.account_id, att_keys,
             COALESCE(att->>'outcome_type', 'minor_failure'),
             NEW.causal_confidence, model,
             COALESCE(att->'causal_entry_versions', '{}'::jsonb),
-            NEW.agent_id
+            NEW.agent_id, verified
         );
     END LOOP;
 
@@ -680,8 +809,10 @@ BEGIN
         NEW.namespace, NEW.account_id, NEW.causal_entry_keys,
         NEW.outcome_type, NEW.causal_confidence, model,
         COALESCE(NEW.causal_entry_versions, '{}'::jsonb),
-        NEW.agent_id
+        NEW.agent_id, verified
     );
+
+    PERFORM amfs_refresh_uplift(NEW.namespace, NEW.account_id, all_keys);
 
     PERFORM pg_notify('amfs_outcome', json_build_object(
         'namespace', NEW.namespace,
@@ -689,6 +820,7 @@ BEGIN
         'outcome_type', NEW.outcome_type,
         'agent_id', NEW.agent_id,
         'causal_confidence', NEW.causal_confidence,
+        'verified_by', NEW.verified_by,
         'attempts', jsonb_array_length(COALESCE(NEW.attempts, '[]'::jsonb))
     )::TEXT);
 

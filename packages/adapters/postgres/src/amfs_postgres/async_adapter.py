@@ -283,6 +283,27 @@ class AsyncPostgresAdapter:
         see exactly what a sync ``list`` or ``search`` on the branch sees."""
         return branch_scope_sql(branch, await self._parent_branch(cur, branch))
 
+    async def _parent_live_row(self, cur: Any, branch: str, entity_path: str, key: str) -> Any:
+        """The parent's live row for a key *branch* has not written, as
+        ``read`` resolves it — or ``None``. ``write`` numbers a branch's first
+        version of an inherited key from it, matching the version the engine
+        computed from the overlay read; see ``PostgresAdapter._parent_live_row``."""
+        parent = await self._parent_branch(cur, branch)
+        if parent is None:
+            return None
+        await cur.execute(
+            f"""
+            SELECT version, value, confidence{_EVIDENCE_SELECT if self._has_evidence_cols else ""}
+            FROM amfs_memory_entries
+            WHERE namespace = %s AND branch = %s
+              AND entity_path = %s AND key = %s
+              AND superseded_at IS NULL
+            ORDER BY version DESC LIMIT 1
+            """,
+            (self._namespace, parent, entity_path, key),
+        )
+        return await cur.fetchone()
+
     # ──────────────────────────────────────────────────────────────
     # 1. read
     # ──────────────────────────────────────────────────────────────
@@ -357,6 +378,11 @@ class AsyncPostgresAdapter:
                         (self._namespace, branch, entry.entity_path, entry.key),
                     )
                     row = await cur.fetchone()
+                    own_row = row is not None
+                    if row is None and branch != "main":
+                        row = await self._parent_live_row(
+                            cur, branch, entry.entity_path, entry.key
+                        )
                     current_version = row["version"] if row else 0
                     new_version = current_version + 1
                     if row and self._has_evidence_cols:
@@ -370,7 +396,7 @@ class AsyncPostgresAdapter:
                             current_version,
                         )
 
-                    if row:
+                    if own_row:
                         await cur.execute(
                             """
                             UPDATE amfs_memory_entries
@@ -690,8 +716,13 @@ class AsyncPostgresAdapter:
         ]
         params: list[Any] = [self._namespace]
         if query.entity_path is not None:
-            conditions.append("entity_path = %s")
-            params.append(query.entity_path)
+            if getattr(query, "include_descendants", False):
+                clause, clause_params = descendants_sql("entity_path", query.entity_path)
+                conditions.append(clause)
+                params.extend(clause_params)
+            else:
+                conditions.append("entity_path = %s")
+                params.append(query.entity_path)
         else:
             conditions.append(_EXCLUDE_SHARED_PATHS)
         if query.min_confidence > 0:

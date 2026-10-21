@@ -25,7 +25,23 @@ jobs:
     if: github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger amfs-internal dev deploy
+      # A repository_dispatch always runs the receiving workflow as defined on
+      # the receiver's default branch (main), so an OSS push deployed dev with
+      # main's sizing and reset the dev API's memory on every push. A
+      # workflow_dispatch on the dev ref runs dev's own definition.
+      - name: Trigger amfs-internal dev deploy (dev's workflow definition)
+        id: dispatch
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.DEPLOY_PAT }}
+        run: |
+          gh workflow run deploy-dev.yml \
+            --repo raia-live/amfs-internal \
+            --ref dev
+      # The token may lack actions:write; the old route still deploys, with
+      # main's sizing, rather than leaving dev undeployed.
+      - name: Fall back to repository_dispatch
+        if: steps.dispatch.outcome == 'failure'
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.DEPLOY_PAT }}

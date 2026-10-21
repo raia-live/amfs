@@ -52,6 +52,7 @@ class TestConsolidationStrategyIntegration:
 
     def test_run_returns_consolidation_report(self) -> None:
         adapter = MagicMock()
+        adapter.list_scopes = None  # no scope aggregate: run() lists the store
         adapter.list.return_value = [_entry("k1"), _entry("k2")]
         adapter.list_branches.return_value = []
         strategy = ConsolidationStrategy(adapter)
@@ -93,6 +94,7 @@ class TestConsolidationStrategyIntegration:
 
     def test_report_serialization(self) -> None:
         adapter = MagicMock()
+        adapter.list_scopes = None
         adapter.list.return_value = []
         strategy = ConsolidationStrategy(adapter)
 

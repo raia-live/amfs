@@ -1231,6 +1231,14 @@ def amfs_retrieve(
         confidence_weight=confidence_weight,
         include_avoid=include_avoid,
     )
+    if situation and situation.strip():
+        # What ``Run.begin(situation=...)`` does for an SDK run: on the trace,
+        # and declared to the server from this request on, so a canary on a
+        # fix for this situation can route the session into an arm.
+        try:
+            mem.set_session_attributes({"situation": situation.strip()[:200]})
+        except (TypeError, ValueError):
+            pass  # a bag at the key cap: the retrieve still scopes on it
 
     # Prefer server-side semantic retrieval (embedder + pgvector live on the
     # server); falls back to client-side composite scoring for local adapters.
@@ -1744,9 +1752,11 @@ def amfs_commit_outcome(
         verified_by: Optional. Who or what decided the outcome when it was not
             you: "ci" (the pipeline went green), "human" (the user confirmed),
             "verifier" (a check you ran), "customer". An outcome with it is
-            external evidence; one without is your own declaration, and the
-            two are weighed differently when a fix is judged. Leave it out
-            when you are the one calling it a success.
+            external evidence; one without is your own declaration. A
+            verified outcome moves the memories it relied on 1.5x further
+            than your own word, and the two are weighed differently when a
+            fix is judged. Leave it out when you are the one calling it a
+            success.
         evidence: Optional small dict of pointers to that source, e.g.
             {"run_id": "1234", "url": "https://ci/..."}. Scalars only.
 

@@ -158,6 +158,33 @@ def _reset_server_globals(monkeypatch):
 
 
 class TestHybridUnion:
+    def test_include_descendants_reaches_both_channels(self, monkeypatch):
+        """A request scoped to a prefix widens the semantic and the lexical
+        query alike; by default both stay exact, so an existing caller's
+        results do not change."""
+        seen: dict[str, list] = {"semantic": [], "lexical": []}
+
+        class _Recording(_FakeAdapter):
+            async def semantic_search(self, query, embedder, *, branch="main"):
+                seen["semantic"].append(query)
+                return []
+
+            async def search(self, query, *, branch="main"):
+                seen["lexical"].append(query)
+                return []
+
+        monkeypatch.setattr(server, "_async_adapter", _Recording())
+        _run(_request(), RetrieveRequest(query="billing", entity_path="svc", limit=5))
+        assert all(q.entity_path == "svc" and not q.include_descendants
+                   for q in seen["semantic"] + seen["lexical"])
+        seen["semantic"].clear()
+        seen["lexical"].clear()
+        _run(_request(), RetrieveRequest(query="billing", entity_path="svc", limit=5,
+                                         include_descendants=True))
+        assert seen["semantic"] and seen["lexical"]
+        assert all(q.entity_path == "svc" and q.include_descendants
+                   for q in seen["semantic"] + seen["lexical"])
+
     def test_lexical_only_hit_surfaces(self, monkeypatch):
         """A relevant entry the vector neighbours miss must still surface via
         the lexical channel (the browser-extension incident)."""

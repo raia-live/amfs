@@ -11,6 +11,12 @@ is built.
 The identity lives on the bound handle, not on the shared ``httpx.Client``:
 ``as_agent`` gives two handles one adapter, and a header set on the client
 would stamp one handle's identity on the other's requests.
+
+``X-AMFS-Situation`` travels the same way and says what kind of task the
+session is on. A canary on a fix for one situation routes only the sessions
+that declare it, so the header has to be there before the first read:
+``AgentMemory`` sends it from the moment the ``situation`` attribute is set
+(``Run.begin(situation=...)``) until the bag is cleared at commit.
 """
 
 from __future__ import annotations
@@ -19,12 +25,18 @@ from typing import Any
 
 import httpx
 import pytest
-from amfs_adapter_http import AGENT_ID_HEADER, SESSION_HEADER, HttpAdapter
+from amfs_adapter_http import AGENT_ID_HEADER, SESSION_HEADER, SITUATION_HEADER, HttpAdapter
 
 
 def _adapter(seen: list[httpx.Request]) -> HttpAdapter:
     def _handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
+        if request.method == "POST" and request.url.path == "/api/v1/outcomes":
+            return httpx.Response(200, json={"entries": []})
+        if request.method == "POST" and request.url.path == "/api/v1/traces":
+            # The server echoes the sealed trace; the one sent is good enough.
+            return httpx.Response(200, content=request.content,
+                                  headers={"content-type": "application/json"})
         return httpx.Response(200, json={"status": "not_found"})
 
     adapter = HttpAdapter("http://test", "key")
@@ -96,6 +108,53 @@ class TestBind:
         assert bare.identity_headers == {}
 
 
+class TestDeclareSituation:
+    def test_the_declared_situation_rides_every_request_until_withdrawn(self) -> None:
+        seen: list[httpx.Request] = []
+        bound = _adapter(seen).bind("sre-agent", "sess-1")
+        bound.read("p", "k")
+        bound.declare_situation("spend summary")
+        bound.read("p", "k")
+        bound.list("p")
+        bound.declare_situation(None)
+        bound.read("p", "k")
+        assert SITUATION_HEADER not in seen[0].headers
+        assert seen[1].headers[SITUATION_HEADER] == "spend summary"
+        assert seen[2].headers[SITUATION_HEADER] == "spend summary"
+        assert SITUATION_HEADER not in seen[3].headers
+        # The identity stayed put throughout.
+        assert all(r.headers[SESSION_HEADER] == "sess-1" for r in seen)
+
+    def test_a_blank_declaration_withdraws_and_a_long_one_is_cut(self) -> None:
+        seen: list[httpx.Request] = []
+        bound = _adapter(seen).bind("a", "s")
+        bound.declare_situation("x" * 300)
+        bound.read("p", "k")
+        assert seen[0].headers[SITUATION_HEADER] == "x" * 200
+        bound.declare_situation("   ")
+        bound.read("p", "k")
+        assert SITUATION_HEADER not in seen[1].headers
+
+    def test_the_situation_is_the_handles_not_the_connections(self) -> None:
+        seen: list[httpx.Request] = []
+        base = _adapter(seen)
+        one = base.bind("agent-one", "s")
+        two = base.bind("agent-two", "s")
+        one.declare_situation("spend summary")
+        one.read("p", "k")
+        two.read("p", "k")
+        base.read("p", "k")
+        assert seen[0].headers[SITUATION_HEADER] == "spend summary"
+        assert SITUATION_HEADER not in seen[1].headers
+        assert SITUATION_HEADER not in seen[2].headers
+
+    def test_a_bare_handle_can_declare(self) -> None:
+        bare = HttpAdapter.__new__(HttpAdapter)
+        bare.declare_situation("s")
+        assert bare.identity_headers == {SITUATION_HEADER: "s"}
+        assert HttpAdapter._identity_headers == {}  # the class default is untouched
+
+
 class TestRetrieveNamesNoBranchForMain:
     """The one read that still sent ``branch: main`` in its body. A named main
     is an explicit choice the server honours over a routed canary branch, so
@@ -136,6 +195,70 @@ class TestAgentMemoryBinds:
         assert seen[0].headers[AGENT_ID_HEADER] == "billing-agent"
         assert seen[0].headers[SESSION_HEADER] == "sess-42"
         assert seen[1].headers[AGENT_ID_HEADER] == "sre-agent"
+
+    def test_the_situation_attribute_is_declared_before_the_first_read(self, memory, seen) -> None:
+        """What ``Run.begin(situation=...)`` does: the bag gets the attribute,
+        the adapter gets the header, every read that follows carries it."""
+        memory.read("acme/billing", "k")
+        memory.set_session_attributes({"situation": "spend summary", "customer": "acme"})
+        memory.read("acme/billing", "k")
+        memory.retrieve("how much did we spend")
+        assert SITUATION_HEADER not in seen[0].headers
+        assert seen[1].headers[SITUATION_HEADER] == "spend summary"
+        assert seen[2].headers[SITUATION_HEADER] == "spend summary"
+        # Other attributes do not touch the header.
+        memory.set_session_attributes({"region": "eu"})
+        memory.read("acme/billing", "k")
+        assert seen[3].headers[SITUATION_HEADER] == "spend summary"
+
+    def test_the_header_is_dropped_with_the_bag(self, memory, seen) -> None:
+        memory.set_session_attributes({"situation": "spend summary"})
+        memory.clear_session_attributes()
+        memory.read("acme/billing", "k")
+        assert SITUATION_HEADER not in seen[-1].headers
+        memory.set_session_attributes({"situation": "renewal quote"})
+        memory.read("acme/billing", "k")
+        assert seen[-1].headers[SITUATION_HEADER] == "renewal quote"
+
+    def test_the_header_is_dropped_when_the_trace_is_committed(self, memory, seen) -> None:
+        memory.set_session_attributes({"situation": "spend summary"})
+        memory.read("acme/billing", "k")
+        assert seen[-1].headers[SITUATION_HEADER] == "spend summary"
+        from amfs_core.models import OutcomeType
+
+        memory.commit_outcome("t-1", OutcomeType.SUCCESS)
+        assert memory.session_attributes == {}
+        memory.read("acme/billing", "k")
+        assert SITUATION_HEADER not in seen[-1].headers
+
+    def test_as_agent_starts_without_a_situation(self, memory, seen) -> None:
+        memory.set_session_attributes({"situation": "spend summary"})
+        memory.as_agent("billing-agent").read("acme/billing", "k")
+        memory.read("acme/billing", "k")
+        assert SITUATION_HEADER not in seen[0].headers
+        assert seen[1].headers[SITUATION_HEADER] == "spend summary"
+
+    def test_run_begin_declares_its_situation_on_the_retrieve(self, memory, seen) -> None:
+        from amfs import Run
+
+        Run(memory).begin("how much did acme spend", entity_path="acme/billing",
+                          situation="spend summary")
+        retrieves = [r for r in seen if r.url.path.endswith("/retrieve")]
+        assert retrieves and retrieves[0].headers[SITUATION_HEADER] == "spend summary"
+
+    def test_the_mcp_retrieve_declares_the_situation_it_was_given(
+        self, memory, seen, monkeypatch
+    ) -> None:
+        """An agent on the OSS MCP server has no ``Run.begin``; the situation it
+        passes to ``amfs_retrieve`` is what it knows. It goes on the bag, and
+        so on the header, before the retrieve is sent."""
+        from amfs_mcp import server as mcp_server
+
+        monkeypatch.setattr(mcp_server, "_get_memory", lambda: memory)
+        mcp_server.amfs_retrieve("how much did acme spend", situation="spend summary")
+        retrieves = [r for r in seen if r.url.path.endswith("/retrieve")]
+        assert retrieves and retrieves[0].headers[SITUATION_HEADER] == "spend summary"
+        assert memory.session_attributes["situation"] == "spend summary"
 
     def test_adapters_without_bind_are_left_alone(self, tmp_path) -> None:
         from amfs import AgentMemory

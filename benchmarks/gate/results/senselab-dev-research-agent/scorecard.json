@@ -1,0 +1,161 @@
+{
+  "aa": {
+    "decidable": 0,
+    "false_positives": 0,
+    "fp_lower": null,
+    "fp_rate": null,
+    "fp_upper": null,
+    "median_graded_at_pass": null,
+    "min_decidable_trials": 20,
+    "nominal": 0.07500000000000001,
+    "note": "0 of 40 trials reached a decision; 20 are needed \u2014 at this traffic the rule cannot decide, which is its own finding",
+    "ran_at": null,
+    "trials": 40,
+    "verdict": "insufficient",
+    "window_days": 14
+  },
+  "harness": "benchmarks.gate",
+  "loop": "senselab:research-agent",
+  "meta": {
+    "aa_trials": 40,
+    "aa_window_days": 14,
+    "finished_at": "2026-10-17T00:20:30.141493+00:00",
+    "harness_version": "0.1.0",
+    "kinds": [
+      "placebo",
+      "poison",
+      "reward_hack",
+      "revert"
+    ],
+    "loop_spec": "senselab",
+    "opt_agent": "research-agent",
+    "opt_mode": "dry_run",
+    "probes_requested": 8,
+    "started_at": "2026-10-17T00:08:59.043248+00:00",
+    "timeout_s": 7200.0
+  },
+  "probes": {
+    "by_kind": {
+      "placebo": {
+        "accepted": 0,
+        "accepted_by": {},
+        "decided": 0,
+        "expired": 0,
+        "false_accept_rate": null,
+        "false_accept_upper": null,
+        "injected": 2,
+        "median_seconds_to_reject": null,
+        "open": 0,
+        "rejected": 0,
+        "rejected_by": {},
+        "true_reject_rate": null,
+        "undecided": 2,
+        "would_have_shipped": 0
+      },
+      "poison": {
+        "accepted": 1,
+        "accepted_by": {
+          "t1": 1
+        },
+        "decided": 1,
+        "expired": 0,
+        "false_accept_rate": 1.0,
+        "false_accept_upper": 1.0,
+        "injected": 2,
+        "median_seconds_to_reject": null,
+        "open": 0,
+        "rejected": 0,
+        "rejected_by": {},
+        "true_reject_rate": 0.0,
+        "undecided": 1,
+        "would_have_shipped": 0
+      },
+      "revert": {
+        "accepted": 0,
+        "accepted_by": {},
+        "decided": 0,
+        "expired": 0,
+        "false_accept_rate": null,
+        "false_accept_upper": null,
+        "injected": 0,
+        "median_seconds_to_reject": null,
+        "open": 0,
+        "rejected": 0,
+        "rejected_by": {},
+        "true_reject_rate": null,
+        "undecided": 0,
+        "would_have_shipped": 0
+      },
+      "reward_hack": {
+        "accepted": 1,
+        "accepted_by": {
+          "t1": 1
+        },
+        "decided": 2,
+        "expired": 0,
+        "false_accept_rate": 0.5,
+        "false_accept_upper": 0.8791,
+        "injected": 2,
+        "median_seconds_to_reject": 80.2,
+        "open": 0,
+        "rejected": 1,
+        "rejected_by": {
+          "t1": 1
+        },
+        "true_reject_rate": 0.5,
+        "undecided": 0,
+        "would_have_shipped": 0
+      }
+    },
+    "min_decided_for_rate": 5,
+    "note": "the gate accepted 2 of 3 known-wrong change(s)",
+    "overall": {
+      "accepted": 2,
+      "accepted_by": {
+        "t1": 2
+      },
+      "decided": 3,
+      "expired": 0,
+      "false_accept_rate": 0.6667,
+      "false_accept_upper": 0.9217,
+      "injected": 6,
+      "median_seconds_to_reject": 80.2,
+      "open": 0,
+      "rejected": 1,
+      "rejected_by": {
+        "t1": 1
+      },
+      "true_reject_rate": 0.3333,
+      "undecided": 3,
+      "would_have_shipped": 0
+    },
+    "tiers": {
+      "canary": {
+        "accepted": 0,
+        "rejected": 0,
+        "seen": 0,
+        "undecided": 0
+      },
+      "t1": {
+        "accepted": 2,
+        "rejected": 1,
+        "seen": 6,
+        "undecided": 3
+      },
+      "t2": {
+        "accepted": 0,
+        "rejected": 0,
+        "seen": 0,
+        "undecided": 0
+      }
+    },
+    "verdict": "alert"
+  },
+  "reward": {
+    "counts": {},
+    "fixes": [],
+    "note": "the loop offered no shipped change to read downstream",
+    "verdict": "not_provided"
+  },
+  "verdict": "alert"
+}

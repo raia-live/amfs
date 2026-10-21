@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from amfs_core.models import DecisionTrace, MemoryEntry
 
 
@@ -150,8 +152,27 @@ def agent_entity_stats_from_entries(entries: "list[MemoryEntry]") -> list[dict]:
     return rows
 
 
+def entity_confidence_buckets(entity_confidences: Iterable[float]) -> dict:
+    """Entities bucketed by their mean confidence, plus the mean of means.
+
+    ``healthy`` is 0.9 and up, ``moderate`` 0.7 to 0.9, ``low`` 0.4 to 0.7,
+    ``critical`` under 0.4 — the health page's donut. One definition, used
+    by the pure-Python aggregate and by the SQL adapter when it buckets in
+    Python, so the two routes to ``/stats`` cannot disagree on an edge.
+    """
+    confs = [float(c) for c in entity_confidences]
+    return {
+        "avg": (sum(confs) / len(confs)) if confs else 0.0,
+        "healthy": sum(1 for c in confs if c >= 0.9),
+        "moderate": sum(1 for c in confs if 0.7 <= c < 0.9),
+        "low": sum(1 for c in confs if 0.4 <= c < 0.7),
+        "critical": sum(1 for c in confs if c < 0.4),
+    }
+
+
 def extended_stats_from_entries(entries: "list[MemoryEntry]") -> dict:
-    """MemoryStats fields plus recall totals, weekly deltas, and type counts.
+    """MemoryStats fields plus recall totals, weekly deltas, type counts and
+    the entity confidence buckets.
 
     Benchmark and system rows are left out — see :mod:`amfs_core.exclusions`.
     These are an account's own totals, so the exclusion belongs here rather than
@@ -168,6 +189,7 @@ def extended_stats_from_entries(entries: "list[MemoryEntry]") -> dict:
 
     agents: dict[str, int] = {}
     entities: dict[str, int] = {}
+    entity_confidence_sum: dict[str, float] = {}
     memory_type_counts: dict[str, int] = {}
     confidences: list[float] = []
     outcome_linked = 0
@@ -182,6 +204,9 @@ def extended_stats_from_entries(entries: "list[MemoryEntry]") -> dict:
         aid = entry.provenance.agent_id
         agents[aid] = agents.get(aid, 0) + 1
         entities[entry.entity_path] = entities.get(entry.entity_path, 0) + 1
+        entity_confidence_sum[entry.entity_path] = (
+            entity_confidence_sum.get(entry.entity_path, 0.0) + entry.confidence
+        )
         mt = str(getattr(entry.memory_type, "value", entry.memory_type))
         memory_type_counts[mt] = memory_type_counts.get(mt, 0) + 1
         confidences.append(entry.confidence)
@@ -221,6 +246,9 @@ def extended_stats_from_entries(entries: "list[MemoryEntry]") -> dict:
         "recalls_this_week": None,
         "recalls_last_week": None,
         "memory_type_counts": memory_type_counts,
+        "entity_confidence": entity_confidence_buckets(
+            entity_confidence_sum[ep] / n for ep, n in entities.items()
+        ),
     }
 
 

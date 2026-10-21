@@ -125,6 +125,14 @@ AMFS is GitHub for agent memory, split into two layers. The open-source core giv
 | Progressive retrieval (`depth`) | Yes | Yes |
 | Importance evaluator hook (`ImportanceEvaluator` ABC) | Yes | Yes |
 | Cortex drift gate (skip-redundant recompilations) | Yes | Yes |
+| Evidence sections on the briefing — `validated`, `discredited` (with `replaced_by`), `regime_shift`, `tried_here`; `evidence_status` on every hot-context row; `compact` and `since` | Yes | Yes |
+| Action priors on retrieve — `include_priors` + `candidate_actions` return per-action won/lost here and a recommendation (`act` / `explore` / `escalate`; `explore` assigned per agent) | Yes | Yes |
+| Failed attempts inside one trace (`record_attempt`) — the entries read before the failure are charged, the recovery is credited, a `lesson-contrast-*` entry names both | Yes | Yes |
+| Reuse ledger — what memory was read back, by whom, and whether it was written by another agent (`GET /api/v1/reuse`, `writer=` filter) | Yes | Yes |
+| Verified outcomes weigh more — `verified_by` on `commit_outcome` (CI, a monitor, a reviewer) multiplies the evidence by 1.5 over the agent's own declaration; the same constant in Python and SQL | Yes | Yes |
+| Credit by uplift — each cited entry's share of an outcome follows whether the entity's recent sessions that read it fared better than the ones that did not; shrunk while the sample is small, floored at 0.25 (Postgres; the filesystem adapter keeps the uniform split) | Yes | Yes |
+| The number — success over sessions per agent, in episodes, with sessions-to-recover after each regime shift and the share of outcomes verified externally (`GET /api/v1/learning`) | Yes | Yes |
+| Byte-faithful capture of model exchanges as sealed traces (OpenRouter proxy `AMFS_PROXY_CAPTURE`; default off, opt-in per account on the hosted gateway) | Yes | Yes |
 | LLM importance scoring (3-dimension) | — | Yes |
 | Background tier recomputation (`TierWorker`) | — | Yes |
 | **Git-like Timeline** | | |
@@ -223,9 +231,21 @@ AMFS is GitHub for agent memory, split into two layers. The open-source core giv
 | Memory distillation & bootstrap sets | — | Yes |
 | Memory safety validation | — | Yes |
 | Multi-strategy retrieval with learned ranking (RRF + ML) | — | Yes |
-| Learned retrieval ranking from outcome data | — | Yes |
-| Adaptive confidence calibration | — | Yes |
+| Learned retrieval ranking from outcome data, behind a holdout gate | — | Yes |
+| Adaptive confidence calibration, behind a holdout gate | — | Yes |
 | Training data export (SFT, DPO, reward model) | — | Yes |
+| **Repair loop (Pro, hosted)** | | |
+| Replay webhook receiver for Tier 2 (`amfs.replay`, `serveReplay`) | Yes | Yes |
+| Fix proposals from verdicts and behaviors; Tier 1 offline replay | — | Yes |
+| Tier 2 customer replay; Tier 3 canary (sequential rule, pooled, multi-arm, replay prior) | — | Yes |
+| Harness levers: system preamble, toolset, procedure workflow (shapes in OSS `amfs_core.render`) | — | Yes |
+| Portfolios of candidate fixes under a budget; scheduled proposer | — | Yes |
+| Gate self-tests in production: A/A monitor, injected wrong fixes, reward probe, evidence invariants | — | Yes |
+| Repair-prompt A/B with win rule and lineage readout | — | Yes |
+| Ship and rollback key by key; review triage queue; fix event trail | — | Yes |
+| Verify sweep — recurrence before and after the ship, two-proportion test; a canary-shipped fix is read against its control arm; an undecided reading is on the event trail (`verify_inconclusive`) | — | Yes |
+| Managed models — SFT and preference training on the account's own traces behind an eval gate, promoted version served through the gateway (`/api/v1/chat/completions`) | — | Yes |
+| Training-data export (`sft`, `dpo`, `team_sft`) — account admins on the dashboard, or an API key an admin created | — | Yes |
 | **Dashboard (Pro)** | | |
 | Memory explorer with interactive causal graph | — | Yes |
 | Decision trace explorer with enriched context and causal graph | — | Yes |
@@ -239,6 +259,22 @@ AMFS is GitHub for agent memory, split into two layers. The open-source core giv
 | Memory Tiers dashboard (distribution, entry browser) | — | Yes |
 | Guided migration from Mem0 and Zep (preview, resume, undo) | — | Yes |
 | Extended MCP server (Pro tools) | — | Yes |
+
+---
+
+## What we claim, and on what evidence
+
+Every public sentence about the loop sits on a rung of one ladder. A rung is published only once its evidence exists; the copy on this page, the README and the site cites the rung it stands on.
+
+| Rung | Sentence | Evidence | Status |
+|:--|:--|:--|:--|
+| 1 | Agents that stop repeating mistakes: every outcome moves the evidence behind what the agent relied on, and the next run gets a recommendation instead of a guess. | The evidence arithmetic and `recommend()` in OSS `amfs_core`; level-0 results in the RSI paper. The per-agent curve (`GET /api/v1/learning`) is how the sentence is checked on a deployment: first-window rate, latest-window rate, sessions to recover after a shift, and how much of it was verified outside the agent. | Published |
+| 2 | A self-improvement loop for AI agents, gated by held-out outcomes, reversible, audited, preregistered. | Tier 1–3 of the repair loop live in production with the gate benchmark scorecard (false-accept and true-reject rates on injected wrong fixes). | Mechanism shipped; scorecard read on dev, production readings pending |
+| 3 | Level 1 adds to level 0. | A confirmatory re-run on a single preregistered primary endpoint, positive at the preregistered alpha. | Not claimed |
+| 4 | Each cycle improves faster than the last. | An ignition series over two or more cycles, regressions reported per family. | Not claimed |
+| 5 | Externally validated. | Engine on/off positive on a public benchmark, a second judge family, one outside replication. | Not claimed |
+
+Never claimed, at any rung: "solved self-improvement", "open-ended capability gain", "autonomous AI research". Nothing here does that.
 
 ---
 
@@ -593,6 +629,8 @@ Extends the OSS MCP server with additional tools:
 ### Agent evaluation surfaces (Pro, hosted only)
 
 Pro adds an evaluation layer on top of sealed traces: LLM **judges** (versioned rubrics with sampling, budgets and dry runs), **verdicts** with evidence, **behaviors** mined from or authored against traces, **incidents** when a behavior breaks from baseline, blast-radius and dimension **segmentation**, **attribution** of failures to the memory entries that caused them, a **fix loop** that hands a coding agent a reproduction-and-tests payload, and an **investigator** that answers questions across runs. All of it runs on the hosted `/api/v1/eval` service and is reached three ways — the Pro MCP server's `amfs_judge_*` / `amfs_verdicts` / `amfs_behavior*` / `amfs_incident` / `amfs_propose_fix` / `amfs_investigate` tools (which refuse with `"mode": "local"` without `AMFS_HTTP_URL`), the private `amfs_pro` Python client (`ProClient` / `AsyncProClient`, dist `amfs-sdk-pro`), and the `amfs-pro` CLI (`eval`, `behaviors`, `incidents`, `fixes`, `cases`, `traces`, `investigate`; `--json` everywhere, `--fail-on-fail` for CI). None of these are in the OSS SDKs; the column map lives in [SDK ↔ MCP Parity]({{ site.baseurl }}/reference/sdk-mcp-parity/#agent-evaluation-pro-hosted-only).
+
+**The repair loop (Pro, hosted only).** Behind the fix loop sits a gated repair loop that takes a proposed fix from a draft to main without a person where the account's policy allows it, and never past the evidence: **Tier 1** replays the fix's prediction offline against the sealed runs it claims to repair; **Tier 2** sends the cases to the customer's own agent through a signed replay webhook (the OSS `amfs.replay.ReplayReceiver` / `amfs replay serve` is the receiver; the TypeScript SDK's `serveReplay` likewise); **Tier 3** runs the fix live as a **canary** on a share of sessions against a control, read by a sequential rule that spends its α across looks, pooled across the account's agents in the same situation, with the customer's Tier 2 result borrowed as a prior so a low-traffic agent decides sooner, and portfolio siblings compared as arms against one control. A fix may change memory, the agent's system preamble, its toolset or a procedure's workflow (the shapes are OSS `amfs_core.render`; the drafting, gating and shipping are Pro). The loop tests itself in production: identical-arm (A/A) canaries read the rule's false-positive rate, known-wrong fixes are injected weekly to confirm the gate refuses them, a reward probe checks the proxy a fix optimised against the outcome it stands for, the twelve evidence-path invariants are metrics with alerts, and the repair prompt itself is A/B'd and promoted by a win rule. Every ship is reversible key by key and every step is on the fix's event trail. Reached through the hosted `/api/v1/eval` routes, `ProClient.eval.fixes` (`test`, `ship`, `rollback`, `start_canary`, `repair_settings`, `repair_prompt`), the `amfs-pro fixes` CLI and the dashboard's Fixes tab; the column map is the *Repair loop* row of [SDK ↔ MCP Parity]({{ site.baseurl }}/reference/sdk-mcp-parity/#agent-evaluation-pro-hosted-only). Per-agent settings (`repair_policy`, `canary_pct`, `gate_probes`, `prompt_optimizer`, …) default to a person in the loop: `review` stops at a passed test until someone ships.
 
 ---
 

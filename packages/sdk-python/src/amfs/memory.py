@@ -507,6 +507,7 @@ class AgentMemory:
         keys under the cap ahead of what a run set — the replay receiver's
         grader keys, say."""
         self._session_attributes = {}
+        self._declare_situation()
 
     @property
     def session_llm_calls(self) -> list[dict[str, Any]]:
@@ -588,6 +589,7 @@ class AgentMemory:
         clone._session_metadata = None
         clone._session_attributes = {}
         clone._session_llm_calls = []
+        clone._declare_situation()
         return clone
 
     # ------------------------------------------------------------------
@@ -1559,14 +1561,24 @@ class AgentMemory:
         keys alone do not (an episode that read nothing still happened
         somewhere); with the causal keys' paths it becomes the record's
         ``entity_paths``, which is how later retrieves on that entity find it.
-        *situation* is an optional label for the kind of task. *actions_taken*
-        is derived from the recorded actions, the attempts and the final action
-        index unless given explicitly — see ``amfs_core.actions.actions_taken``.
+        *situation* is an optional label for the kind of task. It goes on the
+        outcome record, where action priors and lessons read it, and on the
+        sealed trace as the ``situation`` attribute — the same stamp
+        ``Run.begin(situation=...)`` makes — because that is where the repair
+        loop's weak-situation scan reads it. Until it travelled on the trace
+        an agent that labelled every commit through ``amfs_commit_outcome``
+        or this method directly had no situations on the server at all, and
+        the scheduled proposer had nothing to read. *actions_taken* is derived
+        from the recorded actions, the attempts and the final action index
+        unless given explicitly — see ``amfs_core.actions.actions_taken``.
 
         *verified_by* says where the outcome came from when the agent did not
         decide it itself — ``"ci"``, ``"human"``, ``"verifier"``, ``"customer"``.
         An outcome with it is external evidence; one without is the agent's own
-        declaration, and the repair loop's canary treats the two differently.
+        declaration. The two are weighed differently everywhere: a verified
+        outcome moves the evidence behind the entries it cites by
+        ``amfs_core.evidence.VERIFIED_EVIDENCE_WEIGHT`` (1.5x) over the agent's
+        word, and the repair loop's canary treats the two differently.
         *evidence* is a small bag of pointers to that source (``{"run_id": ...,
         "url": ...}``). Both travel as session attributes — ``verified_by`` and
         ``evidence_<key>`` — so they reach the sealed trace on every path.
@@ -1618,10 +1630,16 @@ class AgentMemory:
         untrue one of the two. The trace is still built and still left on
         ``_last_trace``; only the write is skipped.
         """
-        # Validated first so a bad bag fails before anything is written.
-        commit_attributes = validate_session_attributes(
-            {**(attributes or {}), **provenance_attributes(verified_by, evidence)}
-        )
+        # Validated first so a bad bag fails before anything is written. The
+        # situation named on this commit is this run's label: it goes over a
+        # ``Run.begin`` stamp (the later, more specific statement) and over the
+        # same key in *attributes*, which is the same thing said twice.
+        commit_attributes = validate_session_attributes({
+            **(attributes or {}),
+            **({SITUATION_ATTRIBUTE: " ".join(str(situation).split())[:200]}
+               if situation and str(situation).strip() else {}),
+            **provenance_attributes(verified_by, evidence),
+        })
         explicit_calls = [
             c for c in (_normalize_llm_call(lc) for lc in (llm_calls or [])) if c is not None
         ]
@@ -1898,6 +1916,7 @@ class AgentMemory:
         self._read_tracker.clear()
         self._session_attributes = {}
         self._session_llm_calls = []
+        self._declare_situation()
         return updated
 
     def record_attempt(
@@ -2000,10 +2019,15 @@ class AgentMemory:
 
         Skipped when the adapter learns remotely (the HTTP adapter): the server
         commits the same record on its own handle and writes the lesson there,
-        under the caller's identity. Never raises — a lesson is a bonus, and an
-        outcome that propagated must not be reported as failed because of it.
+        under the caller's identity. Skipped for a replay's record too: the
+        repair loop's test of a fix is not a session anyone served, and its
+        lesson named the fix under test as the entry to avoid — on ``main``,
+        for every agent. Never raises — a lesson is a bonus, and an outcome
+        that propagated must not be reported as failed because of it.
         """
         if getattr(self._adapter, "remote_learning", False):
+            return
+        if _evidence.is_replay_outcome(record):
             return
         try:
             lesson = _evidence.contrast_lesson(record)
@@ -2103,6 +2127,11 @@ class AgentMemory:
         string values up to 256 characters; anything else raises. Keys are
         lowercased. The bag is cleared when the trace is committed.
 
+        ``situation`` is also declared to the server on every request from
+        then on (``X-AMFS-Situation``, through an adapter that talks to one):
+        a canary on a fix for that situation routes only the sessions that
+        declare it, so declare it before the first read — ``Run.begin`` does.
+
         The key cap applies to the bag as merged, not to each call: a merge that
         would take it past 20 keys raises ``ValueError`` and leaves the bag as
         it was.
@@ -2115,7 +2144,26 @@ class AgentMemory:
         merged = {**self._session_attributes, **validated}
         _check_attribute_count(merged, "the session attribute bag")
         self._session_attributes = merged
+        if SITUATION_ATTRIBUTE in validated:
+            self._declare_situation()
         return dict(self._session_attributes)
+
+    def _declare_situation(self) -> None:
+        """Tell the adapter the situation the bag now carries, when it can
+        listen (``HttpAdapter.declare_situation``; the local adapters have no
+        request to put it on). A server running a canary on a fix for one
+        situation routes a session into an arm only while it declares that
+        situation, so the header follows the bag: set with the attribute —
+        ``Run.begin(situation=...)`` sets it before the first read — and
+        dropped when the bag is cleared at commit. Never raises."""
+        declare = getattr(self._adapter, "declare_situation", None)
+        if not callable(declare):
+            return
+        value = self._session_attributes.get(SITUATION_ATTRIBUTE)
+        try:
+            declare(str(value) if isinstance(value, str) and value.strip() else None)
+        except Exception:  # noqa: BLE001 - routing is the server's concern, not the run's
+            logger.debug("adapter.declare_situation failed", exc_info=True)
 
     def environment(self) -> dict[str, str]:
         """The run's environment as the session knows it: ``model``,

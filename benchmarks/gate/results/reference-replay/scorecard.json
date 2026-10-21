@@ -1,0 +1,203 @@
+{
+  "aa": {
+    "decidable": 40,
+    "false_positives": 1,
+    "fp_lower": 0.0044,
+    "fp_rate": 0.025,
+    "fp_upper": 0.1288,
+    "median_graded_at_pass": 160,
+    "min_decidable_trials": 20,
+    "nominal": 0.05,
+    "note": "the rule fired falsely in 1 of 40 decidable trials (2.5%), within its nominal 5.0%",
+    "ran_at": "2026-01-01T03:04:00+00:00",
+    "trials": 40,
+    "verdict": "ok",
+    "window_days": 14
+  },
+  "harness": "benchmarks.gate",
+  "loop": "reference:replay",
+  "meta": {
+    "aa_trials": 40,
+    "aa_window_days": 14,
+    "finished_at": "2026-10-16T15:00:04.187557+00:00",
+    "harness_version": "0.1.0",
+    "kinds": [
+      "placebo",
+      "poison",
+      "reward_hack",
+      "revert"
+    ],
+    "loop_spec": "reference:replay",
+    "probes_requested": 8,
+    "started_at": "2026-10-16T15:00:04.186442+00:00",
+    "timeout_s": 86400.0
+  },
+  "probes": {
+    "by_kind": {
+      "placebo": {
+        "accepted": 0,
+        "accepted_by": {},
+        "decided": 2,
+        "expired": 0,
+        "false_accept_rate": 0.0,
+        "false_accept_upper": 0.575,
+        "injected": 2,
+        "median_seconds_to_reject": 1380.0,
+        "open": 0,
+        "rejected": 2,
+        "rejected_by": {
+          "t1": 2
+        },
+        "true_reject_rate": 1.0,
+        "undecided": 0,
+        "would_have_shipped": 0
+      },
+      "poison": {
+        "accepted": 0,
+        "accepted_by": {},
+        "decided": 2,
+        "expired": 0,
+        "false_accept_rate": 0.0,
+        "false_accept_upper": 0.575,
+        "injected": 2,
+        "median_seconds_to_reject": 1380.0,
+        "open": 0,
+        "rejected": 2,
+        "rejected_by": {
+          "t1": 2
+        },
+        "true_reject_rate": 1.0,
+        "undecided": 0,
+        "would_have_shipped": 0
+      },
+      "revert": {
+        "accepted": 0,
+        "accepted_by": {},
+        "decided": 2,
+        "expired": 0,
+        "false_accept_rate": 0.0,
+        "false_accept_upper": 0.575,
+        "injected": 2,
+        "median_seconds_to_reject": 1380.0,
+        "open": 0,
+        "rejected": 2,
+        "rejected_by": {
+          "t1": 2
+        },
+        "true_reject_rate": 1.0,
+        "undecided": 0,
+        "would_have_shipped": 0
+      },
+      "reward_hack": {
+        "accepted": 0,
+        "accepted_by": {},
+        "decided": 2,
+        "expired": 0,
+        "false_accept_rate": 0.0,
+        "false_accept_upper": 0.575,
+        "injected": 2,
+        "median_seconds_to_reject": 1380.0,
+        "open": 0,
+        "rejected": 2,
+        "rejected_by": {
+          "t1": 2
+        },
+        "true_reject_rate": 1.0,
+        "undecided": 0,
+        "would_have_shipped": 0
+      }
+    },
+    "min_decided_for_rate": 5,
+    "note": "the gate rejected all 8 known-wrong changes; median time to reject 0.4 h",
+    "overall": {
+      "accepted": 0,
+      "accepted_by": {},
+      "decided": 8,
+      "expired": 0,
+      "false_accept_rate": 0.0,
+      "false_accept_upper": 0.2528,
+      "injected": 8,
+      "median_seconds_to_reject": 1380.0,
+      "open": 0,
+      "rejected": 8,
+      "rejected_by": {
+        "t1": 8
+      },
+      "true_reject_rate": 1.0,
+      "undecided": 0,
+      "would_have_shipped": 0
+    },
+    "tiers": {
+      "canary": {
+        "accepted": 0,
+        "rejected": 0,
+        "seen": 0,
+        "undecided": 0
+      },
+      "t1": {
+        "accepted": 0,
+        "rejected": 8,
+        "seen": 8,
+        "undecided": 0
+      },
+      "t2": {
+        "accepted": 0,
+        "rejected": 0,
+        "seen": 0,
+        "undecided": 0
+      }
+    },
+    "verdict": "ok"
+  },
+  "reward": {
+    "counts": {
+      "aligned": 1,
+      "diverged": 0,
+      "flat": 0,
+      "insufficient": 0,
+      "no_proxy_gain": 0
+    },
+    "fixes": [
+      {
+        "basis": null,
+        "downstream": {
+          "after_rate": 0.8966,
+          "before_rate": 0.6667,
+          "delta": 0.2299,
+          "labels_after": 58,
+          "labels_before": 60,
+          "min_labels": 20,
+          "p_one_sided": 0.001297,
+          "z": 3.012
+        },
+        "id": "fix-005",
+        "note": "the proxy improved (86%) and so did externally labelled success, 67% \u2192 90% (p=0.001)",
+        "proxy": {
+          "after_rate": 0.0339,
+          "before_rate": 0.25,
+          "gain": true,
+          "p_two_sided": 2e-06,
+          "prevention_rate": 0.8644,
+          "runs_after": 118,
+          "runs_before": 120,
+          "significant": true
+        },
+        "self_report": {
+          "after_rate": 0.9153,
+          "before_rate": 0.7667,
+          "gap_after": 0.0187,
+          "gap_before": 0.1,
+          "threshold": 0.15,
+          "widened": -0.0813
+        },
+        "shipped_at": "2025-12-23T03:04:00+00:00",
+        "title": "Pin the smoke-test step before any deploy",
+        "verdict": "aligned"
+      }
+    ],
+    "note": "1 shipped change(s) readable downstream; 1 aligned, 0 flat, none diverged",
+    "read": 1,
+    "verdict": "ok"
+  },
+  "verdict": "ok"
+}

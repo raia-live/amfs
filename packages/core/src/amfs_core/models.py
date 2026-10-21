@@ -122,6 +122,16 @@ PROCEDURE_OPTIONAL_FIELDS: tuple[str, ...] = (
     "depends_on",
     # Trace or outcome ids the procedure was distilled from.
     "evidence",
+    # A workflow: a procedure several roles carry out. ``roles`` names them
+    # (``{"planner": "drafts the plan", ...}`` or a list of names),
+    # ``call_order`` is the order they are called in (role names when ``roles``
+    # is set, else action keys), and ``output_contracts`` is what each hands on
+    # (``{"planner": "a numbered plan with one tool per step"}``). The SDK lints
+    # the shape and the briefing renders it; what to write in them is the
+    # drafting side's business.
+    "roles",
+    "call_order",
+    "output_contracts",
 )
 
 #: Keys of a ``preconditions`` dict that name the run's environment rather than
@@ -140,12 +150,18 @@ def procedure_issues(value: Any) -> list[str]:
     step a non-blank string or a dict with a non-blank ``action`` and, optionally,
     an ``action_key`` naming the tool call the step expects — the hook adherence
     and step-level attribution key on), optionally ``preconditions``,
-    ``on_failure``, ``verify``, ``effects``, ``depends_on`` and ``evidence``. The
+    ``on_failure``, ``verify``, ``effects``, ``depends_on``, ``evidence`` and the
+    workflow fields ``roles``, ``call_order`` and ``output_contracts``. The
     optional fields are validated for shape only when present: ``effects`` and
     ``evidence`` are lists of strings, ``depends_on`` a list of ``{"ref", "version"}``
-    dicts. A plain string is accepted when it reads as a numbered or bulleted
-    list of at least two steps; anything else is ``not_structured``. Pure; used
-    by ``amfs_core.quality``.
+    dicts, ``roles`` a non-empty list of names or a dict of name → description,
+    ``call_order`` a non-empty list of names, ``output_contracts`` a dict of
+    name → contract (a string or a dict). A ``call_order`` that names a role
+    not in ``roles`` is ``unknown_role_in_call_order``: a workflow whose order
+    calls a role it never defined is one no agent can follow. A plain string is
+    accepted when it reads as a numbered or bulleted list of at least two
+    steps; anything else is ``not_structured``. Pure; used by
+    ``amfs_core.quality``.
     """
     if isinstance(value, dict):
         out: list[str] = []
@@ -185,12 +201,86 @@ def procedure_issues(value: Any) -> list[str]:
             )
             if not ok:
                 out.append("malformed_depends_on")
+        out.extend(_workflow_issues(value))
         return out
     if isinstance(value, str):
         lines = [ln.strip() for ln in value.splitlines() if ln.strip()]
         listed = [ln for ln in lines if _PROCEDURE_STEP_LINE.match(ln)]
         return [] if len(listed) >= 2 else ["not_structured"]
     return ["not_structured"]
+
+
+def _names(items: Any) -> bool:
+    return isinstance(items, list) and bool(items) and all(
+        isinstance(i, str) and i.strip() for i in items
+    )
+
+
+def _well_formed_roles(roles: Any) -> bool:
+    """Whether ``roles`` is a well-shaped role list — a non-empty list of
+    non-blank names, or a non-empty dict of non-blank names to a description
+    (a string) or ``None``. The one test the linter
+    (:func:`procedure_issues`, ``malformed_roles``) and the reader
+    (:func:`procedure_roles`) share, so a ``roles`` the linter flags never
+    reads as a name map."""
+    if isinstance(roles, dict):
+        return bool(roles) and all(
+            isinstance(k, str) and k.strip() and (v is None or isinstance(v, str))
+            for k, v in roles.items()
+        )
+    return _names(roles)
+
+
+def _workflow_issues(value: dict[str, Any]) -> list[str]:
+    """Shape of the workflow fields when present; see :func:`procedure_issues`."""
+    out: list[str] = []
+    role_names: set[str] | None = None
+    roles = value.get("roles")
+    if roles is not None:
+        ok = _well_formed_roles(roles)
+        if ok:
+            role_names = {r.strip() for r in roles}
+        else:
+            out.append("malformed_roles")
+    order = value.get("call_order")
+    if order is not None:
+        if not _names(order):
+            out.append("malformed_call_order")
+        elif role_names is not None and any(o.strip() not in role_names for o in order):
+            out.append("unknown_role_in_call_order")
+    contracts = value.get("output_contracts")
+    if contracts is not None:
+        ok = isinstance(contracts, dict) and bool(contracts) and all(
+            isinstance(k, str) and k.strip()
+            and (isinstance(v, str) and v.strip() or isinstance(v, dict) and v)
+            for k, v in contracts.items()
+        )
+        if not ok:
+            out.append("malformed_output_contracts")
+    return out
+
+
+def procedure_roles(value: Any) -> dict[str, str]:
+    """The workflow's roles as ``name → description`` (``""`` when the role
+    was listed without one), in the order written. Empty for a procedure
+    with no roles or a malformed ``roles``. Pure."""
+    if not isinstance(value, dict):
+        return {}
+    roles = value.get("roles")
+    if not _well_formed_roles(roles):
+        return {}
+    if isinstance(roles, dict):
+        return {k.strip(): (v or "") for k, v in roles.items()}
+    return {r.strip(): "" for r in roles}
+
+
+def procedure_call_order(value: Any) -> list[str]:
+    """The workflow's ``call_order`` as written, stripped; empty when there is
+    none or it is malformed. Pure."""
+    if not isinstance(value, dict):
+        return []
+    order = value.get("call_order")
+    return [o.strip() for o in order] if _names(order) else []
 
 
 def procedure_action_keys(value: Any) -> list[str]:
@@ -354,6 +444,13 @@ class MemoryEntry(BaseModel):
     #: stronger signal than one agent's repeated success, and a peer reading the
     #: entry can see who stands behind it.
     validators: list[str] = Field(default_factory=list)
+    #: Credit by uplift (``amfs_core.evidence``): over the entity's recent
+    #: sessions, the success rate of those that read this entry minus that of
+    #: those that did not, and the sample it rests on (the smaller side).
+    #: Maintained by an adapter that keeps outcomes; unset means the entry
+    #: takes a uniform share of every outcome's credit.
+    uplift: float | None = None
+    uplift_sessions: int = 0
     recall_count: int = 0
     priority_score: float | None = None
     tier: int = 3
@@ -872,10 +969,17 @@ class SemanticQuery(BaseModel):
     it. An adapter given one must use it instead of embedding ``text`` again:
     the server embeds once, off its event loop, and reuses the vector across
     the variant and below-gate reads of a single retrieve.
+
+    ``include_descendants`` widens ``entity_path`` from an exact match to
+    that path and everything beneath it, as :class:`SearchQuery` does and by
+    the same rule (``amfs_core.scope.covers``). Off by default; the caller
+    that wants it is one whose scope is a prefix rather than an entity — a
+    model trained on ``research/*`` serving a request that names no path.
     """
 
     text: str
     entity_path: str | None = None
+    include_descendants: bool = False
     min_confidence: float = 0.0
     max_confidence: float | None = None
     limit: int = 10

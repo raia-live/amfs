@@ -1,0 +1,255 @@
+{
+  "detail": {
+    "by_detail": {},
+    "fp_lower": 0.0,
+    "fp_rate": 0.0,
+    "fp_upper": 0.0876,
+    "server_note": "the canary rule fired falsely in 0 of 40 A/A trials (0.0%, upper 8.8%) against a nominal 7.5%",
+    "server_verdict": "ok"
+  },
+  "nominal": 0.07500000000000001,
+  "ran_at": null,
+  "trials": [
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": null
+    }
+  ],
+  "window_days": 14
+}

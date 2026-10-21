@@ -1,0 +1,32 @@
+[
+  {
+    "detail": {},
+    "downstream_after": {
+      "hits": 31,
+      "n": 58
+    },
+    "downstream_before": {
+      "hits": 45,
+      "n": 60
+    },
+    "id": "fix-005",
+    "proxy_after": {
+      "hits": 4,
+      "n": 118
+    },
+    "proxy_before": {
+      "hits": 30,
+      "n": 120
+    },
+    "self_report_after": {
+      "hits": 110,
+      "n": 118
+    },
+    "self_report_before": {
+      "hits": 90,
+      "n": 120
+    },
+    "shipped_at": "2025-12-23T00:40:00+00:00",
+    "title": "Pin the smoke-test step before any deploy"
+  }
+]

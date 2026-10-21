@@ -641,6 +641,119 @@ def test_asking_about_an_agent_the_caller_cannot_see_answers_nothing():
     assert summary["recent_cross_surface"] == []
 
 
+def test_naming_a_writer_filters_every_query_on_the_author():
+    """The other side of the handoff: the window as one agent AS WRITER.
+
+    A page about who learns from an agent used to ask for the account's newest
+    handoffs and keep the rows naming it as author — a cut of a cut, so a quiet
+    writer among a busy account's latest hundred read as a writer nobody reads.
+    Filtered here, ``cross_surface`` is exactly how many times other agents took
+    its memory and ``by_agent`` names them.
+    """
+    adapter, seen = _sql_capturing_adapter()
+    adapter.reuse_summary(since=datetime.now(UTC) - timedelta(days=7), writer="teacher")
+
+    assert len(seen) == 4, "totals, top, by_agent and recent_cross_surface"
+    for sql, params in seen:
+        assert "written_by = %s" in sql, f"unfiltered query answers about everyone: {sql[:80]}"
+        assert "reused_by = %s" not in sql, "the reader is not narrowed unless asked"
+        assert "teacher" in params, "the writer must actually be bound"
+
+
+def test_writer_and_reader_compose_under_the_visible_scope():
+    """Both sides may be named at once, and neither widens what a caller sees."""
+    adapter, seen = _sql_capturing_adapter()
+    adapter.reuse_summary(
+        since=datetime.now(UTC) - timedelta(days=7),
+        visible_agents={"mine", "teacher"},
+        agent="mine",
+        writer="teacher",
+    )
+    assert len(seen) == 4
+    for sql, params in seen:
+        assert "reused_by = ANY(%s)" in sql and "reused_by = %s" in sql
+        assert "written_by = %s" in sql
+        assert "mine" in params and "teacher" in params
+
+    # A writer the caller may not see is refused up front, not matched to nothing.
+    adapter, seen = _sql_capturing_adapter()
+    summary = adapter.reuse_summary(
+        since=datetime.now(UTC) - timedelta(days=7),
+        visible_agents={"mine"},
+        writer="someone-elses",
+    )
+    assert seen == [] and summary["cross_surface"] == 0
+
+
+def test_the_endpoint_passes_writer_down_and_echoes_it():
+    """The dashboard tells a server that applied ``writer`` from one that
+    ignored the parameter by the echo: an older server returns no ``writer``
+    key and the page falls back to its local cut."""
+    from amfs_http import server as srv
+
+    asked: dict[str, Any] = {}
+
+    class _Adapter:
+        def reuse_summary(
+            self, *, since: Any, limit: int = 10, visible_agents: Any = None,
+            agent: str | None = None, writer: str | None = None,
+        ) -> dict[str, Any]:
+            asked.update(agent=agent, writer=writer, limit=limit)
+            return {"reuses": 2, "cross_surface": 2}
+
+    class _Memory:
+        _adapter = _Adapter()
+
+    class _State:
+        visibility_filter = None
+
+    class _EndpointRequest(_Request):
+        state = _State()
+
+    original = srv._get_memory
+    srv._get_memory = lambda: _Memory()  # type: ignore[assignment]
+    try:
+        body = srv.reuse_summary(_EndpointRequest(), writer="teacher", limit=100)
+    finally:
+        srv._get_memory = original  # type: ignore[assignment]
+
+    assert asked == {"agent": None, "writer": "teacher", "limit": 100}
+    assert body["available"] is True and body["writer"] == "teacher" and body["agent"] is None
+    assert body["cross_surface"] == 2
+
+
+def test_an_adapter_predating_the_writer_filter_degrades_instead_of_failing():
+    from amfs_http import server as srv
+
+    class _OldAdapter:
+        def reuse_summary(
+            self, *, since: Any, limit: int = 10, visible_agents: Any = None,
+            agent: str | None = None,
+        ) -> dict[str, Any]:
+            return {"reuses": 3}
+
+    class _Memory:
+        _adapter = _OldAdapter()
+
+    class _State:
+        visibility_filter = None
+
+    class _EndpointRequest(_Request):
+        state = _State()
+
+    original = srv._get_memory
+    srv._get_memory = lambda: _Memory()  # type: ignore[assignment]
+    try:
+        narrowed = srv.reuse_summary(_EndpointRequest(), writer="teacher")
+        by_reader = srv.reuse_summary(_EndpointRequest(), agent="mine")
+    finally:
+        srv._get_memory = original  # type: ignore[assignment]
+
+    assert narrowed["available"] is False and "one writer" in narrowed["reason"]
+    assert narrowed["writer"] == "teacher"
+    assert by_reader["available"] is True and by_reader["reuses"] == 3
+
+
 def test_an_empty_string_reader_is_excluded_from_every_claim():
     """Defence in depth for rows an older writer may already have stored.
 

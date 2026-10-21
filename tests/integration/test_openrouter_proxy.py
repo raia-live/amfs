@@ -1,24 +1,22 @@
 """Integration test for the memory-augmenting OpenRouter proxy route.
 
 Exercises the full mount → inject → forward → return path against a mocked
-upstream (no real OpenRouter call). Skipped unless AMFS_TEST_PROXY=1 and both
-fastapi + httpx are importable, so unit CI stays green.
+upstream (no real OpenRouter call). Skipped only when fastapi or httpx is not
+importable. It used to be gated behind ``AMFS_TEST_PROXY=1`` as well, and so
+never ran in CI — which is how the route shipped returning 422 on every call
+(``Request`` imported inside the mount function did not resolve the
+``request: Request`` annotation under ``from __future__ import annotations``).
 
 Run:
-    AMFS_TEST_PROXY=1 OPENROUTER_API_KEY=test \
-        pytest tests/integration/test_openrouter_proxy.py
+    pytest tests/integration/test_openrouter_proxy.py
 """
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("AMFS_TEST_PROXY") != "1",
-    reason="AMFS_TEST_PROXY!=1 — skipping OpenRouter proxy integration test",
-)
+pytest.importorskip("fastapi")
+pytest.importorskip("httpx")
 
 
 def _build_app(monkeypatch):

@@ -94,15 +94,15 @@ class FilesystemAdapter(AdapterABC):
                 superseded_path = old_current.with_name(
                     old_current.name.replace("_current.json", "_superseded.json")
                 )
-                old_current.rename(superseded_path)
+                os.replace(old_current, superseded_path)
 
-            # Atomic write: write to tmp, then rename
+            # Atomic write: write to tmp, then replace
             tmp_path = layout.tmp_file(entry.entity_path, entry.key, new_version)
             final_path = layout.version_file(entry.entity_path, entry.key, new_version, current=True)
 
             data = entry.model_dump(mode="json")
             tmp_path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-            os.rename(tmp_path, final_path)
+            os.replace(tmp_path, final_path)
 
         return entry
 
@@ -138,13 +138,13 @@ class FilesystemAdapter(AdapterABC):
                     superseded = old_current.with_name(
                         old_current.name.replace("_current.json", "_superseded.json")
                     )
-                    old_current.rename(superseded)
+                    os.replace(old_current, superseded)
 
                 tmp_path = layout.tmp_file(e.entity_path, e.key, new_version)
                 final_path = layout.version_file(e.entity_path, e.key, new_version, current=True)
                 data = e.model_dump(mode="json")
                 tmp_path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-                os.rename(tmp_path, final_path)
+                os.replace(tmp_path, final_path)
                 written[idx] = e
         finally:
             for lk in reversed(locks):
@@ -166,16 +166,23 @@ class FilesystemAdapter(AdapterABC):
         return d
 
     def save_commit(self, commit: Commit) -> None:
-        path = self._commits_dir() / f"{commit.id}.json"
+        commits_dir = self._commits_dir()
+        final_path = commits_dir / f"{commit.id}.json"
+        tmp_path = commits_dir / f"{commit.id}.tmp"
         data = commit.model_dump(mode="json")
-        path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        tmp_path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        os.replace(tmp_path, final_path)
 
     def get_commit(self, commit_id: str) -> Commit | None:
         path = self._commits_dir() / f"{commit_id}.json"
         if not path.exists():
             return None
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return Commit.model_validate(data)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return Commit.model_validate(data)
+        except Exception:
+            logger.warning("Skipping unreadable commit %s: %s", commit_id, path, exc_info=True)
+            return None
 
     def list_commits(
         self,

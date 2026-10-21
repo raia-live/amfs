@@ -98,3 +98,41 @@ def test_backfill_embeddings_fills_missing(adapter):
         FixedEmbedder(),
     )
     assert any(e.key == "db-analytics" for e, _ in results)
+
+
+def test_semantic_search_reaches_beneath_a_scope_only_when_asked(adapter):
+    """A served model trained on ``svc/*`` retrieves with its prefix as the
+    path and no request names a deeper one: an exact match on ``svc`` finds
+    nothing, and ``include_descendants`` finds ``svc/db`` and ``svc/db/replica``
+    but never the look-alike ``svcx``. Both adapters, the same rule as
+    ``search``."""
+    import asyncio
+
+    from amfs_postgres.async_adapter import AsyncPostgresAdapter
+
+    def at(path: str, key: str, value: str) -> MemoryEntry:
+        return _entry(key, value).model_copy(update={"entity_path": path})
+
+    adapter.write(at("svc/db", "db-billing", "billing runs on postgres"))
+    adapter.write(at("svc/db/replica", "replica", "billing replica runs on postgres too"))
+    adapter.write(at("svcx", "lookalike", "billing runs on postgres elsewhere"))
+    q = SemanticQuery(text="billing runs on postgres", entity_path="svc", limit=10)
+    wide = q.model_copy(update={"include_descendants": True})
+
+    assert adapter.semantic_search(q, FixedEmbedder()) == []
+    keys = sorted(e.entity_path for e, _ in adapter.semantic_search(wide, FixedEmbedder()))
+    assert keys == ["svc/db", "svc/db/replica"]
+
+    async def go():
+        a = AsyncPostgresAdapter(dsn=PG_DSN, namespace="emb-test")
+        await a.open()
+        try:
+            exact = await a.semantic_search(q, FixedEmbedder())
+            beneath = await a.semantic_search(wide, FixedEmbedder())
+            return exact, beneath
+        finally:
+            await a.close()
+
+    exact, beneath = asyncio.run(go())
+    assert exact == []
+    assert sorted(e.entity_path for e, _ in beneath) == ["svc/db", "svc/db/replica"]

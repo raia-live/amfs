@@ -185,6 +185,31 @@ class TestRun:
         # The bag still carries them too, for the paths that read it there.
         assert meta.attributes["model"] == "gpt-5.4-mini"
 
+    def test_a_situation_named_on_the_commit_is_stamped_on_the_trace(self, mem) -> None:
+        """Without ``Run.begin``: the MCP ``amfs_commit_outcome(situation=...)``
+        path and a direct ``commit_outcome``. The label used to reach the
+        outcome record only, so the server's weak-situation scan — which
+        reads ``attributes.situation`` on the sealed trace — saw none of an
+        agent's situations (dev, 532 driver traces, scanned 0)."""
+        mem.read("acme/ci", "fix-pin")
+        mem.commit_outcome("t-1", OutcomeType.SUCCESS, situation="  change   email\n ticket ")
+        bag = mem._last_trace.session_metadata.attributes
+        assert bag[SITUATION_ATTRIBUTE] == "change email ticket"
+
+    def test_the_commit_situation_wins_over_the_run_stamp_and_an_empty_one_is_no_stamp(
+        self, mem
+    ) -> None:
+        run = Run(mem)
+        run.begin("pip install fails", entity_path="acme/ci", situation="install failure")
+        mem.commit_outcome("t-2", OutcomeType.SUCCESS, situation="pin conflict")
+        assert mem._last_trace.session_metadata.attributes[SITUATION_ATTRIBUTE] == "pin conflict"
+        # A blank label is no label; the session's own stamp, if any, stands.
+        mem.commit_outcome("t-3", OutcomeType.SUCCESS, situation="   ",
+                           attributes={"task_type": "x"})
+        bag = mem._last_trace.session_metadata.attributes
+        assert bag.get(SITUATION_ATTRIBUTE) in (None, "install failure")
+        assert bag["task_type"] == "x"
+
     def test_begin_on_another_runtime_sets_the_procedure_apart(self, mem) -> None:
         run = Run(mem)
         g = run.begin("pip install fails", entity_path="acme/ci", runtime="python3.9")

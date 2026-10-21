@@ -251,7 +251,7 @@ def test_override_wins_and_never_goes_below_one(monkeypatch, host_has_8_cpus) ->
 # ── Sync-bodied routes run on the threadpool ─────────────────────────
 
 SYNC_ROUTES = [
-    "entry_quality", "get_usage", "list_api_keys", "create_api_key", "revoke_api_key",
+    "entry_quality", "entry_quality_batch", "get_usage", "list_api_keys", "create_api_key", "revoke_api_key",
     "list_audit_log", "list_teams", "create_team", "update_team", "delete_team",
     "list_team_members", "add_team_member", "update_team_member", "remove_team_member",
     "reinstate_team_member", "check_member_email", "list_detected_patterns",
@@ -334,21 +334,38 @@ class _ClusterCompileSpy:
         return self
 
     def compile(self, scope):
-        self.calls.append((scope, threading.current_thread().name))
+        from amfs_postgres import tenant_context as tc
+
+        self.calls.append(
+            (scope, threading.current_thread().name, tc.get_request_tenant_account_id())
+        )
         if self.gate is not None:
             self.gate.wait(5)
 
 
-def _wire_recompute(monkeypatch, calls, gate=None):
+def _wire_recompute(monkeypatch, calls, gate=None, adapter=None):
     from amfs_postgres.adapter import PostgresAdapter
 
-    adapter = object.__new__(PostgresAdapter)
+    if adapter is None:
+        adapter = object.__new__(PostgresAdapter)
     mem = SimpleNamespace(_adapter=adapter, namespace="acct-1")
     monkeypatch.setattr(server, "_get_memory", lambda: mem)
     import amfs_cortex.compiler as compiler_mod
 
     monkeypatch.setattr(compiler_mod, "DigestCompiler", _ClusterCompileSpy(calls, gate))
     server._cluster_recompute_last.clear()
+    server._cluster_recompute_inflight.clear()
+
+
+def _drain(timeout: float = 5.0) -> None:
+    """Wait for the background compile the handler scheduled to finish."""
+    deadline = time.monotonic() + timeout
+    while server._cluster_recompute_inflight and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert not server._cluster_recompute_inflight, "compile still in flight"
+
+
+SCHEDULED = {"ok": True, "scheduled": True}
 
 
 def _req(account_id: str | None = None):
@@ -363,10 +380,13 @@ def test_recompute_is_a_plain_def_and_compiles_once_per_window(monkeypatch) -> N
     _wire_recompute(monkeypatch, calls)
     assert not inspect.iscoroutinefunction(server.recompute_clusters)
 
-    assert server.recompute_clusters(_req()) == {"ok": True}
+    assert server.recompute_clusters(_req()) == SCHEDULED
+    _drain()
     assert server.recompute_clusters(_req()) == {"ok": True, "skipped": "recent"}
-    assert server.recompute_clusters(_req(), force=True) == {"ok": True}
+    assert server.recompute_clusters(_req(), force=True) == SCHEDULED
+    _drain()
     assert [c[0] for c in calls] == ["cluster:account:acct-1"] * 2
+    assert all(not c[1].startswith("MainThread") for c in calls), "the compile is off the request"
 
 
 def test_recompute_window_expires(monkeypatch) -> None:
@@ -374,8 +394,41 @@ def test_recompute_window_expires(monkeypatch) -> None:
     _wire_recompute(monkeypatch, calls)
     monkeypatch.setattr(server, "_CLUSTER_RECOMPUTE_MIN_INTERVAL_S", 0.0)
     server.recompute_clusters(_req())
+    _drain()
     server.recompute_clusters(_req())
+    _drain()
     assert len(calls) == 2
+
+
+def _digest_compiled(seconds_ago: float):
+    from datetime import UTC, datetime, timedelta
+
+    return SimpleNamespace(compiled_at=datetime.now(UTC) - timedelta(seconds=seconds_ago))
+
+
+def test_recompute_window_is_read_from_the_stored_digest(monkeypatch) -> None:
+    """The window holds across instances: a compile another instance finished
+    inside the window is reused here, with nothing in this process's memory."""
+    from amfs_postgres.adapter import PostgresAdapter
+
+    calls: list = []
+    asked: list = []
+    age = {"seconds": 10.0}
+
+    def get_digest(digest_type, scope, namespace="default", **kw):
+        asked.append((digest_type.value, scope, namespace))
+        return _digest_compiled(age["seconds"])
+
+    adapter = object.__new__(PostgresAdapter)
+    adapter.get_digest = get_digest  # the stored digest, as the database has it
+    _wire_recompute(monkeypatch, calls, adapter=adapter)
+    assert server.recompute_clusters(_req()) == {"ok": True, "skipped": "recent"}
+    assert asked == [("agent_clusters", "account:acct-1", "acct-1")]
+    assert calls == []
+    age["seconds"] = server._CLUSTER_RECOMPUTE_MIN_INTERVAL_S + 1
+    assert server.recompute_clusters(_req()) == SCHEDULED
+    _drain()
+    assert len(calls) == 1
 
 
 def test_recompute_window_is_per_tenant_account(monkeypatch) -> None:
@@ -388,11 +441,13 @@ def test_recompute_window_is_per_tenant_account(monkeypatch) -> None:
     """
     calls: list = []
     _wire_recompute(monkeypatch, calls)
-    assert server.recompute_clusters(_req("acct-A")) == {"ok": True}
-    assert server.recompute_clusters(_req("acct-B")) == {"ok": True}
+    assert server.recompute_clusters(_req("acct-A")) == SCHEDULED
+    assert server.recompute_clusters(_req("acct-B")) == SCHEDULED
+    _drain()
     assert server.recompute_clusters(_req("acct-A")) == {"ok": True, "skipped": "recent"}
     assert server.recompute_clusters(_req("acct-B")) == {"ok": True, "skipped": "recent"}
-    assert server.recompute_clusters(_req()) == {"ok": True}, "no account: its own window"
+    assert server.recompute_clusters(_req()) == SCHEDULED, "no account: its own window"
+    _drain()
     assert len(calls) == 3
 
 
@@ -406,18 +461,23 @@ def test_recompute_window_follows_the_rls_tenant_context(monkeypatch) -> None:
     _wire_recompute(monkeypatch, calls)
     tc.set_tls_tenant_account_id("acct-rls-A")
     try:
-        assert server.recompute_clusters(_req()) == {"ok": True}
+        assert server.recompute_clusters(_req()) == SCHEDULED
+        _drain()
         assert server.recompute_clusters(_req()) == {"ok": True, "skipped": "recent"}
         # A stale state.account_id does not override the context the compile used.
         assert server.recompute_clusters(_req("acct-other")) == {"ok": True, "skipped": "recent"}
         tc.set_tls_tenant_account_id("acct-rls-B")
-        assert server.recompute_clusters(_req()) == {"ok": True}
+        assert server.recompute_clusters(_req()) == SCHEDULED
+        _drain()
     finally:
         tc.clear_tls_tenant_account_id()
     assert server.recompute_clusters(_req("acct-rls-A")) == {"ok": True, "skipped": "recent"}, (
         "without an RLS context the request state names the same account"
     )
     assert len(calls) == 2
+    assert [c[2] for c in calls] == ["acct-rls-A", "acct-rls-B"], (
+        "the background compile runs under the request's tenant"
+    )
 
 
 def test_concurrent_recomputes_do_not_stack(monkeypatch) -> None:
@@ -434,12 +494,13 @@ def test_concurrent_recomputes_do_not_stack(monkeypatch) -> None:
         time.sleep(0.01)
     t2 = threading.Thread(target=lambda: results.append(server.recompute_clusters(_req())))
     t2.start()
-    time.sleep(0.05)
-    assert len(calls) == 1, "the second call must wait for the first, not compile alongside it"
+    t2.join(5)
+    assert len(calls) == 1, "the second call must yield to the first, not compile alongside it"
     gate.set()
-    t1.join(5); t2.join(5)
+    t1.join(5)
+    _drain()
     assert len(calls) == 1
-    assert sorted(r.get("skipped", "") for r in results) == ["", "recent"]
+    assert sorted(r.get("skipped", "") for r in results) == ["", "in_progress"]
 
 
 # ── Acting for an agent never touches the shared tagger ─────────────────────

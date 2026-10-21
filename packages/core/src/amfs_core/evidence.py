@@ -19,13 +19,33 @@ where ``prior`` is the confidence the author wrote and ``E_s`` / ``E_f`` are
 evidence masses that decay by ``EVIDENCE_DECAY`` on every update, so the last
 few outcomes dominate. Each outcome adds a weight
 
-    w = severity(outcome_type) * causal_confidence / n_causal * (1 + |target - confidence|)
+    w = severity(outcome_type) * causal_confidence * credit / n_causal
+        * (1 + |target - confidence|) * verification
 
-to one of the masses. The last factor is the *surprise*: a failure on an entry
-the agent trusted at 0.95 counts nearly twice as much as one on an entry at
-0.5, and a success on an already-trusted entry counts for little. Dividing by
-``n_causal`` is the *credit split*: an outcome that cited eight entries cannot
-hand each of them a full unit of evidence.
+to one of the masses. ``(1 + |target - confidence|)`` is the *surprise*: a
+failure on an entry the agent trusted at 0.95 counts nearly twice as much as
+one on an entry at 0.5, and a success on an already-trusted entry counts for
+little. Dividing by ``n_causal`` is the *credit split*: an outcome that cited
+eight entries cannot hand each of them a full unit of evidence.
+
+``credit`` is the entry's share of that split, by *uplift*: over the entity's
+recent sessions, how much more often the ones that read this entry succeeded
+than the ones that did not (:func:`uplift_credit`). A uniform split hands the
+one entry that mattered and the eleven that did not the same evidence. With
+uplift an entry whose presence tracks success keeps its full share of a
+success and is charged less for a failure; an entry whose presence tracks
+failure is charged in full and credited less. The measurement is shrunk
+toward uniform while the sample is small and floored at ``UPLIFT_FLOOR``, so
+it reorders credit and never silences an entry. An adapter that keeps
+outcomes maintains ``MemoryEntry.uplift`` (:func:`uplift_from_counts`); one
+that does not leaves it unset and the split stays uniform.
+
+``verification`` is :data:`VERIFIED_EVIDENCE_WEIGHT` when the outcome was
+decided outside the agent — ``verified_by`` set to CI, a monitor, a reviewer,
+a customer — and 1 when the agent declared it itself. The agent's opinion of
+its own run is evidence, but an engine whose reward is only that opinion
+grades its own homework; a verified outcome is the stronger signal and moves
+the evidence more.
 
 One exception to the surprise term: the *first* failure of an entry that has
 at least ``FIRST_STRIKE_MIN_WINS`` successes and no failure yet is weighed
@@ -53,7 +73,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Callable, Iterable
 
 from amfs_core.models import (
@@ -87,6 +107,16 @@ FIRST_STRIKE_MIN_WINS = 3
 #: ``explore`` long after a replacement had been found and validated.
 REGIME_MIN_SUCCESSES = 3
 REGIME_WINDOW_DAYS = 7
+#: With the rule's recent outcomes in hand (``regime_shifted(recent=...)``),
+#: a shift needs this many failures among the newest ``REGIME_RECENT_OUTCOMES``
+#: of them, from distinct sessions. The aggregate record cannot tell one
+#: mislabelled failure from a change in the world: on one deployment a rule
+#: validated ten times read as shifted on a single failure the monitor's
+#: pattern had mislabelled, and a fix was drafted for a policy that had not
+#: changed. Two sessions failing where the rule used to hold is the floor at
+#: which "it stopped working" is a claim about the rule rather than the run.
+REGIME_MIN_FAILURES = 2
+REGIME_RECENT_OUTCOMES = 5
 #: Failures weigh more than successes: trust is easy to lose, slow to rebuild.
 SEVERITY: dict[str, float] = {
     OutcomeType.SUCCESS.value: 1.0,
@@ -99,6 +129,21 @@ SEVERITY: dict[str, float] = {
     OutcomeType.P1_INCIDENT.value: 3.0,
 }
 SUCCESS_TYPES = frozenset({OutcomeType.SUCCESS.value, OutcomeType.CLEAN_DEPLOY.value})
+#: How much more an outcome decided outside the agent weighs than the agent's
+#: own declaration (``verified_by`` on the outcome; see the module docstring).
+#: 1.5: a CI failure moves an entry half again as far as "the agent says it
+#: failed". Not an environment variable: the SQL rendering carries the same
+#: constant and the two must agree.
+VERIFIED_EVIDENCE_WEIGHT = 1.5
+#: Credit by uplift. ``UPLIFT_WINDOW`` recent outcomes on the entity are the
+#: sample; ``UPLIFT_SHRINK`` is the sample size at which a measured uplift
+#: counts half (``n / (n + UPLIFT_SHRINK)``), so a handful of sessions barely
+#: move the split; ``UPLIFT_FLOOR`` is the least share an entry keeps, so a
+#: disfavoured entry is still charged and credited, just less.
+UPLIFT_WINDOW = 500
+UPLIFT_WINDOW_DAYS = 90
+UPLIFT_SHRINK = 10
+UPLIFT_FLOOR = 0.25
 
 OUTCOME_MODEL_ENV = "AMFS_OUTCOME_MODEL"
 
@@ -118,11 +163,63 @@ def is_known(outcome_type: OutcomeType | str) -> bool:
     return _name(outcome_type) in SEVERITY
 
 
+def recent_failures_confirm_shift(
+    recent: Iterable[Any],
+    *,
+    min_failures: int = REGIME_MIN_FAILURES,
+    window: int = REGIME_RECENT_OUTCOMES,
+) -> bool:
+    """Whether a rule's recent outcomes, newest first, carry a shift.
+
+    *recent* is the rule's outcomes as the caller has them — objects or
+    mappings with ``outcome_type``, a ``session_id`` (``outcome_ref`` or
+    ``trace_id`` will do) and, where the caller knows it, ``verified_by`` or
+    ``verified``. Among the newest *window* of them at least *min_failures*
+    must be failures from distinct sessions; and when any outcome in that
+    window was verified by someone other than the agent, at least one of the
+    counted failures must be — an agent's own reports of failure do not
+    carry a shift past a monitor that is watching and did not fail the rule.
+    A window with no verified outcome at all is read on the reports alone.
+    """
+    newest = list(recent)[: max(1, int(window))]
+    if not newest:
+        return False
+
+    def _get(item: Any, *names: str) -> Any:
+        for name in names:
+            value = item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+            if value not in (None, ""):
+                return value
+        return None
+
+    def _verified(item: Any) -> bool:
+        flag = _get(item, "verified")
+        if isinstance(flag, bool):
+            return flag
+        return bool(_get(item, "verified_by"))
+
+    any_verified = any(_verified(item) for item in newest)
+    sessions: set[str] = set()
+    verified_failure = False
+    for position, item in enumerate(newest):
+        outcome = _get(item, "outcome_type")
+        if outcome is None or not is_known(outcome) or is_success(outcome):
+            continue
+        session = _get(item, "session_id", "outcome_ref", "trace_id", "id")
+        sessions.add(str(session) if session is not None else f"#{position}")
+        verified_failure = verified_failure or _verified(item)
+    if len(sessions) < max(1, int(min_failures)):
+        return False
+    return verified_failure or not any_verified
+
+
 def regime_shifted(
     entry: Any,
     *,
     now: datetime | None = None,
     window_days: int | None = REGIME_WINDOW_DAYS,
+    recent: Iterable[Any] | None = None,
+    min_failures: int = REGIME_MIN_FAILURES,
 ) -> bool:
     """Whether *entry* looks like a rule that used to work and has just stopped.
 
@@ -135,6 +232,16 @@ def regime_shifted(
     not forgive, is. A ratio over the evidence masses cannot draw that line —
     one failure carries severity 2 against a decayed run of successes and
     already reads as half the mass.
+
+    The label forgives one failure only on a record with none before it. A
+    rule with one failure in its history reads ``contested`` on the next, so
+    a single mislabelled run flips a ten-times-validated rule to "shifted"
+    and a fix is drafted for a policy that did not change. A caller that has
+    the rule's recent outcomes passes them as *recent* (newest first; see
+    :func:`recent_failures_confirm_shift`), and the shift then also needs
+    *min_failures* failures among the newest ``REGIME_RECENT_OUTCOMES`` of
+    them, from distinct sessions, verified where verification exists. Without
+    *recent* the aggregate rule stands alone, as before.
 
     The window is what makes this an event rather than a permanent mark: a
     rule discredited last month is history the ``discredited`` section covers,
@@ -149,6 +256,10 @@ def regime_shifted(
     failures = int(getattr(entry, "failure_count", 0) or 0)
     last = getattr(entry, "last_outcome", None)
     if successes < REGIME_MIN_SUCCESSES or failures < 1 or last is None or is_success(last):
+        return False
+    if recent is not None and not recent_failures_confirm_shift(
+        recent, min_failures=min_failures
+    ):
         return False
     if window_days is not None:
         at = getattr(entry, "last_outcome_at", None)
@@ -225,6 +336,121 @@ def first_strike(outcome_type: OutcomeType | str, success_count: int, failure_co
     )
 
 
+def verification_weight(verified: bool) -> float:
+    """:data:`VERIFIED_EVIDENCE_WEIGHT` for an outcome decided outside the
+    agent, 1 for the agent's own declaration."""
+    return VERIFIED_EVIDENCE_WEIGHT if verified else 1.0
+
+
+def outcome_verified_by(record: Any) -> str | None:
+    """Who decided the outcome, when it was not the agent: the ``verified_by``
+    the SDK carries as a session attribute (``session_metadata.attributes``)
+    or, on an older record, at the top of the metadata. ``None`` for an
+    agent-declared outcome."""
+    meta = getattr(record, "session_metadata", None)
+    if not isinstance(meta, dict):
+        return None
+    value = meta.get("verified_by")
+    if not value:
+        attrs = meta.get("attributes")
+        value = attrs.get("verified_by") if isinstance(attrs, dict) else None
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower()
+    return None
+
+
+def uplift_from_counts(
+    read_successes: int, read_total: int, unread_successes: int, unread_total: int
+) -> tuple[float | None, int]:
+    """An entry's uplift from the entity's recent sessions: the success rate of
+    the sessions that read it minus that of the sessions that did not, and the
+    sample size the credit is shrunk by (the smaller side). ``(None, 0)`` when
+    either side is empty — one-sided data is not a comparison."""
+    if read_total <= 0 or unread_total <= 0:
+        return None, 0
+    uplift = read_successes / read_total - unread_successes / unread_total
+    return max(-1.0, min(1.0, uplift)), min(int(read_total), int(unread_total))
+
+
+def outcome_read_keys(record: Any) -> set[str]:
+    """Every entry spec a session read: the terminal outcome's causal keys and
+    the failed attempts'. An episode that read a rule, failed on it and
+    resolved without it still had the rule in front of it."""
+    keys = {str(k) for k in (getattr(record, "causal_entry_keys", None) or ())}
+    for attempt in getattr(record, "attempts", None) or ():
+        keys.update(str(k) for k in (getattr(attempt, "causal_entry_keys", None) or ()))
+    return keys
+
+
+def uplift_counts(
+    records: Iterable[Any],
+    entity_path: str,
+    keys: Iterable[str],
+    *,
+    now: datetime | None = None,
+) -> dict[str, tuple[float | None, int]]:
+    """Each key's ``(uplift, sessions)`` over the entity's recent outcomes —
+    the reference definition an adapter that keeps outcomes maintains in
+    ``MemoryEntry.uplift`` (the Postgres adapter renders it to SQL).
+
+    The sample is the newest ``UPLIFT_WINDOW`` known outcomes about the entity
+    (``entity_paths`` names it, or a cited key is under it) from the last
+    ``UPLIFT_WINDOW_DAYS``. A session *read* a key when any of its steps
+    cited it (:func:`outcome_read_keys`); success is :func:`is_success`.
+    """
+    now = now or datetime.now(UTC)
+    since = now - timedelta(days=UPLIFT_WINDOW_DAYS)
+    prefix = entity_path.rstrip("/") + "/"
+    sample: list[tuple[datetime, bool, set[str]]] = []
+    for record in records:
+        outcome_type = getattr(record, "outcome_type", None)
+        outcome_type = getattr(outcome_type, "value", outcome_type)
+        if not is_known(outcome_type):
+            continue
+        at = getattr(record, "committed_at", None)
+        if at is None or at < since:
+            continue
+        read = outcome_read_keys(record)
+        paths = set(getattr(record, "entity_paths", None) or ())
+        if entity_path not in paths and not any(k.startswith(prefix) for k in read):
+            continue
+        sample.append((at, is_success(outcome_type), read))
+    sample.sort(key=lambda row: row[0], reverse=True)
+    sample = sample[:UPLIFT_WINDOW]
+    out: dict[str, tuple[float | None, int]] = {}
+    for key in keys:
+        spec = prefix + key
+        read_n = read_s = unread_n = unread_s = 0
+        for _at, ok, read in sample:
+            if spec in read:
+                read_n += 1
+                read_s += int(ok)
+            else:
+                unread_n += 1
+                unread_s += int(ok)
+        out[key] = uplift_from_counts(read_s, read_n, unread_s, unread_n)
+    return out
+
+
+def uplift_credit(uplift: float | None, sessions: int, *, success: bool) -> float:
+    """The entry's share of a split, in ``[UPLIFT_FLOOR, 1]``.
+
+    Full share for a success on an entry with non-negative uplift and for a
+    failure on one with non-positive uplift — the outcome went the way the
+    entry's record says it goes. Otherwise the share falls with the uplift's
+    size, shrunk toward 1 while the sample is small and never below the
+    floor. No measurement (``uplift`` unset or no sessions) is the uniform
+    split the model always had.
+    """
+    if uplift is None or sessions <= 0:
+        return 1.0
+    signed = uplift if success else -uplift
+    if signed >= 0:
+        return 1.0
+    shrink = sessions / (sessions + UPLIFT_SHRINK)
+    return max(UPLIFT_FLOOR, min(1.0, 1.0 + shrink * signed))
+
+
 def evidence_weight(
     outcome_type: OutcomeType | str,
     *,
@@ -233,14 +459,25 @@ def evidence_weight(
     n_causal: int = 1,
     success_count: int = 0,
     failure_count: int = 0,
+    credit: float = 1.0,
+    verified: bool = False,
 ) -> float:
-    """The evidence mass one outcome adds to one of its causal entries."""
+    """The evidence mass one outcome adds to one of its causal entries.
+
+    *credit* is the entry's uplift share (:func:`uplift_credit`); *verified*
+    says the outcome was decided outside the agent (:func:`verification_weight`).
+    Both default to the uniform, agent-declared weight the model always had.
+    """
     target = 1.0 if is_success(outcome_type) else 0.0
     surprise = 1.0 + abs(target - clamp_confidence(current_confidence))
     if first_strike(outcome_type, success_count, failure_count):
         surprise = 1.0
     share = 1.0 / max(1, n_causal)
-    return severity(outcome_type) * max(0.0, causal_confidence) * share * surprise
+    return (
+        severity(outcome_type) * max(0.0, causal_confidence)
+        * max(UPLIFT_FLOOR, min(1.0, credit)) * share * surprise
+        * verification_weight(verified)
+    )
 
 
 def posterior(prior: float, evidence_success: float, evidence_failure: float) -> float:
@@ -257,6 +494,7 @@ def apply_outcome(
     causal_confidence: float = 1.0,
     n_causal: int = 1,
     was_discredited: bool | None = None,
+    verified: bool = False,
 ) -> EvidenceUpdate:
     """Compute the evidence update one outcome makes to ``entry``.
 
@@ -264,10 +502,13 @@ def apply_outcome(
     when set, otherwise the entry's current confidence becomes the prior (the
     first outcome an entry ever sees). ``was_discredited`` defaults to
     ``entry.discredited_at is not None``; an entry stays discredited until
-    evidence lifts the posterior back over the threshold.
+    evidence lifts the posterior back over the threshold. The entry's share
+    of the split is read off its ``uplift`` (:func:`uplift_credit`);
+    *verified* is whether the outcome was decided outside the agent.
     """
     prior = entry.prior_confidence if entry.prior_confidence is not None else entry.confidence
     prior = clamp_confidence(prior)
+    success = is_success(outcome_type)
     w = evidence_weight(
         outcome_type,
         current_confidence=entry.confidence,
@@ -275,8 +516,12 @@ def apply_outcome(
         n_causal=n_causal,
         success_count=entry.success_count,
         failure_count=entry.failure_count,
+        credit=uplift_credit(
+            getattr(entry, "uplift", None), int(getattr(entry, "uplift_sessions", 0) or 0),
+            success=success,
+        ),
+        verified=verified,
     )
-    success = is_success(outcome_type)
     e_s = entry.evidence_success * EVIDENCE_DECAY + (w if success else 0.0)
     e_f = entry.evidence_failure * EVIDENCE_DECAY + (0.0 if success else w)
     new_conf = posterior(prior, e_s, e_f)
@@ -556,6 +801,7 @@ def apply_record_to_entry(
     model = model or outcome_model()
     updates: list[EvidenceUpdate] = []
     current = entry
+    verified = outcome_verified_by(record) is not None
     for outcome_type, keys, versions in outcome_steps_with_versions(record):
         if entry.entry_key not in keys:
             continue
@@ -573,6 +819,7 @@ def apply_record_to_entry(
                 outcome_type,
                 causal_confidence=record.causal_confidence,
                 n_causal=len(keys),
+                verified=verified,
             )
         fields = upd.as_entry_update(now)
         if upd.discredited and current.discredited_at is not None:
@@ -614,6 +861,48 @@ def cited_entries(record: OutcomeRecord) -> list[tuple[str, str]]:
             if split is not None:
                 seen.setdefault(split, None)
     return list(seen)
+
+
+#: Session attributes that mark an outcome as a **replay**: a run the repair
+#: loop made to test a fix, not a session anyone served. A Tier 1 replay
+#: carries ``attributes.origin`` in :data:`REPLAY_ORIGINS`; a Tier 2 customer
+#: replay carries ``attributes.replay_delivery_id`` (the SDK's
+#: ``ReplayReceiver`` stamps it). The hosted loop applies the same two marks
+#: when it grades: a replay is graded by the tier that asked for it and by
+#: nothing else — it does not vote in a canary, fill its window or count as
+#: exposure. This is the memory-side half of that rule (see
+#: :func:`is_replay_outcome`).
+REPLAY_ORIGINS: tuple[str, ...] = ("repair",)
+REPLAY_DELIVERY_ATTRIBUTE = "replay_delivery_id"
+
+
+def is_replay_outcome(record: OutcomeRecord) -> bool:
+    """Whether *record* is a replay's outcome (``REPLAY_ORIGINS`` /
+    ``REPLAY_DELIVERY_ATTRIBUTE`` on ``session_metadata["attributes"]``).
+
+    A replay's outcome is the loop's verdict on the fix, not evidence about the
+    entries the run read — least of all about the fix itself. Measured on
+    clbench (2026-09-30, fleet 10, six canaries): a correction written at 0.78
+    was discredited 65 seconds later, before its canary had started, by the
+    failed attempts inside two Tier 2 replays that both *passed* — each
+    attempt handed the correction a failure (0.78 → 0.41 after the first), the
+    posterior crossed ``DISCREDIT_THRESHOLD`` and the canary arm could no
+    longer be served the entry it existed to test. Five of the six corrections
+    went that way, two before their canary's first session; the treated arm
+    read its fix in 0 of 74 sessions. The same runs had written 425
+    ``lesson-contrast-replay-*`` entries onto ``main``, each naming a
+    correction under test as the thing to avoid. A record with no attributes,
+    or attributes that are not a mapping, is not a replay.
+    """
+    meta = getattr(record, "session_metadata", None)
+    if not isinstance(meta, dict):
+        return False
+    attrs = meta.get("attributes")
+    if not isinstance(attrs, dict):
+        return False
+    if str(attrs.get("origin") or "") in REPLAY_ORIGINS:
+        return True
+    return REPLAY_DELIVERY_ATTRIBUTE in attrs
 
 
 def contrast_lesson(record: OutcomeRecord) -> dict[str, Any] | None:
@@ -815,12 +1104,26 @@ __all__ = [
     "DISCREDIT_THRESHOLD",
     "EVIDENCE_DECAY",
     "PRIOR_STRENGTH",
+    "UPLIFT_FLOOR",
+    "UPLIFT_SHRINK",
+    "UPLIFT_WINDOW",
+    "UPLIFT_WINDOW_DAYS",
+    "VERIFIED_EVIDENCE_WEIGHT",
+    "outcome_read_keys",
+    "outcome_verified_by",
+    "uplift_counts",
+    "uplift_credit",
+    "uplift_from_counts",
+    "verification_weight",
+    "REPLAY_DELIVERY_ATTRIBUTE",
+    "REPLAY_ORIGINS",
     "SEVERITY",
     "SUCCESS_TYPES",
     "SYNTHETIC_KEY_PREFIXES",
     "EvidenceUpdate",
     "apply_outcome",
     "is_known",
+    "is_replay_outcome",
     "apply_outcome_multiplicative",
     "apply_record_to_entry",
     "cited_entries",
@@ -842,6 +1145,9 @@ __all__ = [
     "outcome_model",
     "outcome_steps",
     "posterior",
+    "REGIME_MIN_FAILURES",
+    "REGIME_RECENT_OUTCOMES",
+    "recent_failures_confirm_shift",
     "regime_shifted",
     "replacements_from_lessons",
     "severity",

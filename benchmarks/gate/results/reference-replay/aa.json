@@ -1,0 +1,248 @@
+{
+  "detail": {},
+  "nominal": 0.05,
+  "ran_at": "2026-01-01T03:04:00+00:00",
+  "trials": [
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": true,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    },
+    {
+      "decidable": true,
+      "detail": null,
+      "false_positive": false,
+      "graded_at_decision": 160
+    }
+  ],
+  "window_days": 14
+}
