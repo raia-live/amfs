@@ -2889,3 +2889,57 @@ sealed failing trace in 31 s, Tier 2 ping 200, budget headroom $2,987.
 own model, into `results/rsi-report-beam`: the headline table (four systems as columns), the
 paired deltas with intervals for G1–G3, the pre-change column, the fix lifecycle, model cost,
 tokens, the diagnostics columns. It emits no engine-cut or attribution sections.
+
+### 2026-10-21 — read record of the regime-change study on Beam and Opus 5.5 (amendment (ac)); read 14:46–14:52Z
+
+**Runs.** Launched 12:31–12:33Z, all eight complete by 14:44Z: `rsi-conf-f1-beam-s{37,41,59,73}`
+(Beam `none` + `senselab-rsi`, 400 episodes each, 2 h 10 min) and `rsi-conf-f1-opus55-s{37,41,59,73}`
+(Opus 5.5 `none` + `raw-traces`, 400 each, 30 min). Harness `cl-harness@988ae37e460c-dirty` in every
+manifest; the `-dirty` is two pre-existing working-tree changes outside the harness (the deleted
+`paper/paper.pdf` and edits under `docs/guides/`), none in `benchmarks/continual_learning/`.
+`client_sdk` amfs 0.5.40 / amfs-adapter-http 0.1.37 / amfs-core 0.3.53, `declares_situation` true;
+`hosted_engine` image `c3fb3c098977a612a539b1c99062fcbd9abd15aa`, revision `amfs-api-02275-v6s`,
+`has_situation_routing` true, preflight 12:03:18Z. Reflection: no 429, no daily-reset sleep; 667K
+of the day's 1M output-token allowance used across preflight, smoke and the study. 3 Beam
+`ReadTimeout` episodes on the Beam + SenseLab cells (support s37 ep 32, ci-fix s37 ep 20, ci-fix s73
+ep 3) are infra errors and excluded; 2 trace-persist read timeouts (`POST /api/v1/traces`, s41 and
+s73, one each) were logged by the harness and the cell continued.
+
+**One wiring defect in the cross-model reader, found at the first read of complete data; corrected
+and disclosed.** `rsi_cross_model.cells_of` resolved *one run per system* (the first listed run
+holding finished cells of the arm), the same defect the 2026-09-30 read record found in
+`analysis/rsi.py`; the study launches one run per seed, so the first read took seed 37 alone for
+every system and the gate line printed "incomplete: not every system has all cells; no verdict" —
+no number from a complete table was read before the correction. Corrected in `cells_of` (gather
+the finished cells over every listed run, each `(family, seed)` from the first run that finished
+it) and `fixes_of` (the lifecycle over the same runs), in the commit carrying this record. No
+metric, endpoint, interval or population rule is touched; the first read and the second agree on
+every seed-37 cell.
+
+**Read invocation.** `CL_CONF_MODELS="Beam-1.0-501B-A23B claude-opus-5-5" ./confirm_rsi.sh
+read-cross-model` → `python -m benchmarks.continual_learning.analysis.rsi --cross-model --seeds 37
+41 59 73 --models Beam-1.0-501B-A23B claude-opus-5-5 --runs rsi-conf-f1-beam-s37 … rsi-conf-f1-opus55-s73
+--report-dir benchmarks/continual_learning/results/rsi-report-beam --paper`.
+
+**Result against the gate (8 cells per system, paired on `(family, seed)`, 95 % cell bootstrap).**
+
+| gate | quantity | value | margin | result |
+|---|---|---|---|---|
+| G1 together | Beam + SenseLab − Beam alone, moved half, lower bound | −5.6 pp (mean +6.6, 5/8 cells) | > 0 | fail |
+| G2 vs the frontier at its best | − Opus 5.5 + context window, moved half | [−37.4, −17.0] (mean −26.3, 0/8) | lower > −5 | fail; upper < 0 |
+| G3 collateral, kept | − Opus 5.5 alone, kept half, lower bound | −6.2 pp (mean +12.7, 5/8) | > −2 | fail |
+| G3 collateral, unchanged | − Opus 5.5 alone, unchanged classes, lower bound | +17.1 pp (mean +23.9, 8/8) | > −2 | pass |
+| G4 cheaper | model $/ep, Beam + SenseLab / Opus 5.5 + context window | 0.011 ($0.0014 / $0.1266) | ≤ ⅓ | pass |
+
+**Verdict: no post** (G2's upper bound is below 0; rule of (ac)). Headline, pooled: moved half
+Beam alone 25 %, Beam + SenseLab 33 %, Opus 5.5 alone 25 %, Opus 5.5 + context window 58 %; kept
+half 28 / 64 / 49 / 91 %; unchanged 72 / 99 / 75 / 100 %; pre-change 61 / 79 / 74 / 90 %;
+escalations 17 / 10 / 19 / 3 %; tokens per episode 1,613 / 6,435 / 3,215 / 31,579; model $/ep
+0.0006 / 0.0014 / 0.0132 / 0.1266. Beam + SenseLab − Beam alone on the kept half +32.8 [+14.4,
++51.7], 7/8; on unchanged classes +27.5 [+21.1, +33.9], 8/8. Fix lifecycle on the Beam +
+SenseLab cells: 18 proposed, Tier 1 0 pass / 15 inconclusive / 3 fail, Tier 2 2 pass / 7 fail, 1
+canary run and undecided at cell end, 0 shipped. Turn diagnostics zero on both Beam systems;
+Opus 5.5 0.1 retries and 0.1 no-tool-call turns per 100 episodes. The readout and the headroom
+findings (K8 recovery lag on support, K9 validated guidance as the collateral on ci-fix, K10 the
+proof set that ties at 1.00 on `main`) are in `HEADROOM_RSI.md`, 2026-10-21. The cookbook
+repository ships regardless of the verdict; no post is drafted.

@@ -92,8 +92,13 @@ class XCell(Cell):
 
 
 def cells_of(runs: list[str], arm: str, model: str, seeds: tuple[int, ...]) -> tuple[str, dict[FamilySeed, XCell]]:
-    """The finished cells of (*arm*, *model*) at *seeds*, from the first listed run that has any;
-    a cell still running is left out so no table mixes a complete cell with a partial one."""
+    """The finished cells of (*arm*, *model*) at *seeds*, gathered over every listed run: the
+    study launches one run per seed (``rsi-conf-f1-beam-s37`` ...), so a system's cells are spread
+    across runs. Each (family, seed) is taken from the first run that finished it; a cell still
+    running is left out so no table mixes a complete cell with a partial one. The run name
+    returned is the comma-joined list of the runs the cells came from."""
+    done: dict[FamilySeed, XCell] = {}
+    sources: list[str] = []
     for run in runs:
         out: dict[FamilySeed, XCell] = defaultdict(XCell)
         for e in episodes(run):
@@ -101,32 +106,39 @@ def cells_of(runs: list[str], arm: str, model: str, seeds: tuple[int, ...]) -> t
                     or e.get("seed") not in seeds:
                 continue
             out[(e["scenario"], int(e["seed"]))].add(e)
-        done = {k: c for k, c in out.items() if c.episodes + c.errors >= CELL_EPISODES}
-        if done:
-            for r in reports(run):
-                cell = r.get("cell", "")
-                key = key_of_cell_id(cell)
-                if key is None or cell.split("|")[1] != arm or key[2] != model or (key[0], key[1]) not in done:
-                    continue
-                c = done[(key[0], key[1])]
-                for rp in ((r.get("report") or {}).get("tier2") or {}).get("replays") or []:
-                    u = rp.get("usage") or {}
-                    c.replay_cost += float(u.get("cost_usd") or 0.0)
-                    c.replay_tokens += int(u.get("prompt_tokens") or 0) + int(u.get("completion_tokens") or 0)
-                    c.replays += 1
-            return run, done
-    return "__not_run__", {}
-
-
-def fixes_of(run: str, arm: str, model: str, seeds: tuple[int, ...]) -> list[dict[str, Any]]:
-    out = []
-    for r in reports(run):
-        cell = r.get("cell", "")
-        key = key_of_cell_id(cell)
-        if key is None or cell.split("|")[1] != arm or key[2] != model or key[1] not in seeds:
+        here = {k: c for k, c in out.items() if k not in done and c.episodes + c.errors >= CELL_EPISODES}
+        if not here:
             continue
-        for fx in (r.get("report") or {}).get("fixes") or []:
-            out.append({"scenario": key[0], "seed": key[1], "model": key[2], **fx})
+        for r in reports(run):
+            cell = r.get("cell", "")
+            key = key_of_cell_id(cell)
+            if key is None or cell.split("|")[1] != arm or key[2] != model or (key[0], key[1]) not in here:
+                continue
+            c = here[(key[0], key[1])]
+            for rp in ((r.get("report") or {}).get("tier2") or {}).get("replays") or []:
+                u = rp.get("usage") or {}
+                c.replay_cost += float(u.get("cost_usd") or 0.0)
+                c.replay_tokens += int(u.get("prompt_tokens") or 0) + int(u.get("completion_tokens") or 0)
+                c.replays += 1
+        done.update(here)
+        sources.append(run)
+    return (",".join(sources) if sources else "__not_run__"), done
+
+
+def fixes_of(runs: list[str] | str, arm: str, model: str, seeds: tuple[int, ...]) -> list[dict[str, Any]]:
+    """Every fix the engine proposed in the (*arm*, *model*) cells of *runs* (a list, or the
+    comma-joined name ``cells_of`` returns)."""
+    if isinstance(runs, str):
+        runs = [r for r in runs.split(",") if r and r != "__not_run__"]
+    out = []
+    for run in runs:
+        for r in reports(run):
+            cell = r.get("cell", "")
+            key = key_of_cell_id(cell)
+            if key is None or cell.split("|")[1] != arm or key[2] != model or key[1] not in seeds:
+                continue
+            for fx in (r.get("report") or {}).get("fixes") or []:
+                out.append({"scenario": key[0], "seed": key[1], "model": key[2], **fx})
     return out
 
 
@@ -338,7 +350,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # 5. fix lifecycle (the SenseLab cells)
     md += ["## 5. Fix lifecycle", "",
-           f"Every fix the engine proposed in the {sl_name} cells (`{sl_run}`): Tier 1 is the stand-in replay on "
+           f"Every fix the engine proposed in the {sl_name} cells (runs `{sl_run.replace(',', '`, `')}`): Tier 1 is the stand-in replay on "
            "the fix branch; Tier 2 the agent's own replay of the fix's case set; a canary grades live exposure "
            "over the sessions after it starts — on this engine admitting only sessions in the fix's situation. "
            "`open` Tier 2 replays were still awaited when the cell ended.", ""]

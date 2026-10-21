@@ -1600,3 +1600,97 @@ and will take 8787 (agent's own tunnel) + 8791–8793; a standalone forwarder hu
 (`/tmp/cl_forwarder.py`, :8788, own tunnel, PID 71219) holds the pooled domain from minute 0; the
 e2b hubs run on the pooled URL with no tunnel of their own. 5 = cap. Forwarder handed the e2b
 registration pings to :8795–8797 with 200.
+
+## 2026-10-21 — the regime-change study on Beam (amendment (ac)): the readout, and what it says about the engine
+
+**Verdict: no post.** Four systems, each from its own model, set C, seeds 37/41/59/73, 8
+`(family, seed)` cells per system, 3,200 episodes, every cell fresh on today's production engine
+(image `c3fb3c09…`, situation-aware canary routing). Read invocation: `CL_CONF_MODELS="Beam-1.0-501B-A23B
+claude-opus-5-5" ./confirm_rsi.sh read-cross-model` → `results/rsi-report-beam/{REPORT.md,report.json}`.
+Gate (pre-registered margins): G1 together, Beam + SenseLab − Beam alone on the moved half, 95 %
+interval lower bound −5.6 pp → **fail**; G2 vs the frontier at its best, − Opus 5.5 + context window
+on the moved half, [−37.4, −17.0] → **fail** (upper bound below 0: no post, by the rule of (ac));
+G3 collateral vs Opus 5.5 alone, kept half lower bound −6.2 pp → fail, unchanged classes +17.1 →
+pass; G4 cheaper, model $/ep ratio 0.011 → pass.
+
+| system | moved half | kept half | unchanged | pre-change | episode success | escalated | tokens/ep | model $/ep |
+|---|---|---|---|---|---|---|---|---|
+| Beam alone | 25 % (36/142) [7, 45] | 28 % (39/138) | 72 % (201/280) | 61 % | 83 % | 17 % | 1,613 | 0.0006 |
+| Beam + SenseLab | 33 % (47/142) [24, 43] | 64 % (87/137) | 99 % (278/280) | 79 % | 90 % | 10 % | 6,435 | 0.0014 |
+| Opus 5.5 alone | 25 % (36/142) [7, 46] | 49 % (67/138) | 75 % (211/280) | 74 % | 81 % | 19 % | 3,215 | 0.0132 |
+| Opus 5.5 + context window | 58 % (83/142) [44, 74] | 91 % (125/138) | 100 % (280/280) | 90 % | 97 % | 3 % | 31,579 | 0.1266 |
+
+Paired, Beam + SenseLab minus (pp, mean [95 % CI], cells won of 8): − Beam alone: moved +6.6
+[−5.6, +18.1] 5/8; kept +32.8 [+14.4, +51.7] 7/8; unchanged +27.5 [+21.1, +33.9] 8/8. − Opus 5.5
+alone: moved +6.6 [−5.6, +18.1] 5/8; kept +12.7 [−6.2, +31.2] 5/8; unchanged +23.9 [+17.1, +31.8]
+8/8. − Opus 5.5 + context window: moved −26.3 [−37.4, −17.0] 0/8; kept −26.5 [−41.7, −11.5] 0/8;
+unchanged −0.7 [−1.8, +0.0]. Model cost: Beam + SenseLab 1/9 of Opus 5.5 alone and 1/90 of Opus
+5.5 + context window per episode. Turn diagnostics are zero on both Beam systems (no truncation,
+no missing or malformed tool calls); Opus 5.5's soft-forced tool call cost 0.1 retries and 0.1
+no-tool-call turns per 100 episodes — the deviation of (ac)(i) did not bite. Infra: 3 Beam
+`ReadTimeout` episodes excluded (797/800 on Beam + SenseLab), 2 trace-persist read timeouts (the
+harness logged and continued; those two outcomes never reached the engine), no 429, no daily-reset
+sleep (667K of the 1M daily Beam output tokens used by the study, the smoke runs and preflight
+together; 333K remained at the end).
+
+**What the open model gets from the engine, and when.** The story the gate was written for —
+"better together, cheaper than the frontier model" — holds everywhere except on the one endpoint
+that was the point. Kept half +33 pp and unchanged classes +28 pp over Beam alone with 8/8 and 7/8
+cells; escalations 17 % → 10 %; pre-change first-attempt 61 % → 79 %; Beam + SenseLab is above Opus
+5.5 alone on every endpoint except the moved-half interval, at 1/9 the model cost. On the moved
+half the paired interval covers 0, and the two families pull in opposite directions:
+
+- **K8, support: recovery arrives, forty episodes late.** Beam alone recovers 0/75 of the moved
+  support cases (it has no channel to the new rule: it tries the textbook fix and escalates). Beam
+  + SenseLab: 1/17 in episodes 30–49, 3/22 in 50–69, **13/36 = 36 % in 70–99**. By class:
+  export-timeout 13/40 (Beam alone 0/40), android-notifications 4/19 (0/19), **card-declined 0/16
+  (0/16)** — the issuer-country conditional is not learned by any Beam system, as in the
+  September coding (issuer country 0/8). First wrong answers on moved support: `escalate_tier2`
+  29, `advise_settings_change` 14, `advise_workaround` 12. Opus 5.5 + context window has the new
+  rule the episode after it first appears in its window (40 % over the whole post-change span,
+  30/75). The engine learns the rule; it learns it on the timescale of the per-situation record
+  (`learn` / outcome-gated guidance), and in a 70-episode post-change window that costs about half
+  the span. Nothing shipped carried it (below).
+- **K9, ci-fix: validated guidance is the collateral.** Beam alone recovers 54 % of moved ci-fix
+  cases (36/67): on this family the post-change rule for the moved half *is* the textbook answer,
+  so a system with nothing learned has nothing to unlearn. Beam + SenseLab: **3/13 in episodes
+  30–49 against 8/13 for Beam alone**, 9/22 vs 11/22 in 50–69, 18/32 vs 17/32 in 70–99 — parity by
+  the last third. Wrong first answers are the pre-change Acme rules (`rerun_job` 22,
+  `add_audit_exception` 12). Moved ci-fix episodes with a stale entry in context 10/29 = 34 %
+  first-attempt against 20/38 = 53 % without. The cost of a rule change to a system that holds
+  validated guidance is the time to discredit it; here about 20–40 episodes, i.e. the same lag as
+  K8 seen from the other side. Together with K8 the two families net to +6.6 pp and an interval
+  on 0. This is the `regime_shift` detector's job (long-validated entries that start failing); on
+  these cells it did not shorten the lag.
+- **K10, the fix loop shipped nothing in 800 Beam + SenseLab episodes.** 18 fixes proposed across
+  the 8 cells (17 drafted by the repair agent). By title, 10 are regime drafts ("*X* stopped
+  working", in 5 candidate pairs for the same failure) and 8 are judge-incident drafts. Tier 1
+  (stand-in replay on the fix branch): **0 passed, 15 inconclusive, 3 failed**. Tier 2 (the
+  agent's own replay, 29 Beam replays in all): 2 passed, 7 failed, 0 open. Dismissals 9, all
+  `portfolio_loser` — **6 as "no better than main on the replay set (1.00 repaired vs 1.00 on
+  main; tie)"**, 2 "failed its replay" — i.e. the proof set a regime draft is judged on passes on
+  `main` already, so it holds no case the old rule fails and cannot separate the candidate from
+  what it replaces. That is the `rsi-c3` seam ("the outcome it grades cannot see the
+  conditional") in its present form: the case set for a "stopped working" draft is built from
+  runs the entry *passed*, not from the ones that made it stop working. One canary started (ci-fix
+  s37, `flaky integration test timeout`, 14:17:35Z, 50 % exposure, `min_outcomes` 8, situation
+  share 0.15): at that share and exposure it needs ≈ 100 sessions to see 8 outcomes and the cell
+  had ≈ 25 left — undecided at cell end by construction, the (ab) sizing point again. The other
+  Tier 2 pass (ci-fix s73, `flaky integration timeout webhook`, 14:17:06Z) had no canary by cell
+  end (14:40Z). Shipped 0, reverted 0.
+- **Reader note.** The lifecycle table's "regime / judge" split (0 / 18) reads `judge_id is None
+  and behavior_id is None` as "regime"; on today's engine every fix, regime drafts included,
+  carries both ids, so the split is an artifact and the by-title count above is the one to read.
+
+**Against the frontier model's best setup.** Opus 5.5 with its last ≈ 20,000 tokens of its own
+episodes in context is an immediate learner on 100-episode cells: moved 58 %, kept 91 %, 3 %
+escalations, at $0.1266 per episode and 31,579 tokens. SenseLab's channel into the model is a
+few hundred tokens of guidance per situation plus the outcome-gated record; that is why it is
+1/90 the cost and why it is late. The study's headroom is the lag: a rule change that reaches the
+per-situation record in a handful of episodes rather than forty would move K8 and K9 together,
+and a regime draft whose proof set contains the cases that made the entry stop working (K10)
+is the route by which a fix, not just the record, could carry it. Until then the claim the data
+supports is the narrower one: Beam + SenseLab is above Beam alone and above Opus 5.5 alone on
+collateral, capability and escalations at 1/9 the model cost of the latter, and is behind the
+frontier model with its own history in context on recovery. Not posted; the cookbook repo ships
+on its own.
