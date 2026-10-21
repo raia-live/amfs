@@ -226,7 +226,7 @@ PY
     [[ -n "$runs" ]] || { echo "no rsi-conf-f1-beam-* / rsi-conf-f1-opus55-* runs yet"; exit 1; }
     # shellcheck disable=SC2086
     "$PY" -m benchmarks.continual_learning.analysis.rsi --cross-model --seeds $SEEDS_ALL --models $MODELS \
-      --runs $runs --report-dir benchmarks/continual_learning/results/rsi-report-beam
+      --runs $runs --report-dir benchmarks/continual_learning/results/rsi-report-beam --paper
     ;;
   *)
     sed -n '2,24p' "$0"; exit 1

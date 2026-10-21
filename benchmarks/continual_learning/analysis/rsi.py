@@ -546,6 +546,15 @@ def newest_complete_senselab_run() -> str:
 
 def main() -> None:
     global SEEDS, MODELS, REPORT_DIR  # noqa: PLW0603 — module constants the tables close over
+    import sys
+
+    if "--cross-model" in sys.argv[1:]:
+        # Amendment (ac): the cross-model readout, keyed on (family, seed) with each system from
+        # its own model. Its own module; nothing below applies to it.
+        from .rsi_cross_model import main as cross_model_main
+
+        cross_model_main(sys.argv[1:])
+        return
     ap = argparse.ArgumentParser()
     ap.add_argument("--senselab-run", default=None, help="the SenseLab run for the headline (default: newest complete)")
     ap.add_argument("--paper", action="store_true", help="write results/rsi-report/REPORT.md and report.json")

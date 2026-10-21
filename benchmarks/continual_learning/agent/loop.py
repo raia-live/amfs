@@ -464,6 +464,8 @@ def _run_decision_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Ta
     trace_ids: list[str] = []
     attempt_log: list[tuple[str, str]] = []   # (answer, environment result) per attempt, for the note-writer
     terminal_names = {t.name for t in scenario.tools if t.terminal}
+    known_tools = {t.name for t in scenario.tools}
+    diagnostics: dict[str, int] = {}
     session.candidate_actions = candidate_actions(scenario)
     # The system message is for the transcript and the note-writer; the gateway substitutes the
     # instruction the student was trained on, and the control sees that same instruction.
@@ -476,6 +478,11 @@ def _run_decision_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Ta
             steps += 1
             turn = llm.chat(messages, None, max_tokens=config.STUDY.max_tokens_per_turn, amfs=meta)
             usage.add(turn.usage)
+            _diag(diagnostics, "truncated_turns", int(turn.finish_reason == "length"))
+            _diag(diagnostics, "client_retries", turn.retries)
+            for c in turn.tool_calls:
+                _diag(diagnostics, "malformed_tool_args", int("_raw" in c.arguments))
+                _diag(diagnostics, "unknown_tool_names", int(c.name not in known_tools))
             messages.append(turn.assistant_message)
             block = turn.amfs or {}
             hits = _hits_from_amfs(block)
@@ -509,6 +516,7 @@ def _run_decision_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Ta
             if not turn.tool_calls:
                 # Not an action. At temperature 0 the same prompt yields the same prose, so a
                 # retry would be a duplicate call; the attempt is a failure and the task escalates.
+                _diag(diagnostics, "no_tool_call_turns")
                 answers.append("")
                 attempt_log.append(("", f"not a tool call: {turn.text[:200]}"))
                 flags["unparseable"] = flags.get("unparseable", 0) + 1
@@ -629,5 +637,5 @@ def _run_decision_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Ta
         tags=task.tags, usage=asdict(usage), reflection_usage=asdict(r_usage), memory=session.acct.as_dict(),
         wall_ms=(time.perf_counter() - t0) * 1000, steps=steps, first_action_ms=first_action_ms,
         explanation=explanation, error=error,
-        transcript=transcript,
+        transcript=transcript, diagnostics=diagnostics,
     )
