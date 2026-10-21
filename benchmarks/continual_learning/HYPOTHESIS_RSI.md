@@ -2786,3 +2786,106 @@ Pending (probe (b) still not run; this is the only place a canary passes and a f
 it), Reproducibility (runs, cut) and the package (`readouts/canary/rsi-x-canary-s{11,23}/`,
 `classes_exploratory_ab.md`, `fleet10_curve_exploratory_ab.txt`). Diagnostic agent
 `diag-branch-treatment` excluded from every read.
+
+### 2026-10-21 (ac) — the regime-change study on an open model: Beam alone and Beam + SenseLab against Claude Opus 5.5 alone and Opus 5.5 with its own history in context; written before any cell runs
+
+*What is asked.* Whether a 501B-A23B open-weights model (Reflection AI's `Beam-1.0-501B-A23B`)
+running with SenseLab recovers from a regime change better than the frontier model alone and at
+least as well as the frontier model at its best fair setup, at a fraction of the model cost. Four
+systems on identical task instances (deterministic in `(seed, episode)`, so the cross-model
+pairing per seed is valid):
+
+| system | agent model | arm |
+|---|---|---|
+| Beam alone | `Beam-1.0-501B-A23B` | `none` |
+| Beam + SenseLab | `Beam-1.0-501B-A23B` | `senselab-rsi` |
+| Opus 5.5 alone | `claude-opus-5-5` | `none` |
+| Opus 5.5 + context window | `claude-opus-5-5` | `raw-traces` (newest episodes first, `RAW_TRACES_TOKEN_CAP` = 20,000, unchanged) |
+
+Beam × `raw-traces` and Opus 5.5 × `senselab-rsi` are not run. SenseLab is one system and is
+always on; no ablation arm (`senselab`, `senselab-rsi-nocanary`) is run or reported, and the
+readout resolves none.
+
+*Protocol.* The set-C confirmatory protocol of (w)/(x), unchanged: families `support` and
+`ci-fix`, fleet 1, 100 episodes, change at 30, `--change-focus 0.5 --change-variant C
+--opaque-ids`, seeds 37/41/59/73, `CL_RSI_TIER2=1`, `CL_RSI_VERDICT_WAIT=240`,
+`CL_SENSELAB_TIMEOUT=90`, canary timeout and window = the cell horizon ((v) rule). 4 systems ×
+2 families × 4 seeds × 100 = 3,200 episodes. Two runner launches per seed (`confirm_rsi.sh`,
+tags `beam` and `opus55`): Beam `none` + `senselab-rsi` at `--workers 2`, `CL_REFLECTION_RPM=14`;
+Opus 5.5 `none` + `raw-traces` at `--workers 4`. Run names `rsi-conf-f1-beam-s<seed>` and
+`rsi-conf-f1-opus55-s<seed>`. Every cell is fresh on today's engine; **nothing is paired against
+the September confirmatory cells** (different engine cut, SDK and `tool_choice` handling).
+
+*Endpoints.* Post-change (episodes 30–99) first-attempt success on the moved half (recovery), on
+the kept half and on unchanged classes (collateral); pre-change (0–29) first-attempt success (raw
+capability, Q1); escalations per 1,000 episodes; tokens per episode; **model cost per episode**;
+the fix lifecycle on the Beam + SenseLab cells (drafted, Tier 1, Tier 2, canaried, shipped, held —
+this is the first readout of the situation-aware canary on benchmark traffic).
+
+*Model cost, fixed now.* The headline cost column is the agent model's own token cost: the
+agent's `usage.cost_usd` plus the Tier-2 replay episodes, which run on the cell's own LLM
+(`senselab_rsi_arm.replay()` → `run_episode(self._llm)`), so on the Beam + SenseLab cell they are
+Beam tokens. SenseLab's extra prompt tokens (retrieved context, the reflection turn) are in the
+count; the SenseLab subscription and the hosted judge/repair spend are **not** priced into the
+comparison (the all-in ledger stays in `report.json` as before). Rates: `claude-opus-5-5`
+$4.00 / $0.20 cached / $20.00 per 1M (Anthropic list, 2026-10-07 rate card); `Beam-1.0-501B-A23B`
+$0.40 / $0.04 / $1.20 per 1M (Together AI serverless list, read 2026-10-21) — a **projection**:
+Reflection's beta is free and publishes no rate card; the column is relabelled when one exists.
+The readout refuses to run for any model without a `PRICES` row (`config.cost_usd` is silently
+0.0 otherwise).
+
+*Publish gate (margins fixed before launch; paired over the 8 `(family, seed)` cells, 95 %
+bootstrap intervals on the paired delta).*
+
+- (G1, together) Beam + SenseLab − Beam alone on the moved half: interval above 0.
+- (G2, vs the frontier at its best) Beam + SenseLab − Opus 5.5 + context window on the moved
+  half: lower bound above −0.05.
+- (G3, collateral) Beam + SenseLab − Opus 5.5 alone on the kept half and on unchanged classes:
+  lower bound above −0.02 (the H2 margin).
+- (G4, cheaper) Beam's model cost per episode in the Beam + SenseLab cell ≤ ⅓ of Opus 5.5's in
+  the context-window cell.
+
+All four: the full claim ("better together, better than the frontier model, cheaper"). G1, G3, G4
+with G2's interval covering 0: "matches the frontier model's best setup at a fraction of the model
+cost". G2's upper bound below 0: no post; the readout goes to `HEADROOM_RSI.md`. The pre-change
+column (Q1) is descriptive and is not a gate.
+
+*Deviations from the frozen clients, declared.* (i) `claude-opus-5-5` rejects `tool_choice`
+`any` / `tool` (400). For it the harness sends `tool_choice: auto` plus one system line ("Every
+reply must be a tool call" / "Reply with a call to the `X` tool and nothing else"), and on a turn
+with no (matching) tool call retries once with the instruction repeated before the loop's
+no-tool-call branch runs; the retry's tokens are billed to the turn (`Turn.retries`). Beam keeps
+`required` / the named function. (ii) Both models reason on every call and bill reasoning inside
+completion tokens; `STUDY.max_tokens_per_turn` = 700 stays the visible-answer budget and the API
+cap for them is `STUDY.max_completion_tokens_reasoning` = 4,096. (iii) Beam: `reasoning_effort =
+low` (the harness's `OPENAI_REASONING_EFFORT` / `ANTHROPIC_EFFORT` are `low`); the assistant
+message that made a tool call is replayed verbatim including `reasoning_content`, as the API
+requires. (iv) Per-episode diagnostics are recorded and reported per cell: `truncated_turns`
+(`finish_reason` = length), `no_tool_call_turns`, `malformed_tool_args` (the `{"_raw": …}`
+fallback), `unknown_tool_names`, `client_retries`. A Beam-alone deficit with a non-trivial
+malformed/unknown rate is attributed to the model's tool calling, not to recovery.
+
+*Providers.* Beam: Reflection API direct (`https://api.reflection.ai/openai/v1`, Chat
+Completions). Opus 5.5: Anthropic direct. No router of any kind. Reflection's measured org
+limits (2026-10-21): 60 requests/min, 20,000 requests/day, 1,000,000 output tokens/day, 10M
+uncached input tokens/day, UTC reset; the client paces each process at `CL_REFLECTION_RPM` and
+sleeps to the daily reset on `x-should-retry: false`. The output-token allowance may stop the Beam
+cells for the day; the runner resumes finished cells, so a stop pauses the run and changes no
+cell's content. Judge independence: `judge_family.lineage()` makes `Beam-1.0-501B-A23B` its own
+lineage, independent of the hosted judges; no server change.
+
+*Versions.* Harness branch `study/beam-opus55` = `paper/rsi-engine` + `origin/main` (merge
+`13175d44`); the commit the runs use is in each run's `manifest.json` (`harness_version`,
+`client_core`, `client_sdk`, `hosted_engine`). SDK `amfs` 0.5.40, `amfs-adapter-http` 0.1.37
+(`X-AMFS-Situation` on the wire, amfs `e1759c0a`), `amfs-core` 0.3.53. Hosted engine: image
+`c3fb3c098977a612a539b1c99062fcbd9abd15aa` (= amfs-internal `main`, revision `amfs-api-02275-v6s`,
+deployed 2026-10-21T10:17Z), carrying situation-aware canary routing (amfs-internal #843 /
+#844, commit `ae1570be`, 2026-10-20). Preflight `rsi` gate, extended for this study (situation
+header on the wire; situated assignment `main`, not `undeclared`; image ancestry carries
+`ae1570be`; Tier 2 registered and pinged end to end), PASSED 2026-10-21T12:03Z: judge graded a
+sealed failing trace in 31 s, Tier 2 ping 200, budget headroom $2,987.
+
+*Readout.* `analysis.rsi --cross-model`, keyed on `(family, seed)` with each system from its
+own model, into `results/rsi-report-beam`: the headline table (four systems as columns), the
+paired deltas with intervals for G1–G3, the pre-change column, the fix lifecycle, model cost,
+tokens, the diagnostics columns. It emits no engine-cut or attribution sections.

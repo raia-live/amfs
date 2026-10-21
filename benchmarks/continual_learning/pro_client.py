@@ -180,8 +180,15 @@ class ProClient:
         """``{"active": fix | None, "waiting": [fix, ...]}`` — the agent's canary slot."""
         return self._call("GET", f"/api/v1/eval/agents/{agent_id}/canary")
 
-    def canary_assignment(self, agent_id: str, session: str) -> dict[str, Any]:
-        return self._call("GET", f"/api/v1/eval/agents/{agent_id}/canary/assignment", params={"session": session})
+    def canary_assignment(self, agent_id: str, session: str, *, situation: str | None = None) -> dict[str, Any]:
+        """The arm the hosted router would put *session* in. ``situation`` is what the session
+        would declare on the wire (``X-AMFS-Situation``); from the situation-aware routing of
+        2026-10-20 a canary scoped to a situation answers ``outside`` / ``undeclared`` for a
+        session not in it."""
+        params: dict[str, Any] = {"session": session}
+        if situation:
+            params["situation"] = situation
+        return self._call("GET", f"/api/v1/eval/agents/{agent_id}/canary/assignment", params=params)
 
     def start_canary(self, fix_id: str, *, pct: int | None = None, min_outcomes: int | None = None,
                      timeout_days: int | None = None) -> dict[str, Any]:

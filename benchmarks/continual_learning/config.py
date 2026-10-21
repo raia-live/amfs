@@ -46,9 +46,17 @@ PRICES: dict[str, Price] = {
     "gpt-5.4-mini": Price(0.75, 0.075, 4.50),
     # Anthropic — platform.claude.com/docs/en/about-claude/pricing
     "claude-fable-5-1": Price(10.00, 0.25, 50.00),
+    "claude-opus-5-5": Price(4.00, 0.20, 20.00),   # list price 2026-10-07 rate card; cache hits 0.05x
     "claude-opus-5": Price(5.00, 0.50, 25.00),
     "claude-sonnet-5": Price(2.00, 0.20, 10.00),
     "claude-haiku-4-5-20251001": Price(1.00, 0.10, 5.00),
+    # Reflection Beam (open weights, Apache 2.0). The Reflection API publishes no rate card and
+    # its public beta is free, so Beam is priced at a direct hosting provider's serverless list
+    # price for the same model: Together AI, together.ai/models/reflection-beam, read
+    # 2026-10-21 ($0.40 in / $0.04 cached / $1.20 out). Not the cheapest host (CoreWeave and
+    # Nebius list lower); a projection, labelled as such wherever the number is shown. Swap in
+    # Reflection's own rate card when one exists. Reasoning tokens bill as completion tokens.
+    "Beam-1.0-501B-A23B": Price(0.40, 0.04, 1.20),
 }
 
 
@@ -88,6 +96,22 @@ JUDGE_MODEL: str = env("CL_JUDGE_MODEL") or "gpt-5.4"
 # Reasoning effort for the agents. Recorded in the manifest; identical across arms.
 OPENAI_REASONING_EFFORT: str = env("CL_OPENAI_REASONING_EFFORT") or "low"
 ANTHROPIC_EFFORT: str = env("CL_ANTHROPIC_EFFORT") or "low"
+# Reflection API (Beam), called direct through the OpenAI SDK's Chat Completions client. No
+# router. ``reasoning_effort`` is mandatory on Beam (low / medium / high / xhigh / max); the
+# harness sends ``low`` to match the two efforts above. The org-wide limit measured
+# 2026-10-21 is 60 requests a minute, 20,000 requests and 1M output tokens a UTC day;
+# ``CL_REFLECTION_RPM`` is this process's share of the per-minute budget.
+REFLECTION_BASE_URL: str = env("REFLECTION_BASE_URL") or "https://api.reflection.ai/openai/v1"
+REFLECTION_REASONING_EFFORT: str = env("CL_REFLECTION_REASONING_EFFORT") or "low"
+REFLECTION_RPM: int = int(env("CL_REFLECTION_RPM") or "60")
+
+
+def always_reasons(model: str) -> bool:
+    """Models whose reasoning cannot be switched off and bills inside the completion: Beam
+    (reasoning mandatory) and Claude Opus 5.5 (thinking cannot be disabled). These get
+    ``STUDY.max_completion_tokens_reasoning`` as the API output cap instead of the visible-answer
+    budget, so a turn is not cut off inside its reasoning and returned without a tool call."""
+    return model.startswith("Beam") or model == "claude-opus-5-5"
 
 # ---------------------------------------------------------------------------
 # Study constants (mirror HYPOTHESIS.md)
@@ -132,6 +156,11 @@ class Study:
     min_confidence_gate: float = 0.5
     top_k: int = 5
     max_tokens_per_turn: int = 700
+    # The API output cap for models that always reason (``config.always_reasons``): reasoning
+    # and the visible answer share one completion budget on those, and 700 tokens truncates
+    # the turn inside the reasoning. Cost is metered on tokens actually produced, so the larger
+    # cap changes nothing unless it is used; truncation is recorded per turn either way.
+    max_completion_tokens_reasoning: int = 4096
     diy_consolidate_every: int = 5
     budget_usd: float = 0.0  # 0 = no ceiling (owner decision 2026-09-16; was 600)
     # Zep dropped from the study 2026-09-18 (owner decision): the account exhausted its

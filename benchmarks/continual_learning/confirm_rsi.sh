@@ -22,9 +22,23 @@
 # Protocol constants are those of the dev runs `rsi-c5` / `rsi-c6` (fleet 1) and `rsi-e2b-c6`
 # (fleet 10): CL_RSI_TIER2=1, CL_RSI_VERDICT_WAIT=240, CL_SENSELAB_TIMEOUT=90, canary timeout and
 # window = the cell horizon (amendment (v) rule), --change-focus 0.5 --change-variant C --opaque-ids.
-# Overrides: CL_CONF_MODELS (default "gpt-5.5 claude-opus-5"), CL_CONF_E2B_ARMS (senselab-rsi),
-# CL_CONF_E2B_MODELS (gpt-5.5), CL_CONF_WORKERS_F1 (3),
-# CL_CONF_WORKERS_E2B (3).
+# Overrides: CL_CONF_MODELS (default "gpt-5.5 claude-opus-5"), CL_CONF_F1_ARMS (the eight
+# confirmatory arms), CL_CONF_E2B_ARMS (senselab-rsi), CL_CONF_E2B_MODELS (gpt-5.5),
+# CL_CONF_WORKERS_F1 (3), CL_CONF_WORKERS_E2B (3), CL_CONF_HUB_PORT (the hub port, when two
+# f1 processes share a seed).
+#
+# Cross-model study (HYPOTHESIS_RSI.md amendment (ac), 2026-10-21): Beam alone and Beam +
+# SenseLab against Claude Opus 5.5 alone and Opus 5.5 with its own history in context. Two
+# launches per seed so no cell is wasted (Beam x raw-traces would spend a third of the Beam
+# daily token allowance on a column the readout does not use):
+#   CL_CONF_RUN_TAG=beam   CL_CONF_MODELS=Beam-1.0-501B-A23B CL_CONF_F1_ARMS="none senselab-rsi" \
+#     CL_CONF_WORKERS_F1=2 CL_REFLECTION_RPM=14 ./confirm_rsi.sh launch f1 <seed>
+#   CL_CONF_RUN_TAG=opus55 CL_CONF_MODELS=claude-opus-5-5   CL_CONF_F1_ARMS="none raw-traces" \
+#     CL_CONF_WORKERS_F1=4 CL_CONF_HUB_PORT=$((8800 + i)) ./confirm_rsi.sh launch f1 <seed>
+# Only the senselab-rsi arm opens a replay hub, so the opus55 processes never bind their port;
+# the distinct number only keeps the launch pre-check honest. CL_REFLECTION_RPM is each Beam
+# process's share of Reflection's 60 requests a minute (four processes: 14 each). Readout:
+#   CL_CONF_MODELS="Beam-1.0-501B-A23B claude-opus-5-5" ./confirm_rsi.sh read-cross-model
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,7 +46,7 @@ BENCH="$(cd "$HERE/.." && pwd)"
 PY="$BENCH/../.venv/bin/python"
 MODELS="${CL_CONF_MODELS:-gpt-5.5 claude-opus-5}"
 SEEDS_ALL="37 41 59 73"
-F1_ARMS="none raw-traces pgvector pgvector+rerank pgvector-diy+outcomes senselab senselab-rsi senselab-rsi-nocanary"
+F1_ARMS="${CL_CONF_F1_ARMS:-none raw-traces pgvector pgvector+rerank pgvector-diy+outcomes senselab senselab-rsi senselab-rsi-nocanary}"
 E2B_ARMS="${CL_CONF_E2B_ARMS:-senselab-rsi}"   # amendment (y): fleet 10 runs SenseLab only
 E2B_MODELS="${CL_CONF_E2B_MODELS:-gpt-5.5}"   # amendment (y): fleet 10 on gpt-5.5 only
 # Amendment (aa), 2026-09-30: a tag in the run name, so a protocol relaunched on a later engine cut
@@ -42,6 +56,7 @@ RUN_TAG="${CL_CONF_RUN_TAG:+-$CL_CONF_RUN_TAG}"
 
 port_for() {  # a distinct hub port per (protocol, seed): f1 8787 (the agent's own tunnel), 8791-8793; e2b 8794-8797
   local proto="$1" seed="$2" i=0
+  if [[ -n "${CL_CONF_HUB_PORT:-}" ]]; then echo "$CL_CONF_HUB_PORT"; return; fi
   for s in $SEEDS_ALL; do [[ "$s" == "$seed" ]] && break; i=$((i + 1)); done
   if [[ "$proto" == "f1" ]]; then [[ $i -eq 0 ]] && echo 8787 || echo $((8790 + i)); else echo $((8794 + i)); fi
 }
@@ -202,6 +217,16 @@ PY
     "$PY" -m benchmarks.continual_learning.analysis.rsi_coding_sheet make --runs $runs \
       --out benchmarks/continual_learning/results/rsi-coding-confirmatory
     "$PY" -m benchmarks.continual_learning.analysis.fill_rsi_paper
+    ;;
+  read-cross-model)
+    # Amendment (ac): the cross-model readout, keyed on (family, seed), each system from its own
+    # model, into results/rsi-report-beam. Runs: every rsi-conf-f1-beam-* and rsi-conf-f1-opus55-*.
+    cd "$BENCH/.."
+    runs=$(cd "$HERE/results" && ls -d rsi-conf-f1-beam-* rsi-conf-f1-opus55-* 2>/dev/null | tr '\n' ' ')
+    [[ -n "$runs" ]] || { echo "no rsi-conf-f1-beam-* / rsi-conf-f1-opus55-* runs yet"; exit 1; }
+    # shellcheck disable=SC2086
+    "$PY" -m benchmarks.continual_learning.analysis.rsi --cross-model --seeds $SEEDS_ALL --models $MODELS \
+      --runs $runs --report-dir benchmarks/continual_learning/results/rsi-report-beam
     ;;
   *)
     sed -n '2,24p' "$0"; exit 1

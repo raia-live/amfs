@@ -364,6 +364,48 @@ def _client_core_provenance() -> dict[str, str]:
     return {"path": path, "commit": commit}
 
 
+def _client_sdk_provenance() -> dict[str, str]:
+    """The SDK and HTTP adapter the arms talk through, by package version. The hosted
+    engine's canary routing reads what the SDK puts on the wire (``X-AMFS-Situation`` from
+    amfs 0.5.40 / amfs-adapter-http 0.1.37 on), so a run on an older pair is a different
+    experiment and the manifest has to say which it was."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    out: dict[str, str] = {}
+    for dist in ("amfs", "amfs-adapter-http", "amfs-core"):
+        try:
+            out[dist] = version(dist)
+        except PackageNotFoundError:
+            out[dist] = ""
+    try:
+        from amfs_adapter_http.adapter import HttpAdapter
+
+        out["declares_situation"] = str(hasattr(HttpAdapter, "declare_situation"))
+    except Exception:  # noqa: BLE001
+        out["declares_situation"] = "False"
+    return out
+
+
+def _hosted_engine_provenance() -> dict[str, str]:
+    """The hosted engine's deployed build, read from the preflight record when the
+    ``rsi`` gate wrote one (``CL_ENGINE_BUILD`` overrides). Empty when unknown."""
+    if config.env("CL_ENGINE_BUILD"):
+        return {"build": str(config.env("CL_ENGINE_BUILD")), "source": "env"}
+    try:
+        rec = json.loads((config.RESULTS_DIR / "preflight.json").read_text())
+        rsi = (rec.get("gates") or {}).get("rsi") or {}
+        build = (rsi.get("detail") or {}).get("engine_build") or {}
+        if build.get("image_sha"):
+            return {"build": str(build["image_sha"]), "source": "preflight",
+                    "revision": str(build.get("revision") or ""),
+                    "deployed_at": str(build.get("deployed_at") or ""),
+                    "has_situation_routing": str(build.get("has_situation_routing")),
+                    "preflight_at": str(rec.get("timestamp") or "")}
+    except Exception:  # noqa: BLE001
+        pass
+    return {"build": "", "source": ""}
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--run", required=True)
@@ -427,6 +469,10 @@ def main() -> None:
                 # recommendation it renders comes from the server. Which core rendered it
                 # (a checkout on PYTHONPATH, say) is provenance the readout needs.
                 "client_core": _client_core_provenance(),
+                # The SDK pair the arms speak through and the hosted engine's deployed build:
+                # the server-side routing a run exercised is a function of both.
+                "client_sdk": _client_sdk_provenance(),
+                "hosted_engine": _hosted_engine_provenance(),
                 "fleet_replicas": bool(getattr(args, "fleet_replicas", False)),
                 # The repair-loop arms' knobs (canary, pacing floor, Tier 2), for provenance.
                 "rsi_env": {k: v for k, v in sorted(os.environ.items()) if k.startswith("CL_RSI_")},

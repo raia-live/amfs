@@ -812,15 +812,127 @@ LOOP_GATES = {
 # Gate — the repair loop on the SaaS is wired the way HYPOTHESIS_RSI.md assumes
 # ---------------------------------------------------------------------------
 
+def _hosted_engine_build() -> dict[str, Any]:
+    """The build the hosted engine is serving: the Cloud Run revision and the image's commit
+    SHA, read with the operator's ``gcloud`` (``CL_ENGINE_SERVICE`` / ``CL_ENGINE_REGION``
+    name the service; defaults are the production API). Provenance only — an empty record
+    when ``gcloud`` is absent or unauthenticated never fails the gate; the manifest then
+    says the build is unknown, which the readout reports as such."""
+    import shutil
+    import subprocess
+
+    service = os.environ.get("CL_ENGINE_SERVICE", "amfs-api")
+    region = os.environ.get("CL_ENGINE_REGION", "us-central1")
+    out: dict[str, Any] = {"service": service, "region": region, "revision": "", "image": "", "image_sha": "",
+                           "deployed_at": ""}
+    if not shutil.which("gcloud"):
+        out["error"] = "gcloud not on PATH"
+        return out
+    try:
+        r = subprocess.run(
+            ["gcloud", "run", "services", "describe", service, f"--region={region}",
+             "--format=value(status.latestReadyRevisionName,spec.template.spec.containers[0].image,"
+             "status.conditions[0].lastTransitionTime)"],
+            capture_output=True, text=True, timeout=40, check=False,
+        )
+    except Exception as e:  # noqa: BLE001 - provenance must never stop the gate
+        out["error"] = f"{type(e).__name__}: {str(e)[:120]}"
+        return out
+    if r.returncode != 0:
+        out["error"] = (r.stderr or r.stdout).strip()[:200]
+        return out
+    parts = (r.stdout.strip().split("\t") + ["", "", ""])[:3]
+    out["revision"], out["image"], out["deployed_at"] = parts
+    out["image_sha"] = out["image"].rsplit(":", 1)[-1] if ":" in out["image"] else ""
+    out["has_situation_routing"] = _build_carries(out["image_sha"], SITUATION_ROUTING_COMMIT)
+    return out
+
+
+# The hosted-engine commit that made canary routing situation-aware (amfs-internal,
+# 2026-10-20). A deployed image without it as an ancestor routes every session by
+# agent alone and never answers ``undeclared`` / ``outside``.
+SITUATION_ROUTING_COMMIT = os.environ.get("CL_ENGINE_SITUATION_COMMIT", "ae1570be")
+
+
+def _build_carries(image_sha: str, commit: str) -> bool | None:
+    """Whether *commit* is an ancestor of the deployed *image_sha*, asked of the engine's
+    checkout (``CL_ENGINE_REPO``; default the ``amfs-internal`` sibling of this repo).
+    ``None`` when it cannot be determined — no checkout, or a SHA it has not fetched. The
+    wire gives no other way to tell: the assignment route accepts a ``situation`` on either
+    build, and with no canary live on the agent both answer ``main``."""
+    import subprocess
+
+    if not image_sha:
+        return None
+    repo = Path(os.environ.get("CL_ENGINE_REPO") or Path(__file__).resolve().parents[2].parent / "amfs-internal")
+    if not (repo / ".git").exists():
+        return None
+    try:
+        r = subprocess.run(["git", "merge-base", "--is-ancestor", commit, image_sha], cwd=repo,
+                           capture_output=True, text=True, timeout=20, check=False)
+    except Exception:  # noqa: BLE001
+        return None
+    if r.returncode == 0:
+        return True
+    if r.returncode == 1:
+        return False
+    return None   # 128: a SHA the checkout does not have
+
+
+def _client_sdk_versions() -> dict[str, str]:
+    """The SDK pair the arms talk through (the runner's record, so the manifest and the
+    preflight agree). The situation header the hosted router reads exists from amfs 0.5.40 /
+    amfs-adapter-http 0.1.37; an older pair makes every session ``undeclared``."""
+    from .runner import _client_sdk_provenance
+
+    return _client_sdk_provenance()
+
+
+def _tier2_live(pro: Any, agent: str) -> dict[str, Any]:
+    """Tier 2 end to end on the throwaway agent: the harness's replay endpoint is up behind
+    its tunnel, registered on the agent, and the platform's signed ``ping`` reaches it.
+    Without this the study's ``senselab-rsi`` cells (``CL_RSI_TIER2=1``) would fall back to
+    Tier 1 and the canary alone — a different arm from the one pre-registered."""
+    from .pro_client import ProApiError
+
+    out: dict[str, Any] = {"ok": False}
+    hub = None
+    try:
+        from .replay_hub import ReplayHub
+
+        hub = ReplayHub.get()
+        out["endpoint"] = hub.url
+        s = pro.set_repair_settings(agent, replay_webhook_url=hub.url, replay_webhook_secret=hub.secret,
+                                    replay_wait_hours=1)
+        out["registered"] = bool(s.get("replay_webhook_url"))
+        ping = pro.test_replay_webhook(agent)
+        out["ping"] = {k: ping.get(k) for k in ("ok", "status_code", "error") if k in ping}
+        out["ok"] = bool(out["registered"]) and bool(ping.get("ok"))
+    except ProApiError as e:
+        out["error"] = f"{e.status}: {str(e.detail)[:200]}"
+    except Exception as e:  # noqa: BLE001
+        out["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+    finally:
+        try:
+            if hub is not None and not os.environ.get("CL_REPLAY_PUBLIC_URL"):
+                hub.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
 def gate_rsi() -> bool:
     """Everything the ``senselab-rsi`` arms rely on, checked on a throwaway agent of the
     benchmark account: judge models callable on the platform; budget headroom; the plan
     carries ``auto_after_replay`` and ``auto_after_canary``; a continuous judge with the
-    frozen prompt is accepted; the SDK binds identity headers (server-side canary routing);
-    a sealed failing trace is graded within three minutes; the feedback-contract and
-    canary-assignment endpoints answer. Records the http-server version and judge models
-    for the manifest."""
-    from amfs import AgentMemory
+    frozen prompt is accepted; the SDK binds identity headers and puts a declared situation
+    on the wire (``X-AMFS-Situation``, what the hosted router admits a canary's sessions
+    by); the canary-assignment endpoint answers for a situated session; the deployed
+    engine image carries the situation-routing commit; Tier 2 is live end to end (the
+    harness's replay endpoint registered and pinged by the platform); a sealed failing
+    trace is graded within three minutes; the feedback-contract endpoint answers. Records
+    the deployed engine build, the SDK versions and the judge for the manifest."""
+    from amfs import SITUATION_ATTRIBUTE, AgentMemory
     from amfs_core.models import OutcomeType
 
     from .arms.senselab_arm import _ThrottledHttpAdapter
@@ -862,7 +974,28 @@ def gate_rsi() -> bool:
         a = pro.canary_assignment(agent, "preflight-session")
         detail["assignment"] = {k: a.get(k) for k in ("source", "memory_branch")}
         ok &= a.get("source") == "main"
+        # Situation-aware routing (hosted engine, 2026-10-20): the assignment endpoint takes
+        # the session's situation; a declared session on an agent with no canary is ``main``
+        # (never ``undeclared``). The route accepts the parameter on either build, so whether
+        # the engine *is* on that build is read from the deployed image's ancestry below.
+        try:
+            s = pro.canary_assignment(agent, "preflight-session", situation="preflight-situation")
+            detail["assignment_situation"] = {k: s.get(k) for k in ("source", "memory_branch", "situation")}
+            ok &= s.get("source") == "main"
+        except ProApiError as e:
+            detail["assignment_situation"] = f"{e.status}: {str(e.detail)[:160]}"
+            ok = False
         detail["allow_prod_host"] = os.environ.get("CL_REPAIR_ALLOW_ANY_HOST", "0") in ("1", "true", "yes")
+        detail["engine_build"] = _hosted_engine_build()
+        detail["client_sdk"] = _client_sdk_versions()
+        # The study is pre-registered against an engine that routes by situation. An image
+        # from before that commit is a different experiment; an image whose ancestry cannot
+        # be read is unknown, which fails too unless the operator vouches for the build
+        # (``CL_ENGINE_BUILD_OK=1``) and the amendment says on what grounds.
+        carries = detail["engine_build"].get("has_situation_routing")
+        vouched = os.environ.get("CL_ENGINE_BUILD_OK", "0") in ("1", "true", "yes")
+        detail["engine_build"]["accepted"] = carries is True or (carries is None and vouched)
+        ok &= bool(detail["engine_build"]["accepted"])
 
         # One sealed failing session with the provenance the contract needs.
         mem = AgentMemory(agent_id=agent, adapter=_ThrottledHttpAdapter(
@@ -871,7 +1004,15 @@ def gate_rsi() -> bool:
         detail["identity_headers"] = sorted(hdrs.keys())
         ok &= {"X-AMFS-Agent-Id", "X-AMFS-Session"} <= set(hdrs)
         mem.set_session_attributes({"entity_path": scope, "runtime": "cl-preflight", "model": "preflight",
-                                    "agent_version": config.HARNESS_VERSION})
+                                    "agent_version": config.HARNESS_VERSION,
+                                    SITUATION_ATTRIBUTE: "preflight-situation"})
+        # The SDK must put the declared situation on the wire, or every session of the study
+        # is ``undeclared`` to the router and no canary ever admits it.
+        hdrs = getattr(mem._adapter, "identity_headers", {}) or {}
+        detail["situation_header"] = hdrs.get("X-AMFS-Situation")
+        ok &= hdrs.get("X-AMFS-Situation") == "preflight-situation"
+        detail["tier2"] = _tier2_live(pro, agent)
+        ok &= bool(detail["tier2"].get("ok"))
         mem.write(scope, "playbook", "Declined cards -> update_payment_method.", confidence=0.8)
         mem.retrieve("card declined", entity_path=scope, limit=2)
         mem.record_action("resolve", {"action": "update_payment_method"}, result="rejected", success=False,

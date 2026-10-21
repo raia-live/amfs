@@ -132,9 +132,21 @@ class EpisodeRecord:
     judge_score: int | None = None
     error: str | None = None
     transcript: list[dict[str, Any]] = field(default_factory=list)
+    #: Per-episode protocol diagnostics, so a model's deficit can be told from a client
+    #: mismatch: ``truncated_turns`` (the output cap cut a turn: finish ``length``),
+    #: ``no_tool_call_turns`` (an agent turn with no tool call), ``malformed_tool_args``
+    #: (arguments that did not parse as a JSON object), ``unknown_tool_names`` (a call to a
+    #: tool the scenario does not offer), ``client_retries`` (extra provider calls the client
+    #: made to obtain a tool call on models that reject forced tool use).
+    diagnostics: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _diag(d: dict[str, int], key: str, n: int = 1) -> None:
+    if n:
+        d[key] = d.get(key, 0) + n
 
 
 def _tool_result_text(hits: list[MemoryHit]) -> str:
@@ -203,6 +215,8 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
     edit_tools = set(getattr(scenario, "edit_tools", ()) or ())
     edit_calls = 0
     tools = [t.schema() for t in scenario.tools] + (memory_tools(arm) if arm.has_memory else [])
+    known_tools = {t["name"] for t in tools}
+    diagnostics: dict[str, int] = {}
     session.candidate_actions = candidate_actions(scenario)
 
     messages: list[dict[str, Any]] = [{"role": "system", "content": _system_prompt(scenario, arm, task, session)}]
@@ -219,15 +233,20 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
             steps += 1
             turn = llm.chat(messages, tools, tool_choice="required", max_tokens=config.STUDY.max_tokens_per_turn)
             usage.add(turn.usage)
+            _diag(diagnostics, "truncated_turns", int(turn.finish_reason == "length"))
+            _diag(diagnostics, "client_retries", turn.retries)
             messages.append(turn.assistant_message)
             if keep_transcript:
                 transcript.append({"assistant": turn.text, "tool_calls": [asdict(c) for c in turn.tool_calls]})
             if not turn.tool_calls:
+                _diag(diagnostics, "no_tool_call_turns")
                 messages.append({"role": "user", "content": "You must respond with a tool call."})
                 continue
             stop = False
             for call in turn.tool_calls:
                 name, args = call.name, call.arguments
+                _diag(diagnostics, "malformed_tool_args", int("_raw" in args))
+                _diag(diagnostics, "unknown_tool_names", int(name not in known_tools))
                 if name == "memory_search":
                     searches += 1
                     q = str(args.get("query", ""))
@@ -324,6 +343,10 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
                 messages.append({"role": "user", "content": REFLECT_PROMPT.format(outcome=outcome.summary)})
                 rt = llm.chat(messages, MEMORY_TOOLS[1:], tool_choice="memory_write", max_tokens=400)
                 r_usage.add(rt.usage)
+                _diag(diagnostics, "truncated_turns", int(rt.finish_reason == "length"))
+                _diag(diagnostics, "client_retries", rt.retries)
+                if not any(c.name == "memory_write" for c in rt.tool_calls):
+                    _diag(diagnostics, "no_tool_call_turns")
                 for call in rt.tool_calls:
                     if call.name == "memory_write":
                         writes += 1
@@ -369,7 +392,7 @@ def run_episode(scenario: Scenario, arm: MemoryArm, llm: LLM, task: Task, *,
         wall_ms=(time.perf_counter() - t0) * 1000, steps=steps, first_action_ms=first_action_ms,
         unnecessary_edits=max(0, edit_calls - (1 if success else 0)),
         explanation=explanation, error=error,
-        transcript=transcript,
+        transcript=transcript, diagnostics=diagnostics,
     )
 
 

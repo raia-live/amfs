@@ -23,6 +23,11 @@ class Usage:
     cost_usd: float = 0.0
     latency_ms: float = 0.0
     calls: int = 0
+    # Reasoning / thinking tokens, where the provider reports them (Reflection
+    # ``completion_tokens_details.reasoning_tokens``, Anthropic
+    # ``output_tokens_details.thinking_tokens``). Already counted inside ``completion_tokens``;
+    # kept so a reasoning model's visible answer can be told from its reasoning.
+    reasoning_tokens: int = 0
 
     def add(self, other: "Usage") -> "Usage":
         self.prompt_tokens += other.prompt_tokens
@@ -31,6 +36,7 @@ class Usage:
         self.cost_usd += other.cost_usd
         self.latency_ms += other.latency_ms
         self.calls += other.calls
+        self.reasoning_tokens += other.reasoning_tokens
         return self
 
 
@@ -51,12 +57,54 @@ class Turn:
     # the context and avoid rows it rendered, the prompt bytes when echoed). Frontier clients
     # leave it ``None``.
     amfs: dict[str, Any] | None = None
+    # Why the provider stopped, in one vocabulary across vendors: ``stop``, ``tool_calls``,
+    # ``length`` (the output cap cut the turn), or the provider's own word when none of those
+    # apply. ``None`` on clients that do not report one.
+    finish_reason: str | None = None
+    # Extra provider calls this turn cost beyond the first: the forced-tool-use fallback on
+    # models that reject ``tool_choice`` (Claude Opus 5.5) re-asks once when the first answer
+    # had no tool call. Usage of every call is summed into ``usage``.
+    retries: int = 0
 
 
 # Neutral message format:
 #   {"role": "system"|"user", "content": str}
 #   {"role": "assistant", "content": str, "tool_calls": [{"id","name","arguments"}], "_raw": provider-specific}
 #   {"role": "tool", "tool_call_id": str, "name": str, "content": str}
+
+
+def _finish(reason: str | None) -> str | None:
+    """Provider stop vocabularies -> ``stop`` / ``tool_calls`` / ``length``."""
+    if reason is None:
+        return None
+    return {"end_turn": "stop", "stop": "stop", "tool_use": "tool_calls", "tool_calls": "tool_calls",
+            "max_tokens": "length", "length": "length"}.get(reason, reason)
+
+
+class _RateLimiter:
+    """A process-wide sliding-window limiter: at most ``rpm`` calls in any 60 s. The Reflection
+    API's request limit is per organisation and per minute (60, measured 2026-10-21), so every
+    runner process is given its share through ``CL_REFLECTION_RPM`` and paces itself here
+    rather than discovering the limit through 429s."""
+
+    def __init__(self, rpm: int) -> None:
+        self.rpm = max(1, int(rpm))
+        self._lock = threading.Lock()
+        self._times: list[float] = []
+
+    def acquire(self) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._times = [t for t in self._times if now - t < 60.0]
+                if len(self._times) < self.rpm:
+                    self._times.append(now)
+                    return
+                wait = 60.0 - (now - self._times[0]) + 0.05
+            time.sleep(min(max(wait, 0.05), 60.0))
+
+
+_REFLECTION_LIMITER = _RateLimiter(config.REFLECTION_RPM)
 
 
 class LLM:
@@ -68,11 +116,23 @@ class LLM:
 
     def __init__(self, model: str) -> None:
         self.model = model
-        self.vendor = "anthropic" if model.startswith("claude") else "openai"
+        if model.startswith("claude"):
+            self.vendor = "anthropic"
+        elif model.startswith("Beam"):
+            self.vendor = "reflection"
+        else:
+            self.vendor = "openai"
         if self.vendor == "openai":
             from openai import OpenAI
 
             self._c = OpenAI(api_key=config.env("OPENAI_API_KEY", required=True), max_retries=4, timeout=120)
+        elif self.vendor == "reflection":
+            from openai import OpenAI
+
+            # Reflection's API is OpenAI-compatible on Chat Completions only; the SDK honours
+            # ``Retry-After`` and ``x-should-retry`` on its 429s. Direct to api.reflection.ai.
+            self._c = OpenAI(base_url=config.REFLECTION_BASE_URL,
+                             api_key=config.env("REFLECTION_API_KEY", required=True), max_retries=6, timeout=180)
         else:
             import anthropic
 
@@ -87,12 +147,16 @@ class LLM:
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
              *, tool_choice: str | None = None, max_tokens: int = 700) -> Turn:
         t0 = time.perf_counter()
+        if config.always_reasons(self.model):
+            max_tokens = max(max_tokens, config.STUDY.max_completion_tokens_reasoning)
         if self.vendor == "openai":
             turn = self._chat_openai(messages, tools, tool_choice, max_tokens)
+        elif self.vendor == "reflection":
+            turn = self._chat_openai_compat(messages, tools, tool_choice, max_tokens)
         else:
             turn = self._chat_anthropic(messages, tools, tool_choice, max_tokens)
         turn.usage.latency_ms = (time.perf_counter() - t0) * 1000
-        turn.usage.calls = 1
+        turn.usage.calls = 1 + turn.retries
         turn.usage.cost_usd = config.cost_usd(self.model, turn.usage.prompt_tokens,
                                               turn.usage.completion_tokens, turn.usage.cached_tokens)
         return turn
@@ -155,11 +219,118 @@ class LLM:
         cached = 0
         if getattr(u, "input_tokens_details", None) is not None:
             cached = getattr(u.input_tokens_details, "cached_tokens", 0) or 0
-        usage = Usage(prompt_tokens=u.input_tokens, completion_tokens=u.output_tokens, cached_tokens=cached)
+        reasoning = 0
+        if getattr(u, "output_tokens_details", None) is not None:
+            reasoning = getattr(u.output_tokens_details, "reasoning_tokens", 0) or 0
+        usage = Usage(prompt_tokens=u.input_tokens, completion_tokens=u.output_tokens, cached_tokens=cached,
+                      reasoning_tokens=reasoning)
         assistant = {"role": "assistant", "content": "".join(text_parts),
                      "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls],
                      "_raw": raw}
-        return Turn(text="".join(text_parts), tool_calls=calls, usage=usage, assistant_message=assistant)
+        # The Responses API reports an incomplete turn through ``status`` / ``incomplete_details``
+        # rather than a finish reason.
+        inc = getattr(r, "incomplete_details", None)
+        finish = "length" if inc is not None and getattr(inc, "reason", "") == "max_output_tokens" else (
+            "tool_calls" if calls else "stop")
+        return Turn(text="".join(text_parts), tool_calls=calls, usage=usage, assistant_message=assistant,
+                    finish_reason=finish)
+
+    # ------------------------------------------------------- reflection (beam)
+    def _chat_openai_compat(self, messages, tools, tool_choice, max_tokens) -> Turn:
+        """Chat Completions against the Reflection API (Beam). Tools and ``tool_choice`` as in
+        OpenAI's chat shape; ``reasoning_effort`` is mandatory on Beam; the assistant message
+        that made a tool call must come back on the next request unchanged, including its
+        ``reasoning_content`` — so ``_raw`` holds the whole message dict and is replayed as is."""
+        cc_msgs: list[dict[str, Any]] = []
+        for m in messages:
+            if m["role"] in ("system", "user"):
+                cc_msgs.append({"role": m["role"], "content": m["content"]})
+            elif m["role"] == "assistant":
+                if m.get("_raw"):
+                    cc_msgs.append(m["_raw"])
+                else:
+                    msg: dict[str, Any] = {"role": "assistant", "content": m.get("content") or ""}
+                    if m.get("tool_calls"):
+                        msg["tool_calls"] = [{"id": tc["id"], "type": "function",
+                                              "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"])}}
+                                             for tc in m["tool_calls"]]
+                    cc_msgs.append(msg)
+            elif m["role"] == "tool":
+                cc_msgs.append({"role": "tool", "tool_call_id": m["tool_call_id"], "content": m["content"]})
+        kwargs: dict[str, Any] = {"model": self.model, "messages": cc_msgs, "max_completion_tokens": max_tokens,
+                                  "reasoning_effort": config.REFLECTION_REASONING_EFFORT}
+        if tools:
+            kwargs["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t.get("description", ""),
+                                                                 "parameters": t["parameters"]}} for t in tools]
+            if tool_choice == "required":
+                kwargs["tool_choice"] = "required"
+            elif tool_choice and tool_choice != "auto":
+                kwargs["tool_choice"] = {"type": "function", "function": {"name": tool_choice}}
+        r = self._reflection_create(kwargs)
+        choice = r.choices[0]
+        m = choice.message
+        calls: list[ToolCall] = []
+        for tc in m.tool_calls or []:
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+                if not isinstance(args, dict):
+                    args = {"_raw": tc.function.arguments}
+            except json.JSONDecodeError:
+                args = {"_raw": tc.function.arguments}
+            calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
+        text = m.content or ""
+        # Verbatim replay form: role, content, tool_calls and reasoning_content, nothing else.
+        raw = m.model_dump(exclude_none=True)
+        raw = {k: v for k, v in raw.items() if k in ("role", "content", "tool_calls", "reasoning_content")}
+        raw.setdefault("role", "assistant")
+        if "content" not in raw:
+            raw["content"] = ""
+        u = r.usage
+        cached = reasoning = 0
+        if u is not None:
+            if getattr(u, "prompt_tokens_details", None) is not None:
+                cached = getattr(u.prompt_tokens_details, "cached_tokens", 0) or 0
+            if getattr(u, "completion_tokens_details", None) is not None:
+                reasoning = getattr(u.completion_tokens_details, "reasoning_tokens", 0) or 0
+        usage = Usage(prompt_tokens=(u.prompt_tokens if u else 0), completion_tokens=(u.completion_tokens if u else 0),
+                      cached_tokens=cached, reasoning_tokens=reasoning)
+        assistant = {"role": "assistant", "content": text,
+                     "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls],
+                     "_raw": raw}
+        return Turn(text=text, tool_calls=calls, usage=usage, assistant_message=assistant,
+                    finish_reason=_finish(choice.finish_reason))
+
+    def _reflection_create(self, kwargs: dict[str, Any]):
+        """One paced Chat Completions call. The SDK retries ordinary 429s with ``Retry-After``;
+        a 429 it refuses to retry (``x-should-retry: false``) is the daily allowance running
+        out, and the right move is to wait for the UTC-day reset the headers name rather than
+        fail every remaining episode of the cell in a minute. Capped at one such wait."""
+        import openai
+
+        waited_day = False
+        while True:
+            _REFLECTION_LIMITER.acquire()
+            try:
+                return self._c.chat.completions.create(**kwargs)
+            except openai.RateLimitError as e:
+                headers = getattr(getattr(e, "response", None), "headers", None) or {}
+                should_retry = str(headers.get("x-should-retry", "")).lower()
+                if should_retry == "false" and not waited_day:
+                    waits = []
+                    for k in ("x-ratelimit-reset-output-tokens-day", "x-ratelimit-reset-requests-day",
+                              "x-ratelimit-reset-tokens-day", "x-ratelimit-reset-uncached-input-tokens-day"):
+                        v = str(headers.get(k, "")).rstrip("s")
+                        try:
+                            waits.append(float(v))
+                        except ValueError:
+                            pass
+                    wait = min(max(waits) if waits else 3600.0, 24 * 3600.0) + 15.0
+                    print(f"  reflection: daily allowance exhausted; sleeping {wait / 3600:.1f} h for the UTC-day reset",
+                          flush=True)
+                    time.sleep(wait)
+                    waited_day = True
+                    continue
+                raise
 
     # --------------------------------------------------------------- anthropic
     def _chat_anthropic(self, messages, tools, tool_choice, max_tokens) -> Turn:
@@ -186,6 +357,17 @@ class LLM:
                     an_msgs[-1]["content"].append(block)
                 else:
                     an_msgs.append({"role": "user", "content": [block]})
+        forced = bool(tools) and bool(tool_choice) and tool_choice != "auto"
+        # Claude Opus 5.5 (and Fable 5.1) return 400 on ``tool_choice`` ``any`` / ``tool``. For
+        # those the harness asks with ``auto`` plus one line of instruction, and re-asks once if
+        # the answer carried no (matching) tool call — before the loop's own "You must respond
+        # with a tool call" branch sees the turn. The retry is counted on ``Turn.retries`` and
+        # reported per cell, so the deviation from the other models is visible, not suspected.
+        soft_force = forced and not self._supports_forced_tool_choice()
+        if soft_force and system is not None:
+            system += "\n\n" + (f"Reply with a call to the `{tool_choice}` tool and nothing else."
+                                if tool_choice != "required" else
+                                "Every reply must be a tool call. Never answer in plain text.")
         kwargs: dict[str, Any] = {"model": self.model, "messages": an_msgs, "max_tokens": max_tokens,
                                   "output_config": {"effort": config.ANTHROPIC_EFFORT}}
         if system:
@@ -195,26 +377,71 @@ class LLM:
                          "input_schema": t["parameters"]} for t in tools]
             an_tools[-1]["cache_control"] = {"type": "ephemeral"}
             kwargs["tools"] = an_tools
-            if tool_choice == "required":
+            if soft_force:
+                kwargs["tool_choice"] = {"type": "auto"}
+            elif tool_choice == "required":
                 kwargs["tool_choice"] = {"type": "any"}
             elif tool_choice and tool_choice != "auto":
                 kwargs["tool_choice"] = {"type": "tool", "name": tool_choice}
+
+        def wanted(calls: list[ToolCall]) -> bool:
+            if not soft_force:
+                return True
+            return any(c.name == tool_choice for c in calls) if tool_choice != "required" else bool(calls)
+
         r = self._c.messages.create(**kwargs)
-        text_parts, calls, raw = [], [], []
+        text_parts, calls, raw = self._anthropic_blocks(r)
+        usage = self._anthropic_usage(r)
+        retries = 0
+        if soft_force and not wanted(calls):
+            nudge = (f"You must call the `{tool_choice}` tool now." if tool_choice != "required"
+                     else "You must respond with a tool call now, not with text.")
+            kwargs["messages"] = an_msgs + [{"role": "assistant", "content": raw or [{"type": "text", "text": "(no content)"}]},
+                                            {"role": "user", "content": nudge}]
+            r2 = self._c.messages.create(**kwargs)
+            text_parts2, calls2, raw2 = self._anthropic_blocks(r2)
+            usage.add(self._anthropic_usage(r2))
+            retries = 1
+            if wanted(calls2) or not calls:
+                # The replayed history keeps only the answer the caller acts on; the model's
+                # own no-tool turn is dropped from ``_raw`` so later requests stay consistent
+                # with the neutral history the loop holds.
+                r, text_parts, calls, raw = r2, text_parts2, calls2, raw2
+        assistant = {"role": "assistant", "content": "".join(text_parts),
+                     "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls],
+                     "_raw": raw}
+        return Turn(text="".join(text_parts), tool_calls=calls, usage=usage, assistant_message=assistant,
+                    finish_reason=_finish(getattr(r, "stop_reason", None)), retries=retries)
+
+    def _supports_forced_tool_choice(self) -> bool:
+        """Anthropic models that accept ``tool_choice`` ``any`` / ``tool``. Opus 5.5 and
+        Fable 5.1 do not (400: 'type "tool" and "any" are not supported for this model')."""
+        return not (self.model.startswith("claude-opus-5-5") or self.model.startswith("claude-fable"))
+
+    @staticmethod
+    def _anthropic_blocks(r) -> tuple[list[str], list[ToolCall], list[dict[str, Any]]]:
+        text_parts: list[str] = []
+        calls: list[ToolCall] = []
+        raw: list[dict[str, Any]] = []
         for b in r.content:
             raw.append(b.model_dump())
             if b.type == "text":
                 text_parts.append(b.text)
             elif b.type == "tool_use":
                 calls.append(ToolCall(id=b.id, name=b.name, arguments=dict(b.input or {})))
+        return text_parts, calls, raw
+
+    @staticmethod
+    def _anthropic_usage(r) -> Usage:
         u = r.usage
         cached = getattr(u, "cache_read_input_tokens", 0) or 0
         prompt = (u.input_tokens or 0) + cached + (getattr(u, "cache_creation_input_tokens", 0) or 0)
-        usage = Usage(prompt_tokens=prompt, completion_tokens=u.output_tokens or 0, cached_tokens=cached)
-        assistant = {"role": "assistant", "content": "".join(text_parts),
-                     "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in calls],
-                     "_raw": raw}
-        return Turn(text="".join(text_parts), tool_calls=calls, usage=usage, assistant_message=assistant)
+        thinking = 0
+        det = getattr(u, "output_tokens_details", None)
+        if det is not None:
+            thinking = getattr(det, "thinking_tokens", 0) or 0
+        return Usage(prompt_tokens=prompt, completion_tokens=u.output_tokens or 0, cached_tokens=cached,
+                     reasoning_tokens=thinking)
 
 
 # ---------------------------------------------------------------------------------------------
