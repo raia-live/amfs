@@ -123,6 +123,11 @@ class S3Adapter(AdapterABC):
         current_key = None
         for obj in objects:
             s3_key = obj["Key"]
+            # Only objects directly under the prefix are this entry's versions.
+            # Key ``b`` of entity ``a`` shares its prefix with entity ``a/b``,
+            # whose keys sit one level further down.
+            if "/" in s3_key[len(prefix):]:
+                continue
             filename = s3_key.rsplit("/", 1)[-1]
             match = VERSION_RE.match(filename)
             if match and match.group(2) == "current":
@@ -225,6 +230,11 @@ class S3Adapter(AdapterABC):
         entries: list[MemoryEntry] = []
         for obj in objects:
             s3_key = obj["Key"]
+            # An entity path matches exactly, as on the filesystem and as
+            # ``AdapterABC.search`` expects: ``{entity}/{key}/{file}`` and
+            # nothing deeper, since nested entities share the prefix.
+            if entity_path and s3_key[len(prefix):].count("/") != 1:
+                continue
             filename = s3_key.rsplit("/", 1)[-1]
             match = VERSION_RE.match(filename)
             if not match:
