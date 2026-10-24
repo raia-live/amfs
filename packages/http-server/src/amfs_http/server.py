@@ -9834,7 +9834,15 @@ async def ingest_webhook(
         registry = ConnectorRegistry()
         connector = registry.get(connector_name)
         if connector:
-            ingester.register_transform("*", connector.transform)
+            # A connector transforms the decoded payload: ConnectorABC.transform
+            # takes the dict, which is what connectors are written and tested
+            # against. The ingester calls its transforms with the WebhookEvent it
+            # built instead, so registering the bound method as-is handed every
+            # connector the event, and PagerDuty's first .get() raised: a 500 on
+            # every delivery.
+            ingester.register_transform(
+                "*", lambda event: connector.transform(event.payload)
+            )
     except Exception:
         pass
 
