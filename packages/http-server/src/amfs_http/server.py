@@ -10092,6 +10092,24 @@ def _start_embedded_cortex() -> None:
         logger.exception("Failed to start embedded Cortex worker — server will run without Cortex")
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Robot fleet (fleet/robots registry → /api/v1/robots)
+# ──────────────────────────────────────────────────────────────────────
+
+try:
+    from amfs_http.robots import mount_robots
+
+    # Resolved at call time so a test can monkeypatch the module's memory.
+    mount_robots(
+        app,
+        get_memory=lambda: _get_memory(),
+        visible_agent_ids=lambda request: _visible_agent_ids(request),
+        verify_api_key=verify_api_key,
+    )
+except Exception:  # noqa: BLE001 - never block startup on an optional surface
+    logger.warning("Robot fleet endpoints not mounted", exc_info=True)
+
+
 def main() -> None:
     """Run the AMFS HTTP server via uvicorn."""
     args = _parse_args()

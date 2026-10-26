@@ -103,6 +103,23 @@ All entry endpoints accept a `branch` parameter (defaults to `main`). See [Git-l
 | `GET` | `/api/v1/agents/{agent_id}/activity` | Get agent's activity timeline |
 | `GET` | `/api/v1/agents/{agent_id}/timeline` | Git-like event log (writes, outcomes, reads, briefs) |
 
+### Robot Fleet
+
+A robot runtime registers itself by writing a `kind: robot` row under `fleet/robots/<robot-id>`
+(name, platform, host, capabilities, the agents it writes as, the `entity_prefix` its episodes
+and facts live under, loops, last self-check, `last_seen`). These endpoints read those rows and
+count the robot's learning per day: episodes per loop with their success rate (outcomes whose
+paths fall under the prefix), rules per loop (entries under `<prefix>/<loop>`), facts per topic
+(the prefix's other children and the owner agent's `user/<topic>`), corrections
+(`user/corrections`). Counts only — no values are returned.
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/api/v1/robots` | Every registered robot, with an `online` flag (`last_seen` within 15 min) |
+| `GET` | `/api/v1/robots/learning` | Fleet-wide learning per day and topic (`since`, `days`, `tz`) |
+| `GET` | `/api/v1/robots/{robot_id}` | One robot's registry row |
+| `GET` | `/api/v1/robots/{robot_id}/learning` | That robot's learning per day and topic (`since`, `days`, `tz`) |
+
 ### Memory Cortex
 
 | Method | Path | Description |
