@@ -132,6 +132,21 @@ class S3Adapter(AdapterABC):
                     current_key = s3_key
         return current_version, current_key
 
+    def _other_current_keys(self, entity_path: str, key: str, keep: str) -> list[str]:
+        """Current-version keys of *key* other than *keep*, directly under its prefix."""
+        prefix = self._key_prefix(entity_path, key)
+        found: list[str] = []
+        for obj in self._list_objects(prefix):
+            s3_key = obj["Key"]
+            # Only objects directly under the prefix belong to this key; a nested
+            # entity's objects sit deeper under the same prefix.
+            if "/" in s3_key[len(prefix):]:
+                continue
+            match = VERSION_RE.match(s3_key.rsplit("/", 1)[-1])
+            if match and match.group(2) == "current" and s3_key != keep:
+                found.append(s3_key)
+        return found
+
     def _read_object(self, s3_key: str) -> MemoryEntry:
         """Read and parse a MemoryEntry from an S3 object."""
         response = self._s3.get_object(Bucket=self._bucket, Key=s3_key)
@@ -168,7 +183,7 @@ class S3Adapter(AdapterABC):
         return entry
 
     def write(self, entry: MemoryEntry) -> MemoryEntry:
-        current_version, current_key = self._find_current_version(
+        current_version, _ = self._find_current_version(
             entry.entity_path, entry.key
         )
         new_version = current_version + 1
@@ -180,17 +195,8 @@ class S3Adapter(AdapterABC):
 
         entry = entry.model_copy(update={"version": new_version})
 
-        # Supersede old current by copying to superseded then deleting
-        if current_key is not None:
-            superseded_key = current_key.replace("_current.json", "_superseded.json")
-            self._s3.copy_object(
-                Bucket=self._bucket,
-                CopySource={"Bucket": self._bucket, "Key": current_key},
-                Key=superseded_key,
-            )
-            self._s3.delete_object(Bucket=self._bucket, Key=current_key)
-
-        # Write new current version
+        # Write the new current version first. If this fails, the previous
+        # version is still current and the entry reads as it did before.
         prefix = self._key_prefix(entry.entity_path, entry.key)
         new_key = f"{prefix}v{new_version:03d}_current.json"
         data = entry.model_dump(mode="json")
@@ -200,6 +206,17 @@ class S3Adapter(AdapterABC):
             Body=json.dumps(data, indent=2, default=str).encode("utf-8"),
             ContentType="application/json",
         )
+
+        # Then supersede every other current version of this key, not only the
+        # highest one: a write that stopped after the put leaves two behind.
+        for stale_key in self._other_current_keys(entry.entity_path, entry.key, new_key):
+            superseded_key = stale_key.replace("_current.json", "_superseded.json")
+            self._s3.copy_object(
+                Bucket=self._bucket,
+                CopySource={"Bucket": self._bucket, "Key": stale_key},
+                Key=superseded_key,
+            )
+            self._s3.delete_object(Bucket=self._bucket, Key=stale_key)
 
         for watch_ep, callbacks in self._watchers.items():
             if entry.entity_path == watch_ep or entry.entity_path.startswith(watch_ep + "/"):
