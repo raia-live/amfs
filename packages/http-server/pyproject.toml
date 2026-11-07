@@ -27,7 +27,7 @@ dependencies = [
     # unexpected keyword, _scope_block swallows it, and the block disappears —
     # while an adapter that ignored the argument instead would name another
     # agent's private keys. Either way the floor is what makes the rule real.
-    "amfs-core>=0.3.55",
+    "amfs-core>=0.3.56",
     "fastapi>=0.115",
     # 0.37 is where uvicorn.run() grew timeout_worker_healthcheck, which
     # main() passes unconditionally; on anything older that is a TypeError

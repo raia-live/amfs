@@ -580,7 +580,7 @@ class AsyncPostgresAdapter:
 
         # ``_BRANCH_SCOPE`` is swapped for the real branch condition once a
         # connection is open; its params are spliced in after the namespace.
-        conditions = ["namespace = %s", _BRANCH_SCOPE, "superseded_at IS NULL"]
+        conditions = ["namespace = %s", _BRANCH_SCOPE, "superseded_at IS NULL", "(ttl_at IS NULL OR ttl_at > NOW())"]
         params: list[Any] = [self._namespace]
 
         if query.depth < 3:
@@ -713,6 +713,7 @@ class AsyncPostgresAdapter:
             _BRANCH_SCOPE,
             "superseded_at IS NULL",
             "embedding IS NOT NULL",
+            "(ttl_at IS NULL OR ttl_at > NOW())",
         ]
         params: list[Any] = [self._namespace]
         if query.entity_path is not None:

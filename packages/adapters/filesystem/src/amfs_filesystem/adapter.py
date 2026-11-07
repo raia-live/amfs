@@ -292,6 +292,8 @@ class FilesystemAdapter(AdapterABC):
         heap: list[tuple[tuple[datetime, str], int, MemoryEntry]] = []
         seq = 0
         for e in self._iter_current_entries():
+            if e.is_expired():
+                continue
             if e.provenance.agent_id != agent_id:
                 continue
             if any(e.entity_path.startswith(p) for p in exclude_prefixes):
