@@ -319,6 +319,8 @@ class AdapterABC(ABC):
         from amfs_core.pagination import entry_tiebreak, paginate_desc
 
         def keep(e: MemoryEntry) -> bool:
+            if e.is_expired():
+                return False
             if e.provenance.agent_id != agent_id:
                 return False
             if any(e.entity_path.startswith(p) for p in exclude_prefixes):
@@ -387,6 +389,8 @@ class AdapterABC(ABC):
         query_lower = query.query.lower() if use_text_filter else None
         results: list[MemoryEntry] = []
         for entry in entries:
+            if entry.is_expired():
+                continue
             if entry.confidence < query.min_confidence:
                 continue
             if query.max_confidence is not None and entry.confidence > query.max_confidence:
@@ -1103,6 +1107,8 @@ class AdapterABC(ABC):
 
         scored: list[tuple[MemoryEntry, float]] = []
         for entry in entries:
+            if entry.is_expired():
+                continue
             if entry.confidence < query.min_confidence:
                 continue
             if query.max_confidence is not None and entry.confidence > query.max_confidence:

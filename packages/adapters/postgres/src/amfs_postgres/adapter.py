@@ -2684,7 +2684,7 @@ class PostgresAdapter(AdapterABC):
 
         # The branch scope is resolved on the connection below (it may need the
         # branch's parent); a placeholder keeps its position in the WHERE.
-        conditions = ["namespace = %s", _BRANCH_SCOPE, "superseded_at IS NULL"]
+        conditions = ["namespace = %s", _BRANCH_SCOPE, "superseded_at IS NULL", "(ttl_at IS NULL OR ttl_at > NOW())"]
         params: list[Any] = [self._namespace]
 
         if query.depth < 3:
@@ -2821,7 +2821,7 @@ class PostgresAdapter(AdapterABC):
 
         query_vec = query.embedding if query.embedding is not None else embedder.embed(query.text)
 
-        conditions = ["namespace = %s", "superseded_at IS NULL", "embedding IS NOT NULL"]
+        conditions = ["namespace = %s", "superseded_at IS NULL", "embedding IS NOT NULL", "(ttl_at IS NULL OR ttl_at > NOW())"]
         params: list[Any] = [self._namespace]
 
         if query.entity_path is not None:
@@ -5086,6 +5086,7 @@ class PostgresAdapter(AdapterABC):
             "agent_id = %s",
             "superseded_at IS NULL",
             "branch = 'main'",
+            "(ttl_at IS NULL OR ttl_at > NOW())",
         ]
         params: list[Any] = [namespace, agent_id]
         for prefix in exclude_prefixes:
