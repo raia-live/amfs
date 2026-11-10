@@ -267,6 +267,16 @@ class ActionPrior:
     #: :func:`aggregate_priors` ``situation_exact``), which is what lets
     #: :func:`turned_unsolved` read one loss as a turn.
     situation_exact: bool = False
+    #: When the newest run of losses began — the oldest loss in it, the
+    #: moment this action stopped working if it had worked before. ``None``
+    #: while the newest take is a win. What :func:`regime_turn_at` reads the
+    #: turn of a situation from, and the mark that separates the failures of
+    #: *other* actions before it (void: the fix was something else then) from
+    #: those after it (evidence).
+    losing_since: datetime | None = None
+    #: Bookkeeping for ``losing_since``: rows are walked newest first, and the
+    #: run is open until the first win seen.
+    streak_open: bool = field(default=True, repr=False, compare=False)
 
     @property
     def n(self) -> int:
@@ -295,6 +305,8 @@ class ActionPrior:
         }
         if self.situation_exact:
             out["situation_exact"] = True
+        if self.losing_since is not None:
+            out["losing_since"] = self.losing_since.isoformat()
         return out
 
 
@@ -364,9 +376,14 @@ def aggregate_priors(
             if ok:
                 pr.won += 1
                 pr.won_w += w
+                pr.streak_open = False
             else:
                 pr.lost += 1
                 pr.lost_w += w
+                # Newest first: every loss seen before the first win pushes
+                # the start of the newest run further back.
+                if pr.streak_open and at is not None:
+                    pr.losing_since = at
             if pr.last_unsolved is None:
                 pr.last_unsolved = (not ok) and not solved
             if len(pr.last_3) < 3:
@@ -1073,6 +1090,12 @@ def recommend(
     """
     record_tried: list[Mapping[str, Any]] = list((priors or {}).get("tried") or [])
     untried: list[str] = list((priors or {}).get("untried") or [])
+    # The actions whose only record here predates the turn of the
+    # situation's fix (:func:`stale_failures`) are untried again: an explore
+    # works through them, an escalate is not declared over them.
+    stale = stale_failures(record_tried)
+    if stale:
+        untried = with_stale(untried, stale, candidate_actions)
     have_candidates = bool(candidate_actions)
     # The asking task's covariates, folded as the record's are (keys lowercased,
     # bookkeeping dropped), so ``Plan`` on the retrieve meets ``plan`` on a rule.
@@ -1186,7 +1209,7 @@ def recommend(
         agent_id=agent_id, top_hit_status=top_hit_status,
         top_hit_recent_failure=top_hit_recent_failure, top_hit_shifted=top_hit_shifted,
         regime_shift=regime_shift, regime_shift_at=regime_shift_at, abstain=abstain,
-        hit_statuses=hit_statuses, priors_are_local=priors_are_local,
+        hit_statuses=hit_statuses, priors_are_local=priors_are_local, stale=stale,
     ))
 
 
@@ -1372,12 +1395,16 @@ def _recommend_mode(
     candidate_actions: Sequence[str] | None = None,
     allowed: set[str] | None = None,
     has_record: bool | None = None,
+    stale: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     """The mode and suggested action of :func:`recommend`; the plan is added
     by the caller. *has_record* says the record holds tried actions, whether
-    or not any is among the candidates (defaults to ``bool(tried)``)."""
+    or not any is among the candidates (defaults to ``bool(tried)``).
+    *stale* names the actions in *untried* whose record here is failures
+    from before the fix turned (:func:`stale_failures`)."""
     if has_record is None:
         has_record = bool(tried)
+    stale_keys = {str(a) for a in (stale or ())}
     if priors_are_local:
         contrasts = list((priors or {}).get("contrasts") or [])
         # Near-identical outcomes that contradict each other over time are two
@@ -1428,7 +1455,10 @@ def _recommend_mode(
         }
     lone = _lone_winner(tried, failed_now) if priors_are_local else None
     if lone is not None and (not regime_shift or _won_since(lone, regime_shift_at)):
-        failed = ", ".join(f"{t['action_key']} {t['won']}/{t['n']}" for t in failed_now[:5])
+        failed = ", ".join(
+            f"{t['action_key']} {t['won']}/{t['n']}"
+            for t in [t for t in failed_now if str(t.get("action_key")) not in stale_keys][:5]
+        )
         return {
             "mode": "act",
             "suggested_action": lone["action_key"],
@@ -1463,7 +1493,10 @@ def _recommend_mode(
             sweep_order(priors, untried, agent_id)[0] if _sweep(priors)
             else untried[stable_bucket(agent_id, len(untried))]
         )
-        failed = ", ".join(f"{t['action_key']} {t['won']}/{t['n']}" for t in failed_now[:4])
+        failed = ", ".join(
+            f"{t['action_key']} {t['won']}/{t['n']}"
+            for t in [t for t in failed_now if str(t.get("action_key")) not in stale_keys][:4]
+        )
         why = "regime shift suspected for tasks like this; " if shift_explores else ""
         if stopped:
             s = stopped[0]
@@ -1499,7 +1532,20 @@ def _recommend_mode(
         else:
             why += (f"{len(untried)} untried on this kind of task and nothing in the record orders them — "
                     f"use your own judgement; {pick} is this agent's exploration assignment if you have no better guess")
+        since_change = [a for a in untried if a in stale_keys]
+        if since_change:
+            # Said in the reason as well as the list: the "tried" line above
+            # it still shows these as 0/n, and a reader of that line alone
+            # takes them for failures.
+            why += (
+                f". {', '.join(since_change)} "
+                + ("was" if len(since_change) == 1 else "were")
+                + " tried here only before the fix stopped working and count as untried: "
+                "those failures were against a fix that no longer works, not evidence against them"
+            )
         out: dict[str, Any] = {"mode": "explore", "suggested_action": pick, "untried": untried, "why": why}
+        if since_change:
+            out["untried_since_change"] = since_change
         if unsolved:
             out["sweep"] = True
         if stopped:
@@ -1680,6 +1726,72 @@ def _leading_losses(prior: Mapping[str, Any]) -> int:
     return n
 
 
+def regime_turn_at(tried: Sequence[Mapping[str, Any]]) -> datetime | None:
+    """The moment the record's fix stopped working, if it has: the start of
+    the newest losing run (``losing_since``) of the action that had won most
+    here and has stopped working (:func:`_stopped_working`). ``None`` when no
+    action with a win here has stopped, or when the record predates the
+    ``losing_since`` field — an older server's rows are read as before.
+
+    Ties on wins go to the earlier turn: the record changed no later than
+    the first of them."""
+    moments = [
+        (-int(t.get("won", 0)), at)
+        for t in tried
+        if int(t.get("won", 0)) >= 1 and _stopped_working(t)
+        and (at := _as_dt(t.get("losing_since"))) is not None
+    ]
+    if not moments:
+        return None
+    best = min(w for w, _ in moments)
+    return min(at for w, at in moments if w == best)
+
+
+def stale_failures(tried: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The actions whose only record here is failures from *before* the
+    record's fix stopped working (:func:`regime_turn_at`): never won here,
+    newest take older than the turn. In the order of *tried*.
+
+    Their failures are not evidence against them now. Each was tried when
+    the situation's fix was still working and was, correctly, not it — and
+    that fix has since stopped working, so the record no longer says what
+    the fix is. An action tried only before the change is as untried as one
+    never tried, with one thing more in its favour: an agent reading the
+    task chose it. Measured on the CL support study (Beam-1.0, 2026-10-23,
+    variant B): the one class whose new fix had failed once before the
+    change was told, on every episode after it, "do not spend an attempt on"
+    that fix; a model that follows the record did not find it in 29 episodes
+    and a model that overrode the line found it in one to four. Nothing in
+    the record distinguished that 0/1 from a 0/1 taken after the change —
+    until this reading of the turn.
+    """
+    turn = regime_turn_at(tried)
+    if turn is None:
+        return []
+    out: list[str] = []
+    for t in tried:
+        if int(t.get("won", 0)) != 0:
+            continue
+        at = _as_dt(t.get("last_at"))
+        if at is not None and at < turn:
+            out.append(str(t.get("action_key")))
+    return out
+
+
+def with_stale(
+    untried: Sequence[str], stale: Sequence[str], candidate_actions: Sequence[str] | None = None
+) -> list[str]:
+    """*untried* with the *stale* actions (:func:`stale_failures`) that are
+    not already in it, restricted to *candidate_actions* when given. Stale
+    first: of all the untried they are the ones an agent reading a task like
+    this once reached for, which is the one relevance signal the record
+    holds about any of them."""
+    allowed = set(candidate_actions) if candidate_actions else None
+    seen = set(untried)
+    lead = [a for a in stale if a not in seen and (allowed is None or a in allowed)]
+    return lead + [a for a in untried if allowed is None or a in allowed]
+
+
 def sweep_order(
     priors: Mapping[str, Any] | None, untried: Sequence[str], agent_id: str = ""
 ) -> list[str]:
@@ -1707,21 +1819,29 @@ def sweep_order(
     had that action ranked under every never-tried candidate and out of the
     five-slot plan on all nine post-change exposures, while an untested
     action carries no more information than a losing one.
+
+    Ahead of both: the actions tried on this situation only *before* its
+    fix stopped working (:func:`stale_failures`). Their losses are void
+    (the fix was something else then), and that an agent reading a task
+    like this chose them is the one thing the record knows about which of
+    the untried fits this kind of task — the ordering by wins elsewhere
+    knows nothing of the kind.
     """
     rec = (priors or {}).get("elsewhere")
     by_key: dict[str, Mapping[str, Any]] = {}
     if isinstance(rec, Mapping):
         for t in rec.get("tried") or []:
             by_key[str(t.get("action_key"))] = t
+    stale = set(stale_failures((priors or {}).get("tried") or []))
     n = len(untried)
     start = stable_bucket(agent_id, n) if n else 0
     rotated = [untried[(start + i) % n] for i in range(n)]
 
-    def rank(i_a: tuple[int, str]) -> tuple[float, int]:
+    def rank(i_a: tuple[int, str]) -> tuple[int, float, int]:
         i, a = i_a
         t = by_key.get(a)
         won = float(t.get("won", 0)) if t else 0.0
-        return (-won, i)
+        return (0 if a in stale else 1, -won, i)
 
     return [a for _, a in sorted(enumerate(rotated), key=rank)]
 
@@ -1879,6 +1999,11 @@ def plan_actions(
     """
     tried = list((priors or {}).get("tried") or [])
     untried = list((priors or {}).get("untried") or [])
+    # Failures from before the fix turned are void: those actions go with
+    # the untried (:func:`stale_failures`), not after them with what failed.
+    stale = stale_failures(tried)
+    if stale:
+        untried = with_stale(untried, stale, candidate_actions)
     local = priors_local(priors) if priors_are_local is None else priors_are_local
     allowed = set(candidate_actions) if candidate_actions else None
     plan: list[str] = []
@@ -2001,6 +2126,10 @@ def rank_by_lessons(
             continue
         (worked if claim.get("worked") else failed).add(action)
     failed -= worked
+    # A lesson that an action did not work here, written while the fix was
+    # something else: the record has that action's failures as older than
+    # the turn (:func:`stale_failures`), and the lesson is as old as they are.
+    failed -= set(stale_failures(list(tried.values())))
     worked = {a for a in worked if not (a in tried and _stopped_working(tried[a]))}
     # The same for the action a contest is about: its record on this
     # situation is split, and a lesson that it worked here was written on
@@ -2354,6 +2483,11 @@ def render_priors(
     record = (priors or {}).get("situation_record")
     exact = isinstance(record, Mapping)
     here = "on this situation" if exact else "on tasks like this"
+    # Tried here only before the fix turned (:func:`stale_failures`): shown
+    # as such on the "tried" line, never under "do not spend", and among the
+    # untried below — first among them.
+    stale_order = stale_failures(tried)
+    stale = set(stale_order)
     if tried:
         # Every action tried here when the record is short; else the most
         # taken. The server sorts ``tried`` by posterior, so a fixed cut from
@@ -2372,6 +2506,7 @@ def render_priors(
                 if turned_unsolved(t) and not turned(t) and not _recently_failing(t)
                 else (f", lost last {_leading_losses(t)}" if _stopped_working(t) and int(t.get("won", 0)) else "")
             )
+            + (" (before the fix stopped working — counts as untried)" if str(t.get("action_key")) in stale else "")
             for t in shown
         ]
         lines.append(("Tried on this situation: " if exact else "Tried on similar tasks here: ") + "; ".join(parts))
@@ -2414,6 +2549,8 @@ def render_priors(
             )
     allowed = set(candidate_actions) if candidate_actions else None
     untried = (priors or {}).get("untried") or []
+    if stale_order:
+        untried = with_stale(untried, stale_order, candidate_actions)
     if allowed is not None:
         untried = [u for u in untried if u in allowed]
     mode = (recommendation or {}).get("mode")
@@ -2455,7 +2592,8 @@ def render_priors(
     # from its top kept the 0/1s and dropped the 0/4 (CL CI pilot,
     # 2026-09-26 — the agent took the hidden action a fifth time).
     failed = sorted(
-        (t for t in tried if t not in stopped and int(t.get("won", 0)) == 0),
+        (t for t in tried if t not in stopped and int(t.get("won", 0)) == 0
+         and str(t.get("action_key")) not in stale),
         key=lambda t: -int(t.get("lost", 0)),
     )
     avoid = [
@@ -2465,12 +2603,31 @@ def render_priors(
     ] + [f"{t['action_key']} (0/{t['n']})" for t in failed[:RENDER_TRIED_MAX]]
     if avoid:
         lines.append("Do not spend an attempt on: " + "; ".join(avoid) + f" — these failed {here}.")
+    if stale_order:
+        # The failures that are not held against them, said once where the
+        # prohibition would have been. The CL support study (2026-10-23)
+        # measured the line this replaces: a model that follows the record
+        # was held off the class's new fix for 29 episodes by a 0/1 taken
+        # before the change.
+        by_key = {str(t.get("action_key")): t for t in tried}
+        turned_rows = sorted(
+            (t for t in tried if int(t.get("won", 0)) >= 1 and _stopped_working(t)),
+            key=lambda t: -int(t.get("won", 0)),
+        )
+        turned_key = str(turned_rows[0].get("action_key")) if turned_rows else ""
+        named = ", ".join(f"{a} (0/{by_key[a]['n']})" if a in by_key else a for a in stale_order)
+        lines.append(
+            f"Untried since the change: {named} — tried {here} only while {turned_key or 'the old fix'} "
+            "was still working, so those failures are not evidence against them now. "
+            "They count as untried."
+        )
     backed = _evidence_backed(plan, tried, contrasts if local else [], lessons, recommendation)
     hedged_keys = {str(t.get("action_key")) for t in hedged}
     # An action a lesson for this situation says did not work is not a live
     # choice anywhere in the text: the record may not hold that attempt
-    # (another agent's memory, a scan cap), but the lesson does.
-    barred = _lesson_barred(lessons)
+    # (another agent's memory, a scan cap), but the lesson does — unless the
+    # record dates that attempt to before the fix turned.
+    barred = _lesson_barred(lessons) - stale
     # Every untried candidate, in the sweep's order (:func:`sweep_order`:
     # most-won elsewhere first, then the rotation) — not the plan's cut of
     # them. The plan is capped at ``PLAN_MAX``; a footer that named only the
@@ -2514,9 +2671,11 @@ def render_priors(
             u for u in open_untried
             if u not in backed and u not in hedged_keys and (mode == "explore" or u in in_plan)
         ]
-        tail = sorted(
-            (a for a in rest if a in note), key=lambda a: -int(note[a].split("/", 1)[0])
-        ) + [a for a in rest if a not in note]
+        # The untried-since-the-change lead (see :func:`sweep_order`), then
+        # the winners elsewhere, then the rest.
+        tail = [a for a in rest if a in stale] + sorted(
+            (a for a in rest if a in note and a not in stale), key=lambda a: -int(note[a].split("/", 1)[0])
+        ) + [a for a in rest if a not in note and a not in stale]
     hedge = [a for a in plan if a in hedged_keys]
 
     def _shown(a: str) -> str:
@@ -2672,10 +2831,13 @@ __all__ = [
     "recommend",
     "REGIME_MIN_WINS",
     "REGIME_TURN_STREAK",
+    "regime_turn_at",
     "render_priors",
     "stable_bucket",
+    "stale_failures",
     "turned",
     "turned_unsolved",
     "sweep_order",
+    "with_stale",
     "recorded_environment",
 ]

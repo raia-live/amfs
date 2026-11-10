@@ -6,6 +6,14 @@ keyword, so each of those raised TypeError before S3 was reached, and an
 ``AgentMemory`` on S3 could not write a single entry. Nothing noticed because
 no test ever drove the adapter through the engine.
 
+Those calls also have to stay inside the entity they name. Entity ``myapp``
+keeps key ``auth`` under ``myapp/auth/``, the same prefix entity
+``myapp/auth`` keeps all of its keys under, and the adapter listed key and
+entity prefixes recursively. So a read found an entry that was never written,
+``list`` and ``history`` reported a nested entity's entries as their own, and
+a write superseded the nested entity's current version, which then read back
+as missing.
+
 The bucket is an in-memory stand-in for the five client calls the adapter
 makes, so these run without network access or credentials.
 """
@@ -101,3 +109,81 @@ def test_branch_is_accepted_and_reads_the_one_line_of_history(adapter: S3Adapter
     assert entry is not None
     assert entry.value == {"max": 3}
     assert [e.key for e in adapter.list("svc/checkout", branch="main")] == ["retry"]
+
+
+def test_a_read_does_not_reach_into_a_nested_entity(adapter: S3Adapter) -> None:
+    engine = CoWEngine(adapter, CausalTagger("agent-a"))
+    engine.write("myapp/auth", "token-ttl", 3600)
+
+    assert adapter.read("myapp", "auth") is None
+    assert engine.read("myapp", "auth") is None
+
+
+def test_list_matches_an_entity_path_exactly(adapter: S3Adapter) -> None:
+    engine = CoWEngine(adapter, CausalTagger("agent-a"))
+    engine.write("myapp", "region", "eu-west-1")
+    engine.write("myapp/auth", "token-ttl", 3600)
+
+    assert [(e.entity_path, e.key) for e in adapter.list("myapp")] == [("myapp", "region")]
+    assert [(e.entity_path, e.key) for e in adapter.list("myapp/auth")] == [
+        ("myapp/auth", "token-ttl")
+    ]
+    # With no entity path the listing still covers the whole namespace.
+    assert sorted((e.entity_path, e.key) for e in adapter.list()) == [
+        ("myapp", "region"),
+        ("myapp/auth", "token-ttl"),
+    ]
+
+
+def test_a_write_leaves_a_nested_entitys_entry_alone(adapter: S3Adapter) -> None:
+    engine = CoWEngine(adapter, CausalTagger("agent-a"))
+    engine.write("myapp/auth", "token-ttl", 3600)
+
+    written = engine.write("myapp", "auth", {"provider": "oidc"})
+
+    assert written.version == 1
+    kept = engine.read("myapp/auth", "token-ttl")
+    assert kept is not None
+    assert (kept.version, kept.value) == (1, 3600)
+    auth = engine.read("myapp", "auth")
+    assert auth is not None
+    assert auth.value == {"provider": "oidc"}
+
+
+def test_history_and_read_at_version_stay_inside_the_entity(adapter: S3Adapter) -> None:
+    engine = CoWEngine(adapter, CausalTagger("agent-a"))
+    engine.write("myapp", "token-ttl", 900)
+    engine.write("myapp/auth", "token-ttl", 3600)
+    engine.write("myapp/auth", "token-ttl", 7200)
+
+    assert [(e.entity_path, e.version) for e in engine.history("myapp", "token-ttl")] == [
+        ("myapp", 1)
+    ]
+    assert adapter.read_at_version("myapp", "token-ttl", 2) is None
+    nested = adapter.read_at_version("myapp/auth", "token-ttl", 2)
+    assert nested is not None
+    assert nested.value == 7200
+
+
+def test_a_key_with_a_slash_is_listed_under_its_own_entity(adapter: S3Adapter) -> None:
+    # Key ``active-negotiation/xyz`` of ``sweep/abc`` sits exactly as deep as
+    # key ``owner`` of the nested entity ``sweep/abc/active-negotiation``, so
+    # depth below the entity prefix cannot say whose an object is. Counting
+    # path segments kept the nested entity out and dropped the slashed key
+    # with it: listed nowhere, with no history, though it still read back.
+    engine = CoWEngine(adapter, CausalTagger("agent-a"))
+    engine.write("sweep/abc", "active-negotiation/xyz", {"round": 1})
+    engine.write("sweep/abc", "active-negotiation/xyz", {"round": 2})
+    engine.write("sweep/abc/active-negotiation", "owner", "agent-b")
+
+    assert [(e.entity_path, e.key) for e in adapter.list("sweep/abc")] == [
+        ("sweep/abc", "active-negotiation/xyz")
+    ]
+    assert [(e.entity_path, e.key) for e in adapter.list("sweep/abc/active-negotiation")] == [
+        ("sweep/abc/active-negotiation", "owner")
+    ]
+    history = engine.history("sweep/abc", "active-negotiation/xyz")
+    assert sorted(e.version for e in history) == [1, 2]
+    first = adapter.read_at_version("sweep/abc", "active-negotiation/xyz", 1)
+    assert first is not None
+    assert first.value == {"round": 1}

@@ -2958,3 +2958,182 @@ def test_a_three_value_plan_on_the_minimum_contest_is_a_covariate_and_an_id_is_n
     cb3 = act.contested_record(long_)
     assert cb3 is not None and cb3["rule"]["key"] == "plan"
     assert "customer" not in {a["key"] for a in cb3["rule"].get("alternatives") or []}
+
+
+# ── Regime-aware priors: failures from before the turn are not prohibitions ──
+
+
+_WEBHOOK = [
+    "resolve:explain_and_close", "resolve:advise_settings_change", "resolve:advise_workaround",
+    "resolve:escalate_tier2", "resolve:clear_app_data", "resolve:reinstall_app", "resolve:refund",
+    "resolve:resend_email", "resolve:update_payment_method", "resolve:reset_password",
+]
+
+
+def _webhook_rows(*, changed: bool = True, found: bool = False) -> list[dict]:
+    """The CL support study's ``webhook-late`` record (Beam-1.0, 2026-10-23, seed 307):
+    the class's new fix, ``advise_settings_change``, was tried once before the change
+    and was then not the fix; ``explain_and_close`` won every task until the change;
+    at the change it lost on a task nothing solved, and two other guesses lost with it."""
+    rows = [
+        _sit_row("webhook-late", [("resolve:advise_settings_change", False), ("resolve:advise_workaround", False),
+                                  ("resolve:explain_and_close", True)], days_ago=10),
+        _sit_row("webhook-late", [("resolve:escalate_tier2", False), ("resolve:explain_and_close", True)], days_ago=9),
+    ] + [_sit_row("webhook-late", [("resolve:explain_and_close", True)], days_ago=d) for d in range(8, 1, -1)]
+    if changed:
+        rows.append(_sit_row("webhook-late", [("resolve:explain_and_close", False), ("resolve:clear_app_data", False),
+                                              ("resolve:reinstall_app", False)], outcome="failure", days_ago=0.5))
+    if found:
+        rows.append(_sit_row("webhook-late", [("resolve:explain_and_close", False),
+                                              ("resolve:advise_settings_change", True)], days_ago=0.2))
+    return rows
+
+
+def _webhook_priors(**kw) -> dict:
+    pr = act.aggregate_priors(_webhook_rows(**kw), candidate_actions=_WEBHOOK, situation_exact=True)
+    pr["situation_record"] = {"situation": "webhook-late", "outcomes": pr["n_outcomes"]}
+    pr["elsewhere"] = {"tried": [{"action_key": "resolve:resend_email", "won": 12, "n": 13, "lost": 1}]}
+    return pr
+
+
+def test_the_record_dates_the_turn_of_its_fix() -> None:
+    pr = _webhook_priors()
+    by = {t["action_key"]: t for t in pr["tried"]}
+    leader = by["resolve:explain_and_close"]
+    assert leader["won"] == 9 and leader["last_3"][0] == "lost" and act.turned_unsolved(leader)
+    # The start of the newest losing run; for one loss, that loss.
+    assert leader["losing_since"] == leader["last_at"]
+    turn = act.regime_turn_at(pr["tried"])
+    assert turn == act._as_dt(leader["last_at"])
+    # A winner whose newest take won carries no ``losing_since``.
+    pr_before = _webhook_priors(changed=False)
+    before = {t["action_key"]: t for t in pr_before["tried"]}["resolve:explain_and_close"]
+    assert "losing_since" not in before
+    assert act.regime_turn_at(pr_before["tried"]) is None
+
+
+def test_failures_from_before_the_turn_are_untried_again_and_lead_the_sweep() -> None:
+    """Seed 307 of the study: after the change the block read "Do not spend an attempt
+    on: advise_settings_change (0/1)" on every episode, and the model that follows the
+    record never found the fix (0/29). The 0/1 predates the turn; the two 0/1s taken
+    on the task that turned the record do not."""
+    pr = _webhook_priors()
+    stale = act.stale_failures(pr["tried"])
+    assert sorted(stale) == ["resolve:advise_settings_change", "resolve:advise_workaround", "resolve:escalate_tier2"]
+    rec = act.recommend(pr, agent_id="support-agent-6", candidate_actions=_WEBHOOK)
+    assert rec["mode"] == "explore" and rec["sweep"] is True
+    assert rec["suggested_action"] in stale
+    assert sorted(rec["untried_since_change"]) == sorted(stale)
+    # The explore works through the stale first, then the never-tried — the
+    # winner elsewhere included — then nothing else.
+    sweep = act.sweep_order(pr, rec["untried"], "support-agent-6")
+    assert set(sweep[:3]) == set(stale)
+    assert sweep[3] == "resolve:resend_email"
+    assert set(sweep) == set(stale) | {"resolve:refund", "resolve:resend_email",
+                                       "resolve:update_payment_method", "resolve:reset_password"}
+    assert "resolve:clear_app_data" not in rec["untried"] and "resolve:reinstall_app" not in rec["untried"]
+    assert "advise_settings_change" in rec["why"] and "count as untried" in rec["why"]
+    # The plan: the pick, the turned fix as the hedge, then the rest of the sweep.
+    assert rec["plan"][0] == rec["suggested_action"]
+    assert rec["plan"][1] == "resolve:explain_and_close"
+    text = act.render_priors(pr, rec, candidate_actions=_WEBHOOK, agent_id="support-agent-6")
+    avoid = next(ln for ln in text.splitlines() if ln.startswith("Do not spend"))
+    assert "resolve:clear_app_data (0/1)" in avoid and "resolve:reinstall_app (0/1)" in avoid
+    assert "advise_settings_change" not in avoid and "advise_workaround" not in avoid and "escalate_tier2" not in avoid
+    since = next(ln for ln in text.splitlines() if ln.startswith("Untried since the change"))
+    assert "resolve:advise_settings_change (0/1)" in since and "resolve:explain_and_close" in since
+    tried_line = next(ln for ln in text.splitlines() if ln.startswith("Tried on this situation"))
+    assert "resolve:advise_settings_change 0/1 (before the fix stopped working — counts as untried)" in tried_line
+    assert "resolve:clear_app_data 0/1;" in tried_line and "clear_app_data 0/1 (before" not in tried_line
+    head = next(ln for ln in text.splitlines() if ln.startswith("Try "))
+    first = head.split(" first")[0][len("Try "):].split(" (")[0]
+    assert first in stale
+    assert "resolve:resend_email (12/13 elsewhere)" in head
+
+
+def test_the_same_failures_are_prohibitions_while_the_fix_still_works() -> None:
+    pr = _webhook_priors(changed=False)
+    assert act.stale_failures(pr["tried"]) == []
+    rec = act.recommend(pr, agent_id="a", candidate_actions=_WEBHOOK)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "resolve:explain_and_close"
+    text = act.render_priors(pr, rec, candidate_actions=_WEBHOOK)
+    assert "Do not spend an attempt on: " in text and "resolve:advise_settings_change (0/1)" in text
+    assert "Untried since the change" not in text
+
+
+def test_once_the_new_fix_has_won_the_record_acts_on_it_and_still_holds_no_stale_prohibition() -> None:
+    pr = _webhook_priors(found=True)
+    rec = act.recommend(pr, agent_id="a", candidate_actions=_WEBHOOK)
+    assert rec["mode"] == "act" and rec["suggested_action"] == "resolve:advise_settings_change"
+    text = act.render_priors(pr, rec, candidate_actions=_WEBHOOK)
+    avoid = next(ln for ln in text.splitlines() if ln.startswith("Do not spend"))
+    assert "advise_workaround" not in avoid and "escalate_tier2" not in avoid
+    assert "resolve:clear_app_data (0/1)" in avoid
+    assert "resolve:explain_and_close (9/11, stopped working)" in avoid
+
+
+def test_an_older_servers_record_without_losing_since_reads_as_before() -> None:
+    pr = _webhook_priors()
+    for t in pr["tried"]:
+        t.pop("losing_since", None)
+    assert act.regime_turn_at(pr["tried"]) is None and act.stale_failures(pr["tried"]) == []
+    text = act.render_priors(pr, act.recommend(pr, agent_id="a", candidate_actions=_WEBHOOK), candidate_actions=_WEBHOOK)
+    assert "resolve:advise_settings_change (0/1)" in next(ln for ln in text.splitlines() if ln.startswith("Do not spend"))
+
+
+def test_a_record_with_nothing_left_untried_explores_the_stale_instead_of_escalating() -> None:
+    """Every candidate tried: the fix that turned, two guesses that lost with it, and
+    one that lost before the change. ``escalate`` on that record hands off a task whose
+    one live candidate was never tried against the new rule."""
+    cands = ["resolve:explain_and_close", "resolve:advise_settings_change", "resolve:clear_app_data",
+             "resolve:reinstall_app"]
+    rows = [
+        _sit_row("webhook-late", [("resolve:advise_settings_change", False), ("resolve:explain_and_close", True)],
+                 days_ago=6),
+    ] + [_sit_row("webhook-late", [("resolve:explain_and_close", True)], days_ago=d) for d in (5, 4, 3, 2)] + [
+        _sit_row("webhook-late", [("resolve:explain_and_close", False), ("resolve:clear_app_data", False),
+                                  ("resolve:reinstall_app", False)], outcome="failure", days_ago=1),
+        _sit_row("webhook-late", [("resolve:explain_and_close", False), ("resolve:clear_app_data", False),
+                                  ("resolve:reinstall_app", False)], outcome="failure", days_ago=0.5),
+    ]
+    pr = act.aggregate_priors(rows, candidate_actions=cands, situation_exact=True)
+    pr["situation_record"] = {"situation": "webhook-late", "outcomes": len(rows)}
+    assert pr["untried"] == []
+    rec = act.recommend(pr, agent_id="a", candidate_actions=cands)
+    assert rec["mode"] == "explore"
+    assert rec["suggested_action"] == "resolve:advise_settings_change"
+    assert rec["untried"] == ["resolve:advise_settings_change"]
+    assert rec["plan"][0] == "resolve:advise_settings_change"
+
+
+def test_a_lesson_that_a_stale_action_failed_does_not_send_it_to_the_back() -> None:
+    pr = _webhook_priors()
+    rec = act.recommend(pr, agent_id="a", candidate_actions=_WEBHOOK)
+    lessons = [{"action": "resolve:advise_settings_change", "worked": False, "evidence_status": "validated"}]
+    plan = act.rank_by_lessons(rec["plan"], lessons, priors=pr, recommendation=rec)
+    assert plan == list(rec["plan"])
+    # Lessons passed to the renderer do not bar it from the order either.
+    text = act.render_priors(pr, rec, candidate_actions=_WEBHOOK, lessons=lessons, agent_id="a")
+    assert "resolve:advise_settings_change" in next(ln for ln in text.splitlines() if ln.startswith("Try "))
+    # The same lesson about a failure taken after the turn still bars.
+    after = [{"action": "resolve:clear_app_data", "worked": False, "evidence_status": "validated"}]
+    assert "resolve:clear_app_data" == act.rank_by_lessons(
+        ["resolve:refund", "resolve:clear_app_data"], after, priors=pr, recommendation=rec)[-1]
+
+
+def test_a_pooled_record_dates_its_turn_from_a_streak_not_a_single_loss() -> None:
+    """Off the situation's own record one loss is forgiven (:func:`turned`): no turn,
+    no stale failures. Two losses in a row turn it, and the start of the streak is the
+    mark — a failure between the two losses is after it."""
+    cands = ["fix:rerun_job", "fix:fix_code", "fix:edit_generated_file", "fix:add_audit_exception"]
+    one = [_row([("fix:fix_code", False), ("fix:rerun_job", True)], days_ago=5)] + [
+        _row([("fix:rerun_job", True)], days_ago=d) for d in (4, 3, 2)
+    ] + [_row([("fix:rerun_job", False)], days_ago=1)]
+    pr1 = act.aggregate_priors(one, candidate_actions=cands)
+    assert act.stale_failures(pr1["tried"]) == []
+    two = one + [_row([("fix:edit_generated_file", False)], days_ago=0.7), _row([("fix:rerun_job", False)], days_ago=0.5)]
+    pr2 = act.aggregate_priors(two, candidate_actions=cands)
+    by = {t["action_key"]: t for t in pr2["tried"]}
+    assert act.turned(by["fix:rerun_job"])
+    assert act._as_dt(by["fix:rerun_job"]["losing_since"]) == two[4]["committed_at"]
+    assert act.stale_failures(pr2["tried"]) == ["fix:fix_code"]
