@@ -252,7 +252,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-s3"
-version = "0.1.17"
+version = "0.1.19"
 source = { editable = "packages/adapters/s3" }
 dependencies = [
     { name = "amfs-core" },
