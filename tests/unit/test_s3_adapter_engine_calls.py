@@ -163,3 +163,27 @@ def test_history_and_read_at_version_stay_inside_the_entity(adapter: S3Adapter) 
     nested = adapter.read_at_version("myapp/auth", "token-ttl", 2)
     assert nested is not None
     assert nested.value == 7200
+
+
+def test_a_key_with_a_slash_is_listed_under_its_own_entity(adapter: S3Adapter) -> None:
+    # Key ``active-negotiation/xyz`` of ``sweep/abc`` sits exactly as deep as
+    # key ``owner`` of the nested entity ``sweep/abc/active-negotiation``, so
+    # depth below the entity prefix cannot say whose an object is. Counting
+    # path segments kept the nested entity out and dropped the slashed key
+    # with it: listed nowhere, with no history, though it still read back.
+    engine = CoWEngine(adapter, CausalTagger("agent-a"))
+    engine.write("sweep/abc", "active-negotiation/xyz", {"round": 1})
+    engine.write("sweep/abc", "active-negotiation/xyz", {"round": 2})
+    engine.write("sweep/abc/active-negotiation", "owner", "agent-b")
+
+    assert [(e.entity_path, e.key) for e in adapter.list("sweep/abc")] == [
+        ("sweep/abc", "active-negotiation/xyz")
+    ]
+    assert [(e.entity_path, e.key) for e in adapter.list("sweep/abc/active-negotiation")] == [
+        ("sweep/abc/active-negotiation", "owner")
+    ]
+    history = engine.history("sweep/abc", "active-negotiation/xyz")
+    assert sorted(e.version for e in history) == [1, 2]
+    first = adapter.read_at_version("sweep/abc", "active-negotiation/xyz", 1)
+    assert first is not None
+    assert first.value == {"round": 1}

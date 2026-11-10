@@ -230,11 +230,6 @@ class S3Adapter(AdapterABC):
         entries: list[MemoryEntry] = []
         for obj in objects:
             s3_key = obj["Key"]
-            # An entity path matches exactly, as on the filesystem and as
-            # ``AdapterABC.search`` expects: ``{entity}/{key}/{file}`` and
-            # nothing deeper, since nested entities share the prefix.
-            if entity_path and s3_key[len(prefix):].count("/") != 1:
-                continue
             filename = s3_key.rsplit("/", 1)[-1]
             match = VERSION_RE.match(filename)
             if not match:
@@ -243,9 +238,18 @@ class S3Adapter(AdapterABC):
             if not include_superseded and status == "superseded":
                 continue
             try:
-                entries.append(self._read_object(s3_key))
+                entry = self._read_object(s3_key)
             except Exception:
                 logger.warning("Skipping unreadable object: %s", s3_key)
+                continue
+            # An entity path matches exactly, as on the filesystem and as
+            # ``AdapterABC.search`` expects. Nested entities share the prefix,
+            # and depth does not tell them apart, because a key can hold a
+            # slash too: key ``b/c`` of entity ``a`` sits as deep as key ``c``
+            # of entity ``a/b``. The entry says which entity it belongs to.
+            if entity_path and entry.entity_path != entity_path:
+                continue
+            entries.append(entry)
         return entries
 
     def watch(
