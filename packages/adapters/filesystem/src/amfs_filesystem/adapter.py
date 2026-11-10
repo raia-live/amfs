@@ -117,11 +117,20 @@ class FilesystemAdapter(AdapterABC):
         )
         locks = []
         try:
+            locked: set[Path] = set()
             for idx in sort_keys:
                 e = entries[idx]
                 key_dir = self._layout.key_dir(e.entity_path, e.key)
                 key_dir.mkdir(parents=True, exist_ok=True)
-                lk = AdvisoryLock(self._layout.lock_path(e.entity_path, e.key))
+                lock_path = self._layout.lock_path(e.entity_path, e.key)
+                # A batch may hold several writes to one key. Its lock is taken
+                # once: a second acquire from this process would wait on the
+                # first and time out. The writes below run in order, so each
+                # one still gets the next version.
+                if lock_path in locked:
+                    continue
+                locked.add(lock_path)
+                lk = AdvisoryLock(lock_path)
                 lk.acquire()
                 locks.append(lk)
 
