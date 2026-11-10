@@ -88,15 +88,9 @@ class FilesystemAdapter(AdapterABC):
             # Update entry with actual version
             entry = entry.model_copy(update={"version": new_version})
 
-            # Supersede old current file
-            old_current = layout.current_version_file(entry.entity_path, entry.key)
-            if old_current is not None:
-                superseded_path = old_current.with_name(
-                    old_current.name.replace("_current.json", "_superseded.json")
-                )
-                os.replace(old_current, superseded_path)
-
-            # Atomic write: write to tmp, then replace
+            # Atomic write: write to tmp, then replace. The new version goes in
+            # before the old one is superseded, so a write that fails part way
+            # leaves the previous version current instead of none at all.
             tmp_path = layout.tmp_file(entry.entity_path, entry.key, new_version)
             final_path = layout.version_file(entry.entity_path, entry.key, new_version, current=True)
 
@@ -104,7 +98,23 @@ class FilesystemAdapter(AdapterABC):
             tmp_path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
             os.replace(tmp_path, final_path)
 
+            self._supersede_others(entry.entity_path, entry.key, final_path)
+
         return entry
+
+    def _supersede_others(self, entity_path: str, key: str, keep: Path) -> None:
+        """Mark every current version of *key* except *keep* as superseded.
+
+        All of them, not only the highest: a write that stopped between
+        writing the new version and superseding the old one leaves two current
+        files, and the next write has to clear both.
+        """
+        for stale in self._layout.all_version_files(entity_path, key):
+            if stale != keep:
+                os.replace(
+                    stale,
+                    stale.with_name(stale.name.replace("_current.json", "_superseded.json")),
+                )
 
     # ------------------------------------------------------------------
     # write_batch (atomic multi-key write)
@@ -133,18 +143,12 @@ class FilesystemAdapter(AdapterABC):
                 new_version = current_version + 1
                 e = e.model_copy(update={"version": new_version})
 
-                old_current = layout.current_version_file(e.entity_path, e.key)
-                if old_current is not None:
-                    superseded = old_current.with_name(
-                        old_current.name.replace("_current.json", "_superseded.json")
-                    )
-                    os.replace(old_current, superseded)
-
                 tmp_path = layout.tmp_file(e.entity_path, e.key, new_version)
                 final_path = layout.version_file(e.entity_path, e.key, new_version, current=True)
                 data = e.model_dump(mode="json")
                 tmp_path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
                 os.replace(tmp_path, final_path)
+                self._supersede_others(e.entity_path, e.key, final_path)
                 written[idx] = e
         finally:
             for lk in reversed(locks):
