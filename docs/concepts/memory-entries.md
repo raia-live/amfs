@@ -189,3 +189,5 @@ Archived (confidence → 0.0)
 ```
 
 Every state transition creates a new version. No data is ever deleted — only superseded.
+
+A TTL takes effect the moment `ttl_at` passes, on every adapter: the entry is no longer returned by `read`, `list`, `search` or semantic search, without waiting for the background sweep. The sweep then archives it — a new version with confidence `0.0` and no TTL — and that archived version is what those calls return from then on. The expired version itself stays in the history (`history`, `list(include_superseded=True)`, `read_at_version`).

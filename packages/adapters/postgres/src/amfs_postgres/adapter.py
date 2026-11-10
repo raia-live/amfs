@@ -222,6 +222,14 @@ def priority_score_sql(now: datetime, config: Any | None = None) -> tuple[str, l
     return expr, params
 
 
+#: A row whose TTL has not passed: the predicate every read path that
+#: surfaces current entries carries (``list``, ``search``, ``semantic_search``,
+#: the agent listing). ``NOW()`` rather than a parameter because the fragment
+#: sits in WHERE lists whose parameters are positional and spliced around by
+#: their callers; with nothing to bind it cannot shift any of them.
+_NOT_EXPIRED = "(ttl_at IS NULL OR ttl_at > NOW())"
+
+
 def list_conditions(
     namespace: str,
     entity_path: str | None,
@@ -231,12 +239,20 @@ def list_conditions(
     scope: SqlScope | None,
     agent_id: str | None,
     branch_scope: tuple[str, list[Any]] | None = None,
+    include_expired: bool = False,
 ) -> tuple[list[str], list[Any]]:
     """The WHERE behind ``list()`` and ``count_entries()`` on both adapters.
 
     One definition so a page and the ``total`` it reports cannot disagree
     about which rows exist, and so the shared-namespace guard is applied to
     the unscoped read in one place (``tests/test_shared_path_scoping.py``).
+
+    The rows are the live ones: current and not past their ``ttl_at``, which
+    is the rule ``read`` and ``search`` apply, so a TTL takes effect on every
+    listing at once instead of when the sweep next archives the row. Two
+    callers see expired rows all the same. *include_superseded* is the
+    history, which hides nothing; *include_expired* is for the sweep, whose
+    whole purpose is to find them (``list_expired``).
 
     *branch_scope* replaces the plain ``branch = %s`` predicate with the
     overlay fragment from :func:`branch_scope_sql` (a branch's own live rows
@@ -258,6 +274,8 @@ def list_conditions(
 
     if not include_superseded:
         conditions.append("superseded_at IS NULL")
+        if not include_expired:
+            conditions.append(_NOT_EXPIRED)
     if agent_id is not None:
         conditions.append("agent_id = %s")
         params.append(agent_id)
@@ -2453,13 +2471,15 @@ class PostgresAdapter(AdapterABC):
 
         What a TTL sweep needs: the rows to archive, found through the
         partial index on ``ttl_at`` (``idx_entries_ttl``) rather than by
-        listing the tenant and checking each entry's clock in Python. Same
-        row set as ``list()`` — current versions, this branch, shared paths
-        excluded — narrowed to the expired ones. *limit* bounds one sweep;
-        the next sweep picks up the rest.
+        listing the tenant and checking each entry's clock in Python. The
+        scope is ``list()``'s — current versions, this branch, shared paths
+        excluded — and the rows are the ones ``list()`` leaves out: those past
+        their TTL and not yet archived. *limit* bounds one sweep; the next
+        sweep picks up the rest.
         """
         conditions, params = list_conditions(
             self._namespace, None, include_superseded=False, branch=branch, scope=None, agent_id=None,
+            include_expired=True,
         )
         conditions.append("ttl_at IS NOT NULL AND ttl_at <= %s")
         params.append(now or datetime.now(timezone.utc))
@@ -2684,7 +2704,7 @@ class PostgresAdapter(AdapterABC):
 
         # The branch scope is resolved on the connection below (it may need the
         # branch's parent); a placeholder keeps its position in the WHERE.
-        conditions = ["namespace = %s", _BRANCH_SCOPE, "superseded_at IS NULL", "(ttl_at IS NULL OR ttl_at > NOW())"]
+        conditions = ["namespace = %s", _BRANCH_SCOPE, "superseded_at IS NULL", _NOT_EXPIRED]
         params: list[Any] = [self._namespace]
 
         if query.depth < 3:
@@ -2821,7 +2841,7 @@ class PostgresAdapter(AdapterABC):
 
         query_vec = query.embedding if query.embedding is not None else embedder.embed(query.text)
 
-        conditions = ["namespace = %s", "superseded_at IS NULL", "embedding IS NOT NULL", "(ttl_at IS NULL OR ttl_at > NOW())"]
+        conditions = ["namespace = %s", "superseded_at IS NULL", "embedding IS NOT NULL", _NOT_EXPIRED]
         params: list[Any] = [self._namespace]
 
         if query.entity_path is not None:
@@ -2928,15 +2948,20 @@ class PostgresAdapter(AdapterABC):
         belonging to another agent turns up in ``keys``. A NULL *agent_id*
         compares as unknown rather than true, so passing nothing counts shared
         entries only — the safe direction.
+
+        The TTL predicate is here for the same reason: ``list()`` leaves out an
+        entry past its ``ttl_at``, so the key of one must not turn up in
+        ``keys`` either.
         """
         with self._pool.connection() as conn:
             row = conn.execute(
-                """SELECT count(*) AS total,
+                f"""SELECT count(*) AS total,
                           count(*) FILTER (WHERE coalesce(recall_count, 0) = 0)
                               AS never_read
                      FROM amfs_memory_entries
                     WHERE namespace = %s AND branch = %s AND entity_path = %s
                       AND superseded_at IS NULL
+                      AND {_NOT_EXPIRED}
                       AND (%s::text IS NULL OR key <> %s)
                       AND (shared OR agent_id = %s::text)""",
                 (self._namespace, branch, entity_path, exclude_key, exclude_key,
@@ -2944,9 +2969,10 @@ class PostgresAdapter(AdapterABC):
             ).fetchone()
             keys = [
                 r["key"] for r in conn.execute(
-                    """SELECT key FROM amfs_memory_entries
+                    f"""SELECT key FROM amfs_memory_entries
                         WHERE namespace = %s AND branch = %s AND entity_path = %s
                           AND superseded_at IS NULL
+                          AND {_NOT_EXPIRED}
                           AND (%s::text IS NULL OR key <> %s)
                           AND (shared OR agent_id = %s::text)
                         ORDER BY key LIMIT %s""",
@@ -5086,7 +5112,7 @@ class PostgresAdapter(AdapterABC):
             "agent_id = %s",
             "superseded_at IS NULL",
             "branch = 'main'",
-            "(ttl_at IS NULL OR ttl_at > NOW())",
+            _NOT_EXPIRED,
         ]
         params: list[Any] = [namespace, agent_id]
         for prefix in exclude_prefixes:

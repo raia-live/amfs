@@ -228,6 +228,43 @@ class S3Adapter(AdapterABC):
         branch: str = "main",
     ) -> list[MemoryEntry]:
         # ``branch`` is ignored for the reason given in ``read``.
+        entries = self._stored_entries(entity_path, include_superseded=include_superseded)
+        if include_superseded:
+            # The history: every version, expired ones included.
+            return entries
+        # Live entries only, as on the filesystem and Postgres adapters: an
+        # entry past its TTL is no more listed than it is read. Search, stats
+        # and the agent listing are built on this in ``AdapterABC``, so they
+        # follow. ``list_expired`` is what the sweep reads instead.
+        return [e for e in entries if not e.is_expired()]
+
+    def list_expired(
+        self, *, now: datetime | None = None, branch: str = "main", limit: int = 1000
+    ) -> list[MemoryEntry]:
+        """Current entries whose ``ttl_at`` has passed, oldest expiry first.
+
+        The TTL sweep's read, and the one place the expired entries ``list()``
+        leaves out are still found until they are archived. It costs what the
+        listing the sweep used to do cost — one GET per current object, since
+        a TTL lives in the object body — and no more. *limit* bounds one
+        sweep; the next picks up the rest. *branch* is ignored, as in ``read``.
+        """
+        now = now or datetime.now(timezone.utc)
+        expired = [
+            e
+            for e in self._stored_entries(None, include_superseded=False)
+            if e.is_expired(now=now)
+        ]
+        # A naive ``ttl_at`` is UTC, as ``is_expired`` reads it.
+        expired.sort(
+            key=lambda e: e.ttl_at if e.ttl_at.tzinfo else e.ttl_at.replace(tzinfo=timezone.utc)
+        )
+        return expired[:limit]
+
+    def _stored_entries(
+        self, entity_path: str | None, *, include_superseded: bool
+    ) -> list[MemoryEntry]:
+        """Every stored entry under *entity_path*, whatever its TTL says."""
         prefix = self._entity_prefix(entity_path) if entity_path else self._ns_prefix()
         objects = self._list_objects(prefix)
 

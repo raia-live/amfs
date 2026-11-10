@@ -205,7 +205,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-filesystem"
-version = "0.1.18"
+version = "0.1.19"
 source = { editable = "packages/adapters/filesystem" }
 dependencies = [
     { name = "amfs-core" },
@@ -235,7 +235,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-postgres"
-version = "0.2.43"
+version = "0.2.44"
 source = { editable = "packages/adapters/postgres" }
 dependencies = [
     { name = "amfs-core" },
@@ -252,7 +252,7 @@ requires-dist = [
 
 [[package]]
 name = "amfs-adapter-s3"
-version = "0.1.20"
+version = "0.1.21"
 source = { editable = "packages/adapters/s3" }
 dependencies = [
     { name = "amfs-core" },
@@ -334,7 +334,7 @@ provides-extras = ["cli"]
 
 [[package]]
 name = "amfs-core"
-version = "0.3.55"
+version = "0.3.56"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "pydantic" },

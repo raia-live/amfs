@@ -230,6 +230,9 @@ class FilesystemAdapter(AdapterABC):
         include_superseded: bool = False,
         branch: str = "main",
     ) -> list[MemoryEntry]:
+        # Live entries only: current and not past their TTL, the rule ``read``
+        # applies to a single key. The history listing keeps every version,
+        # expired ones too, and ``list_expired`` is what the sweep reads.
         layout = self._layout
         entity_paths = (
             [entity_path] if entity_path else layout.all_entity_paths()
@@ -242,13 +245,40 @@ class FilesystemAdapter(AdapterABC):
                 )
                 for f in files:
                     try:
-                        entries.append(self._read_entry(f))
+                        entry = self._read_entry(f)
                     except Exception:
                         logger.warning("Skipping unreadable file: %s", f)
+                        continue
+                    if not include_superseded and entry.is_expired():
+                        continue
+                    entries.append(entry)
         return entries
 
+    def list_expired(
+        self, *, now: datetime | None = None, branch: str = "main", limit: int = 1000
+    ) -> list[MemoryEntry]:
+        """Current entries whose ``ttl_at`` has passed, oldest expiry first.
+
+        The TTL sweep's read, and the one place the expired entries ``list()``
+        leaves out are still found until they are archived. One pass over the
+        current files, as the listing the sweep used to do was; *limit* bounds
+        one sweep and the next picks up the rest. *branch* is accepted for
+        parity with the Postgres adapter and ignored, as everywhere here.
+        """
+        now = now or datetime.now(timezone.utc)
+        expired = [e for e in self._iter_current_entries() if e.is_expired(now=now)]
+        # A naive ``ttl_at`` is UTC, as ``is_expired`` reads it.
+        expired.sort(
+            key=lambda e: e.ttl_at if e.ttl_at.tzinfo else e.ttl_at.replace(tzinfo=timezone.utc)
+        )
+        return expired[:limit]
+
     def _iter_current_entries(self) -> Iterator[MemoryEntry]:
-        """Yield current entries one file at a time, never holding them all."""
+        """Yield current entries one file at a time, never holding them all.
+
+        Expired ones included: the callers decide, since one of them is the
+        sweep looking for exactly those.
+        """
         layout = self._layout
         for ep in layout.all_entity_paths():
             for key in layout.all_keys(ep):

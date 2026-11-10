@@ -115,6 +115,27 @@ class TestListConditions:
         assert "superseded_at IS NULL" in live
         assert "superseded_at IS NULL" not in all_
 
+    def test_a_listing_leaves_out_rows_past_their_ttl(self) -> None:
+        """The live rows are the current ones whose TTL has not passed, so a
+        page and its ``total`` agree with ``read`` about an expired entry."""
+        where, params = self._where()
+        assert "(ttl_at IS NULL OR ttl_at > NOW())" in where
+        # Nothing bound: the callers splice their own parameters around these.
+        assert where.count("%s") == len(params)
+
+    def test_the_history_and_the_sweep_still_see_expired_rows(self) -> None:
+        """The history hides nothing, and the sweep exists to find them."""
+        history, _ = self._where(include_superseded=True)
+        assert "ttl_at" not in history
+
+        conds, _ = list_conditions(
+            "ns", None, include_superseded=False, branch="main", scope=None, agent_id=None,
+            include_expired=True,
+        )
+        sweep = " AND ".join(conds)
+        assert "superseded_at IS NULL" in sweep
+        assert "ttl_at" not in sweep
+
 
 class TestOrderAndPage:
     def test_known_orders(self) -> None:

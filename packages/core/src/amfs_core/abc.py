@@ -88,9 +88,23 @@ class AdapterABC(ABC):
         *,
         include_superseded: bool = False,
     ) -> list[MemoryEntry]:
-        """List current entries, optionally filtered to an entity path.
+        """List live entries, optionally filtered to an entity path.
 
-        If *include_superseded* is True, also include older versions.
+        Live means current and not past its ``ttl_at``: an expired entry is
+        left out here for the same reason ``read`` returns ``None`` for it, so
+        a TTL takes effect at once on every path that surfaces memory rather
+        than whenever the lifecycle sweep next archives the entry. Everything
+        built on this listing (search, stats, digests) inherits that.
+
+        If *include_superseded* is True the listing is the full history
+        instead: every stored version, older ones and expired ones included.
+        Nothing is hidden from history, ``read_at_version`` or integrity
+        checks.
+
+        An adapter that hides expired entries here should also offer
+        ``list_expired(*, now=None)`` returning the current entries whose TTL
+        has passed; ``LifecycleManager.sweep`` asks for it and falls back to
+        this listing only where it is missing.
         """
 
     @abstractmethod
