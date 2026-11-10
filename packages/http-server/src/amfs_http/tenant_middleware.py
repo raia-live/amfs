@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 from uuid import UUID
@@ -41,7 +42,10 @@ def apply_tenant_headers_from_request(request: Request) -> bool:
     secret = os.environ.get("AMFS_DASHBOARD_PROXY_SECRET", "")
     if not secret:
         return False
-    if request.headers.get("X-AMFS-Dashboard-Secret") != secret:
+    # Constant-time, so the secret cannot be guessed a byte at a time from how long
+    # the comparison takes.
+    provided = request.headers.get("X-AMFS-Dashboard-Secret") or ""
+    if not hmac.compare_digest(provided.encode("utf-8"), secret.encode("utf-8")):
         return False
     raw = request.headers.get("X-AMFS-Dashboard-Account-Id")
     if not raw:
