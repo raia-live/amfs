@@ -34,6 +34,15 @@ def _make_entry(
     )
 
 
+def _ttl_entry(key: str, *, hours: float) -> MemoryEntry:
+    """An entry whose TTL is *hours* from now — negative for one already past."""
+    from datetime import timedelta
+
+    return _make_entry(key=key).model_copy(
+        update={"ttl_at": datetime.now(timezone.utc) + timedelta(hours=hours)}
+    )
+
+
 def _expected_confidence(start: float, record: OutcomeRecord) -> float:
     """What ``amfs_core.evidence`` says ``record`` leaves a fresh entry at."""
     from amfs_core.evidence import apply_record_to_entry
@@ -123,6 +132,53 @@ class AdapterContractTests:
         entries = adapter.list()
         entity_paths = {e.entity_path for e in entries}
         assert entity_paths == {"svc-a", "svc-b"}
+
+    # ------------------------------------------------------------------
+    # TTL: an entry past ``ttl_at`` is not surfaced, and is still archived
+    # ------------------------------------------------------------------
+
+    def test_an_expired_entry_is_neither_read_nor_listed(self, adapter: AdapterABC) -> None:
+        adapter.write(_ttl_entry("expired", hours=-1))
+        adapter.write(_ttl_entry("live", hours=1))
+        adapter.write(_make_entry(key="forever"))
+
+        assert adapter.read("checkout-service", "expired") is None
+        assert {e.key for e in adapter.list("checkout-service")} == {"live", "forever"}
+        assert {e.key for e in adapter.list()} == {"live", "forever"}
+
+    def test_the_history_keeps_an_expired_version(self, adapter: AdapterABC) -> None:
+        adapter.write(_make_entry(key="rotated"))
+        adapter.write(_ttl_entry("rotated", hours=-1))
+
+        assert adapter.list("checkout-service") == []
+        history = adapter.list("checkout-service", include_superseded=True)
+        assert sorted(e.version for e in history) == [1, 2]
+        assert adapter.read_at_version("checkout-service", "rotated", 2) is not None
+
+    def test_the_sweep_archives_the_expired_entries_list_leaves_out(
+        self, adapter: AdapterABC
+    ) -> None:
+        """Hidden from ``list()``, an expired entry is still found by the sweep
+        (``list_expired``) and archived — including one that had been rewritten
+        before it expired, which the sweep used to fail on with a version
+        conflict. Archived, it is back at confidence 0: archived, never deleted."""
+        from amfs_core.lifecycle import LifecycleManager
+
+        adapter.write(_make_entry(key="rewritten"))
+        adapter.write(_ttl_entry("rewritten", hours=-2))
+        adapter.write(_ttl_entry("once", hours=-1))
+        adapter.write(_ttl_entry("live", hours=1))
+
+        assert [e.key for e in adapter.list_expired()] == ["rewritten", "once"]
+
+        archived = LifecycleManager(adapter).sweep()
+
+        assert sorted((e.key, e.version) for e in archived) == [("once", 2), ("rewritten", 3)]
+        assert all(e.confidence == 0.0 and e.ttl_at is None for e in archived)
+        assert adapter.list_expired() == []
+        assert {e.key for e in adapter.list("checkout-service")} == {"live", "once", "rewritten"}
+        assert adapter.read("checkout-service", "rewritten").confidence == 0.0
+        assert LifecycleManager(adapter).sweep() == []
 
     # ------------------------------------------------------------------
     # commit_outcome

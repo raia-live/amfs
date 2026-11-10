@@ -42,6 +42,7 @@ from amfs_postgres.adapter import (
     _EVIDENCE_COLUMNS,
     _EVIDENCE_SELECT,
     _EXCLUDE_SHARED_PATHS,
+    _NOT_EXPIRED,
     _REUSE_EVENT_INSERT_SQL,
     PostgresAdapter,
     _evidence_params,
@@ -353,6 +354,12 @@ class AsyncPostgresAdapter:
         entry = self._row_to_entry(row)
         if entry.confidence < min_confidence:
             return None
+        # As ``PostgresAdapter.read`` does: a TTL takes effect on read, without
+        # waiting for the sweep. Missing here, the HTTP read route — which
+        # tries this adapter first — served an expired entry that the sync
+        # adapter behind the same route would have withheld.
+        if entry.is_expired():
+            return None
         return entry
 
     # ──────────────────────────────────────────────────────────────
@@ -580,7 +587,7 @@ class AsyncPostgresAdapter:
 
         # ``_BRANCH_SCOPE`` is swapped for the real branch condition once a
         # connection is open; its params are spliced in after the namespace.
-        conditions = ["namespace = %s", _BRANCH_SCOPE, "superseded_at IS NULL"]
+        conditions = ["namespace = %s", _BRANCH_SCOPE, "superseded_at IS NULL", _NOT_EXPIRED]
         params: list[Any] = [self._namespace]
 
         if query.depth < 3:
@@ -713,6 +720,7 @@ class AsyncPostgresAdapter:
             _BRANCH_SCOPE,
             "superseded_at IS NULL",
             "embedding IS NOT NULL",
+            _NOT_EXPIRED,
         ]
         params: list[Any] = [self._namespace]
         if query.entity_path is not None:
@@ -1145,15 +1153,19 @@ class AsyncPostgresAdapter:
         ``list()`` applied, and this block's ``keys`` land in a tool result. A
         NULL *agent_id* compares as unknown, so passing nothing counts shared
         entries only.
+
+        The TTL predicate is carried for the same reason: ``list()`` leaves out
+        an entry past its ``ttl_at``, so its key must not turn up here either.
         """
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                """SELECT count(*) AS total,
+                f"""SELECT count(*) AS total,
                           count(*) FILTER (WHERE coalesce(recall_count, 0) = 0)
                               AS never_read
                      FROM amfs_memory_entries
                     WHERE namespace = %s AND branch = %s AND entity_path = %s
                       AND superseded_at IS NULL
+                      AND {_NOT_EXPIRED}
                       AND (%s::text IS NULL OR key <> %s)
                       AND (shared OR agent_id = %s::text)""",
                 (self._namespace, branch, entity_path, exclude_key, exclude_key,
@@ -1161,9 +1173,10 @@ class AsyncPostgresAdapter:
             )
             row = await cur.fetchone()
             cur = await conn.execute(
-                """SELECT key FROM amfs_memory_entries
+                f"""SELECT key FROM amfs_memory_entries
                     WHERE namespace = %s AND branch = %s AND entity_path = %s
                       AND superseded_at IS NULL
+                      AND {_NOT_EXPIRED}
                       AND (%s::text IS NULL OR key <> %s)
                       AND (shared OR agent_id = %s::text)
                     ORDER BY key LIMIT %s""",

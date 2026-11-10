@@ -603,6 +603,12 @@ class CoWEngine:
         for causal linking.
         """
         entry = self._adapter.read(entity_path, key, min_confidence=min_confidence, branch=branch)
+        # The adapters shipped here drop an expired entry themselves; this is
+        # for one that does not (a third-party adapter, or an HTTP adapter
+        # talking to an older server). Before the recall bump, so a read that
+        # returns nothing is not counted as a reuse.
+        if entry is not None and entry.is_expired():
+            return None
         if entry is not None:
             self._adapter.increment_recall_count(entity_path, key, branch=branch)
             if self._read_tracker is not None:
@@ -674,8 +680,20 @@ class CoWEngine:
         include_superseded: bool = False,
         branch: str = "main",
     ) -> list[MemoryEntry]:
-        """List entries from the adapter."""
-        return self._adapter.list(entity_path, include_superseded=include_superseded, branch=branch)
+        """List entries from the adapter.
+
+        Live entries only — current and not past their TTL — unless
+        *include_superseded* asks for the full history, which keeps every
+        version, expired ones included.
+        """
+        entries = self._adapter.list(
+            entity_path, include_superseded=include_superseded, branch=branch
+        )
+        if include_superseded:
+            return entries
+        # Same backstop as in ``read``, for an adapter that lists expired
+        # entries; a no-op on the adapters shipped here.
+        return [e for e in entries if not e.is_expired()]
 
     def history(
         self,

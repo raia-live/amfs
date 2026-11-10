@@ -1849,6 +1849,164 @@ def test_list_expired_returns_only_current_rows_past_their_ttl(adapter) -> None:
     assert adapter.read("acme/support", "old").confidence == 0.0
 
 
+def _ttl_world(adapter):
+    """One live entry, one without a TTL and one expired under ``acme/support``;
+    a scope holding nothing but an expired entry; and an expired entry under a
+    shared path, which only an entity-scoped read reaches."""
+    from datetime import UTC, datetime, timedelta
+
+    from amfs_core.models import MemoryEntry, Provenance
+
+    now = datetime.now(UTC)
+
+    def _w(path, key, ttl, agent="support-agent"):
+        return adapter.write(MemoryEntry(
+            entity_path=path, key=key, value={"note": key}, ttl_at=ttl,
+            provenance=Provenance(agent_id=agent, session_id="s", written_at=now),
+        ))
+
+    _w("acme/support", "live", now + timedelta(hours=1))
+    _w("acme/support", "forever", None)
+    _w("acme/support", "expired", now - timedelta(hours=1))
+    _w("acme/ghost", "only-expired", now - timedelta(hours=1), agent="ghost-agent")
+    _w("@room/shared", "expired-shared", now - timedelta(hours=1))
+    _w("@room/shared", "live-shared", None)
+
+
+def test_a_listing_and_its_count_leave_out_expired_entries(adapter) -> None:
+    """``list()`` returns live rows — current and not past their TTL — and
+    everything that says it reads "the rows ``list()`` returns" agrees: the
+    count behind a page's ``total``, the priority ranking and its stats, and
+    the scopes the catch-up scan compiles digests for. The history and the
+    sweep's own read still see the expired rows."""
+    from amfs_core.models import SearchQuery
+
+    _ttl_world(adapter)
+
+    assert sorted(e.key for e in adapter.list()) == ["forever", "live"]
+    assert sorted(e.key for e in adapter.list("acme/support")) == ["forever", "live"]
+    assert adapter.list("acme/ghost") == []
+    assert [e.key for e in adapter.list("@room/shared")] == ["live-shared"]
+
+    # A page and the total it reports are the same rows.
+    assert adapter.count_entries() == 2
+    assert adapter.count_entries("acme/support") == 2
+    assert adapter.count_entries("acme/ghost") == 0
+    assert adapter.count_entries("@room/shared") == 1
+    pages = [e for offset in range(3) for e in adapter.list(limit=1, offset=offset)]
+    assert sorted(e.key for e in pages) == ["forever", "live"]
+    assert sorted(e.key for e in adapter.list(agent_id="support-agent")) == ["forever", "live"]
+    assert adapter.list(agent_id="ghost-agent") == []
+
+    assert sorted(e.key for e in adapter.list_by_priority(limit=10)) == ["forever", "live"]
+    assert adapter.priority_stats()[0] == 2
+    paths, agents = adapter.list_scopes()
+    assert paths == {"acme/support"} and agents == {"support-agent"}
+
+    # The other read paths agree with the listing.
+    assert adapter.read("acme/support", "expired") is None
+    searched = adapter.search(SearchQuery(entity_path="acme/support"))
+    assert sorted(e.key for e in searched) == ["forever", "live"]
+    # The agent listing reaches shared paths too, and leaves out the expired one there.
+    assert sorted(e.key for e in adapter.list_entries_for_agent("support-agent")) == [
+        "forever", "live", "live-shared",
+    ]
+
+    # The scope block a write reports names keys, so it carries the rule too.
+    scope = adapter.scope_counts("acme/support", agent_id="support-agent")
+    assert (scope["existing_entries"], scope["keys"]) == (2, ["forever", "live"])
+
+    # The history hides nothing, and the sweep still finds what the listing left out.
+    assert sorted(e.key for e in adapter.list("acme/support", include_superseded=True)) == [
+        "expired", "forever", "live",
+    ]
+    assert adapter.count_entries("acme/support", include_superseded=True) == 3
+    assert adapter.read_at_version("acme/support", "expired", 1).key == "expired"
+    assert sorted(e.key for e in adapter.list_expired()) == ["expired", "only-expired"]
+
+
+def test_the_async_adapter_withholds_expired_entries_on_every_read(adapter) -> None:
+    """The async adapter serves the HTTP read path. Its ``read`` had no TTL
+    check at all, so ``GET /api/v1/entries/{path}/{key}`` returned an expired
+    entry the sync adapter behind the same route would have withheld; its
+    ``list`` and ``count_entries`` share ``list_conditions`` with the sync
+    adapter and so follow it."""
+    from amfs_core.models import SearchQuery
+
+    _ttl_world(adapter)
+
+    async def go():
+        a = await _async_adapter()
+        try:
+            return {
+                "read_expired": await a.read("acme/support", "expired"),
+                "read_live": await a.read("acme/support", "live"),
+                "read_forever": await a.read("acme/support", "forever"),
+                "listed": await a.list("acme/support"),
+                "listed_all": await a.list(),
+                "count": await a.count_entries("acme/support"),
+                "count_all": await a.count_entries(),
+                "history": await a.list("acme/support", include_superseded=True),
+                "searched": await a.search(SearchQuery(entity_path="acme/support")),
+                "by_agent": await a.list_entries_for_agent("support-agent"),
+                "scope": await a.scope_counts("acme/support", agent_id="support-agent"),
+            }
+        finally:
+            await a.close()
+
+    got = _run(go())
+    assert got["read_expired"] is None
+    assert got["read_live"].key == "live" and got["read_forever"].key == "forever"
+    assert sorted(e.key for e in got["listed"]) == ["forever", "live"]
+    assert sorted(e.key for e in got["listed_all"]) == ["forever", "live"]
+    assert (got["count"], got["count_all"]) == (2, 2)
+    assert sorted(e.key for e in got["history"]) == ["expired", "forever", "live"]
+    assert sorted(e.key for e in got["searched"]) == ["forever", "live"]
+    assert sorted(e.key for e in got["by_agent"]) == ["forever", "live", "live-shared"]
+    assert (got["scope"]["existing_entries"], got["scope"]["keys"]) == (2, ["forever", "live"])
+
+
+def test_an_expired_row_on_a_branch_hides_the_key_as_read_does(adapter) -> None:
+    """A branch that wrote a key owns it: once that row expires the key is
+    gone from the branch, on ``list`` as on ``read`` — the parent's row does
+    not show through, and ``main`` is untouched."""
+    from datetime import UTC, datetime, timedelta
+
+    from amfs_core.models import MemoryEntry, Provenance
+
+    branch = _branch_world(adapter)
+    adapter.write(MemoryEntry(
+        entity_path="acme/pricing", key="plans", value={"tiers": ["trial"]}, branch=branch,
+        ttl_at=datetime.now(UTC) - timedelta(hours=1), confidence=0.9,
+        provenance=Provenance(agent_id="a", session_id="s", written_at=datetime.now(UTC)),
+    ))
+
+    assert adapter.read("acme/pricing", "plans", branch=branch) is None
+    assert sorted(e.key for e in adapter.list("acme/pricing", branch=branch)) == [
+        "rate-limit", "risk-stale-limit",
+    ]
+    assert adapter.count_entries("acme/pricing", branch=branch) == 2
+    assert sorted(e.key for e in adapter.list("acme/pricing")) == ["plans", "rate-limit"]
+
+    async def go():
+        a = await _async_adapter()
+        try:
+            return (
+                await a.read("acme/pricing", "plans", branch=branch),
+                await a.list("acme/pricing", branch=branch),
+                await a.count_entries("acme/pricing", branch=branch),
+                await a.read("acme/pricing", "plans"),
+            )
+        finally:
+            await a.close()
+
+    on_branch, listed, count, on_main = _run(go())
+    assert on_branch is None
+    assert sorted(e.key for e in listed) == ["rate-limit", "risk-stale-limit"]
+    assert count == 2
+    assert on_main.value == {"tiers": ["starter", "team"]}
+
+
 def test_outcome_task_text_is_stored_and_read_back_per_entity(adapter) -> None:
     """``task_input`` reaches the outcome row as ``task_text`` — the head of
     it, and only when given — and ``recent_task_texts`` reads an entity's

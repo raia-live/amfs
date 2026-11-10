@@ -88,9 +88,23 @@ class AdapterABC(ABC):
         *,
         include_superseded: bool = False,
     ) -> list[MemoryEntry]:
-        """List current entries, optionally filtered to an entity path.
+        """List live entries, optionally filtered to an entity path.
 
-        If *include_superseded* is True, also include older versions.
+        Live means current and not past its ``ttl_at``: an expired entry is
+        left out here for the same reason ``read`` returns ``None`` for it, so
+        a TTL takes effect at once on every path that surfaces memory rather
+        than whenever the lifecycle sweep next archives the entry. Everything
+        built on this listing (search, stats, digests) inherits that.
+
+        If *include_superseded* is True the listing is the full history
+        instead: every stored version, older ones and expired ones included.
+        Nothing is hidden from history, ``read_at_version`` or integrity
+        checks.
+
+        An adapter that hides expired entries here should also offer
+        ``list_expired(*, now=None)`` returning the current entries whose TTL
+        has passed; ``LifecycleManager.sweep`` asks for it and falls back to
+        this listing only where it is missing.
         """
 
     @abstractmethod
@@ -319,6 +333,8 @@ class AdapterABC(ABC):
         from amfs_core.pagination import entry_tiebreak, paginate_desc
 
         def keep(e: MemoryEntry) -> bool:
+            if e.is_expired():
+                return False
             if e.provenance.agent_id != agent_id:
                 return False
             if any(e.entity_path.startswith(p) for p in exclude_prefixes):
@@ -387,6 +403,8 @@ class AdapterABC(ABC):
         query_lower = query.query.lower() if use_text_filter else None
         results: list[MemoryEntry] = []
         for entry in entries:
+            if entry.is_expired():
+                continue
             if entry.confidence < query.min_confidence:
                 continue
             if query.max_confidence is not None and entry.confidence > query.max_confidence:
@@ -1103,6 +1121,8 @@ class AdapterABC(ABC):
 
         scored: list[tuple[MemoryEntry, float]] = []
         for entry in entries:
+            if entry.is_expired():
+                continue
             if entry.confidence < query.min_confidence:
                 continue
             if query.max_confidence is not None and entry.confidence > query.max_confidence:
