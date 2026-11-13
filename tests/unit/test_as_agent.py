@@ -112,3 +112,13 @@ class TestItSharesTheStoreAndNotTheSession:
 
         assert mem.as_agent(BRIEFED)._read_tracker._contexts == []
         assert mem._read_tracker._contexts, "setup wrong: the caller recorded one"
+
+    def test_covariates_are_not_shared(self, mem) -> None:
+        mem.declare_covariates({"region": "us-east"})
+        other = mem.as_agent(BRIEFED)
+
+        assert other.covariates == {}
+        other.declare_covariates({"tier": "canary"})
+        assert mem.covariates == {"region": "us-east"}
+        other.clear_covariates()
+        assert mem.covariates == {"region": "us-east"}
