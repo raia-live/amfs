@@ -10,7 +10,7 @@
 import type { AmfsAdapter, WatchHandle } from "../adapter.js";
 import { createWatchHandle } from "../adapter.js";
 import type { MemoryEntry, OutcomeRecord } from "../models.js";
-import { OUTCOME_MULTIPLIERS } from "../models.js";
+import { clampConfidence, OUTCOME_MULTIPLIERS } from "../models.js";
 
 export class InMemoryAdapter implements AmfsAdapter {
   private store = new Map<string, MemoryEntry[]>();
@@ -100,7 +100,7 @@ export class InMemoryAdapter implements AmfsAdapter {
 
       const newEntry: MemoryEntry = {
         ...current,
-        confidence: current.confidence * multiplier * record.causalConfidence,
+        confidence: clampConfidence(current.confidence * multiplier * record.causalConfidence),
         outcomeCount: current.outcomeCount + 1,
       };
       const written = this.write(newEntry);

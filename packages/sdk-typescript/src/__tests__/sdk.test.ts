@@ -108,13 +108,13 @@ describe("InMemoryAdapter", () => {
       agentId: "release-agent",
     });
     expect(updated).toHaveLength(1);
-    expect(updated[0].confidence).toBeCloseTo(1.15);
+    expect(updated[0].confidence).toBeCloseTo(0.85);
     expect(updated[0].outcomeCount).toBe(1);
   });
 
   it("commit outcome clean deploy", () => {
     const adapter = new InMemoryAdapter();
-    adapter.write(makeEntry());
+    adapter.write(makeEntry({ confidence: 0.8 }));
 
     const updated = adapter.commitOutcome({
       outcomeRef: "DEP-001",
@@ -125,7 +125,7 @@ describe("InMemoryAdapter", () => {
       agentId: "release-agent",
     });
     expect(updated).toHaveLength(1);
-    expect(updated[0].confidence).toBeCloseTo(0.97);
+    expect(updated[0].confidence).toBeCloseTo(0.8 * 1.03);
   });
 
   it("watch receives new writes", () => {
@@ -199,7 +199,33 @@ describe("CoWEngine", () => {
 describe("OutcomeBackPropagator", () => {
   it("compute new confidence", () => {
     const result = OutcomeBackPropagator.computeNewConfidence(1.0, OutcomeType.P1_INCIDENT, 0.9);
-    expect(result).toBeCloseTo(1.0 * 1.15 * 0.9);
+    expect(result).toBeCloseTo(1.0 * 0.85 * 0.9);
+    expect(result).toBeLessThan(1.0);
+  });
+
+  it("success increases confidence and clamps to 1.0", () => {
+    const increased = OutcomeBackPropagator.computeNewConfidence(0.8, OutcomeType.SUCCESS, 1.0);
+    expect(increased).toBeCloseTo(0.8 * 1.03);
+    expect(increased).toBeGreaterThan(0.8);
+
+    const clamped = OutcomeBackPropagator.computeNewConfidence(0.99, OutcomeType.SUCCESS, 1.0);
+    expect(clamped).toBe(1.0);
+  });
+
+  it("InMemoryAdapter.commitOutcome decreases on failure and clamps on success", () => {
+    const adapter = new InMemoryAdapter();
+    const engine = new CoWEngine(adapter, new CausalTagger("eng"));
+    engine.write("svc", "k1", "v1", { confidence: 0.9 });
+    engine.write("svc", "k2", "v2", { confidence: 0.99 });
+
+    const failRecord = OutcomeBackPropagator.makeRecord("INC-1", OutcomeType.FAILURE, ["svc/k1"], "eng");
+    const [failed] = adapter.commitOutcome(failRecord);
+    expect(failed.confidence).toBeCloseTo(0.9 * 0.9);
+    expect(failed.confidence).toBeLessThan(0.9);
+
+    const okRecord = OutcomeBackPropagator.makeRecord("OK-1", OutcomeType.SUCCESS, ["svc/k2"], "eng");
+    const [succeeded] = adapter.commitOutcome(okRecord);
+    expect(succeeded.confidence).toBe(1.0);
   });
 
   it("make record", () => {
@@ -248,7 +274,7 @@ describe("AgentMemory", () => {
     mem.write("svc", "key", "data");
     const updated = mem.commitOutcome("INC-001", OutcomeType.P1_INCIDENT, ["svc/key"]);
     expect(updated).toHaveLength(1);
-    expect(updated[0].confidence).toBeCloseTo(1.15);
+    expect(updated[0].confidence).toBeCloseTo(0.85);
   });
 
   it("properties", () => {
@@ -288,11 +314,11 @@ describe("AgentMemory", () => {
 
   it("auto-causal commitOutcome uses read tracker", () => {
     const mem = new AgentMemory("test-agent");
-    mem.write("svc", "k1", "v1");
+    mem.write("svc", "k1", "v1", { confidence: 0.8 });
     mem.read("svc", "k1");
     const updated = mem.commitOutcome("DEP-1", OutcomeType.CLEAN_DEPLOY);
     expect(updated).toHaveLength(1);
-    expect(updated[0].confidence).toBeCloseTo(0.97);
+    expect(updated[0].confidence).toBeCloseTo(0.8 * 1.03);
   });
 
   it("clearReadLog resets tracker", () => {
