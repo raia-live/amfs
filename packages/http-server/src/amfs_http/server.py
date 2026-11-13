@@ -6973,6 +6973,25 @@ async def create_agent_group_endpoint(
     return created.model_dump(mode="json")
 
 
+@app.put("/api/v1/agent-groups/reorder")
+async def reorder_agent_groups_endpoint(
+    request: Request,
+    _auth: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Reorder agent groups by setting new positions."""
+    body = await request.json()
+    positions = body.get("positions")
+    if not positions or not isinstance(positions, list):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "positions list is required"},
+        )
+    tuples = [(p["group_id"], p["position"]) for p in positions]
+    mem = _get_memory()
+    mem._adapter.reorder_agent_groups(tuples, namespace=mem.namespace)
+    return {"ok": True}
+
+
 @app.put("/api/v1/agent-groups/{group_id}")
 async def update_agent_group_endpoint(
     group_id: str,
@@ -7048,25 +7067,6 @@ async def remove_group_members(
         group_id, agent_ids, namespace=mem.namespace,
     )
     return {"removed": count}
-
-
-@app.put("/api/v1/agent-groups/reorder")
-async def reorder_agent_groups_endpoint(
-    request: Request,
-    _auth: str | None = Depends(verify_api_key),
-) -> dict[str, Any]:
-    """Reorder agent groups by setting new positions."""
-    body = await request.json()
-    positions = body.get("positions")
-    if not positions or not isinstance(positions, list):
-        return JSONResponse(
-            status_code=400,
-            content={"error": "positions list is required"},
-        )
-    tuples = [(p["group_id"], p["position"]) for p in positions]
-    mem = _get_memory()
-    mem._adapter.reorder_agent_groups(tuples, namespace=mem.namespace)
-    return {"ok": True}
 
 
 @app.get("/api/v1/agent-groups/suggestions")
