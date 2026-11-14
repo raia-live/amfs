@@ -1030,10 +1030,26 @@ export class AgentMemory {
       throw new Error("Room operations require the HTTP adapter (set AMFS_HTTP_URL)");
     }
     const url = `${baseUrl.replace(/\/$/, "")}${path}`;
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    const apiKey = adapter._apiKey ?? adapter.apiKey;
+    const adapterHeaders =
+      adapter.headers && typeof adapter.headers === "object"
+        ? (adapter.headers as Record<string, string>)
+        : {};
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...adapterHeaders,
+    };
+    const opts =
+      adapter.opts && typeof adapter.opts === "object"
+        ? (adapter.opts as Record<string, unknown>)
+        : undefined;
+    const apiKey = adapter._apiKey ?? adapter.apiKey ?? opts?.apiKey;
     if (typeof apiKey === "string") {
-      headers["Authorization"] = `Bearer ${apiKey}`;
+      if (!headers["X-AMFS-API-Key"]) {
+        headers["X-AMFS-API-Key"] = apiKey;
+      }
+      if (!headers["Authorization"]) {
+        headers["Authorization"] = `Bearer ${apiKey}`;
+      }
     }
 
     const resp = await fetch(url, {
