@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from amfs_core.abc import AdapterABC
 from amfs_core.exceptions import VersionConflictError
+from amfs_core.hashing import integrity_chain_hash
 from amfs_core.models import MemoryEntry
 
 logger = logging.getLogger(__name__)
@@ -90,8 +91,18 @@ class LifecycleManager:
                 entry.version,
                 entry.ttl_at,
             )
+            next_chain = (
+                integrity_chain_hash(entry.content_hash, entry.integrity_chain)
+                if entry.content_hash is not None
+                else None
+            )
             archived_entry = entry.model_copy(
-                update={"confidence": 0.0, "ttl_at": None, "version": entry.version + 1}
+                update={
+                    "confidence": 0.0,
+                    "ttl_at": None,
+                    "version": entry.version + 1,
+                    "integrity_chain": next_chain,
+                }
             )
             try:
                 written = self._adapter.write(archived_entry)
