@@ -99,6 +99,7 @@ jobs:
           pytest tests/integration/test_postgres_adapter.py \
                  tests/integration/test_postgres_outcome_evidence.py \
                  tests/integration/test_postgres_evidence_parity.py \
+                 tests/integration/test_postgres_outcome_entry_roles.py \
                  tests/integration/test_postgres_descendants_range.py -v
 
   # The hosted product builds these packages from this git tree, so a change here

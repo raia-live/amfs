@@ -5425,6 +5425,16 @@ async def commit_outcome(
         final_action_index=final_action_index,
         # The client's read versions, never the server's shared tracker.
         causal_entry_versions=req.causal_entry_versions or {},
+        # The client's statement of each key's role. With explicit keys and
+        # no ``in_view_entry_keys`` (an older client) nothing is in view and
+        # every key is charged in full, as before; with no keys at all the
+        # handle falls back to its read log, and those are in view.
+        in_view_entry_keys=(
+            req.in_view_entry_keys
+            if req.in_view_entry_keys is not None or req.causal_entry_keys is None
+            else []
+        ),
+        not_followed_entry_keys=req.not_followed_entry_keys or [],
         # Action-level learning. Derived from the request's own tool calls
         # and attempts when the client did not send them, never from the
         # shared tracker; the keys are scanned inside commit_outcome.

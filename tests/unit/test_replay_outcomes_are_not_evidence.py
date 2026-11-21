@@ -45,8 +45,8 @@ def mem(tmp_amfs_root: Path) -> AgentMemory:
 
 
 def _fail_then_succeed(mem: AgentMemory, ref: str) -> list:
-    """The shape that discredited the corrections: the correction is read,
-    the first attempt fails, the session ends in success."""
+    """The shape that used to discredit the corrections on one read: the
+    correction is read, the first attempt fails, the session ends in success."""
     mem.read(SCOPE, "correction")
     mem.record_action("rotate_key", {"service": "ingest"}, result="still stuck", success=False)
     mem.record_attempt(summary="first try did nothing")
@@ -83,7 +83,10 @@ class TestSdk:
     def test_a_served_session_still_learns(self, mem: AgentMemory) -> None:
         updated = {e.key: e for e in _fail_then_succeed(mem, "ticket-1")}
         assert updated["correction"].failure_count == 1
-        assert updated["correction"].evidence_status == "discredited"
+        # Read, not named: the failure is on its record, and the first one
+        # does not discredit an entry that was only in view.
+        assert updated["correction"].discredited_at is None
+        assert updated["correction"].evidence_status == "contested"
         assert mem.read(SCOPE, ev.contrast_lesson_key("ticket-1")) is not None
 
     def test_a_replay_leaves_no_evidence_and_no_lesson(self, mem: AgentMemory) -> None:

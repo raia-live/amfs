@@ -357,6 +357,10 @@ class _SenseLabSession(EpisodeSession):
         the agent follows one, so blaming all of them for a failed attempt discredits
         correct lessons that merely shared the context. ``None`` when nothing identifies.
         """
+        if not getattr(self.arm, "names_entries", True):
+            # ``senselab-window``: the agent names nothing, and the SDK falls back to
+            # its read window — what an agent on the MCP tools does by default.
+            return None
         boundary = getattr(self, "_boundary", 0)
         keys = list(cited_keys) or list(dict.fromkeys(self.read_keys[boundary:]))
         return [f"{self.arm.scope}/{k}" for k in keys] or None
@@ -385,6 +389,15 @@ class _SenseLabSession(EpisodeSession):
             # Local bookkeeping only: the boundary and the entries it blames leave with the
             # terminal commit_outcome, inside the same trace. Zero extra round trips.
             keys = self._blame(cited_keys)
+            if keys is None and not getattr(self.arm, "names_entries", True):
+                try:
+                    self.mem.record_attempt(outcome_type=OutcomeType(severity),
+                                            summary=f"attempt {attempt} failed; answer={answer}"[:300])
+                    self._attempts_marked += 1
+                    self._boundary = len(self.read_keys)
+                except Exception as e:  # noqa: BLE001
+                    self.acct.notes["record_attempt_error"] = str(e)[:200]
+                return
             if keys is None:
                 # Nothing identifies what this attempt relied on: no search since the last
                 # boundary and no citation. An attempt that names no entry teaches nothing,
@@ -510,6 +523,17 @@ class SenseLabArm(MemoryArm):
                         if attempt == 2:
                             raise
                         time.sleep(5 * (attempt + 1))
+
+
+class SenseLabWindowArm(SenseLabArm):
+    """The same protocol with nothing named: every attempt and the terminal outcome are
+    attributed to the SDK's default read window (the top hit of each retrieve and the rows
+    the briefing surfaced, since the last boundary). This is how an agent on the MCP tools
+    behaves when it calls ``amfs_record_attempt()`` and ``amfs_commit_outcome()`` without
+    naming an entry, and it is the arm that measures what charging the read window costs."""
+
+    name = "senselab-window"
+    names_entries = False
 
 
 class SenseLabEpisodeArm(SenseLabArm):

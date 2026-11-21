@@ -61,7 +61,9 @@ def _outcome(
     mem: AgentMemory, key: str, outcome: OutcomeType, ref: str, entity_path: str = "acme/support"
 ) -> None:
     mem.read(entity_path, key)
-    mem.commit_outcome(ref, outcome)
+    # The entry is named, so a failure is charged in full. An entry that was
+    # only in view of a failure is held at the threshold the first time.
+    mem.commit_outcome(ref, outcome, causal_entry_keys=[f"{entity_path}/{key}"])
 
 
 def _keys(resp) -> list[str]:

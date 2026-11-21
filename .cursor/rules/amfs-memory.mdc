@@ -127,6 +127,7 @@ Use `amfs_whoami()` to check the active identity. Use `amfs_reset_identity()` to
   amfs_record_attempt(outcome_type="failure", causal_entry_keys=["acme/support/fix-restart"])
   ```
 - Everything read and done since the previous attempt is attributed to it. At `commit_outcome` those entries receive the failure and only what you read afterwards is credited with the success — the stale memory loses confidence instead of being reinforced by your recovery, and a `lesson-contrast-*` entry is written naming what failed and what worked.
+- **Say which entry it was when you know.** An entry named in `causal_entry_keys` takes the failure in full. An entry that was only read is recorded as *in view*: its first failure lowers it to the discredit threshold and no further, and a second failure, from any session, discredits it. When the attempt failed because you did **not** do what an entry says, pass it in `not_followed_entry_keys`: it is credited, not charged. Both arguments are also on `amfs_commit_outcome`, for a failed outcome.
 - **No round-trip, no separate commit.** Commit once at the end, whatever the final outcome; the attempts travel inside the same trace.
 
 ## When to COMMIT OUTCOMES (capture the full trace)

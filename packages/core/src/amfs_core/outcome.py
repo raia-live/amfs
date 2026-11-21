@@ -143,9 +143,13 @@ class OutcomeBackPropagator:
         entity_paths: list[str] | None = None,
         situation: str | None = None,
         covariates: Mapping[str, Any] | None = None,
+        in_view_entry_keys: list[str] | None = None,
+        not_followed_entry_keys: list[str] | None = None,
     ) -> OutcomeRecord:
         """Convenience factory for creating OutcomeRecord instances."""
         return OutcomeRecord(
+            in_view_entry_keys=list(in_view_entry_keys or []),
+            not_followed_entry_keys=list(not_followed_entry_keys or []),
             covariates=dict(covariates or {}),
             attempts=attempts or [],
             final_action_index=final_action_index,

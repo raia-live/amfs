@@ -470,7 +470,10 @@ class TestBriefingProcedures:
                   memory_type=MemoryType.PROCEDURE)
         mem._read_tracker.clear()
         mem.read("acme/support", "procedure-rotate")
-        mem.commit_outcome("bad-1", OutcomeType.FAILURE)
+        mem.commit_outcome(
+            "bad-1", OutcomeType.FAILURE,
+            causal_entry_keys=["acme/support/procedure-rotate"],
+        )
 
         lead = _lead(service.briefing(entity_path="acme/support"))
         assert "procedures" not in lead.summary

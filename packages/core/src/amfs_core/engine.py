@@ -379,6 +379,8 @@ class ReadTracker:
         summary: str | None = None,
         causal_entry_keys: list[str] | None = None,
         action_indices: list[int] | None = None,
+        in_view_entry_keys: list[str] | None = None,
+        not_followed_entry_keys: list[str] | None = None,
     ) -> dict:
         """Close the attempt in progress as a failure and start the next one.
 
@@ -395,9 +397,32 @@ class ReadTracker:
         is used. Pass *action_indices* when the actions are not in this
         tracker's log but will arrive as ``tool_calls`` on the commit — the
         indices then refer to that list. Returns the attempt as recorded.
+
+        The two ways of arriving at the keys are not the same statement, and
+        the attempt records which was made. Named keys are what the agent
+        says it acted on, and are charged in full. Keys taken from the read
+        window were only *in view* — a session reads more than it follows —
+        and are recorded as ``in_view_entry_keys``: the failure lowers them,
+        and cannot discredit one that has never failed before
+        (``amfs_core.evidence``). *in_view_entry_keys* overrides that default
+        for a caller that knows better.
+
+        *not_followed_entry_keys* names entries the attempt had, or should
+        have had, and did **not** follow, when that is why it failed. They
+        are credited instead of charged and leave the attempt's other keys.
         """
         since = self._state.attempt_boundary_seq
-        keys = list(dict.fromkeys(causal_entry_keys)) if causal_entry_keys is not None else self._keys_since(since)
+        named = causal_entry_keys is not None
+        keys = list(dict.fromkeys(causal_entry_keys)) if named else self._keys_since(since)
+        not_followed = list(dict.fromkeys(k for k in (not_followed_entry_keys or []) if k))
+        if not_followed:
+            skipped = set(not_followed)
+            keys = [k for k in keys if k not in skipped]
+        if in_view_entry_keys is not None:
+            charged = set(keys)
+            in_view = [k for k in dict.fromkeys(in_view_entry_keys) if k in charged]
+        else:
+            in_view = [] if named else list(keys)
         n_actions = len(self._actions)
         cursor = self._state.attempt_action_cursor
         indices = (
@@ -409,7 +434,9 @@ class ReadTracker:
             "attempt": len(self._state.attempts) + 1,
             "outcome_type": outcome_type,
             "causal_entry_keys": keys,
-            "causal_entry_versions": self.versions_for(keys),
+            "causal_entry_versions": self.versions_for([*keys, *not_followed]),
+            "in_view_entry_keys": in_view,
+            "not_followed_entry_keys": not_followed,
             "action_indices": indices,
             "summary": summary,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
@@ -477,6 +504,47 @@ class ReadTracker:
             "version": version,
             "is_new": is_new,
         })
+        self._pin_attempts_before_write(f"{entity_path}/{key}", int(version), bool(is_new))
+
+    def _pin_attempts_before_write(self, entry_key: str, version: int, is_new: bool) -> None:
+        """Keep a closed attempt's failure on the text it was about.
+
+        An attempt that names a key it never read has no read version, and
+        the store then applies its failure to whatever the key says when the
+        commit lands. When this session goes on to rewrite that key — find
+        the wrong entry, mark it failed, write the correction, commit — the
+        failure meant for the old text landed on the correction and
+        discredited it.
+
+        The attempt was closed before this write, so the text it is about is
+        the version before it. Recording that as the attempt's read version
+        is all the store needs: its claim rule (``evidence.claim_still_held``)
+        applies the failure only if the key still says the same thing. When
+        the write created the key there was no earlier text, and the attempt
+        cannot have been about it: the key leaves the attempt.
+
+        An attempt closed *after* the write is untouched ("I wrote this,
+        tried it, it failed" is a statement about the new text), and so is
+        one that recorded a read version of its own.
+
+        The same holds for an entry the attempt says it did not follow: the
+        credit is for the text the attempt left unfollowed, never for a
+        rewrite the session made afterwards, and never for a key that did not
+        exist yet.
+        """
+        roles = ("causal_entry_keys", "in_view_entry_keys", "not_followed_entry_keys")
+        for attempt in self._state.attempts:
+            if not any(entry_key in (attempt.get(role) or []) for role in roles):
+                continue
+            versions = attempt.setdefault("causal_entry_versions", {})
+            if entry_key in versions:
+                continue
+            if is_new or version <= 1:
+                for role in roles:
+                    if role in attempt:
+                        attempt[role] = [k for k in attempt[role] or [] if k != entry_key]
+            else:
+                versions[entry_key] = version - 1
 
     @property
     def write_events(self) -> list[dict]:

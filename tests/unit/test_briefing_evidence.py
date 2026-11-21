@@ -41,7 +41,9 @@ def world(tmp_path):
 
 def _outcome(mem: AgentMemory, key: str, outcome: OutcomeType, ref: str) -> None:
     mem.read("acme/support", key)
-    mem.commit_outcome(ref, outcome)
+    # The entry is named, so a failure is charged in full. An entry that was
+    # only in view of a failure is held at the threshold the first time.
+    mem.commit_outcome(ref, outcome, causal_entry_keys=[f"acme/support/{key}"])
 
 
 def _lead(digests: list[Digest]) -> Digest:
@@ -75,7 +77,9 @@ def test_sections_reflect_the_record(world) -> None:
 def test_discredited_entry_shows_what_replaced_it(world) -> None:
     mem, service, _ = world
     mem.read("acme/support", "fix-restart")
-    mem.record_attempt(summary="restart did nothing")
+    mem.record_attempt(
+        summary="restart did nothing", causal_entry_keys=["acme/support/fix-restart"]
+    )
     mem.read("acme/support", "fix-rotate")
     mem.commit_outcome("ticket-1", OutcomeType.SUCCESS)
 

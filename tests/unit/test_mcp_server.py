@@ -228,9 +228,11 @@ class TestMCPTools:
         result = json.loads(amfs_commit_outcome("INC-001", "critical_failure"))
         assert result["outcome_ref"] == "INC-001"
         assert result["affected_entries"] == 1
-        # CRITICAL_FAILURE erodes confidence: first critical failure on a 1.0
-        # entry lands at 2/(2+6) = 0.25 under the evidence model.
-        assert result["entries"][0]["confidence"] == pytest.approx(0.25)
+        # CRITICAL_FAILURE erodes confidence. The entry was read and not
+        # named, so it was only in view: a first failure takes it to the
+        # discredit threshold and no further. Named, it lands at
+        # 2/(2+6) = 0.25 (test_outcome_entry_roles.py).
+        assert result["entries"][0]["confidence"] == pytest.approx(0.5)
 
     def test_amfs_commit_outcome_invalid_type(self) -> None:
         from amfs_mcp.server import amfs_commit_outcome

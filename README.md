@@ -148,6 +148,7 @@ Everything below is in this repo and works without an account. The order matters
 
 - Decision traces capture what the agent was asked, what it read, what it decided, what it did, and what it answered. Committed once, at the end.
 - `record_attempt()` draws a line inside the trace. What was read before the line gets the failure; what was read after gets the success. Without that line, a stale entry that misled the agent would get credit for the recovery.
+- A failure knows each entry's role. An entry the agent names (`causal_entry_keys`) takes it in full. An entry that was only read is *in view*: its first failure lowers it to the discredit threshold and no further, so a correct entry that merely shared the context is not thrown out, and a second failure discredits it. An entry the agent says it did not follow (`not_followed_entry_keys`) is credited.
 - Contrast lessons are written automatically: "X failed here, Y worked". They are the highest-value knowledge in the store and nobody has to author them.
 - Outcomes can carry `verified_by` (`ci`, `human`, `customer`), so an agent declaring its own success is weighed differently from CI confirming it.
 - Every trace is a supervised example: request in, actions out, outcome attached. That is what makes the jump from better prompts to better weights possible later.

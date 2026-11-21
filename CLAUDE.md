@@ -25,7 +25,7 @@ You have access to AMFS (Agent Memory File System) through MCP tools. AMFS gives
 - `amfs_commit_outcome(outcome_ref, outcome_type, task_input?)` — **critical**: snapshots the full decision trace (all reads, writes, decisions, contexts, actions) and persists it. Call this after completing significant work, and pass `task_input` whenever you have it.
 - `amfs_record_context(label, summary, source?)` — capture decisions, external tool results, or user choices in the causal chain. Call this **as decisions happen**, not at the end.
 - `amfs_record_action(tool_name, arguments?, result?, success?)` — record a consequential action you took. Call this **right after taking it**.
-- `amfs_record_attempt(outcome_type?, summary?, causal_entry_keys?)` — mark the approach you just tried as **failed** before trying another. The entries it relied on receive the failure at commit time instead of being reinforced by your recovery. No round-trip; travels with the outcome.
+- `amfs_record_attempt(outcome_type?, summary?, causal_entry_keys?, not_followed_entry_keys?)` — mark the approach you just tried as **failed** before trying another. The entries it relied on receive the failure at commit time instead of being reinforced by your recovery. No round-trip; travels with the outcome.
 - `amfs_history(entity_path, key, since?, until?)` — retrieve version history of an entry
 - `amfs_explain(outcome_ref?)` — inspect the current session's decision trace: reads + external contexts
 - `amfs_list_traces(entity_path?, agent_id?, limit?)` — browse persisted decision traces from past sessions
@@ -152,6 +152,13 @@ afterwards is credited with the success — so a stale memory that sent you down
 wrong path loses confidence instead of gaining it, and SenseLab writes a
 `lesson-contrast-*` entry naming what failed and what worked. Commit **once**, at the
 end, whatever the final outcome; the attempts travel inside the same trace.
+
+Say which entry it was when you know. An entry you name in `causal_entry_keys` takes
+the failure in full. An entry that was only read is recorded as *in view*: its first
+failure lowers it to the discredit threshold and no further, and a second failure,
+from any session, discredits it. When the attempt failed because you did **not** do
+what an entry says, pass that entry in `not_followed_entry_keys`: it is credited, not
+charged. Both arguments are also on `amfs_commit_outcome`, for a failed outcome.
 
 ### After completing significant work (commit the trace)
 **Always call `commit_outcome`** after finishing a task. This snapshots all reads, writes, decisions, contexts, and recorded actions into a persisted `DecisionTrace`:

@@ -161,7 +161,10 @@ def test_a_discredited_correction_is_still_the_treatment(client, mem) -> None:
     from amfs_core.models import OutcomeType
 
     mem.read(SCOPE, "pip-audit-corrected")
-    mem.record_attempt(summary="the corrected rule did not apply here")
+    mem.record_attempt(
+        summary="the corrected rule did not apply here",
+        causal_entry_keys=[f"{SCOPE}/pip-audit-corrected"],
+    )
     mem.commit_outcome("case-1", OutcomeType.FAILURE)
     mem._read_tracker.clear()
     entry = mem.read(SCOPE, "pip-audit-corrected")

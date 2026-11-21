@@ -143,6 +143,107 @@ def test_sql_and_python_agree_on_random_outcome_sequences(adapter, monkeypatch, 
             want[key] = _with_uplift(want[key], got)
 
 
+def _random_record_with_roles(rng: random.Random) -> OutcomeRecord:
+    """As ``_random_record``, with the two roles an outcome can give an entry
+    beside "named": in view (read, not named) and not followed. Any subset of
+    the cited keys may be in view; a key may be listed as not followed on a
+    step whether or not it is also cited, and on a success, where it must be
+    ignored."""
+
+    def roles(pool: list[str]) -> tuple[list[str], list[str]]:
+        in_view = [k for k in pool if rng.random() < 0.6]
+        not_followed = [f"svc/mod/{k}" for k in KEYS if rng.random() < 0.25]
+        return in_view, not_followed
+
+    cited = [f"svc/mod/{k}" for k in rng.sample(KEYS, k=rng.randint(1, len(KEYS)))]
+    attempts = []
+    for i in range(rng.choice((0, 0, 1, 2))):
+        keys = [f"svc/mod/{k}" for k in rng.sample(KEYS, k=rng.randint(1, 2))]
+        in_view, not_followed = roles(keys)
+        attempts.append(
+            AttemptRecord(
+                attempt=i + 1,
+                outcome_type=rng.choice(("minor_failure", "failure", "regression")),
+                causal_entry_keys=keys,
+                in_view_entry_keys=in_view,
+                not_followed_entry_keys=not_followed,
+            )
+        )
+    in_view, not_followed = roles(cited)
+    verified_by = rng.choice((None, None, "ci", "reviewer"))
+    return OutcomeRecord(
+        outcome_ref=f"t-{uuid.uuid4().hex[:6]}",
+        outcome_type=rng.choice(TYPES),
+        causal_confidence=round(rng.choice((0.0, 0.25, 0.5, 0.75, 1.0, rng.random())), 4),
+        committed_at=datetime.now(UTC),
+        causal_entry_keys=cited,
+        in_view_entry_keys=in_view,
+        not_followed_entry_keys=not_followed,
+        agent_id=rng.choice(("agent-1", "agent-2")),
+        attempts=attempts,
+        session_metadata={"attributes": {"verified_by": verified_by}} if verified_by else {},
+    )
+
+
+@pytest.mark.parametrize("seed", range(CASES))
+def test_sql_and_python_agree_on_entries_in_view_and_not_followed(
+    adapter, monkeypatch, seed: int
+) -> None:
+    """The same property with the roles drawn at random: the first failure of
+    an entry in view is capped at the threshold in both, a not-followed entry
+    is credited and never charged in both, and the uplift the trigger
+    refreshes covers the not-followed keys too."""
+    monkeypatch.delenv(ev.OUTCOME_MODEL_ENV, raising=False)
+    rng = random.Random(10_000 + seed)
+    want: dict[str, MemoryEntry] = {}
+    for key in KEYS:
+        want[key] = adapter.write(_entry(key, round(rng.uniform(0.05, 0.95), 3)))
+    history: list[OutcomeRecord] = []
+    for step in range(STEPS):
+        record = _random_record_with_roles(rng)
+        adapter.commit_outcome(record)
+        history.append(record)
+        touched = {k.rsplit("/", 1)[1] for k in ev.outcome_entry_keys(record)}
+        reference = ev.uplift_counts(history, "svc/mod", KEYS)
+        for key in KEYS:
+            want[key], _ = ev.apply_record_to_entry(want[key], record, model="evidence")
+            got = adapter.read("svc/mod", key)
+            assert got is not None
+            _assert_same(got, want[key], seed=seed, step=step, key=key)
+            if key in touched:
+                uplift, sessions = reference[key]
+                where = f"seed={seed} step={step} key={key}"
+                assert got.uplift_sessions == sessions, where
+                if uplift is None:
+                    assert got.uplift is None, where
+                else:
+                    assert got.uplift == pytest.approx(uplift, abs=1e-9), where
+            want[key] = _with_uplift(want[key], got)
+    by_ref = {o.outcome_ref: o for o in adapter.list_outcomes()}
+    for record in history:
+        kept = by_ref[record.outcome_ref]
+        assert kept.in_view_entry_keys == record.in_view_entry_keys
+        assert kept.not_followed_entry_keys == record.not_followed_entry_keys
+
+
+def test_the_role_generator_reaches_both_rules() -> None:
+    """The property above is only worth its seeds if they soften failures and
+    confirm entries; count both over the default seeds, without the database."""
+    softened = confirmed = 0
+    for seed in range(40):
+        rng = random.Random(10_000 + seed)
+        entries = {key: _entry(key, round(rng.uniform(0.05, 0.95), 3)) for key in KEYS}
+        for _ in range(STEPS):
+            record = _random_record_with_roles(rng)
+            confirmed += sum(1 for c in ev.outcome_charges(record) if c.confirms)
+            for key in KEYS:
+                entries[key], updates = ev.apply_record_to_entry(
+                    entries[key], record, model="evidence"
+                )
+                softened += sum(1 for u in updates if u.softened)
+    assert softened >= 20 and confirmed >= 20, (softened, confirmed)
+
+
 def test_multiplicative_model_agrees_too(adapter, monkeypatch) -> None:
     """The legacy model is kept behind AMFS_OUTCOME_MODEL=multiplicative; the
     multipliers in SQL come from the same table as Python's."""

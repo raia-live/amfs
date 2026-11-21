@@ -1710,6 +1710,8 @@ def amfs_commit_outcome(
     situation: str | None = None,
     verified_by: str | None = None,
     evidence: dict[str, Any] | None = None,
+    causal_entry_keys: list[str] | None = None,
+    not_followed_entry_keys: list[str] | None = None,
 ) -> str:
     """Record an outcome and auto-link it to everything read this session.
 
@@ -1759,8 +1761,21 @@ def amfs_commit_outcome(
             success.
         evidence: Optional small dict of pointers to that source, e.g.
             {"run_id": "1234", "url": "https://ci/..."}. Scalars only.
+        causal_entry_keys: Optional. The exact "entity_path/key" entries you
+            ACTED ON, when you know them. Entries you name take the outcome
+            in full. Left out, everything read since the last attempt is
+            used, as entries that were only in view: a failure lowers those
+            and cannot discredit one that has never failed before.
+        not_followed_entry_keys: Optional, for a FAILED outcome only. The
+            entries you had (or should have had) and did NOT follow, when
+            that is why the work failed — you broke a rule, skipped a step a
+            memory told you to take. The failure is evidence the entry was
+            right: it is credited, not charged. Never name an entry here to
+            say it was wrong; that is what causal_entry_keys is for.
 
     Example: amfs_commit_outcome("task-42", "success")
+    Example: amfs_commit_outcome("doc-export", "failure",
+                                 not_followed_entry_keys=["docs/style/rule-one-product"])
     Example: amfs_commit_outcome("PR-456", "success", verified_by="ci",
                                  evidence={"run_id": "98765"})
     Example: amfs_commit_outcome("INC-2047", "success", task_input="API p99 latency above 2s in us-east")
@@ -1802,6 +1817,10 @@ def amfs_commit_outcome(
         commit_kwargs["verified_by"] = verified_by
     if evidence:
         commit_kwargs["evidence"] = dict(evidence)
+    if causal_entry_keys is not None:
+        commit_kwargs["causal_entry_keys"] = [str(k) for k in causal_entry_keys if k]
+    if not_followed_entry_keys:
+        commit_kwargs["not_followed_entry_keys"] = [str(k) for k in not_followed_entry_keys if k]
     entries = mem.commit_outcome(outcome_ref, otype, **commit_kwargs)
     trace = getattr(mem, "_last_trace", None)
     result: dict[str, Any] = {
@@ -1821,6 +1840,16 @@ def amfs_commit_outcome(
     attempts_recorded = len(getattr(trace.session_metadata, "attempts", []) or []) if trace is not None and trace.session_metadata is not None else 0
     if attempts_recorded:
         result["attempts"] = attempts_recorded
+        # Each failed attempt this commit applied, and to what. This server
+        # holds one session per identity, and an editor runs every
+        # conversation under that identity through it: an attempt recorded
+        # in another conversation leaves with whichever commit comes next.
+        # Listed so the agent committing can see an attempt that is not its
+        # own, and the entries it touched, instead of finding out from a
+        # discredited entry later.
+        applied = _attempts_applied(trace)
+        if applied:
+            result["attempts_applied"] = applied
     if trace is not None:
         # Only the id is adapter-dependent — the filesystem adapter persists a
         # trace without minting one. Gating the whole block on it dropped the
@@ -1985,6 +2014,7 @@ def amfs_record_attempt(
     outcome_type: str = "minor_failure",
     summary: str | None = None,
     causal_entry_keys: list[str] | None = None,
+    not_followed_entry_keys: list[str] | None = None,
 ) -> str:
     """Mark the approach you just tried as failed, before trying another one.
 
@@ -2007,10 +2037,21 @@ def amfs_record_attempt(
             (it caused damage before you noticed).
         summary: Optional one line on what you tried and what happened.
         causal_entry_keys: Optional. The exact "entity_path/key" entries this
-            attempt acted on, when you know them. Defaults to everything read
-            since the previous attempt.
+            attempt ACTED ON, when you know them. Name them: an entry you
+            name takes the failure in full. Left out, everything read since
+            the previous attempt is used, as entries that were only in view:
+            the failure lowers those, and cannot discredit one that has
+            never failed before (a second failure does).
+        not_followed_entry_keys: Optional. The entries you had (or should
+            have had) and did NOT follow, when that is why the attempt
+            failed — you broke a rule, skipped a step a memory told you to
+            take. The failure is evidence the entry was right: it is
+            credited, not charged. Never name an entry here to say it was
+            wrong; that is what causal_entry_keys is for.
 
     Example: amfs_record_attempt(summary="restarted worker per runbook; queue still stuck")
+    Example: amfs_record_attempt(summary="exported with the old template; reviewer rejected it",
+                                 not_followed_entry_keys=["docs/style/rule-use-new-template"])
     """
     mem = _get_memory()
     try:
@@ -2019,16 +2060,67 @@ def amfs_record_attempt(
         return json.dumps({
             "error": f"Invalid outcome_type '{outcome_type}'. Use minor_failure, failure or critical_failure."
         })
+    attempt_kwargs: dict[str, Any] = {}
+    # Sent only when set, so an older SDK that predates it is not handed a
+    # keyword it would reject.
+    if not_followed_entry_keys:
+        attempt_kwargs["not_followed_entry_keys"] = [str(k) for k in not_followed_entry_keys if k]
     attempt = mem.record_attempt(
-        outcome_type=otype, summary=summary, causal_entry_keys=causal_entry_keys
+        outcome_type=otype, summary=summary, causal_entry_keys=causal_entry_keys,
+        **attempt_kwargs,
     )
-    return json.dumps({
+    in_view = list(getattr(attempt, "in_view_entry_keys", None) or [])
+    not_followed = list(getattr(attempt, "not_followed_entry_keys", None) or [])
+    hint = (
+        "Now try a different approach; commit the task's outcome with "
+        "amfs_commit_outcome when it is resolved."
+    )
+    if in_view:
+        # The read window stood in for an answer the agent did not give. Say
+        # what that means while it can still be corrected: a second call
+        # naming the entry is cheaper than a correct entry marked down.
+        hint = (
+            f"{len(in_view)} entr{'y was' if len(in_view) == 1 else 'ies were'} only in view "
+            "(read, not named): the failure will lower them, and cannot discredit one that has "
+            "never failed before. If you know which entry you acted on, name it in "
+            "causal_entry_keys; if you failed because you did NOT follow an entry, name it in "
+            "not_followed_entry_keys instead. " + hint
+        )
+    result: dict[str, Any] = {
         "recorded_attempt": attempt.attempt,
         "outcome_type": attempt.outcome_type.value,
         "causal_entry_keys": attempt.causal_entry_keys,
         "action_indices": attempt.action_indices,
-        "hint": "Now try a different approach; commit the task's outcome with amfs_commit_outcome when it is resolved.",
-    })
+        "hint": hint,
+    }
+    if in_view:
+        result["in_view_entry_keys"] = in_view
+    if not_followed:
+        result["not_followed_entry_keys"] = not_followed
+    return json.dumps(result)
+
+
+def _attempts_applied(trace: Any) -> list[dict[str, Any]]:
+    """The failed attempts a commit applied, as the agent should read them."""
+    meta = getattr(trace, "session_metadata", None)
+    out: list[dict[str, Any]] = []
+    for raw in getattr(meta, "attempts", None) or []:
+        if hasattr(raw, "model_dump"):
+            raw = raw.model_dump(mode="json")
+        if not isinstance(raw, dict):
+            continue
+        row: dict[str, Any] = {
+            "attempt": raw.get("attempt"),
+            "outcome_type": raw.get("outcome_type"),
+            "summary": raw.get("summary"),
+            "charged": list(raw.get("causal_entry_keys") or []),
+        }
+        if raw.get("in_view_entry_keys"):
+            row["in_view"] = list(raw["in_view_entry_keys"])
+        if raw.get("not_followed_entry_keys"):
+            row["credited_not_followed"] = list(raw["not_followed_entry_keys"])
+        out.append(row)
+    return out
 
 
 @mcp.tool(tags={"core"}, annotations={"readOnlyHint": False, "destructiveHint": False})

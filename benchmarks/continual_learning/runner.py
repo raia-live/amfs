@@ -32,7 +32,7 @@ from .scenarios import make_scenario
 _SL = int(os.environ.get("CL_SENSELAB_CONCURRENCY", "2"))
 _ARM_CONCURRENCY = {"mem0": 6, "zep": 8, "senselab": _SL, "senselab-episode": _SL,
                     "senselab-nofeedback": _SL, "senselab-attempts": _SL, "senselab-nopriors": _SL,
-                    "senselab-lean": _SL}
+                    "senselab-lean": _SL, "senselab-window": _SL}
 _sems: dict[str, threading.Semaphore] = {}
 _write_lock = threading.Lock()
 

@@ -1566,6 +1566,8 @@ class AgentMemory:
         verified_by: str | None = None,
         evidence: Mapping[str, Any] | None = None,
         covariates: Mapping[str, Any] | None = None,
+        in_view_entry_keys: list[str] | None = None,
+        not_followed_entry_keys: list[str] | None = None,
     ) -> list[MemoryEntry]:
         """Record an outcome and back-propagate confidence changes.
 
@@ -1601,6 +1603,20 @@ class AgentMemory:
         narrows to what was read since the last boundary: the entries a failed
         attempt relied on receive that attempt's failure, not a share of the
         eventual success.
+
+        Keys taken from the read log were only *in view*: the session read
+        them, and nothing says it acted on them. They are recorded as such
+        (``in_view_entry_keys`` on the record), and a failure lowers an
+        in-view entry without discrediting one that has never failed before;
+        a second failure, from any session, is weighed in full. Keys passed
+        in *causal_entry_keys* are the caller's statement of what was acted
+        on and are charged in full, as before. *in_view_entry_keys* overrides
+        the default either way — the HTTP server passes a remote client's.
+
+        *not_followed_entry_keys* is for a **failed** outcome: the entries
+        the agent had, or should have had, and did not follow, when that is
+        why it failed. They are credited instead of charged, and are left
+        out of the causal keys. Ignored on a success.
 
         *attempts* are the failed attempts that preceded this outcome, oldest
         first; they default to the ones recorded with ``record_attempt``. Each is
@@ -1665,12 +1681,29 @@ class AgentMemory:
         attempt_records = self._resolve_attempts(attempts)
         if final_action_index is None:
             final_action_index = self._read_tracker.final_action_index
+        keys_from_read_log = causal_entry_keys is None
         if causal_entry_keys is None:
             causal_entry_keys = (
                 self._read_tracker.terminal_causal_keys
                 if attempt_records
                 else self._read_tracker.causal_keys
             )
+        # What the outcome did not follow leaves what it is charged to; only
+        # a failure can say that. See ``amfs_core.evidence``.
+        not_followed = (
+            list(dict.fromkeys(k for k in (not_followed_entry_keys or []) if k))
+            if not _evidence.is_success(outcome_type)
+            else []
+        )
+        if not_followed:
+            skipped = set(not_followed)
+            causal_entry_keys = [k for k in causal_entry_keys if k not in skipped]
+        # Keys that came off the read log were in view, not named.
+        if in_view_entry_keys is None:
+            in_view_entry_keys = list(causal_entry_keys) if keys_from_read_log else []
+        else:
+            charged = set(causal_entry_keys)
+            in_view_entry_keys = [k for k in dict.fromkeys(in_view_entry_keys) if k in charged]
         # The attempts and the final action index travel on the trace's
         # metadata as well as on the record: the metadata is what the server
         # seals, and it is what training and export read the trace through.
@@ -1706,7 +1739,9 @@ class AgentMemory:
         # reflection may have rewritten it a moment ago). Explicit map wins;
         # otherwise whatever this session's read log knows.
         if causal_entry_versions is None:
-            causal_entry_versions = self._read_tracker.versions_for(list(causal_entry_keys))
+            causal_entry_versions = self._read_tracker.versions_for(
+                [*causal_entry_keys, *not_followed]
+            )
         # What happened to each decisive action, from the *unscanned* action list
         # so the indices line up with the attempt boundaries; only the action key
         # is kept, and it is scanned like any other captured text.
@@ -1734,9 +1769,10 @@ class AgentMemory:
                 row["action_key"] = cleared or row.get("tool_name") or "action"
         # The failed attempts' keys count too: an episode that read a rule,
         # failed on it and resolved without it is still about that rule's entity.
-        all_keys = list(causal_entry_keys)
+        all_keys = [*causal_entry_keys, *not_followed]
         for a in attempt_records:
             all_keys.extend(a.causal_entry_keys)
+            all_keys.extend(a.not_followed_entry_keys)
         derived_paths = entity_paths_of(all_keys, entity_path)
         entity_paths = list(dict.fromkeys([*(entity_paths or []), *derived_paths]))
         record = OutcomeBackPropagator.make_record(
@@ -1768,6 +1804,8 @@ class AgentMemory:
             # the server splits a contested situation on them and must not
             # mistake the bag's bookkeeping for one.
             covariates=dict(covariates) if covariates is not None else dict(self._covariates),
+            in_view_entry_keys=in_view_entry_keys,
+            not_followed_entry_keys=not_followed,
         )
         updated = self._propagator.propagate(record)
         self._write_contrast_lesson(record)
@@ -1943,6 +1981,8 @@ class AgentMemory:
         summary: str | None = None,
         causal_entry_keys: list[str] | None = None,
         action_indices: list[int] | None = None,
+        in_view_entry_keys: list[str] | None = None,
+        not_followed_entry_keys: list[str] | None = None,
     ) -> AttemptRecord:
         """Mark the attempt in progress as failed and start the next one.
 
@@ -1952,6 +1992,13 @@ class AgentMemory:
         recorded since then are attributed to this attempt; the next
         ``commit_outcome`` applies *outcome_type* to those entries before it
         applies the terminal outcome to what was read afterwards.
+
+        Name the entries when you know them. Named keys are charged in
+        full; keys taken from the read window were only *in view*, and a
+        failure lowers those without discrediting one that has never failed
+        before (a second failure does). *not_followed_entry_keys* is for the
+        opposite case — the attempt failed because it did **not** follow an
+        entry it had, or should have had: those are credited, not charged.
 
         Nothing is sent anywhere: the attempt is buffered on the session and
         leaves with the outcome, inside the same trace.
@@ -1978,6 +2025,8 @@ class AgentMemory:
             summary=summary,
             causal_entry_keys=causal_entry_keys,
             action_indices=action_indices,
+            in_view_entry_keys=in_view_entry_keys,
+            not_followed_entry_keys=not_followed_entry_keys,
         )
         return AttemptRecord.model_validate(
             {k: v for k, v in recorded.items() if k != "recorded_at"}

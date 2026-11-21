@@ -293,8 +293,11 @@ class TestAutoCausalTracking:
         updated = mem.commit_outcome("INC-100", OutcomeType.CRITICAL_FAILURE)
         assert len(updated) == 2
         # CRITICAL_FAILURE erodes confidence. Two causal entries split the
-        # credit: w = 3.0 * 2 / 2 = 3 each, so 2/(2+3) = 0.4.
-        assert all(abs(e.confidence - 0.4) < 1e-6 for e in updated)
+        # credit: w = 3.0 * 2 / 2 = 3 each, which would land on 2/(2+3) = 0.4.
+        # Keys off the read log were only in view, so a first failure stops
+        # at the discredit threshold; named keys take it in full (below).
+        assert all(abs(e.confidence - 0.5) < 1e-6 for e in updated)
+        assert all(e.discredited_at is None for e in updated)
 
     def test_commit_outcome_explicit_overrides_auto(self, mem: AgentMemory) -> None:
         """Explicit causal keys take precedence over the auto read log."""
