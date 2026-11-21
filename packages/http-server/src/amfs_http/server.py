@@ -7156,10 +7156,14 @@ def agent_group_suggestions(
     if allowed is not None:
         scoped = []
         for c in suggestions:
-            members = [a for a in (c.get("agent_ids") or []) if a in allowed]
+            raw_members = c.get("agents") if "agents" in c else c.get("agent_ids")
+            members = [a for a in (raw_members or []) if a in allowed]
             if len(members) < 2:
                 continue
-            scoped.append({**c, "agent_ids": members})
+            updated = {**c, "agents": members}
+            if "agent_ids" in c:
+                updated["agent_ids"] = members
+            scoped.append(updated)
         suggestions = scoped
     return {"suggestions": suggestions}
 
@@ -9735,17 +9739,22 @@ def list_consolidation_proposals(
 
         try:
             diff = adapter.diff_branch(b.name, namespace=namespace)
-            entry_keys = [f"{d.entity_path}/{d.key}" for d in diff.entries] if hasattr(diff, "entries") else []
+            diff_entries = diff.entries if hasattr(diff, "entries") else (diff or [])
+            entry_keys = [f"{d.entity_path}/{d.key}" for d in diff_entries]
         except Exception:
-            diff = None
+            diff_entries = []
             entry_keys = []
 
         proposed_value = None
         proposed_confidence = 0.0
-        if diff and hasattr(diff, "entries") and diff.entries:
-            first = diff.entries[0]
+        if diff_entries:
+            first = diff_entries[0]
             proposed_value = first.branch_value if hasattr(first, "branch_value") else None
-            proposed_confidence = 0.8
+            proposed_confidence = (
+                first.branch_confidence
+                if getattr(first, "branch_confidence", None) is not None
+                else 0.8
+            )
 
         all_proposals.append({
             "id": b.id or b.name,
