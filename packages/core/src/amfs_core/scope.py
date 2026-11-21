@@ -29,6 +29,26 @@ otherwise act as a wildcard: a scope of ``a_b`` would quietly also cover
 ``axb``. Those are escaped, and the escape character is escaped first, which is
 the ordering that a later pass cannot undo. Postgres' default LIKE escape is
 the backslash, so no ``ESCAPE`` clause is needed to read the result back.
+
+The same rule as a range
+------------------------
+"Everything beneath ``a/b``" is every path that starts with ``a/b/``, and in
+byte order those are exactly the paths from ``a/b/`` up to, but not including,
+``a/b0``: ``0`` is the byte after ``/``, so ``a/b0`` is the first string that
+no longer starts with ``a/b/``. :func:`descendants_range_sql` states the rule
+that way, with Postgres' byte-order comparison operators.
+
+It selects the same rows as :func:`descendants_sql`, and the tests hold the
+two to each other. It is a separate form, used only where a caller asks for
+it, because of what the planner does with each. A range is something a b-tree
+over ``entity_path text_pattern_ops`` can seek; a ``LIKE`` whose pattern
+arrives as a parameter is not, in a database whose collation is not ``C``. So
+the two reach the same rows by different plans, and for a nearest-neighbour
+search the plan is not neutral: read through the vector index and filtered
+afterwards, a search sees the nearest rows of the whole table that happen to
+lie beneath the path; read through the b-tree and sorted, it sees every row
+beneath the path. Swapping one form for the other under an existing caller
+would change what that caller is handed, so it is not swapped.
 """
 
 from __future__ import annotations
@@ -36,7 +56,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["SqlScope", "covers", "descendants_sql", "normalize_scope"]
+__all__ = ["SqlScope", "covers", "descendants_range_sql", "descendants_sql", "normalize_scope"]
 
 
 @dataclass(frozen=True)
@@ -121,4 +141,32 @@ def descendants_sql(column: str, prefix: str) -> tuple[str, list[str]]:
     return (
         f"({column} = %s OR {column} LIKE %s)",
         [root, _escape_like(root) + "/%"],
+    )
+
+
+_SEPARATOR = "/"
+# The byte after the separator. ``<prefix>/`` to ``<prefix>0`` is the half-open
+# range of every string that starts with ``<prefix>/``.
+_AFTER_SEPARATOR = chr(ord(_SEPARATOR) + 1)
+
+
+def descendants_range_sql(column: str, prefix: str) -> tuple[str, list[str]]:
+    """The SQL form as a byte-order range: the same rows as
+    :func:`descendants_sql`, stated so that a b-tree can seek them.
+
+    An OR of equality and the range of everything beneath the prefix. The
+    lower bound is the prefix with its separator, the upper bound the same
+    with the separator replaced by the next byte, so the range holds exactly
+    the paths that start with ``<prefix>/``. Nothing in it is a pattern, so
+    there is nothing to escape: the path is compared, never interpreted.
+    *column* is a trusted identifier supplied by the caller, never user input;
+    the prefix is user input and travels only as parameters.
+
+    Postgres only (``~>=~`` and ``~<~``), and not a drop-in replacement where
+    the statement orders by vector distance: see the module docstring.
+    """
+    root = normalize_scope(prefix)
+    return (
+        f"({column} = %s OR ({column} ~>=~ %s AND {column} ~<~ %s))",
+        [root, root + _SEPARATOR, root + _AFTER_SEPARATOR],
     )

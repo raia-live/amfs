@@ -93,9 +93,13 @@ jobs:
           # PL/pgSQL rendered from amfs_core.evidence (migration 012), and the
           # parity test is what says the two still agree on random outcome
           # sequences. Without a database it skips, which is not a pass.
+          # And the range form of "this path and below": that it selects the
+          # rows the LIKE selects is a claim about Postgres under a collation
+          # that is not C, which only a database can confirm.
           pytest tests/integration/test_postgres_adapter.py \
                  tests/integration/test_postgres_outcome_evidence.py \
-                 tests/integration/test_postgres_evidence_parity.py -v
+                 tests/integration/test_postgres_evidence_parity.py \
+                 tests/integration/test_postgres_descendants_range.py -v
 
   # The hosted product builds these packages from this git tree, so a change here
   # reaches production whether or not it is ever published. Everything else reads

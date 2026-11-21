@@ -916,6 +916,19 @@ class SearchQuery(BaseModel):
     # When True (default) artifacts (stored source files) are demoted to the
     # bottom of results; when False they are excluded entirely.
     include_artifacts: bool = True
+    # Narrows the search to rows the calling account itself owns, by naming
+    # the account in the statement. It can only remove rows: what the caller
+    # may see is still decided by the database's row-level rules, and those
+    # also admit rows another account shares (a room's topics, say), which
+    # this leaves out. Off by default for that reason. The caller that wants
+    # it is one whose path every account has — a product that files each
+    # customer's notes under the same path — where an index that leads with
+    # the account can then read that customer's rows alone. To let it,
+    # "this path and below" is sent as a byte-order range rather than a LIKE
+    # (amfs_core.scope.descendants_range_sql): the same rows, by a different
+    # plan. Ignored where the adapter has no account for the request (a
+    # single-tenant deployment), and the statement is then the usual one.
+    own_account_only: bool = False
 
 
 class TierConfig(BaseModel):
@@ -984,6 +997,15 @@ class SemanticQuery(BaseModel):
     the same rule (``amfs_core.scope.covers``). Off by default; the caller
     that wants it is one whose scope is a prefix rather than an entity — a
     model trained on ``research/*`` serving a request that names no path.
+
+    ``own_account_only`` narrows the search to rows the calling account
+    itself owns, as :class:`SearchQuery` does and with the same caveat: it
+    leaves out rows another account shares with the caller. Off by default.
+    Under it the rows beneath a path are read through a b-tree and sorted,
+    so the search is exact over them; without it the planner may read the
+    vector index and filter afterwards, which finds the nearest rows of the
+    whole table that happen to lie beneath the path. The two can rank
+    different candidates, which is one more reason it is the caller's choice.
     """
 
     text: str
@@ -994,6 +1016,7 @@ class SemanticQuery(BaseModel):
     limit: int = 10
     min_similarity: float = 0.0
     embedding: list[float] | None = None
+    own_account_only: bool = False
 
 
 # ── Knowledge graph models ────────────────────────────────────────────
