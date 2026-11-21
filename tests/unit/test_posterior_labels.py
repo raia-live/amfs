@@ -203,7 +203,9 @@ def test_since_keeps_discredited_rows_and_compact_cuts_long_values(world) -> Non
     adapter, mems = world
     mems["a1"].write("acme/support", "long-note", "x" * 2000, confidence=0.8)
     mems["a2"].read("acme/support", "rule")
-    mems["a2"].commit_outcome("t-fail", OutcomeType.FAILURE)
+    mems["a2"].commit_outcome(
+        "t-fail", OutcomeType.FAILURE, causal_entry_keys=["acme/support/rule"]
+    )
     assert adapter.read("acme/support", "rule").discredited_at is not None
     adapter.list_digests = lambda **kw: []  # type: ignore[attr-defined]
     adapter.list_branches = lambda **kw: []  # type: ignore[attr-defined]

@@ -59,8 +59,19 @@ class OutcomeRequest(BaseModel):
     #: trace for one outcome. Only the SDK sets this, and only because its
     #: ``commit_outcome`` posts the trace on every path out of itself.
     trace_follows: bool = False
+    #: The subset of ``causal_entry_keys`` the session only had in view: read,
+    #: and not named by the agent as what it acted on. A failure lowers an
+    #: in-view entry without discrediting one that has never failed before.
+    #: Absent (an older client, a direct REST caller) means every key is
+    #: charged in full, as it always was.
+    in_view_entry_keys: list[str] | None = None
+    #: For a failed outcome: the entries the agent did not follow, when that
+    #: is why it failed. Credited instead of charged; never also charged.
+    not_followed_entry_keys: list[str] | None = None
     #: Failed attempts that preceded the terminal outcome, oldest first:
-    #: ``{attempt, outcome_type, causal_entry_keys, action_indices, summary}``.
+    #: ``{attempt, outcome_type, causal_entry_keys, action_indices, summary}``,
+    #: and optionally each attempt's own ``in_view_entry_keys`` and
+    #: ``not_followed_entry_keys``.
     #: Each is applied to its own causal entries before ``outcome_type`` is
     #: applied to ``causal_entry_keys`` — inside this one outcome and trace.
     attempts: list[dict[str, Any]] = Field(default_factory=list)

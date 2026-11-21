@@ -195,7 +195,7 @@ def test_legacy_multipliers_kept_for_the_opt_in_model(
 def test_trigger_applies_attempts_before_the_terminal_outcome(sources: dict[str, str]) -> None:
     body = _definition(sources["migrations/012"], "amfs_propagate_outcome")
     attempts_at = body.index("jsonb_array_elements(COALESCE(NEW.attempts")
-    terminal_at = body.index("NEW.causal_entry_keys, NEW.outcome_type")
+    terminal_at = body.index("NEW.namespace, NEW.account_id, term_keys,")
     assert attempts_at < terminal_at
     assert "ORDER BY COALESCE((value->>'attempt')::INTEGER, 0)" in body
 

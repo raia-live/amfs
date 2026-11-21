@@ -51,19 +51,40 @@ def _fail_then_succeed(mem: AgentMemory) -> list:
 
 
 class TestSdkAttemptBoundaries:
-    def test_failed_attempt_entry_is_discredited_and_final_entry_validated(
+    def test_failed_attempt_entry_is_marked_down_and_final_entry_validated(
         self, mem: AgentMemory
     ) -> None:
+        """The attempt named nothing, so the entry it read was only in view:
+        the failure takes it down to the threshold, not under it. It is not
+        reinforced by the recovery, which is what the boundary is for; one
+        more failure, from any session, discredits it."""
         updated = {e.key: e for e in _fail_then_succeed(mem)}
         assert set(updated) == {"fix-restart", "fix-rotate-key"}
         stale = updated["fix-restart"]
         good = updated["fix-rotate-key"]
         assert stale.failure_count == 1 and stale.success_count == 0
-        assert stale.confidence < ev.DISCREDIT_THRESHOLD
-        assert stale.evidence_status == "discredited"
+        assert stale.confidence == pytest.approx(ev.DISCREDIT_THRESHOLD)
+        assert stale.discredited_at is None
+        assert stale.evidence_status == "contested"
         assert good.success_count == 1 and good.failure_count == 0
         assert good.confidence > 0.7
         assert good.evidence_status == "validated"
+
+    def test_an_attempt_that_names_its_entry_discredits_it(self, mem: AgentMemory) -> None:
+        """What the boundary did for every read before entries had roles, and
+        still does for the entry the agent says it acted on."""
+        mem.read("acme/support", "fix-restart")
+        mem.record_attempt(
+            summary="restart per runbook did nothing",
+            causal_entry_keys=["acme/support/fix-restart"],
+        )
+        mem.read("acme/support", "fix-rotate-key")
+        updated = {e.key: e for e in mem.commit_outcome("ticket-1", OutcomeType.SUCCESS)}
+        stale = updated["fix-restart"]
+        assert stale.failure_count == 1 and stale.success_count == 0
+        assert stale.confidence < ev.DISCREDIT_THRESHOLD
+        assert stale.evidence_status == "discredited"
+        assert updated["fix-rotate-key"].evidence_status == "validated"
 
     def test_trace_carries_attempts_and_final_action_index(self, mem: AgentMemory) -> None:
         _fail_then_succeed(mem)
@@ -136,7 +157,11 @@ class TestSdkAttemptBoundaries:
         """The three-round-trip episode: no record_action calls, actions arrive
         as ``tool_calls`` on the commit and the attempt names its indices."""
         mem.read("acme/support", "fix-restart")
-        attempt = mem.record_attempt(summary="restart did nothing", action_indices=[0])
+        attempt = mem.record_attempt(
+            summary="restart did nothing",
+            action_indices=[0],
+            causal_entry_keys=["acme/support/fix-restart"],
+        )
         assert attempt.action_indices == [0]
         mem.read("acme/support", "fix-rotate-key")
         updated = {

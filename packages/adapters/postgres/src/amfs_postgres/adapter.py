@@ -35,7 +35,7 @@ from amfs_core.exclusions import (
     ENTITY_PATH_NOT_EXCLUDED_SQL,
 )
 from amfs_core.actions import entity_paths_of, recorded_covariates, recorded_environment
-from amfs_core.evidence import cited_entries, outcome_model, outcome_read_keys, outcome_verified_by
+from amfs_core.evidence import cited_entries, outcome_entry_keys, outcome_model, outcome_verified_by
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
     Agent,
@@ -888,6 +888,7 @@ class PostgresAdapter(AdapterABC):
         self._has_task_text_col = False
         self._has_covariates_col = False
         self._has_verified_by_col = False
+        self._has_entry_role_cols = False
         self._pgvector_version: tuple[int, ...] | None = None
         # When an embedder is provided, embeddings are computed at write time and
         # persisted, so ANN retrieval (semantic_search / pgvector HNSW) works
@@ -1891,7 +1892,8 @@ class PostgresAdapter(AdapterABC):
                     WHERE table_name = 'amfs_outcomes'
                       AND column_name IN (
                         'actions_taken', 'task_embedding', 'environment', 'task_text',
-                        'verified_by', 'covariates'
+                        'verified_by', 'covariates',
+                        'in_view_entry_keys', 'not_followed_entry_keys'
                       )
                     """,
                 )
@@ -1902,6 +1904,9 @@ class PostgresAdapter(AdapterABC):
                 self._has_task_text_col = "task_text" in found
                 self._has_verified_by_col = "verified_by" in found
                 self._has_covariates_col = "covariates" in found
+                self._has_entry_role_cols = (
+                    "in_view_entry_keys" in found and "not_followed_entry_keys" in found
+                )
 
     # ------------------------------------------------------------------
     # read
@@ -4290,7 +4295,7 @@ class PostgresAdapter(AdapterABC):
                     # derivation here, because the trigger's uplift refresh
                     # (migration 012) finds an entity's sessions by this column.
                     entity_paths = list(record.entity_paths or []) or entity_paths_of(
-                        sorted(outcome_read_keys(record))
+                        sorted(outcome_entry_keys(record))
                     )
                     columns += ["actions_taken", "entity_paths", "situation"]
                     placeholders += ["%s::jsonb", "%s", "%s"]
@@ -4307,6 +4312,23 @@ class PostgresAdapter(AdapterABC):
                     columns.append("verified_by")
                     placeholders.append("%s")
                     params.append(verified_by)
+                # The terminal step's entry roles (migration 012): the keys it
+                # only had in view, and the keys a failed outcome did not
+                # follow. The attempts carry their own inside the JSON above.
+                # On a database that has not got the columns the roles are
+                # left out and the step charges its keys in full, as before;
+                # a key named as not followed is already out of
+                # ``causal_entry_keys`` (the record keeps the roles apart), so
+                # it is never charged there either.
+                if getattr(self, "_has_entry_role_cols", False):
+                    if record.in_view_entry_keys:
+                        columns.append("in_view_entry_keys")
+                        placeholders.append("%s")
+                        params.append(list(record.in_view_entry_keys))
+                    if record.not_followed_entry_keys:
+                        columns.append("not_followed_entry_keys")
+                        placeholders.append("%s")
+                        params.append(list(record.not_followed_entry_keys))
                 if getattr(self, "_has_outcome_env_col", False):
                     env = recorded_environment({"session_metadata": record.session_metadata or {}})
                     if env:
@@ -4509,6 +4531,8 @@ class PostgresAdapter(AdapterABC):
             entity_path=entity_path, since=since, outcome_ref=outcome_ref
         )
         extra = ", actions_taken, entity_paths, situation" if self._has_action_cols else ""
+        if getattr(self, "_has_entry_role_cols", False):
+            extra += ", in_view_entry_keys, not_followed_entry_keys"
         sql = f"""
             SELECT outcome_ref, outcome_type, causal_confidence,
                    committed_at, causal_entry_keys, agent_id,
@@ -4545,6 +4569,8 @@ class PostgresAdapter(AdapterABC):
                     actions_taken=_jsonb(row.get("actions_taken"), []),
                     entity_paths=list(row.get("entity_paths") or []),
                     situation=row.get("situation"),
+                    in_view_entry_keys=list(row.get("in_view_entry_keys") or []),
+                    not_followed_entry_keys=list(row.get("not_followed_entry_keys") or []),
                 )
             )
         return results

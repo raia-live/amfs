@@ -26,10 +26,30 @@
 -- The row-copy shape (007) and the credited claim rule (versions) are
 -- unchanged. The step takes a ninth argument and the trigger passes it, so
 -- the 009 trigger is redefined here; the eight-argument step is retired.
+--
+-- And the two roles an entry can have in a step besides "acted on":
+--   in view       read in the step, not named by the agent. The step's tenth
+--                 argument. The first failure of an entry that has never
+--                 failed is capped at the weight that leaves the posterior on
+--                 DISCREDIT_THRESHOLD and does not discredit it; any later
+--                 failure is weighed in full
+--                 (amfs_core.evidence.in_view_first_failure / in_view_room).
+--   not followed  entries a failed step names as what it should have
+--                 followed: credited a success, split over those entries,
+--                 never charged, no validator added, and weighed as
+--                 unverified (what an owner verified is the outcome, not
+--                 the agent's account of what it left unfollowed).
+-- Both are read off each attempt object and, for the terminal step, off the
+-- two columns added below. Nothing is dropped: the nine-argument step stays
+-- as a call into the ten-argument one with no entry in view, so there is no
+-- moment during an upgrade (or a rollback to the previous release, whose
+-- trigger calls nine arguments) at which the live trigger has no step to call.
 
 ALTER TABLE amfs_outcomes ADD COLUMN IF NOT EXISTS verified_by TEXT;
 ALTER TABLE amfs_memory_entries ADD COLUMN IF NOT EXISTS uplift DOUBLE PRECISION;
 ALTER TABLE amfs_memory_entries ADD COLUMN IF NOT EXISTS uplift_sessions INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE amfs_outcomes ADD COLUMN IF NOT EXISTS in_view_entry_keys TEXT[];
+ALTER TABLE amfs_outcomes ADD COLUMN IF NOT EXISTS not_followed_entry_keys TEXT[];
 
 CREATE OR REPLACE FUNCTION amfs_outcome_is_success(t TEXT) RETURNS BOOLEAN AS $$
     SELECT t IN ('clean_deploy',
@@ -197,7 +217,8 @@ CREATE OR REPLACE FUNCTION amfs_apply_outcome_step(
     p_model TEXT,
     p_versions JSONB,
     p_agent TEXT,
-    p_verified BOOLEAN
+    p_verified BOOLEAN,
+    p_in_view TEXT[]
 ) RETURNS INTEGER AS $$
 DECLARE
     keys TEXT[];
@@ -217,6 +238,9 @@ DECLARE
     new_conf NUMERIC;
     disc TIMESTAMPTZ;
     surprise NUMERIC;
+    soft BOOLEAN;
+    room NUMERIC;
+    floor_conf NUMERIC;
     vals JSONB;
     touched INTEGER := 0;
     -- amfs_core.evidence, rendered:
@@ -279,6 +303,7 @@ BEGIN
         END IF;
 
         prior := LEAST(1.0, GREATEST(0.0, COALESCE(cur.prior_confidence, cur.confidence)));
+        soft := FALSE;
 
         IF p_model = 'multiplicative' THEN
             new_conf := LEAST(1.0, GREATEST(0.0,
@@ -303,13 +328,33 @@ BEGIN
                  / n_keys
                  * surprise
                  * CASE WHEN COALESCE(p_verified, FALSE) THEN c_verified ELSE 1.0 END;
-            e_s := COALESCE(cur.evidence_success, 0) * c_decay + CASE WHEN is_ok THEN w ELSE 0 END;
-            e_f := COALESCE(cur.evidence_failure, 0) * c_decay + CASE WHEN is_ok THEN 0 ELSE w END;
-            new_conf := LEAST(1.0, GREATEST(0.0,
+            e_s := COALESCE(cur.evidence_success, 0) * c_decay;
+            e_f := COALESCE(cur.evidence_failure, 0) * c_decay;
+            -- In view: the first failure of an entry that has never failed,
+            -- when the step only had it in view, is capped at the weight that
+            -- leaves the posterior on the threshold, and does not discredit
+            -- (amfs_core.evidence.in_view_first_failure / in_view_room).
+            soft := NOT is_ok AND COALESCE(cur.failure_count, 0) = 0
+                    AND entry_key = ANY(COALESCE(p_in_view, '{}'));
+            floor_conf := 0.0;
+            IF soft THEN
+                room := GREATEST(0.0,
+                    (c_prior_strength * prior + e_s) / c_discredit
+                    - c_prior_strength - e_s - e_f);
+                IF w > room THEN
+                    w := room;
+                    IF room > 0 THEN
+                        floor_conf := c_discredit;
+                    END IF;
+                END IF;
+            END IF;
+            e_s := e_s + CASE WHEN is_ok THEN w ELSE 0 END;
+            e_f := e_f + CASE WHEN is_ok THEN 0 ELSE w END;
+            new_conf := LEAST(1.0, GREATEST(floor_conf,
                 (c_prior_strength * prior + e_s) / (c_prior_strength + e_s + e_f)));
         END IF;
 
-        IF new_conf < c_discredit AND NOT is_ok THEN
+        IF new_conf < c_discredit AND NOT is_ok AND NOT soft THEN
             disc := COALESCE(cur.discredited_at, NOW());
         ELSIF new_conf >= c_discredit THEN
             disc := NULL;
@@ -363,22 +408,72 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- The 009 trigger, calling the nine-argument step: verified_by on the outcome
+-- The nine-argument step, as the previous rendering of this file defined its
+-- signature: now a call into the ten-argument one with no entry in view,
+-- which is the arithmetic it always had. Kept, not dropped, so a trigger
+-- that still calls nine arguments (this file half applied, or the previous
+-- release put back) always finds a step.
+CREATE OR REPLACE FUNCTION amfs_apply_outcome_step(
+    p_namespace TEXT,
+    p_account UUID,
+    p_keys TEXT[],
+    p_outcome_type TEXT,
+    p_causal_confidence NUMERIC,
+    p_model TEXT,
+    p_versions JSONB,
+    p_agent TEXT,
+    p_verified BOOLEAN
+) RETURNS INTEGER AS $$
+BEGIN
+    RETURN amfs_apply_outcome_step(
+        p_namespace, p_account, p_keys, p_outcome_type, p_causal_confidence,
+        p_model, p_versions, p_agent, p_verified, NULL::TEXT[]
+    );
+END;
+$$ LANGUAGE plpgsql;
+
+-- A JSON array of strings as TEXT[]; anything else (absent, null, an
+-- object) is the empty array. The trigger reads the roles through this, off
+-- the attempt objects and off to_jsonb(NEW), so a record from a client that
+-- does not send them, or a table that has not got the two columns yet, is a
+-- step with no entry in view and none not followed: the arithmetic as it was.
+CREATE OR REPLACE FUNCTION amfs_jsonb_text_array(j JSONB) RETURNS TEXT[] AS $$
+    SELECT COALESCE(array_agg(x), '{}')
+    FROM jsonb_array_elements_text(
+        CASE WHEN jsonb_typeof(j) = 'array' THEN j ELSE '[]'::jsonb END
+    ) AS x;
+$$ LANGUAGE sql IMMUTABLE;
+
+-- The 009 trigger, calling the ten-argument step: verified_by on the outcome
 -- row is the verification flag, and after every step the cited keys' uplift
 -- is refreshed from a window that now includes this outcome. The step reads
 -- the uplift the row carried before it, so an outcome never grades its own
 -- credit.
+--
+-- Each step carries its entries' roles (amfs_core.evidence.outcome_charges):
+-- the keys it only had in view go to the step as its tenth argument, and the
+-- keys a *failed* step did not follow leave its charged keys and are handed
+-- a success of their own, with no agent so no validator is added. The
+-- terminal step's two lists are read through to_jsonb(NEW), not NEW.<column>:
+-- a table that has not got the columns yet then reads as "none", where a
+-- direct reference would fail every outcome insert.
 CREATE OR REPLACE FUNCTION amfs_propagate_outcome() RETURNS TRIGGER AS $$
 DECLARE
     model TEXT;
     att JSONB;
+    att_type TEXT;
     att_keys TEXT[];
+    step_in_view TEXT[];
+    step_skipped TEXT[];
+    term_keys TEXT[];
+    row_json JSONB;
     all_keys TEXT[];
     verified BOOLEAN;
 BEGIN
     model := COALESCE(NULLIF(current_setting('amfs.outcome_model', true), ''), 'evidence');
     verified := NULLIF(btrim(COALESCE(NEW.verified_by, '')), '') IS NOT NULL;
     all_keys := COALESCE(NEW.causal_entry_keys, '{}');
+    row_json := to_jsonb(NEW);
 
     -- Failed attempts first, oldest to newest: each hands its own failure to
     -- the entries that attempt relied on.
@@ -388,23 +483,62 @@ BEGIN
     LOOP
         SELECT COALESCE(array_agg(x), '{}') INTO att_keys
         FROM jsonb_array_elements_text(COALESCE(att->'causal_entry_keys', '[]'::jsonb)) AS x;
-        all_keys := all_keys || att_keys;
+        att_type := COALESCE(att->>'outcome_type', 'minor_failure');
+        step_in_view := amfs_jsonb_text_array(att->'in_view_entry_keys');
+        step_skipped := '{}';
+        IF amfs_outcome_is_known(att_type) AND NOT amfs_outcome_is_success(att_type) THEN
+            step_skipped := amfs_jsonb_text_array(att->'not_followed_entry_keys');
+        END IF;
+        IF cardinality(step_skipped) > 0 THEN
+            SELECT COALESCE(array_agg(x), '{}') INTO att_keys
+            FROM unnest(att_keys) AS x WHERE x <> ALL(step_skipped);
+        END IF;
+        all_keys := all_keys || att_keys || step_skipped;
         PERFORM amfs_apply_outcome_step(
             NEW.namespace, NEW.account_id, att_keys,
-            COALESCE(att->>'outcome_type', 'minor_failure'),
+            att_type,
             NEW.causal_confidence, model,
             COALESCE(att->'causal_entry_versions', '{}'::jsonb),
-            NEW.agent_id, verified
+            NEW.agent_id, verified, step_in_view
         );
+        IF cardinality(step_skipped) > 0 THEN
+            PERFORM amfs_apply_outcome_step(
+                NEW.namespace, NEW.account_id, step_skipped,
+                'success',
+                NEW.causal_confidence, model,
+                COALESCE(att->'causal_entry_versions', '{}'::jsonb),
+                NULL, FALSE, NULL
+            );
+        END IF;
     END LOOP;
 
     -- Then the terminal outcome to the entries the resolution relied on.
+    term_keys := NEW.causal_entry_keys;
+    step_in_view := amfs_jsonb_text_array(row_json->'in_view_entry_keys');
+    step_skipped := '{}';
+    IF amfs_outcome_is_known(NEW.outcome_type)
+       AND NOT amfs_outcome_is_success(NEW.outcome_type) THEN
+        step_skipped := amfs_jsonb_text_array(row_json->'not_followed_entry_keys');
+    END IF;
+    IF cardinality(step_skipped) > 0 THEN
+        SELECT COALESCE(array_agg(x), '{}') INTO term_keys
+        FROM unnest(COALESCE(NEW.causal_entry_keys, '{}')) AS x WHERE x <> ALL(step_skipped);
+        all_keys := all_keys || step_skipped;
+    END IF;
     PERFORM amfs_apply_outcome_step(
-        NEW.namespace, NEW.account_id, NEW.causal_entry_keys,
+        NEW.namespace, NEW.account_id, term_keys,
         NEW.outcome_type, NEW.causal_confidence, model,
         COALESCE(NEW.causal_entry_versions, '{}'::jsonb),
-        NEW.agent_id, verified
+        NEW.agent_id, verified, step_in_view
     );
+    IF cardinality(step_skipped) > 0 THEN
+        PERFORM amfs_apply_outcome_step(
+            NEW.namespace, NEW.account_id, step_skipped,
+            'success', NEW.causal_confidence, model,
+            COALESCE(NEW.causal_entry_versions, '{}'::jsonb),
+            NULL, FALSE, NULL
+        );
+    END IF;
 
     PERFORM amfs_refresh_uplift(NEW.namespace, NEW.account_id, all_keys);
 

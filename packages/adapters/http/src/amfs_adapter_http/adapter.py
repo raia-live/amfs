@@ -430,6 +430,14 @@ class HttpAdapter(AdapterABC):
             body["final_action_index"] = record.final_action_index
         if record.causal_entry_versions:
             body["causal_entry_versions"] = dict(record.causal_entry_versions)
+        # Each key's role in the terminal step (the attempts carry their own):
+        # what was only in view, and what a failed outcome did not follow. A
+        # server that does not know the fields ignores them and charges the
+        # causal keys in full, which is what it did before they existed.
+        if record.in_view_entry_keys:
+            body["in_view_entry_keys"] = list(record.in_view_entry_keys)
+        if record.not_followed_entry_keys:
+            body["not_followed_entry_keys"] = list(record.not_followed_entry_keys)
         # Action-level learning: what happened to each decisive action, and the
         # entities the outcome is about. Both are derived client-side by the SDK
         # (it has the unscanned action list, so the indices line up) and stored

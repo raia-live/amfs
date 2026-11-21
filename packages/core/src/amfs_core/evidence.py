@@ -56,14 +56,36 @@ of retrieval. Without it the same failure leaves the rule contested at ~0.62; a
 second failure still discredits it (~0.40), so a regime change is unlearned in
 two strikes exactly as before.
 
+Two things an outcome can say about an entry besides "this was acted on",
+both carried on the record (``OutcomeRecord`` / ``AttemptRecord``):
+
+* **In view** (``in_view_entry_keys``): the entry was read in the step and
+  the agent did not name it as what it acted on — the read window's default.
+  A session reads more than it follows, so a failure charged to everything in
+  view marks down entries that had nothing to do with it; with full surprise
+  one such failure took a correct entry at 1.0 to 0.33 and out of retrieval.
+  A failure on an in-view entry that has **never failed before** is capped at
+  the weight that leaves the posterior on :data:`DISCREDIT_THRESHOLD`: the
+  entry is lowered and reads ``contested``, and it is not discredited. Any
+  later failure, in view or named, is weighed in full, so an entry that keeps
+  turning up in failures is still unlearned on the second one. A key the
+  agent names keeps the full charge on the first failure, as before.
+* **Not followed** (``not_followed_entry_keys``): the agent had the entry, or
+  should have, did not follow it, and that is why the step failed. The
+  failure is evidence *for* the entry: it is credited a success, split over
+  the entries named that way, and never charged. It is not counted among
+  what the step read, and the agent is not added to the entry's validators:
+  it stood behind the claim by failing without it, not by succeeding with it.
+
 With the defaults below a fresh 0.7 entry drops to ~0.26 on its first failure
 and lifts to ~0.82 on its first success; a long-validated entry survives one
 failure (contested, ~0.62) and is discredited on the second. Those are the
 timescales a regime change in a live system plays out on.
 
-The same arithmetic is implemented in PL/pgSQL in ``amfs_postgres`` migrations
-008 and 009 and must be kept identical; ``tests/unit/test_evidence.py`` pins the
-numbers both implementations have to produce.
+The same arithmetic is implemented in PL/pgSQL, rendered from this module by
+``amfs_postgres.evidence_sql`` (migration 012), and must be kept identical;
+``tests/unit/test_evidence.py`` pins the numbers both implementations have to
+produce.
 
 ``AMFS_OUTCOME_MODEL=multiplicative`` restores the constant-multiplier model
 for deployments that need the old numbers.
@@ -312,6 +334,9 @@ class EvidenceUpdate:
     #: How much the outcome moved the posterior, signed. Exposed so callers
     #: can report "this failure cost the entry 0.31" instead of just the result.
     delta: float
+    #: The failure found the entry only in view and it had never failed
+    #: before, so the weight was capped and the entry was not discredited.
+    softened: bool = False
 
     def as_entry_update(self, now: datetime) -> dict[str, Any]:
         return {
@@ -334,6 +359,30 @@ def first_strike(outcome_type: OutcomeType | str, success_count: int, failure_co
         and int(failure_count) == 0
         and int(success_count) >= FIRST_STRIKE_MIN_WINS
     )
+
+
+def in_view_first_failure(
+    outcome_type: OutcomeType | str, failure_count: int, in_view: bool
+) -> bool:
+    """Is this a failure that only had the entry in view, on an entry that has
+    never failed? That one is capped (:func:`in_view_room`) and does not
+    discredit; every other failure is weighed as it always was."""
+    return bool(in_view) and not is_success(outcome_type) and int(failure_count) == 0
+
+
+def in_view_room(prior: float, evidence_success: float, evidence_failure: float) -> float:
+    """The most failure mass that leaves the posterior on the threshold.
+
+    Solved from ``posterior(prior, e_s, e_f + w) == DISCREDIT_THRESHOLD`` for
+    ``w``, with the masses already decayed. Zero when the entry is at or
+    under the threshold as it stands: there is no room, and the failure adds
+    nothing.
+    """
+    room = (
+        (PRIOR_STRENGTH * prior + evidence_success) / DISCREDIT_THRESHOLD
+        - PRIOR_STRENGTH - evidence_success - evidence_failure
+    )
+    return max(0.0, room)
 
 
 def verification_weight(verified: bool) -> float:
@@ -382,6 +431,21 @@ def outcome_read_keys(record: Any) -> set[str]:
     return keys
 
 
+def outcome_entry_keys(record: Any) -> set[str]:
+    """Every entry spec a record is about: what the session read
+    (:func:`outcome_read_keys`) and what its failed steps did not follow.
+    The second set is not a read, so uplift does not count it, but the
+    outcome still concerns those entries' entities. A step that succeeded,
+    or whose type is unknown, confirms nothing, so its list adds nothing."""
+    keys = outcome_read_keys(record)
+    for step in (record, *(getattr(record, "attempts", None) or ())):
+        outcome_type = getattr(step, "outcome_type", None)
+        outcome_type = getattr(outcome_type, "value", outcome_type)
+        if is_known(outcome_type) and not is_success(outcome_type):
+            keys.update(str(k) for k in (getattr(step, "not_followed_entry_keys", None) or ()))
+    return keys
+
+
 def uplift_counts(
     records: Iterable[Any],
     entity_path: str,
@@ -394,7 +458,8 @@ def uplift_counts(
     ``MemoryEntry.uplift`` (the Postgres adapter renders it to SQL).
 
     The sample is the newest ``UPLIFT_WINDOW`` known outcomes about the entity
-    (``entity_paths`` names it, or a cited key is under it) from the last
+    (``entity_paths`` names it, or a key the record is about is under it —
+    :func:`outcome_entry_keys`) from the last
     ``UPLIFT_WINDOW_DAYS``. A session *read* a key when any of its steps
     cited it (:func:`outcome_read_keys`); success is :func:`is_success`.
     """
@@ -412,7 +477,10 @@ def uplift_counts(
             continue
         read = outcome_read_keys(record)
         paths = set(getattr(record, "entity_paths", None) or ())
-        if entity_path not in paths and not any(k.startswith(prefix) for k in read):
+        # A failed step that names only what it did not follow is still an
+        # outcome about the entity: a session that went without the entry.
+        about = outcome_entry_keys(record)
+        if entity_path not in paths and not any(k.startswith(prefix) for k in about):
             continue
         sample.append((at, is_success(outcome_type), read))
     sample.sort(key=lambda row: row[0], reverse=True)
@@ -495,6 +563,7 @@ def apply_outcome(
     n_causal: int = 1,
     was_discredited: bool | None = None,
     verified: bool = False,
+    in_view: bool = False,
 ) -> EvidenceUpdate:
     """Compute the evidence update one outcome makes to ``entry``.
 
@@ -505,6 +574,9 @@ def apply_outcome(
     evidence lifts the posterior back over the threshold. The entry's share
     of the split is read off its ``uplift`` (:func:`uplift_credit`);
     *verified* is whether the outcome was decided outside the agent.
+    *in_view* says the step only had the entry in view (the agent did not
+    name it): its first failure is capped and does not discredit it — see
+    the module docstring.
     """
     prior = entry.prior_confidence if entry.prior_confidence is not None else entry.confidence
     prior = clamp_confidence(prior)
@@ -522,13 +594,24 @@ def apply_outcome(
         ),
         verified=verified,
     )
-    e_s = entry.evidence_success * EVIDENCE_DECAY + (w if success else 0.0)
-    e_f = entry.evidence_failure * EVIDENCE_DECAY + (0.0 if success else w)
-    new_conf = posterior(prior, e_s, e_f)
+    e_s = entry.evidence_success * EVIDENCE_DECAY
+    e_f = entry.evidence_failure * EVIDENCE_DECAY
+    softened = in_view_first_failure(outcome_type, entry.failure_count, in_view)
+    floor = 0.0
+    if softened:
+        room = in_view_room(prior, e_s, e_f)
+        if w > room:
+            w = room
+            # Capped onto the threshold: hold the posterior there, so a
+            # rounding error cannot leave it a hair under.
+            floor = DISCREDIT_THRESHOLD if room > 0 else 0.0
+    e_s += w if success else 0.0
+    e_f += 0.0 if success else w
+    new_conf = max(posterior(prior, e_s, e_f), floor)
     discredited_before = (
         was_discredited if was_discredited is not None else entry.discredited_at is not None
     )
-    if new_conf < DISCREDIT_THRESHOLD and not success:
+    if new_conf < DISCREDIT_THRESHOLD and not success and not softened:
         discredited = True
     elif new_conf >= DISCREDIT_THRESHOLD:
         discredited = False
@@ -545,6 +628,7 @@ def apply_outcome(
         last_outcome=_name(outcome_type),
         discredited=discredited,
         delta=new_conf - entry.confidence,
+        softened=softened,
     )
 
 
@@ -727,14 +811,79 @@ def _split_spec(spec: str) -> tuple[str, str] | None:
     return parts[0], parts[1]
 
 
-def outcome_steps(record: OutcomeRecord) -> list[tuple[OutcomeType, list[str]]]:
-    """The ordered ``(outcome_type, causal_entry_keys)`` steps a record applies.
+@dataclass(frozen=True)
+class OutcomeStep:
+    """One application of an outcome type to a set of entries.
+
+    ``in_view`` is the subset of ``keys`` the step only had in view. A step
+    with ``confirms`` set is the credit a *failed* step hands the entries it
+    did not follow: its ``outcome_type`` is a success and it is split over
+    those entries alone.
+    """
+
+    outcome_type: OutcomeType
+    keys: list[str]
+    versions: dict[str, int]
+    in_view: frozenset[str] = frozenset()
+    confirms: bool = False
+
+
+def _steps_of(
+    outcome_type: OutcomeType,
+    causal: Iterable[str],
+    versions: dict[str, int],
+    in_view: Iterable[str],
+    not_followed: Iterable[str],
+) -> list[OutcomeStep]:
+    """The step a failed attempt or a terminal outcome applies, then — when it
+    failed and named entries it did not follow — the confirmation of those."""
+    failed = is_known(outcome_type) and not is_success(outcome_type)
+    confirmed = list(dict.fromkeys(not_followed)) if failed else []
+    skip = set(confirmed)
+    keys = [k for k in dict.fromkeys(causal) if k not in skip]
+    steps = [OutcomeStep(outcome_type, keys, dict(versions), frozenset(in_view) & set(keys))]
+    if confirmed:
+        steps.append(OutcomeStep(OutcomeType.SUCCESS, confirmed, dict(versions), confirms=True))
+    return steps
+
+
+def outcome_charges(record: OutcomeRecord) -> list[OutcomeStep]:
+    """Every step a record applies, in order, with each entry's role.
 
     Failed attempts first, oldest to newest, then the terminal outcome. Each
     step's keys are deduplicated, and each step is credit-split over its own
     keys, not over the union — an attempt that read one entry hands it a full
-    unit of failure even if the whole task read twenty.
+    unit of failure even if the whole task read twenty. A failed step that
+    names entries it did not follow is followed by their confirmation; a
+    success has none (what a success did not follow says nothing about it).
     """
+    steps: list[OutcomeStep] = []
+    for attempt in sorted(record.attempts, key=lambda a: a.attempt):
+        for step in _steps_of(
+            attempt.outcome_type,
+            attempt.causal_entry_keys,
+            attempt.causal_entry_versions,
+            getattr(attempt, "in_view_entry_keys", ()) or (),
+            getattr(attempt, "not_followed_entry_keys", ()) or (),
+        ):
+            if step.keys:
+                steps.append(step)
+    terminal = _steps_of(
+        record.outcome_type,
+        record.causal_entry_keys,
+        record.causal_entry_versions,
+        getattr(record, "in_view_entry_keys", ()) or (),
+        getattr(record, "not_followed_entry_keys", ()) or (),
+    )
+    # The terminal step is kept even when it cites nothing, as it always was.
+    steps.append(terminal[0])
+    steps.extend(step for step in terminal[1:] if step.keys)
+    return steps
+
+
+def outcome_steps(record: OutcomeRecord) -> list[tuple[OutcomeType, list[str]]]:
+    """The ordered ``(outcome_type, entry_keys)`` steps a record applies
+    (:func:`outcome_charges` without the roles)."""
     return [(t, keys) for t, keys, _ in outcome_steps_with_versions(record)]
 
 
@@ -742,17 +891,7 @@ def outcome_steps_with_versions(
     record: OutcomeRecord,
 ) -> list[tuple[OutcomeType, list[str], dict[str, int]]]:
     """``outcome_steps`` plus, per step, the ``entry_key -> version`` map read."""
-    steps: list[tuple[OutcomeType, list[str], dict[str, int]]] = []
-    for attempt in sorted(record.attempts, key=lambda a: a.attempt):
-        keys = list(dict.fromkeys(attempt.causal_entry_keys))
-        if keys:
-            steps.append((attempt.outcome_type, keys, dict(attempt.causal_entry_versions)))
-    steps.append((
-        record.outcome_type,
-        list(dict.fromkeys(record.causal_entry_keys)),
-        dict(record.causal_entry_versions),
-    ))
-    return steps
+    return [(s.outcome_type, list(s.keys), dict(s.versions)) for s in outcome_charges(record)]
 
 
 #: ``(entity_path, key, version) -> MemoryEntry | None``: how an adapter finds
@@ -802,7 +941,8 @@ def apply_record_to_entry(
     updates: list[EvidenceUpdate] = []
     current = entry
     verified = outcome_verified_by(record) is not None
-    for outcome_type, keys, versions in outcome_steps_with_versions(record):
+    for step in outcome_charges(record):
+        outcome_type, keys, versions = step.outcome_type, step.keys, step.versions
         if entry.entry_key not in keys:
             continue
         if not claim_still_held(entry, versions.get(entry.entry_key), version_lookup):
@@ -819,14 +959,19 @@ def apply_record_to_entry(
                 outcome_type,
                 causal_confidence=record.causal_confidence,
                 n_causal=len(keys),
-                verified=verified,
+                # What was verified is the outcome, not the agent's account of
+                # which entry it left unfollowed: a confirmation weighs as unverified.
+                verified=verified and not step.confirms,
+                in_view=entry.entry_key in step.in_view,
             )
         fields = upd.as_entry_update(now)
         if upd.discredited and current.discredited_at is not None:
             # Still discredited: keep the moment it happened, not the latest hit.
             fields["discredited_at"] = current.discredited_at
         fields["validators"] = validators_after(
-            current.validators, record.agent_id, is_success(outcome_type)
+            current.validators,
+            record.agent_id,
+            is_success(outcome_type) and not step.confirms,
         )
         current = current.model_copy(update={**fields, "outcome_count": current.outcome_count + 1})
         updates.append(upd)
@@ -1109,6 +1254,8 @@ __all__ = [
     "UPLIFT_WINDOW",
     "UPLIFT_WINDOW_DAYS",
     "VERIFIED_EVIDENCE_WEIGHT",
+    "outcome_charges",
+    "outcome_entry_keys",
     "outcome_read_keys",
     "outcome_verified_by",
     "uplift_counts",

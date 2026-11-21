@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class MemoryType(str, Enum):
@@ -605,8 +605,46 @@ class AttemptRecord(BaseModel):
     #: applied only if the key still says what it said then; see
     #: ``OutcomeRecord.causal_entry_versions``.
     causal_entry_versions: dict[str, int] = Field(default_factory=dict)
+    #: The subset of ``causal_entry_keys`` this attempt only had *in view*:
+    #: read during it, not named by the agent as what it acted on. The SDK
+    #: fills it when the keys came from the read window. A failure lowers an
+    #: in-view entry but cannot discredit one that has never failed before
+    #: (``amfs_core.evidence.apply_outcome``); a key the agent named keeps the
+    #: full charge. Empty on a record from a client that does not say, which
+    #: is every key charged in full, as before.
+    in_view_entry_keys: list[str] = Field(default_factory=list)
+    #: Entries the agent had, or should have had, and did **not** follow, when
+    #: that is why the attempt failed. The failure is evidence *for* them, so
+    #: they are credited a success and never charged, and they are not counted
+    #: among the entries the session read. Never also in ``causal_entry_keys``.
+    not_followed_entry_keys: list[str] = Field(default_factory=list)
     action_indices: list[int] = Field(default_factory=list)
     summary: str | None = None
+
+    @model_validator(mode="after")
+    def _separate_roles(self) -> AttemptRecord:
+        _separate_entry_roles(self)
+        return self
+
+
+def _separate_entry_roles(record: Any) -> None:
+    """Keep the three roles of a step apart, in place.
+
+    An entry is charged, only in view, or not followed: a key named as not
+    followed leaves the charged keys (the agent's more specific statement
+    wins over a read window that happened to hold it), and ``in_view`` is
+    kept to keys that are charged. Order is preserved and duplicates dropped,
+    so every reader of a record sees the same sets the SQL step computes.
+    """
+    not_followed = list(dict.fromkeys(str(k) for k in record.not_followed_entry_keys if k))
+    if not_followed:
+        skip = set(not_followed)
+        record.causal_entry_keys = [k for k in record.causal_entry_keys if k not in skip]
+    charged = set(record.causal_entry_keys)
+    record.not_followed_entry_keys = not_followed
+    record.in_view_entry_keys = [
+        k for k in dict.fromkeys(str(k) for k in record.in_view_entry_keys if k) if k in charged
+    ]
 
 
 class OutcomeRecord(BaseModel):
@@ -624,6 +662,12 @@ class OutcomeRecord(BaseModel):
     #: the outcome is not applied to the new claim. Keys absent from the map
     #: are applied unconditionally, as before.
     causal_entry_versions: dict[str, int] = Field(default_factory=dict)
+    #: The subset of ``causal_entry_keys`` that was only in view, and the
+    #: entries a *failed* terminal outcome did not follow — the terminal
+    #: step's counterparts of the two ``AttemptRecord`` fields of the same
+    #: names. ``not_followed_entry_keys`` is ignored on a success.
+    in_view_entry_keys: list[str] = Field(default_factory=list)
+    not_followed_entry_keys: list[str] = Field(default_factory=list)
     agent_id: str
     #: Failed attempts that preceded the terminal outcome, oldest first. Each is
     #: applied to its own causal entries before ``outcome_type`` is applied to
@@ -686,6 +730,11 @@ class OutcomeRecord(BaseModel):
     #: Default ``False``, so a caller that posts no trace — a direct REST client
     #: — still gets the server-side seal, which for it is the only one there is.
     trace_follows: bool = False
+
+    @model_validator(mode="after")
+    def _separate_roles(self) -> OutcomeRecord:
+        _separate_entry_roles(self)
+        return self
 
 
 class TraceEntry(BaseModel):

@@ -40,7 +40,9 @@ def _validate(mem: AgentMemory, key: str, times: int) -> None:
 def _discredit(mem: AgentMemory, key: str) -> None:
     mem._read_tracker.clear()
     mem.read("acme/support", key)
-    mem.commit_outcome(f"bad-{key}", OutcomeType.FAILURE)
+    mem.commit_outcome(
+        f"bad-{key}", OutcomeType.FAILURE, causal_entry_keys=[f"acme/support/{key}"]
+    )
 
 
 class TestUnchangedClaim:

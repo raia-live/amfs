@@ -53,10 +53,12 @@ def test_the_rendering_carries_every_constant_and_table_of_the_model() -> None:
 
 
 def test_the_rendering_replaces_the_functions_008_and_009_defined() -> None:
-    """The same four scalar functions, the step with its ninth argument
-    (verification) in place of 009's eight-argument one, and the trigger
-    redefined to pass it — the 009 trigger would otherwise keep calling the
-    overload this file drops."""
+    """The same four scalar functions, the step with verification and the
+    in-view keys after 009's eight arguments, and the trigger redefined to
+    pass them — the 009 trigger would otherwise keep calling the overload this
+    file drops. The nine-argument step is kept as a call into the full one:
+    a release that drops it leaves the previous release's trigger, still
+    live until the trigger is replaced further down, with nothing to call."""
     sql = evidence_sql.render_evidence_sql()
     for fn in (
         "amfs_outcome_is_success(t TEXT)",
@@ -68,7 +70,7 @@ def test_the_rendering_replaces_the_functions_008_and_009_defined() -> None:
         "amfs_propagate_outcome()",
     ):
         assert f"CREATE OR REPLACE FUNCTION {fn}" in sql
-    assert sql.count("CREATE OR REPLACE FUNCTION amfs_apply_outcome_step(") == 1
+    assert sql.count("CREATE OR REPLACE FUNCTION amfs_apply_outcome_step(") == 2
     nine = (MIGRATIONS / "009_action_priors.sql").read_text(encoding="utf-8")
     sig_009 = nine.split("CREATE OR REPLACE FUNCTION amfs_apply_outcome_step(", 1)[1].split(
         ") RETURNS", 1
@@ -76,7 +78,22 @@ def test_the_rendering_replaces_the_functions_008_and_009_defined() -> None:
     sig_012 = sql.split("CREATE OR REPLACE FUNCTION amfs_apply_outcome_step(", 1)[1].split(
         ") RETURNS", 1
     )[0]
-    assert sig_012 == sig_009.rstrip() + ",\n    p_verified BOOLEAN\n"
+    assert sig_012 == sig_009.rstrip() + ",\n    p_verified BOOLEAN,\n    p_in_view TEXT[]\n"
+    full, wrapper = sql.split("CREATE OR REPLACE FUNCTION amfs_apply_outcome_step(")[1:]
+    sig_wrapper = wrapper.split(") RETURNS", 1)[0]
+    assert sig_wrapper == sig_009.rstrip() + ",\n    p_verified BOOLEAN\n"
+    wrapper_body = wrapper.split("$$ LANGUAGE plpgsql;", 1)[0]
+    assert "p_verified, NULL::TEXT[]" in wrapper_body
+    assert "UPDATE" not in wrapper_body and "INSERT" not in wrapper_body
+    # The full step is created before anything that calls it, and the trigger
+    # is replaced last.
+    assert "p_in_view TEXT[]" in full.split(") RETURNS", 1)[0]
+    assert "CREATE OR REPLACE FUNCTION amfs_propagate_outcome()" in wrapper
+    assert "CREATE OR REPLACE FUNCTION amfs_propagate_outcome()" not in full
+    assert (
+        "DROP FUNCTION IF EXISTS amfs_apply_outcome_step("
+        "TEXT, UUID, TEXT[], TEXT, NUMERIC, TEXT, JSONB, TEXT, BOOLEAN)"
+    ) not in sql
     assert (
         "DROP FUNCTION IF EXISTS amfs_apply_outcome_step("
         "TEXT, UUID, TEXT[], TEXT, NUMERIC, TEXT, JSONB, TEXT);"

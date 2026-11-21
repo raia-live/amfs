@@ -325,6 +325,7 @@ class Run:
         *,
         outcome_type: OutcomeType | str = OutcomeType.MINOR_FAILURE,
         causal_entry_keys: list[str | None] | None = None,
+        not_followed_entry_keys: list[str | None] | None = None,
     ) -> None:
         """Close the approach just tried as failed before trying another.
 
@@ -335,13 +336,18 @@ class Run:
         failure, so correct lessons that merely shared the context lose
         confidence with the one that was wrong. Bare keys (no ``/``) are
         qualified with the run's ``entity_path``. Without them the memory read
-        since the previous boundary receives the failure at ``complete``;
-        what is read afterwards is credited with the outcome.
+        since the previous boundary receives the failure at ``complete``,
+        as entries that were only in view: lowered, and not discredited on a
+        first failure. What is read afterwards is credited with the outcome.
+
+        *not_followed_entry_keys* names entries the attempt failed for
+        **not** following. They are credited, not charged.
         """
         self.memory.record_attempt(
             outcome_type=outcome_type,
             summary=summary,
             causal_entry_keys=self._qualify(causal_entry_keys),
+            not_followed_entry_keys=self._qualify(not_followed_entry_keys),
         )
 
     def _qualify(self, keys: list[str | None] | None) -> list[str] | None:
@@ -424,6 +430,7 @@ class Run:
         attributes: Mapping[str, Any] | None = None,
         decision_summary: str | None = None,
         causal_entry_keys: list[str | None] | None = None,
+        not_followed_entry_keys: list[str | None] | None = None,
     ) -> list[MemoryEntry]:
         """Commit the run's outcome and seal its trace.
 
@@ -456,6 +463,7 @@ class Run:
             verified_by=verified_by,
             evidence=evidence,
             causal_entry_keys=self._qualify(causal_entry_keys),
+            not_followed_entry_keys=self._qualify(not_followed_entry_keys),
         )
         self._completed = True
         return entries

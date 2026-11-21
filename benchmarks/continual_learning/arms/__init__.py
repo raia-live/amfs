@@ -22,6 +22,9 @@ def make_arm(name: str) -> MemoryArm:
     if name == "senselab":
         from .senselab_arm import SenseLabArm
         return SenseLabArm()
+    if name == "senselab-window":
+        from .senselab_arm import SenseLabWindowArm
+        return SenseLabWindowArm()
     if name == "senselab-nofeedback":
         from .senselab_arm import SenseLabNoFeedbackArm
         return SenseLabNoFeedbackArm()
