@@ -393,6 +393,41 @@ class TestTextWrittenAfterTheAttempt:
         entry = _fresh(mem, "other")
         assert entry.failure_count == 0 and entry.confidence == pytest.approx(0.95)
 
+    def test_a_rewrite_after_the_attempt_is_not_credited_as_not_followed(
+        self, mem: AgentMemory
+    ) -> None:
+        """The attempt failed because it did not do what the entry said. The
+        session then rewrites the entry: the credit was for the text that was
+        there, and the rewrite has earned nothing yet."""
+        mem.record_attempt(
+            outcome_type=OutcomeType.FAILURE, not_followed_entry_keys=[f"{SCOPE}/other"]
+        )
+        mem.write(SCOPE, "other", "rotate the key, then restart", confidence=0.7)
+        mem.commit_outcome("t-1", OutcomeType.SUCCESS)
+        entry = _fresh(mem, "other")
+        assert entry.value == "rotate the key, then restart"
+        assert entry.success_count == 0 and entry.failure_count == 0
+        assert entry.confidence == pytest.approx(0.7)
+
+    def test_an_entry_created_after_the_attempt_cannot_have_been_not_followed(
+        self, mem: AgentMemory
+    ) -> None:
+        mem.record_attempt(
+            outcome_type=OutcomeType.FAILURE, not_followed_entry_keys=[f"{SCOPE}/new"]
+        )
+        mem.write(SCOPE, "new", "what actually works", confidence=0.8)
+        mem.commit_outcome("t-1", OutcomeType.SUCCESS)
+        entry = _fresh(mem, "new")
+        assert entry.success_count == 0 and entry.confidence == pytest.approx(0.8)
+
+    def test_a_not_followed_entry_left_alone_is_still_credited(self, mem: AgentMemory) -> None:
+        mem.record_attempt(
+            outcome_type=OutcomeType.FAILURE, not_followed_entry_keys=[f"{SCOPE}/other"]
+        )
+        mem.write(SCOPE, "unrelated", "a note about something else", confidence=0.8)
+        mem.commit_outcome("t-1", OutcomeType.SUCCESS)
+        assert _fresh(mem, "other").success_count == 1
+
 
 # ── MCP ──────────────────────────────────────────────────────────────────
 

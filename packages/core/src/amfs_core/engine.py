@@ -526,19 +526,23 @@ class ReadTracker:
         An attempt closed *after* the write is untouched ("I wrote this,
         tried it, it failed" is a statement about the new text), and so is
         one that recorded a read version of its own.
+
+        The same holds for an entry the attempt says it did not follow: the
+        credit is for the text the attempt left unfollowed, never for a
+        rewrite the session made afterwards, and never for a key that did not
+        exist yet.
         """
+        roles = ("causal_entry_keys", "in_view_entry_keys", "not_followed_entry_keys")
         for attempt in self._state.attempts:
-            keys = attempt.get("causal_entry_keys") or []
-            if entry_key not in keys:
+            if not any(entry_key in (attempt.get(role) or []) for role in roles):
                 continue
             versions = attempt.setdefault("causal_entry_versions", {})
             if entry_key in versions:
                 continue
             if is_new or version <= 1:
-                attempt["causal_entry_keys"] = [k for k in keys if k != entry_key]
-                attempt["in_view_entry_keys"] = [
-                    k for k in attempt.get("in_view_entry_keys") or [] if k != entry_key
-                ]
+                for role in roles:
+                    if role in attempt:
+                        attempt[role] = [k for k in attempt[role] or [] if k != entry_key]
             else:
                 versions[entry_key] = version - 1
 
