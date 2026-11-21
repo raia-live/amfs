@@ -594,6 +594,7 @@ class AgentMemory:
         clone._session_metadata = None
         clone._session_attributes = {}
         clone._session_llm_calls = []
+        clone._covariates = {}
         clone._declare_situation()
         return clone
 
