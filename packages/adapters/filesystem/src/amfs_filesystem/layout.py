@@ -13,9 +13,13 @@ Directory structure::
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
 
 _VERSION_CURRENT_RE = re.compile(r"^v(\d+)_current\.json$")
 _VERSION_ANY_RE = re.compile(r"^v(\d+)_(current|superseded)\.json$")
@@ -88,48 +92,81 @@ class PathLayout:
             return False
         return any(_VERSION_ANY_RE.match(f.name) for f in directory.iterdir() if f.is_file())
 
+    def _read_entry_entity_and_key(self, key_dir: Path) -> tuple[str, str] | None:
+        """Read (entity_path, key) from the version file in key_dir, if present."""
+        current_file: Path | None = None
+        fallback_file: Path | None = None
+        try:
+            for f in key_dir.iterdir():
+                if not f.is_file():
+                    continue
+                if _VERSION_CURRENT_RE.match(f.name):
+                    current_file = f
+                    break
+                if fallback_file is None and _VERSION_ANY_RE.match(f.name):
+                    fallback_file = f
+            target = current_file or fallback_file
+            if target is not None:
+                data = json.loads(target.read_text(encoding="utf-8"))
+                ep = data.get("entity_path")
+                k = data.get("key")
+                if ep is not None and k is not None:
+                    return str(ep), str(k)
+        except Exception:
+            logger.debug("Failed to read entity/key from %s", key_dir, exc_info=True)
+        return None
+
     def all_entity_paths(self) -> list[str]:
         """Return all entity paths in the namespace, at any depth.
 
         Entity paths are hierarchical and ``entity_dir`` maps them straight onto
-        nested directories, so ``a/b`` is stored at ``<ns>/a/b``. A single level
-        of ``iterdir`` therefore reported ``a`` and never ``a/b``, and since the
-        callers that enumerate the store all start here, an entry written to a
-        nested path was invisible to every one of them — to ``list(None)``, and
-        so to the base ``search`` built on it, while a direct ``list("a/b")``
-        found it perfectly well. Writes were fine; only enumeration was blind.
+        nested directories, so ``a/b`` is stored at ``<ns>/a/b``. Keys may also
+        contain slashes (e.g. ``active-negotiation/xyz``), so a directory tree
+        such as ``<ns>/sweep/abc/active-negotiation/xyz/`` holds entity
+        ``sweep/abc`` with key ``active-negotiation/xyz``.
 
-        A directory can be both at once: with entity ``a`` holding key ``b`` and
-        entity ``a/b`` holding key ``c``, ``<ns>/a/b`` is a key directory of
-        ``a`` and an entity directory of ``a/b``. So the walk descends into key
-        directories too rather than treating them as leaves.
+        To avoid misattributing intermediate key segments as entity paths (or
+        mistaking nested entities for keys), this inspects the version file in
+        each key directory to extract the true stored ``entity_path``.
         """
         ns = self.namespace_dir
         if not ns.exists():
             return []
 
-        paths: list[str] = []
+        paths: set[str] = set()
+        for root_dir, dirs, files in os.walk(ns):
+            p = Path(root_dir)
+            if self.is_key_dir(p):
+                info = self._read_entry_entity_and_key(p)
+                if info is not None:
+                    paths.add(info[0])
+                else:
+                    rel = p.parent.relative_to(ns).as_posix()
+                    if rel:
+                        paths.add(rel)
 
-        def walk(directory: Path, prefix: str) -> None:
-            holds_keys = False
-            for child in sorted(directory.iterdir()):
-                if not child.is_dir():
-                    continue
-                if self.is_key_dir(child):
-                    holds_keys = True
-                walk(child, f"{prefix}/{child.name}" if prefix else child.name)
-            if holds_keys and prefix:
-                paths.append(prefix)
-
-        walk(ns, "")
         return sorted(paths)
 
     def all_keys(self, entity_path: str) -> list[str]:
-        """Return all key names for an entity."""
+        """Return all key names for an entity, including slashed keys."""
         entity_d = self.entity_dir(entity_path)
         if not entity_d.exists():
             return []
-        return sorted(d.name for d in entity_d.iterdir() if d.is_dir())
+
+        keys: set[str] = set()
+        for root_dir, dirs, files in os.walk(entity_d):
+            p = Path(root_dir)
+            if self.is_key_dir(p):
+                info = self._read_entry_entity_and_key(p)
+                if info is not None:
+                    ep, k = info
+                    if ep == entity_path:
+                        keys.add(k)
+                else:
+                    rel = p.relative_to(entity_d).as_posix()
+                    keys.add(rel)
+
+        return sorted(keys)
 
     def lock_path(self, entity_path: str, key: str) -> Path:
         return self.key_dir(entity_path, key) / ".lock"
