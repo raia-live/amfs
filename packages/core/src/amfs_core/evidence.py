@@ -76,6 +76,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable, Iterable
 
+from amfs_core.hashing import integrity_chain_hash
 from amfs_core.models import (
     OUTCOME_MULTIPLIERS,
     MemoryEntry,
@@ -830,6 +831,14 @@ def apply_record_to_entry(
         )
         current = current.model_copy(update={**fields, "outcome_count": current.outcome_count + 1})
         updates.append(upd)
+    if updates and entry.content_hash is not None:
+        current = current.model_copy(
+            update={
+                "integrity_chain": integrity_chain_hash(
+                    entry.content_hash, entry.integrity_chain
+                )
+            }
+        )
     return current, updates
 
 
