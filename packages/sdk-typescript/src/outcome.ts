@@ -4,7 +4,7 @@
 
 import type { AmfsAdapter } from "./adapter.js";
 import type { MemoryEntry, OutcomeRecord } from "./models.js";
-import { OUTCOME_MULTIPLIERS, OutcomeType } from "./models.js";
+import { clampConfidence, OUTCOME_MULTIPLIERS, OutcomeType } from "./models.js";
 
 export class OutcomeBackPropagator {
   private adapter: AmfsAdapter;
@@ -30,7 +30,7 @@ export class OutcomeBackPropagator {
     outcomeType: OutcomeType,
     causalConfidence = 1.0
   ): number {
-    return currentConfidence * OUTCOME_MULTIPLIERS[outcomeType] * causalConfidence;
+    return clampConfidence(currentConfidence * OUTCOME_MULTIPLIERS[outcomeType] * causalConfidence);
   }
 
   static makeRecord(
