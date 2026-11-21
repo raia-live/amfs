@@ -79,7 +79,7 @@ from amfs_core.models import (
     ToolCall,
     TraceEntry,
 )
-from amfs_core.scope import SqlScope, descendants_sql
+from amfs_core.scope import SqlScope, descendants_range_sql, descendants_sql
 
 try:
     from psycopg_pool import ConnectionPool as _ConnectionPool
@@ -1681,6 +1681,23 @@ class PostgresAdapter(AdapterABC):
             ON amfs_memory_entries (namespace, branch, entity_path, key)
             WHERE superseded_at IS NULL
         """)
+        # "This path and below" for one account: what a search that asks for
+        # its own rows (``own_account_only``) reads. It states the path as a
+        # byte-order range (amfs_core.scope.descendants_range_sql), which a
+        # b-tree can seek only through ``text_pattern_ops`` in a database whose
+        # collation is not C. Led by the account because a path can be one
+        # every account has: without the account in front, the search would
+        # read every account's rows at that path and discard the others.
+        # A statement that already named the account on live rows may be
+        # planned onto it as well; such a statement returns the same rows by
+        # any plan. The one place the plan decides the rows is the ordering by
+        # vector distance in semantic_search, and that names the account only
+        # when the query asks.
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entries_account_path_prefix
+            ON amfs_memory_entries (account_id, namespace, branch, entity_path text_pattern_ops)
+            WHERE superseded_at IS NULL
+        """)
         # The per-agent activity listing: current entries by one agent, newest
         # first, keyset-paged on written_at. Without this it is a scan of every
         # current entry in the namespace filtered by agent afterwards.
@@ -2715,9 +2732,11 @@ class PostgresAdapter(AdapterABC):
         if col_ready and not query.include_artifacts:
             conditions.append("is_artifact IS NOT TRUE")
 
+        own_account = self._own_account(query)
         if query.entity_path is not None:
             if query.include_descendants:
-                clause, clause_params = descendants_sql("entity_path", query.entity_path)
+                beneath = descendants_range_sql if own_account else descendants_sql
+                clause, clause_params = beneath("entity_path", query.entity_path)
                 conditions.append(clause)
                 params.extend(clause_params)
             else:
@@ -2725,6 +2744,9 @@ class PostgresAdapter(AdapterABC):
                 params.append(query.entity_path)
         else:
             conditions.append(_EXCLUDE_SHARED_PATHS)
+        if own_account:
+            conditions.append("account_id = %s::uuid")
+            params.append(own_account)
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
@@ -2844,9 +2866,11 @@ class PostgresAdapter(AdapterABC):
         conditions = ["namespace = %s", "superseded_at IS NULL", "embedding IS NOT NULL", _NOT_EXPIRED]
         params: list[Any] = [self._namespace]
 
+        own_account = self._own_account(query)
         if query.entity_path is not None:
             if getattr(query, "include_descendants", False):
-                clause, clause_params = descendants_sql("entity_path", query.entity_path)
+                beneath = descendants_range_sql if own_account else descendants_sql
+                clause, clause_params = beneath("entity_path", query.entity_path)
                 conditions.append(clause)
                 params.extend(clause_params)
             else:
@@ -2854,6 +2878,9 @@ class PostgresAdapter(AdapterABC):
                 params.append(query.entity_path)
         else:
             conditions.append(_EXCLUDE_SHARED_PATHS)
+        if own_account:
+            conditions.append("account_id = %s::uuid")
+            params.append(own_account)
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
@@ -5462,6 +5489,20 @@ class PostgresAdapter(AdapterABC):
             return get_request_tenant_account_id()
         except ImportError:
             return None
+
+    def _own_account(self, query: Any) -> str | None:
+        """The account to name in the statement, when the query asks for the
+        calling account's own rows (``own_account_only``) and the request has
+        an account; ``None`` otherwise, and then nothing about the statement
+        changes. Naming it narrows and never widens: visibility stays with the
+        database's row-level rules. It also switches "this path and below" to
+        its range form (``amfs_core.scope.descendants_range_sql``), so that an
+        index led by ``account_id`` can seek one account's rows beneath a path
+        that many accounts have."""
+        if not getattr(query, "own_account_only", False):
+            return None
+        account_id = self._get_current_account_id()
+        return str(account_id) if account_id else None
 
     def upsert_digest(self, digest: Digest) -> None:
         """Insert or update a compiled digest."""

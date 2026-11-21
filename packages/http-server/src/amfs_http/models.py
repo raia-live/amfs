@@ -173,6 +173,24 @@ class RetrieveRequest(BaseModel):
     #: a memory the record has confirmed does not need nine alternatives beside
     #: it in the prompt. Opt-in.
     adaptive_k: bool = False
+    #: Rank the head of the results with the cross-encoder where one is
+    #: installed (the default, and what every caller got before this field
+    #: existed). Set to False to skip it: the cross-encoder is the slowest
+    #: stage of a read, and a caller that reads on every turn of a
+    #: conversation can prefer the blended score as it stands. The
+    #: ``X-AMFS-Reranked`` response header says whether it ran.
+    rerank: bool = True
+    #: Search only the rows the calling account itself owns, by naming the
+    #: account in the statement so an index that leads with it can be used.
+    #: It can only remove rows: it leaves out what another account shares
+    #: with the caller (a room's topics), which the default search returns.
+    #: Opt-in. For a caller whose path is one every account has, where the
+    #: search would otherwise read every account's rows at that path before
+    #: the database's row-level rules discard the others. With
+    #: ``include_descendants`` the semantic read is then exact over the
+    #: account's rows beneath the path, so its candidates can differ from
+    #: those of the same request without this field.
+    own_account_only: bool = False
     #: The calling agent, for the per-agent exploration assignment in the
     #: recommendation. A fleet whose members pass distinct ids spreads its
     #: search over the untried actions instead of all trying the same one.

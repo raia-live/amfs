@@ -327,6 +327,40 @@ _model_executor = ThreadPoolExecutor(
 _db_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="amfs-db")
 
 
+#: Says whether the cross-encoder ranked a retrieve's results: ``1`` when it
+#: did, ``0`` when it did not (none is installed, it failed, there was nothing
+#: to rank, or the caller declined it). A caller that thresholds on ``_score``
+#: needs to know, since the relevance term is the cross-encoder's standing in
+#: the batch in one case and the embedding similarity in the other.
+RERANKED_HEADER = "X-AMFS-Reranked"
+
+
+class _Stages:
+    """Wall time of a request's stages, for a ``Server-Timing`` header.
+
+    ``mark(name)`` charges the time since the previous mark to *name*; a name
+    marked more than once (a stage inside a loop) accumulates. The header
+    carries durations in milliseconds and nothing else: no query text, no
+    paths, no counts. It is what lets a slow read be explained from the
+    outside, by the caller that waited for it, without a profiler on the
+    server.
+    """
+
+    def __init__(self) -> None:
+        self._started = self._last = time.perf_counter()
+        self._durations: dict[str, float] = {}
+
+    def mark(self, name: str) -> None:
+        now = time.perf_counter()
+        self._durations[name] = self._durations.get(name, 0.0) + (now - self._last) * 1000.0
+        self._last = now
+
+    def header(self) -> str:
+        parts = [f"{name};dur={ms:.1f}" for name, ms in self._durations.items()]
+        parts.append(f"total;dur={(self._last - self._started) * 1000.0:.1f}")
+        return ", ".join(parts)
+
+
 async def _offload(executor: ThreadPoolExecutor, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
     """Run ``fn(*args, **kwargs)`` on ``executor`` with the current context."""
     loop = asyncio.get_running_loop()
@@ -3163,6 +3197,7 @@ async def retrieve_entries(
     from amfs_core.content import ARTIFACT_PENALTY, PROCEDURE_BOOST, classify_artifact
     from amfs_core.query_norm import normalize_temporal
 
+    stages = _Stages()
     branch = _effective_branch(request, req.branch)
     vis = _get_visibility_filter(request)
     embedder = _get_server_embedder()
@@ -3206,6 +3241,7 @@ async def retrieve_entries(
                     query_vectors[qtext] = await _offload(_model_executor, embedder.embed, qtext)
                 except Exception:  # noqa: BLE001
                     logger.debug("query embedding failed — adapter will embed", exc_info=True)
+            stages.mark("embed")
             sq = SemanticQuery(
                 text=qtext,
                 entity_path=req.entity_path,
@@ -3213,6 +3249,7 @@ async def retrieve_entries(
                 min_confidence=req.min_confidence,
                 limit=pool,
                 embedding=query_vectors.get(qtext),
+                own_account_only=req.own_account_only,
             )
             try:
                 pairs = await _async_adapter.semantic_search(sq, embedder, branch=branch)
@@ -3225,6 +3262,7 @@ async def retrieve_entries(
                     candidates[entry.entry_key] = {"entry": entry, "sim": sim, "keyword": 0.0}
                 elif sim > slot["sim"]:
                     slot["sim"] = sim
+            stages.mark("semantic")
 
     # 3b. Lexical channel (first-class, always run — OR-tsquery recall).
     sq_lex = SearchQuery(
@@ -3236,6 +3274,7 @@ async def retrieve_entries(
         sort_by="confidence",
         depth=3,
         include_artifacts=req.include_artifacts,
+        own_account_only=req.own_account_only,
     )
     lex_entries: list[MemoryEntry] = []
     if _async_adapter is not None:
@@ -3263,6 +3302,7 @@ async def retrieve_entries(
             candidates.setdefault(
                 entry.entry_key, {"entry": entry, "sim": 0.0, "keyword": 1.0}
             )
+    stages.mark("lexical")
 
     # 3d. Below-gate read, scoped to this query. A discredited entry sits under
     #     the discredit threshold by definition, so a caller gating at or above
@@ -3288,6 +3328,7 @@ async def retrieve_entries(
                         max_confidence=gate_ceiling,
                         limit=BELOW_GATE_LIMIT,
                         embedding=query_vectors[topical],
+                        own_account_only=req.own_account_only,
                     ),
                     embedder,
                     branch=branch,
@@ -3310,6 +3351,7 @@ async def retrieve_entries(
             sort_by="recency",
             depth=3,
             include_artifacts=req.include_artifacts,
+            own_account_only=req.own_account_only,
         )
         lex_below: list[MemoryEntry] = []
         try:
@@ -3330,6 +3372,7 @@ async def retrieve_entries(
             else:
                 slot["keyword"] = 1.0
         candidates.update(below_gate)
+    stages.mark("below_gate")
 
     # 4. Drop benchmark/system scratch namespaces from user recall, and the
     #    system-written contrast lessons: those are consumed by the briefing
@@ -3612,9 +3655,17 @@ async def retrieve_entries(
     #    entries with identical text, one at confidence 0.5 and one at 1.0,
     #    ranked with the 0.5 one first. Outcomes were recorded faithfully and
     #    then ignored at the only point where they could change behaviour.
+    #
+    #    A caller may decline it (``rerank: false``). It is the slowest stage
+    #    of a read, and a caller that makes one on every turn of a conversation
+    #    can prefer the composite as it stands to waiting for the cross-encoder.
+    #    The response says whether it ran, because a score's relevance term
+    #    means something different with and without it.
+    stages.mark("score")
     reranker = _retrieval_reranker
     rerank_top_n = 30
-    if reranker is not None and getattr(reranker, "available", False) and scored:
+    reranked_by_cross_encoder = False
+    if req.rerank and reranker is not None and getattr(reranker, "available", False) and scored:
         head = scored[:rerank_top_n]
         try:
             # Cross-encoder inference over up to thirty documents: the single
@@ -3657,6 +3708,8 @@ async def retrieve_entries(
             # the two halves back together in order would pin it above anyway.
             scored = reranked + scored[rerank_top_n:]
             scored.sort(key=lambda t: t[1], reverse=True)
+            reranked_by_cross_encoder = True
+    stages.mark("rerank")
 
     # 9. Abstain floor: trim clearly-irrelevant tail (low relevance AND no
     #    keyword match), but never drop the single best result.
@@ -4167,6 +4220,11 @@ async def retrieve_entries(
             out.append(data)
     if meta is not None:
         out.append(meta)
+    stages.mark("finish")
+    # A caller invoking the handler in-process has no response to decorate.
+    if response is not None:
+        response.headers[RERANKED_HEADER] = "1" if reranked_by_cross_encoder else "0"
+        response.headers["Server-Timing"] = stages.header()
     return out
 
 
