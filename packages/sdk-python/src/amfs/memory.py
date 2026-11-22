@@ -621,24 +621,25 @@ class AgentMemory:
         effective_branch = branch or self._branch
         start = time.monotonic()
         try:
+            threshold = 0.0 if self._decay_half_life_days is not None else min_confidence
+            entry = self._adapter.read(
+                entity_path, key, min_confidence=threshold, branch=effective_branch
+            )
+            if entry is None or entry.is_expired():
+                return None
+            if not entry.shared and entry.provenance.agent_id != self.agent_id:
+                return None
             if self._decay_half_life_days is not None:
-                entry = self._engine.read(entity_path, key, min_confidence=0.0, branch=effective_branch)
-                if entry is None:
-                    return None
-                if not entry.shared and entry.provenance.agent_id != self.agent_id:
-                    return None
                 effective = entry.effective_confidence(
                     decay_half_life_days=self._decay_half_life_days,
                 )
                 if effective < min_confidence:
                     return None
-                self._log_read_event(entry, effective_branch)
-                return entry
-            entry = self._engine.read(entity_path, key, min_confidence=min_confidence, branch=effective_branch)
-            if entry is not None and not entry.shared and entry.provenance.agent_id != self.agent_id:
-                return None
-            if entry is not None:
-                self._log_read_event(entry, effective_branch)
+            self._adapter.increment_recall_count(
+                entity_path, key, branch=effective_branch
+            )
+            self._read_tracker.record(entry)
+            self._log_read_event(entry, effective_branch)
             return entry
         except Exception as exc:
             self._read_tracker.record_error(
@@ -673,15 +674,20 @@ class AgentMemory:
         read_version = self._read_tracker.read_version(entry_key)
 
         if read_version is not None:
-            current = self._adapter.read(entity_path, key)
+            current = self._adapter.read(entity_path, key, branch=effective_branch)
             if (
                 current is not None
                 and current.version > read_version
                 and current.provenance.agent_id != self.agent_id
             ):
                 if self._on_conflict is not None:
+                    our_last_read = self._adapter.read_at_version(
+                        entity_path, key, read_version
+                    )
+                    if our_last_read is None:
+                        our_last_read = current.model_copy()
                     value = self._on_conflict(
-                        current.model_copy(),
+                        our_last_read,
                         current,
                         value,
                     )
@@ -2629,19 +2635,26 @@ class AgentMemory:
         brain actually knows from direct experience.  Falls back through
         history to find the most recent version authored by this agent.
         """
-        entry = self._engine.read(entity_path, key, min_confidence=0.0)
+        entry = self._adapter.read(
+            entity_path, key, min_confidence=0.0, branch=self._branch
+        )
         if entry is None:
             return None
         if entry.provenance.agent_id == self.agent_id:
-            if entry.confidence >= min_confidence:
-                self._log_read_event(entry)
+            if not entry.is_expired() and entry.confidence >= min_confidence:
+                self._adapter.increment_recall_count(
+                    entity_path, key, branch=self._branch
+                )
+                self._read_tracker.record(entry)
+                self._log_read_event(entry, self._branch)
                 return entry
             return None
-        versions = self._engine.history(entity_path, key)
+        versions = self._engine.history(entity_path, key, branch=self._branch)
         for v in reversed(versions):
             if v.provenance.agent_id == self.agent_id:
-                if v.confidence >= min_confidence:
-                    self._log_read_event(v)
+                if not v.is_expired() and v.confidence >= min_confidence:
+                    self._read_tracker.record(v)
+                    self._log_read_event(v, self._branch)
                     return v
                 return None
         return None
