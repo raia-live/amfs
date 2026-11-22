@@ -256,8 +256,9 @@ export class HttpAdapter implements AmfsAdapter {
           buffer += decoder.decode(value, { stream: true });
 
           while (buffer.includes("\n\n")) {
-            const [msg, rest] = buffer.split("\n\n", 2);
-            buffer = rest;
+            const sepIdx = buffer.indexOf("\n\n");
+            const msg = buffer.slice(0, sepIdx);
+            buffer = buffer.slice(sepIdx + 2);
             for (const line of msg.split("\n")) {
               if (line.startsWith("data:")) {
                 const raw = line.slice(5).trim();
