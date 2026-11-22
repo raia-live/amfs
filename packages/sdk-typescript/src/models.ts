@@ -29,15 +29,20 @@ export enum MemoryType {
 }
 
 export const OUTCOME_MULTIPLIERS: Record<string, number> = {
-  [OutcomeType.CRITICAL_FAILURE]: 1.15,
-  [OutcomeType.FAILURE]: 1.1,
-  [OutcomeType.MINOR_FAILURE]: 1.08,
-  [OutcomeType.SUCCESS]: 0.97,
-  [OutcomeType.P1_INCIDENT]: 1.15,
-  [OutcomeType.P2_INCIDENT]: 1.1,
-  [OutcomeType.REGRESSION]: 1.08,
-  [OutcomeType.CLEAN_DEPLOY]: 0.97,
+  [OutcomeType.CRITICAL_FAILURE]: 0.85,
+  [OutcomeType.FAILURE]: 0.90,
+  [OutcomeType.MINOR_FAILURE]: 0.92,
+  [OutcomeType.SUCCESS]: 1.03,
+  [OutcomeType.P1_INCIDENT]: 0.85,
+  [OutcomeType.P2_INCIDENT]: 0.90,
+  [OutcomeType.REGRESSION]: 0.92,
+  [OutcomeType.CLEAN_DEPLOY]: 1.03,
 };
+
+/** Clamp a confidence score to the valid [0.0, 1.0] range. */
+export function clampConfidence(value: number): number {
+  return Math.max(0.0, Math.min(1.0, value));
+}
 
 export interface Provenance {
   agentId: string;
