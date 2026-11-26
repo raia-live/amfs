@@ -161,6 +161,14 @@ describe("room lifecycle", () => {
     '"https://amfs.sense-lab.ai/join/tok_abc123".',
     "<tok_abc123>.",
     "https://amfs.sense-lab.ai/join/tok_abc123 .",
+    // What copying out of an email or a document adds: non-breaking and other
+    // Unicode spaces, zero-width characters, curly quotes.
+    "\u00a0https://amfs.sense-lab.ai/join/tok_abc123\u00a0",
+    "tok_abc123\u00a0",
+    "\u2003<https://amfs.sense-lab.ai/join/tok_abc123>\u00a0.\u00a0",
+    "\ufeffhttps://amfs.sense-lab.ai/join/tok_abc123\u200b",
+    "\u201chttps://amfs.sense-lab.ai/join/tok_abc123\u201d.",
+    "\u2018tok_abc123\u2019",
   ])("roomRedeem takes the token or the whole link: %s", async (pasted) => {
     mockFetch({ room_id: ROOM });
     expect(await memory().roomRedeem(pasted)).toEqual({ room_id: ROOM });

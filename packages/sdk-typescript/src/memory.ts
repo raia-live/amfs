@@ -69,24 +69,31 @@ function branchFromEnv(): string | undefined {
 }
 
 /**
- * What a pasted join link arrives wrapped in: brackets, quotes and the
- * punctuation of the sentence around it. None of it can be part of a token,
- * which is URL-safe base64, so it is trimmed from both ends in any order.
+ * What a pasted join link arrives wrapped in, besides whitespace: brackets,
+ * straight and curly quotes, the punctuation of the sentence around it, and
+ * the zero-width characters a copy out of an email or a document carries.
+ * None of it can be part of a token, which is URL-safe base64.
  */
-const LINK_WRAPPING = " \t\r\n<>()[]\"'`.,;:!";
+const LINK_WRAPPING = "<>()[]\"'`.,;:!\u201c\u201d\u2018\u2019\u200b\u200c\u200d\u2060\ufeff";
+
+/** Whitespace as `String.prototype.trim` sees it, so a non-breaking space counts. */
+function isLinkWrapping(ch: string): boolean {
+  return ch.trim() === "" || LINK_WRAPPING.includes(ch);
+}
 
 /**
- * `text` without the link wrapping at either end. One set, not a bracket pass
- * followed by a punctuation pass: `<https://.../join/tok>.` ends in a full
- * stop with the bracket behind it, and two passes leave the `>` on the token.
- * Index scans, not regexes: an anchored `[...]+$` backtracks quadratically on
- * a long run of the character that is then followed by something else.
+ * `text` without link wrapping or whitespace at either end. One pass over one
+ * set, in any order, and not a bracket pass followed by a punctuation pass:
+ * `<https://.../join/tok>.` ends in a full stop with the bracket behind it,
+ * and two passes leave the `>` on the token. Index scans, not regexes: an
+ * anchored `[...]+$` backtracks quadratically on a long run of the character
+ * that is then followed by something else.
  */
 function unwrapLink(text: string): string {
   let start = 0;
   let end = text.length;
-  while (start < end && LINK_WRAPPING.includes(text[start])) start++;
-  while (end > start && LINK_WRAPPING.includes(text[end - 1])) end--;
+  while (start < end && isLinkWrapping(text[start])) start++;
+  while (end > start && isLinkWrapping(text[end - 1])) end--;
   return text.slice(start, end);
 }
 

@@ -104,10 +104,27 @@ def _warn_env_ignored() -> None:
     )
 
 
-#: What a pasted join link arrives wrapped in: brackets, quotes and the
-#: punctuation of the sentence around it. None of it can be part of a token,
-#: which is URL-safe base64, so it is trimmed from both ends in any order.
-_LINK_WRAPPING = " \t\r\n<>()[]\"'`.,;:!"
+#: What a pasted join link arrives wrapped in, besides whitespace: brackets,
+#: straight and curly quotes, the punctuation of the sentence around it, and
+#: the zero-width characters a copy out of an email or a document carries.
+#: None of it can be part of a token, which is URL-safe base64.
+_LINK_WRAPPING = "<>()[]\"'`.,;:!\u201c\u201d\u2018\u2019\u200b\u200c\u200d\u2060\ufeff"
+
+
+def _unwrap_link(text: str) -> str:
+    """``text`` without link wrapping or whitespace at either end.
+
+    One pass over one set, in any order, and not a bracket pass followed by a
+    punctuation pass: ``<https://.../join/tok>.`` ends in a full stop with the
+    bracket behind it, and two passes leave the ``>`` on the token. Whitespace
+    is ``str.isspace`` rather than a list, so a non-breaking space counts.
+    """
+    start, end = 0, len(text)
+    while start < end and (text[start].isspace() or text[start] in _LINK_WRAPPING):
+        start += 1
+    while end > start and (text[end - 1].isspace() or text[end - 1] in _LINK_WRAPPING):
+        end -= 1
+    return text[start:end]
 
 
 def _join_token(value: str) -> str:
@@ -116,12 +133,8 @@ def _join_token(value: str) -> str:
     The link is what people are sent, so the whole URL is accepted as well as
     the bare token, with the brackets, trailing punctuation and query string
     it tends to arrive wrapped in.
-
-    The wrapping is one set and not a bracket pass followed by a punctuation
-    pass: ``<https://.../join/tok>.`` ends in a full stop with the bracket
-    behind it, and two passes leave the ``>`` on the token.
     """
-    text = (value or "").strip(_LINK_WRAPPING)
+    text = _unwrap_link(value or "")
     for marker in ("/join/", "/j/"):
         if marker in text:
             text = text.rsplit(marker, 1)[1]
@@ -129,7 +142,7 @@ def _join_token(value: str) -> str:
     for cut in ("?", "#", "/"):
         if cut in text:
             text = text.split(cut, 1)[0]
-    return text.strip(_LINK_WRAPPING)
+    return _unwrap_link(text)
 
 
 #: The session attribute a committed outcome carries when the memory was on a

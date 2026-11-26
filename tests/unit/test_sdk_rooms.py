@@ -182,6 +182,14 @@ class TestLifecycle:
             '"https://amfs.sense-lab.ai/join/tok_abc123".',
             "<tok_abc123>.",
             "https://amfs.sense-lab.ai/join/tok_abc123 .",
+            # What copying out of an email or a document adds: non-breaking
+            # and other Unicode spaces, zero-width characters, curly quotes.
+            "\u00a0https://amfs.sense-lab.ai/join/tok_abc123\u00a0",
+            "tok_abc123\u00a0",
+            "\u2003<https://amfs.sense-lab.ai/join/tok_abc123>\u00a0.\u00a0",
+            "\ufeffhttps://amfs.sense-lab.ai/join/tok_abc123\u200b",
+            "\u201chttps://amfs.sense-lab.ai/join/tok_abc123\u201d.",
+            "\u2018tok_abc123\u2019",
         ],
     )
     def test_room_redeem_takes_the_token_or_the_whole_link(self, pasted: str) -> None:
