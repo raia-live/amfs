@@ -119,6 +119,35 @@ export class HttpAdapter implements AmfsAdapter {
     return resp.json();
   }
 
+  /**
+   * Call a route this adapter has no method for, and get the server's JSON back
+   * untouched (snake_case keys).
+   *
+   * The request is this adapter's own: the same base URL, API key and identity
+   * headers as every other call, and the same error, an `Error` whose message
+   * carries the status and the response body. `AgentMemory`'s room and
+   * negotiation methods go through it. `query` values that are `undefined` or
+   * `null` are left out; the rest are URL-encoded.
+   */
+  async requestRaw(
+    method: string,
+    path: string,
+    options?: {
+      body?: unknown;
+      query?: Record<string, string | number | boolean | undefined | null>;
+    }
+  ): Promise<unknown> {
+    const params = new URLSearchParams();
+    for (const [name, value] of Object.entries(options?.query ?? {})) {
+      if (value !== undefined && value !== null) params.set(name, String(value));
+    }
+    const qs = params.toString();
+    return this.fetchRaw(`${path}${qs ? `?${qs}` : ""}`, {
+      method,
+      ...(options?.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+    });
+  }
+
   read(
     entityPath: string,
     key: string,

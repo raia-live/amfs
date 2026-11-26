@@ -7,9 +7,9 @@ import type {
   DecisionTrace,
   DecisionTracePage,
   DecisionTraceSummary,
-  HttpAdapter,
   ListTracesOptions,
 } from "./adapters/http.js";
+import { HttpAdapter } from "./adapters/http.js";
 import { InMemoryAdapter } from "./adapters/filesystem.js";
 import { defaultConfig } from "./config.js";
 import { CausalTagger, CoWEngine } from "./engine.js";
@@ -51,9 +51,42 @@ export const BRANCH_ENV = "AMFS_BRANCH";
  */
 export const MEMORY_BRANCH_ATTRIBUTE = "memory_branch";
 
-function branchFromEnv(): string | undefined {
+/**
+ * The hosted connection, as the MCP server reads it. The constructor does not
+ * read these — a memory built without an adapter is in-memory whatever the
+ * environment says. {@link AgentMemory.fromEnv} is the explicit way to use them.
+ */
+export const HTTP_URL_ENV = "AMFS_HTTP_URL";
+export const API_KEY_ENV = "AMFS_API_KEY";
+
+function fromProcessEnv(name: string): string | undefined {
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
-  return env?.[BRANCH_ENV];
+  return env?.[name];
+}
+
+function branchFromEnv(): string | undefined {
+  return fromProcessEnv(BRANCH_ENV);
+}
+
+/**
+ * The token out of whatever a room join link looks like when pasted: the bare
+ * token, or the whole URL with the brackets, trailing punctuation and query
+ * string it tends to arrive wrapped in.
+ */
+function joinToken(value: string): string {
+  let text = (value ?? "").trim().replace(/^[<>]+|[<>]+$/g, "").replace(/[.,;)]+$/, "");
+  for (const marker of ["/join/", "/j/"]) {
+    const at = text.lastIndexOf(marker);
+    if (at !== -1) {
+      text = text.slice(at + marker.length);
+      break;
+    }
+  }
+  for (const cut of ["?", "#", "/"]) {
+    const at = text.indexOf(cut);
+    if (at !== -1) text = text.slice(0, at);
+  }
+  return text.trim();
 }
 
 function normalizeBranch(branch: string | undefined | null): string {
@@ -126,6 +159,35 @@ export class AgentMemory {
     }
     this.engine = new CoWEngine(this.adapter, tagger, this.readTracker);
     this.propagator = new OutcomeBackPropagator(this.adapter);
+  }
+
+  /**
+   * A memory connected to hosted SenseLab, from `AMFS_HTTP_URL` and
+   * `AMFS_API_KEY`.
+   *
+   * The constructor never reads those variables, so this is the one-line way
+   * to use them. `url` and `apiKey` override the environment — a second key
+   * for a second agent, say. It never falls back to the in-memory adapter: a
+   * missing URL or key throws, naming what to set.
+   */
+  static fromEnv(
+    agentId: string,
+    options?: Omit<AgentMemoryOptions, "adapter"> & { url?: string; apiKey?: string }
+  ): AgentMemory {
+    const { url: urlOption, apiKey: apiKeyOption, ...rest } = options ?? {};
+    const url = (urlOption ?? fromProcessEnv(HTTP_URL_ENV) ?? "").trim();
+    const apiKey = (apiKeyOption ?? fromProcessEnv(API_KEY_ENV) ?? "").trim();
+    const missing = [
+      ...(url ? [] : [HTTP_URL_ENV]),
+      ...(apiKey ? [] : [API_KEY_ENV]),
+    ];
+    if (missing.length > 0) {
+      throw new Error(
+        `AgentMemory.fromEnv() needs ${missing.join(" and ")}: set ` +
+          `${missing.length === 1 ? "it" : "them"} in the environment, or pass url / apiKey.`
+      );
+    }
+    return new AgentMemory(agentId, { ...rest, adapter: new HttpAdapter({ url, apiKey }) });
   }
 
   /** The branch remote reads and writes go to unless a call names another. */
@@ -918,7 +980,77 @@ export class AgentMemory {
     return this.requireHttp("statsAsync").statsAsync();
   }
 
-  // ── Room operations (Pro — requires HTTP adapter with rooms backend) ──
+  // ── Room operations (hosted — requires the HTTP adapter) ──
+  //
+  // These return the server's JSON as it arrived (snake_case keys), unlike the
+  // entry methods above, which convert to camelCase: a room response is read by
+  // the same names the REST API and the Python SDK use.
+
+  /**
+   * Open a room over one or more topics (entity paths) this account owns.
+   *
+   * Everyone admitted to the room reads and writes those exact paths — a
+   * sub-path of a topic is not part of the room. This agent is joined as the
+   * room's creator. Returns the room, including its `id`.
+   */
+  async roomCreate(
+    topics: string | string[],
+    options?: { name?: string; description?: string; discussions?: boolean }
+  ): Promise<Record<string, unknown>> {
+    const paths = (Array.isArray(topics) ? topics : [topics]).filter((p) => (p ?? "").trim());
+    if (paths.length === 0) {
+      throw new Error("roomCreate() needs at least one topic (entity path)");
+    }
+    return this._roomRequest("POST", "/api/v1/rooms", {
+      entity_paths: paths,
+      display_name: options?.name ?? null,
+      description: options?.description ?? null,
+      discussions_enabled: options?.discussions ?? true,
+      agent_id: this.agentId,
+    });
+  }
+
+  /**
+   * Mint a join link for a room. Owner only.
+   *
+   * The response carries the raw `token`, and this is the only time it is
+   * returned; whoever should join spends it with {@link roomRedeem}.
+   * `clampToPlan` (default true) lowers `maxUses` to the plan's per-room
+   * ceiling rather than refusing with 402; the response then carries
+   * `max_uses_clamped`.
+   */
+  async roomShare(
+    roomId: string,
+    options?: {
+      expiresInDays?: number;
+      maxUses?: number;
+      role?: "collaborator" | "viewer";
+      clampToPlan?: boolean;
+    }
+  ): Promise<Record<string, unknown>> {
+    return this._roomRequest("POST", `/api/v1/rooms/${roomId}/join-links`, {
+      expires_in_days: options?.expiresInDays ?? null,
+      max_uses: options?.maxUses ?? null,
+      role: options?.role ?? "collaborator",
+      clamp_max_uses_to_plan: options?.clampToPlan ?? true,
+    });
+  }
+
+  /**
+   * Spend a join link: admit this API key's user to the room it opens.
+   *
+   * Accepts the bare token or the whole link URL. The one room call that
+   * works before the caller has any access to the room. It admits the *user*;
+   * call {@link roomJoin} afterwards to place this agent in the room and
+   * receive its briefing. Returns the `room_id`.
+   */
+  async roomRedeem(token: string): Promise<Record<string, unknown>> {
+    const cleaned = joinToken(token);
+    if (!cleaned) {
+      throw new Error("roomRedeem() needs a join token or a join link URL");
+    }
+    return this._roomRequest("POST", `/api/v1/room-join/${encodeURIComponent(cleaned)}`, {});
+  }
 
   /** Join a room. The user owning this agent must have an accepted invite. */
   async roomJoin(roomId: string): Promise<Record<string, unknown>> {
@@ -929,13 +1061,17 @@ export class AgentMemory {
 
   /** Leave a room. Knowledge snapshots are preserved in private memory. */
   async roomLeave(roomId: string): Promise<Record<string, unknown>> {
-    return this._roomRequest("DELETE", `/api/v1/rooms/${roomId}/agents/${this.agentId}`);
+    return this._roomRequest(
+      "DELETE",
+      `/api/v1/rooms/${roomId}/agents/${encodeURIComponent(this.agentId)}`
+    );
   }
 
   /** List rooms this agent's user owns or is invited to. */
   async myRooms(): Promise<Record<string, unknown>[]> {
-    const result = await this._roomRequest("GET", "/api/v1/rooms");
-    return Array.isArray(result) ? result : (result as Record<string, unknown>).rooms as Record<string, unknown>[] ?? [];
+    const result = (await this._roomRequest("GET", "/api/v1/rooms")) as unknown;
+    if (Array.isArray(result)) return result as Record<string, unknown>[];
+    return ((result as Record<string, unknown> | null)?.rooms as Record<string, unknown>[]) ?? [];
   }
 
   /** Get room details including members, settings, and discussion status. */
@@ -943,10 +1079,37 @@ export class AgentMemory {
     return this._roomRequest("GET", `/api/v1/rooms/${roomId}`);
   }
 
+  /**
+   * (Re)deliver the room's shared knowledge to this agent, without a rejoin.
+   * The briefing text comes back under `briefing`.
+   */
+  async roomBriefing(roomId: string): Promise<Record<string, unknown>> {
+    return this._roomRequest("POST", `/api/v1/rooms/${roomId}/briefing`, {
+      agent_id: this.agentId,
+    });
+  }
+
   /** Get recent room activity (writes, joins, discussions, negotiations). */
   async roomUpdates(roomId: string, options?: { since?: string }): Promise<Record<string, unknown>> {
-    const params = options?.since ? `?since=${options.since}` : "";
-    return this._roomRequest("GET", `/api/v1/rooms/${roomId}/activity${params}`);
+    return this._roomRequest("GET", `/api/v1/rooms/${roomId}/activity`, undefined, {
+      since: options?.since,
+    });
+  }
+
+  /**
+   * Close a room. Owner only. It stops accepting joins and writes; the shared
+   * topics and the memories in them stay where they are.
+   */
+  async roomClose(roomId: string): Promise<Record<string, unknown>> {
+    return this._roomRequest("POST", `/api/v1/rooms/${roomId}/close`, {});
+  }
+
+  /**
+   * Delete a room. Owner only. The room, its membership and its activity
+   * history go away; the shared topics and every memory in them survive.
+   */
+  async roomDelete(roomId: string): Promise<Record<string, unknown>> {
+    return this._roomRequest("DELETE", `/api/v1/rooms/${roomId}`);
   }
 
   // -- Discussions --
@@ -954,25 +1117,26 @@ export class AgentMemory {
   async roomDiscuss(
     roomId: string,
     content: string,
-    options?: { messageType?: string; addressedTo?: string }
+    options?: { messageType?: string; addressedTo?: string; replyTo?: string }
   ): Promise<Record<string, unknown>> {
     return this._roomRequest("POST", `/api/v1/rooms/${roomId}/discussions`, {
       agent_id: this.agentId,
       content,
       message_type: options?.messageType ?? "message",
       addressed_to: options?.addressedTo ?? null,
+      ...(options?.replyTo ? { reply_to: options.replyTo } : {}),
     });
   }
 
   async roomDiscussions(
     roomId: string,
-    options?: { limit?: number; since?: string }
+    options?: { limit?: number; since?: string; addressedTo?: string }
   ): Promise<Record<string, unknown>> {
-    const params = new URLSearchParams();
-    if (options?.limit) params.set("limit", String(options.limit));
-    if (options?.since) params.set("since", options.since);
-    const qs = params.toString();
-    return this._roomRequest("GET", `/api/v1/rooms/${roomId}/discussions${qs ? `?${qs}` : ""}`);
+    return this._roomRequest("GET", `/api/v1/rooms/${roomId}/discussions`, undefined, {
+      limit: options?.limit || undefined,
+      since: options?.since,
+      addressed_to: options?.addressedTo,
+    });
   }
 
   // -- Negotiations --
@@ -1019,32 +1183,33 @@ export class AgentMemory {
     return this._roomRequest("GET", `/api/v1/rooms/${roomId}/negotiations/${sessionId}`);
   }
 
+  /**
+   * Send a request to the rooms API over the HTTP adapter's own transport.
+   *
+   * This used to build its own `fetch` from `adapter.apiKey`, a property
+   * `HttpAdapter` does not have, so every room call went out with no API key
+   * and no agent or session header and was refused with 401. Through
+   * `requestRaw` it is the adapter's request: same key, same identity, and an
+   * error whose message carries the server's response body.
+   */
   private async _roomRequest(
     method: string,
     path: string,
-    body?: Record<string, unknown>
+    body?: Record<string, unknown>,
+    query?: Record<string, string | number | boolean | undefined | null>
   ): Promise<Record<string, unknown>> {
-    const adapter = this.adapter as unknown as Record<string, unknown>;
-    const baseUrl = adapter._baseUrl ?? adapter.baseUrl;
-    if (typeof baseUrl !== "string") {
-      throw new Error("Room operations require the HTTP adapter (set AMFS_HTTP_URL)");
+    const adapter = this.adapter as unknown as { requestRaw?: unknown };
+    if (typeof adapter.requestRaw !== "function") {
+      throw new Error(
+        "Room operations need the hosted API: build the memory with " +
+          "AgentMemory.fromEnv(agentId) or an HttpAdapter ({ url, apiKey }). " +
+          "The in-memory adapter has no rooms."
+      );
     }
-    const url = `${baseUrl.replace(/\/$/, "")}${path}`;
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    const apiKey = adapter._apiKey ?? adapter.apiKey;
-    if (typeof apiKey === "string") {
-      headers["Authorization"] = `Bearer ${apiKey}`;
-    }
-
-    const resp = await fetch(url, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    if (!resp.ok) {
-      throw new Error(`Room API error: ${resp.status} ${resp.statusText}`);
-    }
-    return resp.json() as Promise<Record<string, unknown>>;
+    return (await (this.adapter as unknown as HttpAdapter).requestRaw(method, path, {
+      body,
+      query,
+    })) as Record<string, unknown>;
   }
 }
 
