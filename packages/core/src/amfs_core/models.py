@@ -978,6 +978,31 @@ class SearchQuery(BaseModel):
     # plan. Ignored where the adapter has no account for the request (a
     # single-tenant deployment), and the statement is then the usual one.
     own_account_only: bool = False
+    # The agent the search is made for. When set, the adapter returns only
+    # what that agent may read: entries that are shared, and its own. It is
+    # the rule ``AgentMemory.read``, ``list`` and ``search`` apply after the
+    # fact (``MemoryEntry.shared``), stated in the statement so that it holds
+    # before the limit and not after it: filtered afterwards, a store where
+    # one agent keeps thousands of private entries fills another agent's
+    # whole page with rows that are then thrown away. ``None`` (the default)
+    # applies no such rule, which is what a caller that is not an agent
+    # wants: an admin listing, a migration, a count.
+    visible_to_agent: str | None = None
+
+
+def readable_by(entry: Any, agent_id: str | None) -> bool:
+    """Whether *agent_id* may read *entry*: it is shared, or it is theirs.
+
+    The one statement of the rule ``SearchQuery.visible_to_agent`` puts in
+    SQL, for the places that hold entries rather than a query: an adapter
+    with no SQL to put it in, and the checks made after a merge of several
+    reads. With no agent named there is nobody to hide anything from.
+    """
+    if not agent_id:
+        return True
+    if getattr(entry, "shared", True):
+        return True
+    return getattr(getattr(entry, "provenance", None), "agent_id", None) == agent_id
 
 
 class TierConfig(BaseModel):
@@ -1066,6 +1091,10 @@ class SemanticQuery(BaseModel):
     min_similarity: float = 0.0
     embedding: list[float] | None = None
     own_account_only: bool = False
+    # See SearchQuery.visible_to_agent: the same rule, and here it is the
+    # difference between ten nearest neighbours the agent may read and ten
+    # nearest neighbours of which it may read none.
+    visible_to_agent: str | None = None
 
 
 # ── Knowledge graph models ────────────────────────────────────────────

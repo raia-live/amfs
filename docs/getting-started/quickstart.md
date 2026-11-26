@@ -99,7 +99,7 @@ mem.write(
 )
 ```
 
-Private entries are invisible to other agents across all methods — `read()`, `search()`, `list()`, and `read_from()` all skip them. Only the owning agent can access its private entries via `recall()` and `my_entries()`.
+Private entries are invisible to other agents across all methods — `read()`, `search()`, `retrieve()`, `semantic_search()`, `list()`, and `read_from()` all skip them. Only the owning agent can access its private entries via `recall()` and `my_entries()`.
 
 ---
 

@@ -30,6 +30,7 @@ from amfs_core.models import (
     SearchQuery,
     SemanticQuery,
     Tag,
+    readable_by,
 )
 from amfs_core.scope import covers
 
@@ -410,6 +411,8 @@ class AdapterABC(ABC):
             if query.max_confidence is not None and entry.confidence > query.max_confidence:
                 continue
             if query.agent_id is not None and entry.provenance.agent_id != query.agent_id:
+                continue
+            if not readable_by(entry, query.visible_to_agent):
                 continue
             if query.since is not None and entry.provenance.written_at < query.since:
                 continue
@@ -1128,6 +1131,8 @@ class AdapterABC(ABC):
             if query.max_confidence is not None and entry.confidence > query.max_confidence:
                 continue
             if entry.embedding is None:
+                continue
+            if not readable_by(entry, query.visible_to_agent):
                 continue
             sim = cosine_similarity(query_vec, entry.embedding)
             if sim >= query.min_similarity:

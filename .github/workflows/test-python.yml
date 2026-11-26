@@ -96,11 +96,15 @@ jobs:
           # And the range form of "this path and below": that it selects the
           # rows the LIKE selects is a claim about Postgres under a collation
           # that is not C, which only a database can confirm.
+          # And the private-entry rule: that it is applied before the LIMIT is
+          # the whole point of stating it in the query, and a LIMIT is the
+          # database's.
           pytest tests/integration/test_postgres_adapter.py \
                  tests/integration/test_postgres_outcome_evidence.py \
                  tests/integration/test_postgres_evidence_parity.py \
                  tests/integration/test_postgres_outcome_entry_roles.py \
-                 tests/integration/test_postgres_descendants_range.py -v
+                 tests/integration/test_postgres_descendants_range.py \
+                 tests/integration/test_postgres_visible_to_agent.py -v
 
   # The hosted product builds these packages from this git tree, so a change here
   # reaches production whether or not it is ever published. Everything else reads

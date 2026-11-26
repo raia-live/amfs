@@ -100,6 +100,7 @@ Never share `AMFS_POSTGRES_DSN` with external agents in multi-tenant deployments
 | `AMFS_HTTP_PORT` | HTTP server bind port | `8080` |
 | `AMFS_API_KEYS` | Comma-separated API keys for authentication (empty = no auth) | — |
 | `AMFS_CORS_ORIGINS` | Comma-separated CORS allowed origins | `*` |
+| `AMFS_REUSE_CREDIT_GATE` | Whether a retrieve's top hit must be endorsed by the cross-encoder reranker (absolute score of 0.5 or more) to be counted as a reuse. `off` counts the top hit of every retrieve, as before 0.3.71. Has no effect where no reranker is configured, or on a request that declines it. | on |
 
 ---
 
