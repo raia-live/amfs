@@ -159,6 +159,23 @@ describe("room lifecycle", () => {
     expect([call.method, call.url]).toEqual(["POST", "http://s/api/v1/room-join/tok_abc123"]);
   });
 
+  it("a long run of brackets or slashes costs linear time, not quadratic", async () => {
+    mockFetch({ room_id: ROOM });
+    const started = Date.now();
+    await memory().roomRedeem(`${"<".repeat(200_000)}x${"<".repeat(200_000)}tok_abc123`).catch(() => {});
+    new HttpAdapter({ url: `http://s${"/".repeat(200_000)}x`, apiKey: "key-a" });
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("several trailing slashes on the base URL are all dropped", async () => {
+    mockFetch({ rooms: [] });
+    const mem = new AgentMemory("agent-a", {
+      adapter: new HttpAdapter({ url: "http://s///", apiKey: "key-a" }),
+    });
+    await mem.myRooms();
+    expect(only().url).toBe("http://s/api/v1/rooms");
+  });
+
   it("roomRedeem without a token is refused before any request", async () => {
     mockFetch();
     await expect(memory().roomRedeem("  ")).rejects.toThrow(/join token/);

@@ -56,7 +56,11 @@ export class HttpAdapter implements AmfsAdapter {
   private readonly agentId: string | undefined;
 
   constructor(opts: HttpAdapterOptions) {
-    this.baseUrl = opts.url.replace(/\/+$/, "");
+    // Not `replace(/\/+$/, "")`: that backtracks quadratically on a long run
+    // of slashes that is not at the end.
+    let end = opts.url.length;
+    while (end > 0 && opts.url[end - 1] === "/") end--;
+    this.baseUrl = opts.url.slice(0, end);
     this.agentId = opts.agentId;
     this.headers = {
       "Content-Type": "application/json",

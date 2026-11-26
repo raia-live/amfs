@@ -74,7 +74,15 @@ function branchFromEnv(): string | undefined {
  * string it tends to arrive wrapped in.
  */
 function joinToken(value: string): string {
-  let text = (value ?? "").trim().replace(/^[<>]+|[<>]+$/g, "").replace(/[.,;)]+$/, "");
+  // Index scans, not regexes: an anchored `[...]+$` backtracks quadratically
+  // on a long run of the character that is then followed by something else.
+  let text = (value ?? "").trim();
+  let start = 0;
+  let end = text.length;
+  while (start < end && "<>".includes(text[start])) start++;
+  while (end > start && "<>".includes(text[end - 1])) end--;
+  while (end > start && ".,;)".includes(text[end - 1])) end--;
+  text = text.slice(start, end);
   for (const marker of ["/join/", "/j/"]) {
     const at = text.lastIndexOf(marker);
     if (at !== -1) {
