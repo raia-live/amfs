@@ -403,10 +403,10 @@ class Provenance:
 
 ```python
 class OutcomeType(str, Enum):
-    CRITICAL_FAILURE = "critical_failure"  # × 1.15
-    FAILURE = "failure"                    # × 1.10
-    MINOR_FAILURE = "minor_failure"        # × 1.08
-    SUCCESS = "success"                    # × 0.97
+    CRITICAL_FAILURE = "critical_failure"  # failure, weighs 3x a success
+    FAILURE = "failure"                    # failure, weighs 2x
+    MINOR_FAILURE = "minor_failure"        # failure, weighs 1.5x
+    SUCCESS = "success"                    # success
 
     # Legacy aliases (deprecated — will be removed in a future version)
     P1_INCIDENT = "critical_failure"
