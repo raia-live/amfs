@@ -50,6 +50,7 @@ from amfs_core.aggregates import (
 )
 from amfs_core.ranking import composite_score
 from amfs_core.ranking import entry_text as _entry_text
+from amfs_core.models import readable_by as _readable_by
 from amfs_core.scope import SqlScope, covers
 from amfs_core.ranking import keyword_coverage as _keyword_coverage
 from amfs_core.reuse_value import REUSE_VALUE_HEADER, reuse_value_block
@@ -611,6 +612,63 @@ def _rerank_is_calibrated(scores: list[float]) -> bool:
 RERANK_ENDORSED = 0.5
 
 
+def _reuse_credit_gated() -> bool:
+    """Whether a retrieve hit must be endorsed to count as a reuse (default).
+
+    ``AMFS_REUSE_CREDIT_GATE=off`` restores crediting the top hit of every
+    retrieve without a code deploy. See :func:`_reuse_creditable` for what
+    the default costs and why it is the default all the same.
+    """
+    return os.environ.get("AMFS_REUSE_CREDIT_GATE", "").strip().lower() not in (
+        "0", "off", "false", "no",
+    )
+
+
+def _reuse_creditable(breakdown: dict[str, Any]) -> bool:
+    """Whether a retrieve hit may be counted as a memory that was reused.
+
+    Counting it bumps the entry's ``recall_count``, writes a reuse event and
+    returns the block a client relays to its user as what memory just did for
+    them. All three say the hit was about the query, so the test is whether
+    anything here can vouch for that:
+
+    * The composite score cannot. It blends confidence, recency and evidence
+      with relevance, and it ranks: the best of a bad batch is still first.
+    * The bi-encoder's similarity cannot. Measured with the default embedder
+      on real queries, the top hits that had nothing to do with the query sat
+      at 0.64-0.66 cosine and the ones that answered it at 0.60-0.80.
+    * The lexical term cannot. It is coverage within the candidate pool, so
+      the one candidate holding the query's only matched word scores 1.0.
+    * The cross-encoder's absolute score (``rerank_absolute``) can, in one
+      direction. On the same queries every unrelated top hit scored under
+      0.01, and the specific questions' hits over 0.9.
+
+    So a hit is credited when the cross-encoder puts it at better-than-even
+    odds (``RERANK_ENDORSED``, the bar step 9 already uses to overrule the
+    abstain floor). The cost is on the other side and is real: a relevant hit
+    to an open-ended question ("anything I should know before touching X")
+    scored under 0.01 too, in two of seven relevant cases. Those reuses go
+    uncounted. That is the error this number can afford: it is an estimate
+    shown to a person as a saving, and one unrelated row counted as a saving
+    costs it more belief than a real one left out.
+
+    Where no cross-encoder judged the hit there is nothing to gate on and it
+    is credited as before: a deployment without a reranker, a request that
+    declined it (``rerank: false``), a hit past the reranked head, and a
+    branch's pinned entry, which is at the head because the branch put it
+    there.
+    """
+    if not _reuse_credit_gated():
+        return True
+    absolute = breakdown.get("rerank_absolute")
+    if absolute is None:
+        return True
+    try:
+        return float(absolute) >= RERANK_ENDORSED
+    except (TypeError, ValueError):
+        return True
+
+
 def _rerank_absolute(scores: list[float]) -> list[float]:
     """The cross-encoder's opinion of each candidate on its own, 0..1.
 
@@ -1008,6 +1066,7 @@ async def _branch_treatment(
     vis: Any,
     include_artifacts: bool,
     is_artifact: Callable[[MemoryEntry], bool],
+    reader: str | None = None,
 ) -> list[tuple[MemoryEntry, float, float]]:
     """The entries *branch* changed under *entity_path* that are about *topical*.
 
@@ -1051,7 +1110,7 @@ async def _branch_treatment(
             pairs = await _async_adapter.semantic_search(
                 SemanticQuery(
                     text=topical, entity_path=entity_path, min_confidence=0.0,
-                    limit=pool, embedding=query_vector,
+                    limit=pool, embedding=query_vector, visible_to_agent=reader,
                 ),
                 embedder,
                 branch=branch,
@@ -1067,6 +1126,7 @@ async def _branch_treatment(
     lex = SearchQuery(
         query=topical, entity_path=entity_path, min_confidence=0.0, limit=pool,
         sort_by="confidence", depth=3, include_artifacts=include_artifacts,
+        visible_to_agent=reader,
     )
     try:
         if _async_adapter is not None:
@@ -1095,7 +1155,7 @@ async def _branch_treatment(
     # sees the record; it is not hidden from the arm on the record's account.
     out = [
         t for t in found.values()
-        if include_artifacts or not is_artifact(t[0])
+        if (include_artifacts or not is_artifact(t[0])) and _readable_by(t[0], reader)
     ]
     if out and vis is not None and vis.should_filter():
         allowed = {e.entry_key for e in vis.filter_entries([t[0] for t in out])}
@@ -3030,6 +3090,23 @@ def _known_agent_id(value: str | None) -> str | None:
     return cleaned or None
 
 
+def _reading_agent(request: Request) -> str | None:
+    """The agent a read is made for, or ``None`` when the request names none.
+
+    The ``X-AMFS-Agent-Id`` header and nothing else. It is the identity of the
+    session, sent on every request by the HTTP adapter and the MCP gateway,
+    which are the clients whose ``read``, ``list`` and ``search`` already keep
+    another agent's private entries from it. A retrieve's body can carry an
+    ``agent_id`` too, but that one is there to spread a fleet over untried
+    actions and is sent by services that read on an account's behalf; taking
+    it for the reader would hide rows from callers that never asked to be
+    treated as an agent. Read defensively because this route is also called
+    in-process, with a request built by the caller.
+    """
+    headers = getattr(request, "headers", None)
+    return _known_agent_id(headers.get("x-amfs-agent-id") if headers is not None else None)
+
+
 def _persist_reuse_event(
     credited: MemoryEntry,
     *,
@@ -3201,6 +3278,16 @@ async def retrieve_entries(
     branch = _effective_branch(request, req.branch)
     vis = _get_visibility_filter(request)
     embedder = _get_server_embedder()
+    # The agent this is read for, when the request names one. An entry written
+    # with ``shared=False`` is its author's alone: ``read``, ``list`` and
+    # ``search`` have always kept it from other agents, and this route handed
+    # it back in full, so the one way to find a memory by meaning was also the
+    # one way to read what an agent had marked private. The rule goes into the
+    # statements below (before the limit, so private rows do not use up the
+    # pool) and is applied once more over the merged set in step 5. A request
+    # that names no agent is not an agent's read (an admin page, a service
+    # calling with the account's key) and is answered as before.
+    reader = _reading_agent(request)
 
     # 1. Split temporal intent out of the query so it becomes a recency signal
     #    rather than embedded/lexical noise.
@@ -3250,6 +3337,7 @@ async def retrieve_entries(
                 limit=pool,
                 embedding=query_vectors.get(qtext),
                 own_account_only=req.own_account_only,
+                visible_to_agent=reader,
             )
             try:
                 pairs = await _async_adapter.semantic_search(sq, embedder, branch=branch)
@@ -3275,6 +3363,7 @@ async def retrieve_entries(
         depth=3,
         include_artifacts=req.include_artifacts,
         own_account_only=req.own_account_only,
+        visible_to_agent=reader,
     )
     lex_entries: list[MemoryEntry] = []
     if _async_adapter is not None:
@@ -3329,6 +3418,7 @@ async def retrieve_entries(
                         limit=BELOW_GATE_LIMIT,
                         embedding=query_vectors[topical],
                         own_account_only=req.own_account_only,
+                        visible_to_agent=reader,
                     ),
                     embedder,
                     branch=branch,
@@ -3352,6 +3442,7 @@ async def retrieve_entries(
             depth=3,
             include_artifacts=req.include_artifacts,
             own_account_only=req.own_account_only,
+            visible_to_agent=reader,
         )
         lex_below: list[MemoryEntry] = []
         try:
@@ -3401,6 +3492,13 @@ async def retrieve_entries(
         allowed = {e.entry_key for e in vis.filter_entries([v["entry"] for v in candidates.values()])}
         candidates = {k: v for k, v in candidates.items() if k in allowed}
         lessons = vis.filter_entries(lessons) if lessons else lessons
+
+    # 5b. Another agent's private entries, for the reads that did not state the
+    #     rule themselves: the sync fallback on an adapter with no SQL to put
+    #     it in. A no-op after the Postgres reads above, which already did.
+    if reader:
+        candidates = {k: v for k, v in candidates.items() if _readable_by(v["entry"], reader)}
+        lessons = [e for e in lessons if _readable_by(e, reader)]
 
     # 6. Artifact awareness (column authoritative once backfilled; classify on
     #    the fly otherwise so demotion works immediately).
@@ -3787,6 +3885,7 @@ async def retrieve_entries(
         vis=vis,
         include_artifacts=req.include_artifacts,
         is_artifact=_is_artifact,
+        reader=reader,
     )
     if pinned:
         if environment:
@@ -3853,9 +3952,19 @@ async def retrieve_entries(
     #     happened (a real session: 4 lookups, 16 credited reuses, 1 that
     #     changed the agent's behavior). Best-effort: never let accounting
     #     failure affect the response.
+    #
+    #     And only a hit the query was about. The top of a ranked list is
+    #     there whatever the query: step 9 never drops the single best result,
+    #     so a question the store has nothing on still has a first row, and
+    #     that row was counted as a memory reused, with its tokens saved and a
+    #     line telling the user so. ``_reuse_creditable`` is the test, and it
+    #     says why the cross-encoder's own opinion is the only signal here
+    #     that can make it.
     credited_entry = None
     credited_hits = 0
     for entry, _score, _bd in scored[:REUSE_CREDIT_K]:
+        if not _reuse_creditable(_bd):
+            continue
         credited_hits += 1
         if credited_entry is None:
             credited_entry = entry
@@ -5231,13 +5340,18 @@ async def _memories_matching_task(
     query = normalize_temporal(text).topical
 
     embedder = _get_server_embedder()
+    # Retrieve hides another agent's private entries from the agent asking, so
+    # this does too: the count is of what that agent would have been shown.
+    reader = _reading_agent(request)
     # entry_key -> {"entry", "sim", "keyword"}, the same slot shape retrieve uses.
     candidates: dict[str, dict[str, Any]] = {}
 
     if embedder is not None:
         try:
             pairs = await _async_adapter.semantic_search(
-                SemanticQuery(text=query, limit=150), embedder, branch=branch
+                SemanticQuery(text=query, limit=150, visible_to_agent=reader),
+                embedder,
+                branch=branch,
             )
         except Exception:  # noqa: BLE001 - a gap report never costs a commit
             logger.debug("gap semantic_search failed", exc_info=True)
@@ -5256,7 +5370,9 @@ async def _memories_matching_task(
     # blindest about the memories that earned their confidence.
     try:
         lex = await _async_adapter.search(
-            SearchQuery(query=query, limit=150, sort_by="confidence", depth=3),
+            SearchQuery(
+                query=query, limit=150, sort_by="confidence", depth=3, visible_to_agent=reader,
+            ),
             branch=branch,
         )
     except Exception:  # noqa: BLE001

@@ -44,6 +44,7 @@ from amfs_postgres.adapter import (
     _EXCLUDE_SHARED_PATHS,
     _NOT_EXPIRED,
     _REUSE_EVENT_INSERT_SQL,
+    _VISIBLE_TO_AGENT,
     PostgresAdapter,
     _evidence_params,
     _inherit_from_row,
@@ -626,6 +627,11 @@ class AsyncPostgresAdapter:
         if own_account:
             conditions.append("account_id = %s::uuid")
             params.append(own_account)
+        reader = getattr(query, "visible_to_agent", None)
+        if reader:
+            # Before the limit, not after: see SearchQuery.visible_to_agent.
+            conditions.append(_VISIBLE_TO_AGENT)
+            params.append(reader)
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
@@ -757,6 +763,11 @@ class AsyncPostgresAdapter:
         if own_account:
             conditions.append("account_id = %s::uuid")
             params.append(own_account)
+        reader = getattr(query, "visible_to_agent", None)
+        if reader:
+            # Before the limit, not after: see SearchQuery.visible_to_agent.
+            conditions.append(_VISIBLE_TO_AGENT)
+            params.append(reader)
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)

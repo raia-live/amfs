@@ -229,6 +229,15 @@ def priority_score_sql(now: datetime, config: Any | None = None) -> tuple[str, l
 #: their callers; with nothing to bind it cannot shift any of them.
 _NOT_EXPIRED = "(ttl_at IS NULL OR ttl_at > NOW())"
 
+# What one agent may read: entries that are shared, and its own. One
+# parameter, the agent. The rule ``AgentMemory`` applies to the entries it is
+# handed (``MemoryEntry.shared``), for a search that states it up front
+# (``SearchQuery.visible_to_agent``): applied after the limit instead, the
+# private entries of other agents take the places in the page and are then
+# dropped, and where one agent keeps thousands of them the page comes back
+# empty. The cast keeps the parameter's type from depending on the driver.
+_VISIBLE_TO_AGENT = "(shared OR agent_id = %s::text)"
+
 
 def list_conditions(
     namespace: str,
@@ -2752,6 +2761,11 @@ class PostgresAdapter(AdapterABC):
         if own_account:
             conditions.append("account_id = %s::uuid")
             params.append(own_account)
+        reader = getattr(query, "visible_to_agent", None)
+        if reader:
+            # Before the limit, not after: see SearchQuery.visible_to_agent.
+            conditions.append(_VISIBLE_TO_AGENT)
+            params.append(reader)
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)
@@ -2886,6 +2900,11 @@ class PostgresAdapter(AdapterABC):
         if own_account:
             conditions.append("account_id = %s::uuid")
             params.append(own_account)
+        reader = getattr(query, "visible_to_agent", None)
+        if reader:
+            # Before the limit, not after: see SearchQuery.visible_to_agent.
+            conditions.append(_VISIBLE_TO_AGENT)
+            params.append(reader)
         if query.min_confidence > 0:
             conditions.append("confidence >= %s")
             params.append(query.min_confidence)

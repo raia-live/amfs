@@ -56,6 +56,7 @@ from amfs_core.models import (
     ToolCall,
     TraceEntry,
     environment_of,
+    readable_by,
 )
 from amfs_core.outcome import OutcomeBackPropagator
 
@@ -1030,8 +1031,17 @@ class AgentMemory:
             min_confidence=min_confidence,
             limit=limit,
             min_similarity=min_similarity,
+            # Shared entries and our own, as ``read``, ``list`` and ``search``
+            # have it. Stated in the query so an adapter with a statement to
+            # put it in applies it before the limit; checked again below for
+            # one that ignores the field.
+            visible_to_agent=self.agent_id,
         )
-        return self._adapter.semantic_search(query, self._embedder)
+        return [
+            (entry, similarity)
+            for entry, similarity in self._adapter.semantic_search(query, self._embedder)
+            if readable_by(entry, self.agent_id)
+        ]
 
     def retrieve(
         self,
@@ -1138,9 +1148,14 @@ class AgentMemory:
                     optional=("covariates", "environment", "abstain", "branch", "situation",
                               "compact", "candidate_actions", "include_priors"),
                 )
+                # A server that knows the rule has applied it already, from
+                # the agent id this handle sends on every request. This is for
+                # one that does not yet: another agent's private entry is not
+                # ours to be handed, whichever side of the wire notices.
                 scored = [
                     ScoredEntry(entry=entry, score=score, breakdown=breakdown or {})
                     for entry, score, breakdown in rows
+                    if readable_by(entry, self.agent_id)
                 ]
                 self._record_retrieval_reuse(
                     query, entity_path, [r for r in scored if not is_avoid(r)]
