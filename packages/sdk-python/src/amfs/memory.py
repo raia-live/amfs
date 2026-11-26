@@ -104,14 +104,24 @@ def _warn_env_ignored() -> None:
     )
 
 
+#: What a pasted join link arrives wrapped in: brackets, quotes and the
+#: punctuation of the sentence around it. None of it can be part of a token,
+#: which is URL-safe base64, so it is trimmed from both ends in any order.
+_LINK_WRAPPING = " \t\r\n<>()[]\"'`.,;:!"
+
+
 def _join_token(value: str) -> str:
     """The token out of whatever a room join link looks like when pasted.
 
     The link is what people are sent, so the whole URL is accepted as well as
     the bare token, with the brackets, trailing punctuation and query string
     it tends to arrive wrapped in.
+
+    The wrapping is one set and not a bracket pass followed by a punctuation
+    pass: ``<https://.../join/tok>.`` ends in a full stop with the bracket
+    behind it, and two passes leave the ``>`` on the token.
     """
-    text = (value or "").strip().strip("<>").rstrip(".,;)")
+    text = (value or "").strip(_LINK_WRAPPING)
     for marker in ("/join/", "/j/"):
         if marker in text:
             text = text.rsplit(marker, 1)[1]
@@ -119,7 +129,7 @@ def _join_token(value: str) -> str:
     for cut in ("?", "#", "/"):
         if cut in text:
             text = text.split(cut, 1)[0]
-    return text.strip()
+    return text.strip(_LINK_WRAPPING)
 
 
 #: The session attribute a committed outcome carries when the memory was on a

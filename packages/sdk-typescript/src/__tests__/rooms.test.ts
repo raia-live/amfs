@@ -152,12 +152,30 @@ describe("room lifecycle", () => {
     "https://amfs.sense-lab.ai/join/tok_abc123",
     "<https://amfs.sense-lab.ai/join/tok_abc123?utm_source=email>.",
     "  https://amfs.sense-lab.ai/j/tok_abc123/  ",
+    // Wrapping in any order: the bracket behind the full stop is the ordinary
+    // way a link ends a sentence in an email.
+    "<https://amfs.sense-lab.ai/join/tok_abc123>.",
+    "<https://amfs.sense-lab.ai/join/tok_abc123>,",
+    "(https://amfs.sense-lab.ai/join/tok_abc123).",
+    "[the room](https://amfs.sense-lab.ai/join/tok_abc123);",
+    '"https://amfs.sense-lab.ai/join/tok_abc123".',
+    "<tok_abc123>.",
+    "https://amfs.sense-lab.ai/join/tok_abc123 .",
   ])("roomRedeem takes the token or the whole link: %s", async (pasted) => {
     mockFetch({ room_id: ROOM });
     expect(await memory().roomRedeem(pasted)).toEqual({ room_id: ROOM });
     const call = only();
     expect([call.method, call.url]).toEqual(["POST", "http://s/api/v1/room-join/tok_abc123"]);
   });
+
+  it.each(["tok_abc-", "tok_abc_", "-tok_abc", "_tok-abc_"])(
+    "roomRedeem keeps a token that starts or ends in a dash: %s",
+    async (token) => {
+      mockFetch({ room_id: ROOM });
+      await memory().roomRedeem(`<https://amfs.sense-lab.ai/join/${token}>.`);
+      expect(only().url).toBe(`http://s/api/v1/room-join/${token}`);
+    },
+  );
 
   it("a long run of brackets or slashes costs linear time, not quadratic", async () => {
     mockFetch({ room_id: ROOM });

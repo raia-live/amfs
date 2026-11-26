@@ -69,20 +69,34 @@ function branchFromEnv(): string | undefined {
 }
 
 /**
+ * What a pasted join link arrives wrapped in: brackets, quotes and the
+ * punctuation of the sentence around it. None of it can be part of a token,
+ * which is URL-safe base64, so it is trimmed from both ends in any order.
+ */
+const LINK_WRAPPING = " \t\r\n<>()[]\"'`.,;:!";
+
+/**
+ * `text` without the link wrapping at either end. One set, not a bracket pass
+ * followed by a punctuation pass: `<https://.../join/tok>.` ends in a full
+ * stop with the bracket behind it, and two passes leave the `>` on the token.
+ * Index scans, not regexes: an anchored `[...]+$` backtracks quadratically on
+ * a long run of the character that is then followed by something else.
+ */
+function unwrapLink(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && LINK_WRAPPING.includes(text[start])) start++;
+  while (end > start && LINK_WRAPPING.includes(text[end - 1])) end--;
+  return text.slice(start, end);
+}
+
+/**
  * The token out of whatever a room join link looks like when pasted: the bare
  * token, or the whole URL with the brackets, trailing punctuation and query
  * string it tends to arrive wrapped in.
  */
 function joinToken(value: string): string {
-  // Index scans, not regexes: an anchored `[...]+$` backtracks quadratically
-  // on a long run of the character that is then followed by something else.
-  let text = (value ?? "").trim();
-  let start = 0;
-  let end = text.length;
-  while (start < end && "<>".includes(text[start])) start++;
-  while (end > start && "<>".includes(text[end - 1])) end--;
-  while (end > start && ".,;)".includes(text[end - 1])) end--;
-  text = text.slice(start, end);
+  let text = unwrapLink(value ?? "");
   for (const marker of ["/join/", "/j/"]) {
     const at = text.lastIndexOf(marker);
     if (at !== -1) {
@@ -94,7 +108,7 @@ function joinToken(value: string): string {
     const at = text.indexOf(cut);
     if (at !== -1) text = text.slice(0, at);
   }
-  return text.trim();
+  return unwrapLink(text);
 }
 
 function normalizeBranch(branch: string | undefined | null): string {

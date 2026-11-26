@@ -173,6 +173,15 @@ class TestLifecycle:
             "https://amfs.sense-lab.ai/join/tok_abc123",
             "<https://amfs.sense-lab.ai/join/tok_abc123?utm_source=email>.",
             "  https://amfs.sense-lab.ai/j/tok_abc123/  ",
+            # Wrapping in any order: the bracket behind the full stop is the
+            # ordinary way a link ends a sentence in an email.
+            "<https://amfs.sense-lab.ai/join/tok_abc123>.",
+            "<https://amfs.sense-lab.ai/join/tok_abc123>,",
+            "(https://amfs.sense-lab.ai/join/tok_abc123).",
+            "[the room](https://amfs.sense-lab.ai/join/tok_abc123);",
+            '"https://amfs.sense-lab.ai/join/tok_abc123".',
+            "<tok_abc123>.",
+            "https://amfs.sense-lab.ai/join/tok_abc123 .",
         ],
     )
     def test_room_redeem_takes_the_token_or_the_whole_link(self, pasted: str) -> None:
@@ -183,6 +192,15 @@ class TestLifecycle:
         assert mem.room_redeem(pasted) == {"room_id": ROOM}
         request = _only(seen)
         assert (request.method, request.url.path) == ("POST", "/api/v1/room-join/tok_abc123")
+
+    @pytest.mark.parametrize("token", ["tok_abc-", "tok_abc_", "-tok_abc", "_tok-abc_"])
+    def test_room_redeem_keeps_a_token_that_starts_or_ends_in_a_dash(self, token: str) -> None:
+        """Join tokens are URL-safe base64, so ``-`` and ``_`` at either end are
+        part of the token and not wrapping to be trimmed."""
+        seen: list[httpx.Request] = []
+        mem = _memory(seen, {("POST", f"/api/v1/room-join/{token}"): {"room_id": ROOM}})
+        mem.room_redeem(f"<https://amfs.sense-lab.ai/join/{token}>.")
+        assert _only(seen).url.path == f"/api/v1/room-join/{token}"
 
     def test_room_redeem_without_a_token_is_refused_before_any_request(self) -> None:
         seen: list[httpx.Request] = []
