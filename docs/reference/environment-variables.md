@@ -63,6 +63,9 @@ When connecting to AMFS as a hosted service (SaaS), set these variables to route
 {: .warning }
 When `AMFS_HTTP_URL` is set, `AMFS_POSTGRES_DSN` and `AMFS_DATA_DIR` are ignored. A log warning is emitted if both `AMFS_HTTP_URL` and `AMFS_POSTGRES_DSN` are set.
 
+{: .note }
+The MCP server and the HTTP server read these variables on their own. The SDKs do not: in Python, `AgentMemory(agent_id=...)` keeps its local storage whatever the environment says, and `AgentMemory.from_env(agent_id)` is the call that reads them (it raises if either is missing). In TypeScript the equivalent is `AgentMemory.fromEnv(agentId)`. The CLI is local-first and does not read them either.
+
 {: .important }
 Never share `AMFS_POSTGRES_DSN` with external agents in multi-tenant deployments. Always use `AMFS_HTTP_URL` + `AMFS_API_KEY` for external access — this ensures tenant isolation, scope enforcement, and audit logging.
 

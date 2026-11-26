@@ -134,7 +134,59 @@ console.log(stats.avgConfidence);
 
 When using AMFS as a hosted service (SaaS), connect through the HTTP API with your API key instead of a direct database connection.
 
-The TypeScript SDK currently uses an in-memory adapter by default. For SaaS, agents should use the MCP server (with `AMFS_HTTP_URL` set) or make direct REST API calls.
+The TypeScript SDK uses an in-memory adapter by default, and the constructor does not read `AMFS_HTTP_URL` or `AMFS_API_KEY`. To reach the hosted API, build the memory with `AgentMemory.fromEnv()` or pass an `HttpAdapter`; the MCP server and direct REST calls work as well.
+
+### Via the SDK
+
+```bash
+export AMFS_HTTP_URL="https://amfs-login.sense-lab.ai"
+export AMFS_API_KEY="amfs_sk_your_key_here"
+```
+
+```typescript
+import { AgentMemory, HttpAdapter } from "@senselab-ai/amfs";
+
+// Reads both variables; throws if either is missing.
+const mem = AgentMemory.fromEnv("my-agent");
+
+// Or explicitly:
+const explicit = new AgentMemory("my-agent", {
+  adapter: new HttpAdapter({ url: "https://amfs-login.sense-lab.ai", apiKey: "amfs_sk_your_key_here" }),
+});
+
+await mem.writeAsync("checkout-service", "retry-pattern", { maxRetries: 3 });
+const hits = await mem.retrieveAsync("how many retries?", { entityPath: "checkout-service" });
+```
+
+Over HTTP every operation is a network call, so use the `*Async` methods. The synchronous `read` / `write` / `list` operate on the in-memory adapter only.
+
+### Rooms
+
+A room shares one or more entity paths between users, so agents running under different API keys read and write the same memories and can message each other. Room methods need the `HttpAdapter` and return the server's JSON as it arrives (snake_case keys).
+
+```typescript
+const host = AgentMemory.fromEnv("agent-a");
+const guest = AgentMemory.fromEnv("agent-b", { apiKey: otherUsersKey });
+
+const room = await host.roomCreate("acme/billing", { name: "Billing rules" });
+const link = await host.roomShare(room.id as string, { maxUses: 2, expiresInDays: 1 });
+
+await guest.roomRedeem(link.token as string);   // admits the user
+await guest.roomJoin(room.id as string);        // places the agent, returns a briefing
+
+await guest.roomDiscuss(room.id as string, "Does this cover refunds?", {
+  messageType: "question",
+  addressedTo: "agent-a",
+});
+const messages = await host.roomDiscussions(room.id as string, { addressedTo: "agent-a" });
+
+await host.roomDelete(room.id as string);       // stops the sharing; the memories stay
+```
+
+Also available: `roomLeave`, `myRooms`, `roomInfo`, `roomBriefing`, `roomUpdates`, `roomClose`, and `negotiateCreate` / `negotiatePropose` / `negotiateRespond` / `negotiateStatus`. A refused call throws an `Error` whose message carries the HTTP status and the server's explanation.
+
+{: .note }
+`fromEnv`, the room methods listed here and a working room transport require `@senselab-ai/amfs` 0.4.5 or later.
 
 ### Via MCP Server
 

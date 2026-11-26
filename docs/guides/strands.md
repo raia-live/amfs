@@ -167,7 +167,18 @@ export AMFS_HTTP_URL="https://amfs-login.sense-lab.ai"
 export AMFS_API_KEY="amfs_sk_your_key_here"
 ```
 
-`AgentMemory` auto-detects the HTTP adapter when `AMFS_HTTP_URL` is set.
+Build the memory with `AgentMemory.from_env()`, which reads both and raises if either is missing:
+
+```python
+from amfs import AgentMemory
+from amfs_strands import AMFSPlugin
+
+mem = AgentMemory.from_env("my-agent")
+agent = Agent(plugins=[AMFSPlugin(mem)])
+```
+
+{: .warning }
+The constructor does **not** read these variables: `AgentMemory(agent_id="my-agent")` with no `adapter=` uses local storage even when both are set.
 
 ### Explicit HttpAdapter
 

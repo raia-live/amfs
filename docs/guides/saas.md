@@ -215,7 +215,7 @@ See the [API Reference](/amfs/reference/api/) for the full endpoint list.
 
 ## Connecting via Python SDK
 
-Set the environment variables and the SDK auto-detects the HTTP adapter:
+Set the environment variables and build the memory with `AgentMemory.from_env()`:
 
 ```bash
 export AMFS_HTTP_URL="https://amfs-login.sense-lab.ai"
@@ -225,9 +225,14 @@ export AMFS_API_KEY="amfs_sk_your_key_here"
 ```python
 from amfs import AgentMemory
 
-mem = AgentMemory(agent_id="my-agent")
+mem = AgentMemory.from_env("my-agent")
 mem.write("checkout-service", "retry-pattern", {"max_retries": 3})
 ```
+
+`from_env()` raises if either variable is missing rather than falling back to local storage.
+
+{: .warning }
+The constructor does **not** read these variables. `AgentMemory(agent_id="my-agent")` with no `adapter=` writes to local storage even when both are set, and logs one warning saying so.
 
 Or configure explicitly with the `HttpAdapter`:
 
