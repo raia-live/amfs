@@ -2,7 +2,14 @@
  * @senselab-ai/amfs — Agent Memory File System TypeScript SDK
  */
 
-export { AgentMemory, MemoryScope, BRANCH_ENV, MEMORY_BRANCH_ATTRIBUTE } from "./memory.js";
+export {
+  AgentMemory,
+  MemoryScope,
+  API_KEY_ENV,
+  BRANCH_ENV,
+  HTTP_URL_ENV,
+  MEMORY_BRANCH_ATTRIBUTE,
+} from "./memory.js";
 export type { AgentMemoryOptions, SearchOptions, MemoryStats } from "./memory.js";
 export type { AmfsAdapter, WatchHandle } from "./adapter.js";
 export { createWatchHandle } from "./adapter.js";

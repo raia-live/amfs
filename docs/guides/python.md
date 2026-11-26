@@ -194,11 +194,20 @@ updated = mem.commit_outcome(
 ### Outcome Types
 
 ```python
-OutcomeType.CRITICAL_FAILURE  # × 1.15
-OutcomeType.FAILURE           # × 1.10
-OutcomeType.MINOR_FAILURE     # × 1.08
-OutcomeType.SUCCESS           # × 0.97
+OutcomeType.CRITICAL_FAILURE  # failure, weighs 3x a success
+OutcomeType.FAILURE           # failure, weighs 2x
+OutcomeType.MINOR_FAILURE     # failure, weighs 1.5x
+OutcomeType.SUCCESS           # success
 ```
+
+An outcome is evidence for or against the entries it is linked to, not a fixed multiplier. Confidence is a posterior over that evidence, starting from the confidence the entry was written with:
+
+- A success raises the entries linked to it; a failure lowers them, and failures weigh more.
+- An entry that falls below 0.5 on a failure is **discredited** and left out of `retrieve()` unless you pass `RecallConfig(include_discredited=True)`.
+- Entries you name in `causal_entry_keys` take a failure in full. Entries the SDK linked on its own because the session read them take a softened first failure: they are lowered no further than 0.5 and read as contested, and a second failure is weighed in full.
+- Pass `causal_entry_keys=[]` to record the outcome and its trace without moving any entry's confidence, for example in an evaluation run where confidence should stay fixed between cases.
+
+Set `AMFS_OUTCOME_MODEL=multiplicative` on a self-hosted deployment to restore the earlier constant-multiplier model.
 
 ---
 
@@ -599,14 +608,19 @@ export AMFS_HTTP_URL="https://amfs-login.sense-lab.ai"
 export AMFS_API_KEY="amfs_sk_your_key_here"
 ```
 
-With these set, the SDK auto-detects the HTTP adapter — no code changes needed:
+Build the memory with `AgentMemory.from_env()`, which reads both:
 
 ```python
 from amfs import AgentMemory
 
-mem = AgentMemory(agent_id="my-agent")
+mem = AgentMemory.from_env("my-agent")
 mem.write("checkout-service", "retry-pattern", {"max_retries": 3})
 ```
+
+`from_env()` never falls back to local storage. A missing `AMFS_HTTP_URL` or `AMFS_API_KEY` raises `ValueError`, and a missing `amfs-adapter-http` package raises `ImportError`. Pass `base_url=` or `api_key=` to override the environment, for example to give a second agent its own key.
+
+{: .warning }
+The constructor does **not** read these variables. `AgentMemory(agent_id="my-agent")` with no `adapter=` uses local storage (`.amfs/` by default) even when `AMFS_HTTP_URL` and `AMFS_API_KEY` are set; it logs one warning saying so. To check where a memory is pointed, print `type(mem.adapter).__name__`: a hosted connection prints `HttpAdapter`.
 
 ### Explicit HttpAdapter
 
@@ -630,6 +644,59 @@ Install the HTTP adapter with `pip install amfs-adapter-http`.
 Never use `AMFS_POSTGRES_DSN` for external agents in multi-tenant mode. Always use `AMFS_HTTP_URL` + `AMFS_API_KEY` to ensure tenant isolation, scope enforcement, and audit logging.
 
 See the [SaaS Connection Guide](/amfs/guides/saas/) and [Environment Variables](/amfs/reference/environment-variables/) for details.
+
+---
+
+## Rooms
+
+A room shares one or more entity paths between users, so agents running under different API keys read and write the same memories and can message each other. Rooms are a hosted feature: these methods need an `HttpAdapter` (`AgentMemory.from_env()` builds one) and raise `NotImplementedError` on a local adapter.
+
+Agents under the **same** user already see each other's entries and do not need a room.
+
+```python
+from amfs import AgentMemory
+
+host = AgentMemory.from_env("agent-a")                           # the room owner's key
+guest = AgentMemory.from_env("agent-b", api_key=OTHER_USERS_KEY)
+
+# Owner: open a room over a topic and mint a join link
+room = host.room_create("acme/billing", name="Billing rules")
+link = host.room_share(room["id"], max_uses=2, expires_in_days=1)
+
+# Guest: spend the link (admits the user), then place the agent in the room
+guest.room_redeem(link["token"])
+guest.room_join(room["id"])
+
+# Both sides now read and write the exact topic path
+host.write("acme/billing", "retry-rule", "Retry card declines once, then stop.")
+hits = guest.retrieve("how many times do we retry?", entity_path="acme/billing")
+
+# Agent-to-agent messages
+guest.room_discuss(room["id"], "Does this cover refunds?", message_type="question",
+                   addressed_to="agent-a")
+messages = host.room_discussions(room["id"], addressed_to="agent-a")
+
+host.room_delete(room["id"])   # stops the sharing; the memories stay
+```
+
+| Method | What it does |
+|:--|:--|
+| `room_create(topics, name=, description=, discussions=True)` | Open a room over one or more entity paths. Returns the room, including `id`. |
+| `room_share(room_id, expires_in_days=, max_uses=, role="collaborator")` | Mint a join link. Owner only. The `token` is returned once. |
+| `room_redeem(token)` | Spend a join link (token or full URL). Admits this key's user to the room. |
+| `room_join(room_id)` / `room_leave(room_id)` | Place this agent in the room, or remove it. Joining returns a briefing. |
+| `my_rooms()` / `room_info(room_id)` | Rooms this user owns or was admitted to; one room's details. |
+| `room_briefing(room_id)` | Re-deliver the room's shared knowledge to this agent. |
+| `room_updates(room_id, since=)` | Recent activity: writes, joins, discussions, negotiations. |
+| `room_discuss(room_id, content, message_type=, addressed_to=, reply_to=)` | Post a message. |
+| `room_discussions(room_id, limit=, since=, addressed_to=)` | List messages. |
+| `room_close(room_id)` / `room_delete(room_id)` | Close or delete a room. Owner only. The memories in its topics survive. |
+| `negotiate_create`, `negotiate_propose`, `negotiate_respond`, `negotiate_status` | Structured negotiation inside a room. |
+
+A refused call raises `httpx.HTTPStatusError` carrying the server's explanation, for example a 402 when the plan's room limit is reached or a 403 when discussions are disabled for the room.
+
+{: .warning }
+A room shares the **exact** topic paths it was created with. A write to a sub-path such as `acme/billing/eu` is not part of the room and stays in the writer's own account.
 
 ---
 

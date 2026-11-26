@@ -28,7 +28,10 @@ export AMFS_HTTP_URL="https://amfs-login.sense-lab.ai"
 export AMFS_API_KEY="amfs_sk_your_key_here"
 ```
 
-With these set, `AgentMemory` auto-detects the HTTP adapter and routes all operations through the authenticated API. This applies to CrewAI, LangGraph, LangChain, AutoGen, and any custom integration.
+Then build the memory you hand to the integration with `AgentMemory.from_env("my-agent")`, which reads both variables and routes all operations through the authenticated API. This applies to CrewAI, LangGraph, LangChain, AutoGen, and any custom integration.
+
+{: .warning }
+The constructor does **not** read these variables. `AgentMemory(agent_id="my-agent")` with no `adapter=` uses local storage even when both are set; `from_env()` raises instead of falling back.
 
 {: .warning }
 Never use `AMFS_POSTGRES_DSN` for external agents in multi-tenant mode. Always use `AMFS_HTTP_URL` + `AMFS_API_KEY` to ensure tenant isolation.
