@@ -188,6 +188,60 @@ def test_every_read_the_route_makes_states_the_rule(monkeypatch):
     assert all(q.visible_to_agent == "reader" for q in adapter.queries)
 
 
+def _stopped_working(key: str, *, by: str, shared: bool = True) -> MemoryEntry:
+    """A rule that was validated and then discredited: what the priors read looks for."""
+    return _entry(key, by=by, shared=shared).model_copy(
+        update={"confidence": 0.1, "discredited_at": datetime.now(UTC)}
+    )
+
+
+def _below_gate(adapter, monkeypatch, *, reader: str | None) -> list[str]:
+    monkeypatch.setattr(server, "_async_adapter", adapter)
+    rows = asyncio.run(
+        server._discredited_below_gate(
+            "svc/billing", branch="main", seen=set(), vis=None,
+            include_artifacts=True, limit=50, reader=reader,
+        )
+    )
+    return [e.key for e in rows]
+
+
+def test_the_priors_read_states_the_rule_and_holds_to_it(monkeypatch):
+    """The entity-wide read behind the regime-shift flag. Its rows are not
+    returned, but they decide whether the caller is told a rule stopped
+    working and sent to explore, so another agent's private one must not be
+    among them: in the query, and on what an adapter without the field
+    hands back."""
+    theirs = _stopped_working("scratch-rule", by="simulator", shared=False)
+    shared = _stopped_working("old-runbook", by="simulator")
+    adapter = _Adapter(lexical=[theirs, shared])
+
+    assert _below_gate(adapter, monkeypatch, reader="reader") == ["old-runbook"]
+    assert [q.visible_to_agent for q in adapter.queries] == ["reader"]
+
+
+def test_the_priors_read_still_sees_the_readers_own_private_rule(monkeypatch):
+    theirs = _stopped_working("scratch-rule", by="simulator", shared=False)
+    adapter = _Adapter(lexical=[theirs])
+
+    assert _below_gate(adapter, monkeypatch, reader="simulator") == ["scratch-rule"]
+    # No agent named: nobody to hide it from, as on every other read.
+    assert _below_gate(adapter, monkeypatch, reader=None) == ["scratch-rule"]
+
+
+def test_a_retrieve_that_asks_for_priors_states_the_rule_on_that_read_too(monkeypatch):
+    """The read above is made by the route, which has to hand it the reader."""
+    adapter = _Adapter()
+    monkeypatch.setattr(server, "_get_server_embedder", lambda: _Embedder())
+    monkeypatch.setattr(server, "_priors_for_retrieve", lambda **_kw: None)
+
+    _retrieve(adapter, monkeypatch, agent="reader", entity_path="svc/billing", include_priors=True)
+
+    below = [q for q in adapter.queries if getattr(q, "max_confidence", None) is not None]
+    assert len(below) == 1, "the priors read ran"
+    assert all(q.visible_to_agent == "reader" for q in adapter.queries)
+
+
 def test_the_count_of_what_could_have_been_consulted_follows_the_same_rule(monkeypatch):
     """The gap report says how many memories the agent would have been shown
     had it asked. It is checked by asking, so it has to hide what asking hides."""

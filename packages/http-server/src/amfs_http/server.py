@@ -1171,6 +1171,7 @@ async def _discredited_below_gate(
     vis: Any,
     include_artifacts: bool,
     limit: int,
+    reader: str | None = None,
 ) -> list[MemoryEntry]:
     """The entity's discredited entries the ranked list did not hold.
 
@@ -1190,9 +1191,12 @@ async def _discredited_below_gate(
     confidence at or under the discredit threshold — a small set, since that is
     what discrediting means — then the discredited ones among them.
 
-    Filtered by the same visibility rules as the ranked list. The rows are not
-    returned, but the recommendation they steer is, and a policy decision
-    driven by memory the caller cannot see is a leak by another name.
+    Filtered by the same visibility rules as the ranked list, *reader*'s
+    included: another agent's private entry is left out in the query, so it
+    takes none of *limit*, and again on what comes back, for a store that
+    does not apply it. The rows are not returned, but the recommendation they
+    steer is, and a policy decision driven by memory the caller cannot see is
+    a leak by another name.
     Best-effort; a store that cannot answer contributes nothing rather than
     failing the retrieve.
     """
@@ -1204,6 +1208,7 @@ async def _discredited_below_gate(
         sort_by="recency",
         depth=3,
         include_artifacts=include_artifacts,
+        visible_to_agent=reader,
     )
     rows: list[MemoryEntry] = []
     try:
@@ -1223,6 +1228,7 @@ async def _discredited_below_gate(
     return [
         e for e in rows
         if getattr(e, "discredited_at", None) is not None
+        and _readable_by(e, reader)
         and e.entry_key not in seen
         and not _is_excluded_entity(getattr(e, "entity_path", ""))
         and not _is_synthetic_key(getattr(e, "key", ""))
@@ -4104,6 +4110,7 @@ async def retrieve_entries(
                 vis=vis,
                 include_artifacts=req.include_artifacts,
                 limit=pool,
+                reader=reader,
             )
         )
         shifted_entries = [e for e in shift_pool if _regime_shifted(e, now=now)]
