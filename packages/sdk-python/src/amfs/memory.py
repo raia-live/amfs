@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote
 
 from pydantic import ValidationError
 
@@ -67,6 +68,59 @@ logger = logging.getLogger(__name__)
 #: Environment variable naming the branch an ``AgentMemory`` starts on when the
 #: constructor is not given one. Read once, at construction.
 BRANCH_ENV = "AMFS_BRANCH"
+
+#: The hosted connection, as the MCP server and the HTTP server read it. The
+#: constructor does **not** read these: ``AgentMemory(agent_id=...)`` keeps its
+#: configured (by default local) storage whatever the environment says, because
+#: a process that happens to inherit them would otherwise start writing to a
+#: hosted account nobody pointed it at. :meth:`AgentMemory.from_env` is the
+#: explicit way to use them.
+HTTP_URL_ENV = "AMFS_HTTP_URL"
+API_KEY_ENV = "AMFS_API_KEY"
+
+_env_ignored_warned = False
+
+
+def _warn_env_ignored() -> None:
+    """Say once that ``AMFS_HTTP_URL`` is set and this memory is not using it.
+
+    The failure this is for is silent: the variables are exported, the script
+    runs without an error, and every write lands in a local ``.amfs/`` folder
+    while the hosted dashboard stays empty. Once per process, as a log line —
+    never an exception, since a local memory in that environment is also what
+    the CLI and every offline test are meant to get.
+    """
+    global _env_ignored_warned
+    if _env_ignored_warned or not (os.environ.get(HTTP_URL_ENV) or "").strip():
+        return
+    _env_ignored_warned = True
+    logger.warning(
+        "%s is set, but this AgentMemory was built without an adapter and is "
+        "using its local configuration, not the hosted API. Use "
+        "AgentMemory.from_env(agent_id) or pass "
+        "adapter=HttpAdapter(base_url=..., api_key=...) to connect; pass "
+        "adapter= or config_path= to choose local storage without this warning.",
+        HTTP_URL_ENV,
+    )
+
+
+def _join_token(value: str) -> str:
+    """The token out of whatever a room join link looks like when pasted.
+
+    The link is what people are sent, so the whole URL is accepted as well as
+    the bare token, with the brackets, trailing punctuation and query string
+    it tends to arrive wrapped in.
+    """
+    text = (value or "").strip().strip("<>").rstrip(".,;)")
+    for marker in ("/join/", "/j/"):
+        if marker in text:
+            text = text.rsplit(marker, 1)[1]
+            break
+    for cut in ("?", "#", "/"):
+        if cut in text:
+            text = text.split(cut, 1)[0]
+    return text.strip()
+
 
 #: The session attribute a committed outcome carries when the memory was on a
 #: branch other than ``main``: the trace says which memory it read. This is
@@ -443,6 +497,8 @@ class AgentMemory:
         if adapter is not None:
             self._adapter = adapter
         else:
+            if config_path is None:
+                _warn_env_ignored()
             self._adapter = create_adapter_from_config(self._config)
 
         self._tagger = CausalTagger(agent_id, session_id)
@@ -479,6 +535,53 @@ class AgentMemory:
             self._lifecycle.start()
 
         self._adapter.ensure_agent(self.agent_id, self._config.namespace)
+
+    @classmethod
+    def from_env(
+        cls,
+        agent_id: str,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        **kwargs: Any,
+    ) -> AgentMemory:
+        """A memory connected to hosted SenseLab, from ``AMFS_HTTP_URL`` and
+        ``AMFS_API_KEY``.
+
+        The constructor never reads those variables, so this is the one-line
+        way to use them. *base_url* and *api_key* override the environment —
+        a second key for a second agent, say. Every other keyword argument is
+        passed to the constructor.
+
+        Unlike the constructor, this never falls back to local storage. A
+        missing URL or key raises ``ValueError`` and a missing
+        ``amfs-adapter-http`` package raises ``ImportError``, both naming what
+        to set or install: a script that meant to reach the hosted API and
+        could not should stop, not write somewhere else.
+        """
+        if "adapter" in kwargs:
+            raise TypeError(
+                "from_env() builds the adapter itself; use AgentMemory(agent_id, adapter=...) "
+                "to pass your own"
+            )
+        url = (base_url if base_url is not None else os.environ.get(HTTP_URL_ENV) or "").strip()
+        key = (api_key if api_key is not None else os.environ.get(API_KEY_ENV) or "").strip()
+        missing = [
+            name for name, value in ((HTTP_URL_ENV, url), (API_KEY_ENV, key)) if not value
+        ]
+        if missing:
+            raise ValueError(
+                f"AgentMemory.from_env() needs {' and '.join(missing)}: set "
+                f"{'it' if len(missing) == 1 else 'them'} in the environment, or pass "
+                "base_url= / api_key=."
+            )
+        try:
+            from amfs_adapter_http import HttpAdapter
+        except ImportError as exc:
+            raise ImportError(
+                "AgentMemory.from_env() needs the HTTP adapter: pip install amfs-adapter-http"
+            ) from exc
+        return cls(agent_id, adapter=HttpAdapter(base_url=url, api_key=key), **kwargs)
 
     # ------------------------------------------------------------------
     # Properties
@@ -3087,8 +3190,84 @@ class AgentMemory:
         self._read_tracker.clear()
 
     # ------------------------------------------------------------------
-    # Room operations (Pro — requires HTTP adapter with rooms backend)
+    # Room operations (hosted — requires the HTTP adapter)
     # ------------------------------------------------------------------
+
+    def room_create(
+        self,
+        topics: str | list[str],
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        discussions: bool = True,
+    ) -> dict[str, Any]:
+        """Open a room over one or more topics (entity paths) this account owns.
+
+        Everyone admitted to the room reads and writes those exact paths —
+        a sub-path of a topic is not part of the room. This agent is joined
+        as the room's creator. Returns the room, including its ``id``.
+
+        Args:
+            topics: One entity path, or a list of them. At least one.
+            name: Human-readable room name
+            description: What the room is for
+            discussions: Enable agent-to-agent discussion (``room_discuss``)
+        """
+        paths = [topics] if isinstance(topics, str) else list(topics)
+        paths = [p for p in paths if (p or "").strip()]
+        if not paths:
+            raise ValueError("room_create() needs at least one topic (entity path)")
+        return self._room_request("POST", "/api/v1/rooms", {
+            "entity_paths": paths,
+            "display_name": name,
+            "description": description,
+            "discussions_enabled": discussions,
+            "agent_id": self.agent_id,
+        })
+
+    def room_share(
+        self,
+        room_id: str,
+        *,
+        expires_in_days: int | None = None,
+        max_uses: int | None = None,
+        role: str = "collaborator",
+        clamp_to_plan: bool = True,
+    ) -> dict[str, Any]:
+        """Mint a join link for a room. Owner only.
+
+        The response carries the raw ``token``, and this is the only time it
+        is returned; hand it (or the dashboard URL built from it) to whoever
+        should join, and they spend it with :meth:`room_redeem`.
+
+        Args:
+            room_id: UUID of the room
+            expires_in_days: Lifetime of the link, 1-365. ``None`` never expires.
+            max_uses: How many people may join with it. ``None`` is unlimited.
+            role: ``'collaborator'`` (read and write) or ``'viewer'`` (read-only)
+            clamp_to_plan: Lower *max_uses* to the plan's per-room ceiling
+                rather than refuse with 402; the response then carries
+                ``max_uses_clamped``. Pass ``False`` to get the refusal.
+        """
+        return self._room_request("POST", f"/api/v1/rooms/{room_id}/join-links", {
+            "expires_in_days": expires_in_days,
+            "max_uses": max_uses,
+            "role": role,
+            "clamp_max_uses_to_plan": clamp_to_plan,
+        })
+
+    def room_redeem(self, token: str) -> dict[str, Any]:
+        """Spend a join link: admit this API key's user to the room it opens.
+
+        Accepts the bare token or the whole link URL. This is the one room
+        call that works before the caller has any access to the room. It
+        admits the *user*; call :meth:`room_join` afterwards to place this
+        agent in the room and receive its briefing. Returns the ``room_id``.
+        """
+        cleaned = _join_token(token)
+        if not cleaned:
+            raise ValueError("room_redeem() needs a join token or a join link URL")
+        return self._room_request("POST", f"/api/v1/room-join/{quote(cleaned, safe='')}", {})
 
     def room_join(self, room_id: str) -> dict[str, Any]:
         """Join a room. The user owning this agent must have an accepted invite.
@@ -3101,7 +3280,9 @@ class AgentMemory:
 
     def room_leave(self, room_id: str) -> dict[str, Any]:
         """Leave a room. Knowledge snapshots are preserved in private memory."""
-        return self._room_request("DELETE", f"/api/v1/rooms/{room_id}/agents/{self.agent_id}")
+        return self._room_request(
+            "DELETE", f"/api/v1/rooms/{room_id}/agents/{quote(self.agent_id, safe='')}"
+        )
 
     def my_rooms(self) -> list[dict[str, Any]]:
         """List rooms this agent's user owns or is invited to."""
@@ -3114,6 +3295,16 @@ class AgentMemory:
         """Get room details including members, settings, and discussion status."""
         return self._room_request("GET", f"/api/v1/rooms/{room_id}")
 
+    def room_briefing(self, room_id: str) -> dict[str, Any]:
+        """(Re)deliver the room's shared knowledge to this agent, without a rejoin.
+
+        For a member or the owner who wants the room's current state. The
+        briefing text comes back under ``briefing``.
+        """
+        return self._room_request("POST", f"/api/v1/rooms/{room_id}/briefing", {
+            "agent_id": self.agent_id,
+        })
+
     def room_updates(
         self, room_id: str, *, since: str | None = None
     ) -> dict[str, Any]:
@@ -3123,8 +3314,23 @@ class AgentMemory:
             room_id: UUID of the room
             since: ISO timestamp — only return events after this time
         """
-        params = f"?since={since}" if since else ""
-        return self._room_request("GET", f"/api/v1/rooms/{room_id}/activity{params}")
+        return self._room_request(
+            "GET", f"/api/v1/rooms/{room_id}/activity", params={"since": since}
+        )
+
+    def room_close(self, room_id: str) -> dict[str, Any]:
+        """Close a room. Owner only. It stops accepting joins and writes; the
+        shared topics and the memories in them stay where they are."""
+        return self._room_request("POST", f"/api/v1/rooms/{room_id}/close", {})
+
+    def room_delete(self, room_id: str) -> dict[str, Any]:
+        """Delete a room. Owner only.
+
+        The room, its membership and its activity history go away. The shared
+        topics and every memory in them survive: deleting a room stops the
+        sharing, it does not delete anyone's memory.
+        """
+        return self._room_request("DELETE", f"/api/v1/rooms/{room_id}")
 
     # ------------------------------------------------------------------
     # Room: Discussions
@@ -3137,6 +3343,7 @@ class AgentMemory:
         *,
         message_type: str = "message",
         addressed_to: str | None = None,
+        reply_to: str | None = None,
     ) -> dict[str, Any]:
         """Post a discussion message in a room.
 
@@ -3145,13 +3352,17 @@ class AgentMemory:
             content: Message text
             message_type: One of 'message', 'question', 'answer', 'proposal', 'summary'
             addressed_to: Optional agent_id to address the message to
+            reply_to: Optional id of the message this one answers
         """
-        return self._room_request("POST", f"/api/v1/rooms/{room_id}/discussions", {
+        body: dict[str, Any] = {
             "agent_id": self.agent_id,
             "content": content,
             "message_type": message_type,
             "addressed_to": addressed_to,
-        })
+        }
+        if reply_to is not None:
+            body["reply_to"] = reply_to
+        return self._room_request("POST", f"/api/v1/rooms/{room_id}/discussions", body)
 
     def room_discussions(
         self,
@@ -3159,6 +3370,7 @@ class AgentMemory:
         *,
         limit: int = 50,
         since: str | None = None,
+        addressed_to: str | None = None,
     ) -> dict[str, Any]:
         """List discussion messages in a room.
 
@@ -3166,11 +3378,13 @@ class AgentMemory:
             room_id: UUID of the room
             limit: Max messages to return
             since: ISO timestamp — only messages after this time
+            addressed_to: Only messages addressed to this agent_id
         """
-        params = f"?limit={limit}"
-        if since:
-            params += f"&since={since}"
-        return self._room_request("GET", f"/api/v1/rooms/{room_id}/discussions{params}")
+        return self._room_request(
+            "GET",
+            f"/api/v1/rooms/{room_id}/discussions",
+            params={"limit": limit, "since": since, "addressed_to": addressed_to},
+        )
 
     # ------------------------------------------------------------------
     # Room: Negotiations
@@ -3257,26 +3471,42 @@ class AgentMemory:
         """
         return self._room_request("GET", f"/api/v1/rooms/{room_id}/negotiations/{session_id}")
 
-    def _room_request(self, method: str, path: str, body: dict | None = None) -> Any:
-        """Send a request to the rooms API via the HTTP adapter."""
-        adapter = self._adapter
-        if hasattr(adapter, "_base_url") and hasattr(adapter, "_session"):
-            import requests
-            url = f"{adapter._base_url.rstrip('/')}{path}"
-            headers = getattr(adapter, "_headers", {})
-            if method == "GET":
-                resp = adapter._session.get(url, headers=headers)
-            elif method == "POST":
-                resp = adapter._session.post(url, json=body or {}, headers=headers)
-            elif method == "DELETE":
-                resp = adapter._session.delete(url, headers=headers)
-            else:
-                resp = adapter._session.request(method, url, json=body, headers=headers)
-            resp.raise_for_status()
-            return resp.json()
-        raise NotImplementedError(
-            "Room operations require the HTTP adapter (set AMFS_HTTP_URL)"
-        )
+    def _room_request(
+        self,
+        method: str,
+        path: str,
+        body: dict | None = None,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        """Send a request to the rooms API over the HTTP adapter's own transport.
+
+        The adapter's ``_request`` is what every other hosted call goes
+        through, so a room call carries the same API key, the same agent and
+        session headers, and the same 429 retry, and fails the same way: an
+        ``httpx.HTTPStatusError`` whose message is the server's ``detail``.
+
+        This used to look for ``_base_url`` and ``_session`` on the adapter,
+        which ``HttpAdapter`` has never had, so every room method raised
+        ``NotImplementedError`` whatever it was connected to. Duck-typed on
+        ``_request`` rather than on the class, because this package does not
+        depend on ``amfs-adapter-http``.
+        """
+        request = getattr(self._adapter, "_request", None)
+        if not callable(request):
+            raise NotImplementedError(
+                "Room operations need the hosted API: build the memory with "
+                "AgentMemory.from_env(agent_id) or "
+                "adapter=HttpAdapter(base_url=..., api_key=...). This one is using "
+                f"{type(self._adapter).__name__}."
+            )
+        kwargs: dict[str, Any] = {}
+        if body is not None:
+            kwargs["json"] = body
+        query = {k: v for k, v in (params or {}).items() if v is not None}
+        if query:
+            kwargs["params"] = query
+        return request(method, path, **kwargs)
 
     # ------------------------------------------------------------------
     # Lifecycle
